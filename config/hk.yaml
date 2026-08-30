@@ -1,0 +1,217 @@
+# hk: single, fully self-contained livo_recon config file.
+# 2026-08-16: consolidated from config/defaults/*.yaml + config/hk/*.yaml
+# (the old defaults/dataset-override split across ~10-13 per-topic files
+# each) into one file per dataset -- every option this dataset actually
+# runs with lives here, nothing implicit from a separate defaults/ layer.
+# Loaded via a single <rosparam file> in launch/livo_recon_hk.launch,
+# followed by overrides_file (test-only escape hatch, still separate).
+# Merge verified byte-exact against the old multi-file load via a
+# rosparam-dump diff before the old files were removed -- see
+# VIO_METHODOLOGY_DIFF.md or task #292 if this history matters.
+
+cuda:
+  enable: false  # set true to dispatch H^T*W*H accumulation (LIO) and affine warp (VIO) to GPU
+viz:
+  enable: true  # normally overridden by the launch file's viz/enable param, set directly from the rviz:= launch arg (see livo_recon_*.launch) -- this default only applies if that param load is bypassed, e.g. loading this file's params directly outside a launch file
+  grid_map: false
+  grid_map_color_weight: 0.5  # 0=all grayscale, 1=all color tint
+  plane_map: false
+  uv_tracking: true  # publish rgb_img with arrows showing vio's tracked uv displacements
+  ds:
+    ds_leaf_size: 0.05
+outputs:
+  # Self-shutdown for headless/scripted test runs: once popMeasureGroup()
+  # has come back empty for auto_terminate_idle_secs real (wall-clock)
+  # seconds straight, LivoReconNode::run() exits its own loop cleanly
+  # instead of idling forever. Enabled by default so test_common.sh's
+  # run_one() (and any other headless launcher) can just wait() on the
+  # process rather than guessing "is it done" from a stall heuristic on
+  # console output, which misfires on GPU-bound VIO frontends (can go
+  # quiet for seconds at a time mid-frame while blocked on a GPU kernel).
+  auto_terminate_on_idle: true
+  auto_terminate_idle_secs: 5.0
+  profiler:
+    export_path: "/tmp/livo_recon_profile.txt"
+  path: "/root/catkin_ws/Log"          # base directory for COLMAP dataset export (empty = disabled)
+  pcd:
+    export: false   # accumulate and write sparse/0/points3D.bin on shutdown
+  image:
+    export: false   # save images to images/ and write cameras.bin + images.bin on shutdown
+    interval: 1     # export every N-th frame (must be >= 1)
+  printer:
+    # params/calib default to true (matching Printer's own C++ constructor
+    # default) so load-confirmation output -- tracker backend load status
+    # in particular -- is actually visible in a normal run's console log.
+    # Confirmed 2026-08-12: this default being false meant NOTHING from
+    # loadParameters() across every subsystem (including a successful/
+    # failed tracker load) ever printed, making a real investigation (does
+    # the tracker actually load, what did calib produce) impossible without
+    # first discovering and overriding this flag by hand.
+    params:
+      enable: true
+    voxel:
+      enable: false
+    state:
+      enable: false
+    calib:
+      enable: true
+    vio:
+      enable: false
+    lio:
+      enable: false
+    evo:
+      enable: true
+    profiler:
+      enable: false
+    throttle_s: 0.
+calib:
+  num_samples: 500
+  use_calib: true
+  use_calib_var: false
+  use_calib_bias: true
+state:
+  est:
+    bg: true
+    ba: true
+    gravity: true
+    cov_acc: true
+    cov_gyr: true
+  cov:
+    rot: 1.0e-4
+    pos: 1.0e-4
+    vel: 1.0e-4
+    bg: 1.0e-6
+    ba: 1.0e-6
+    gravity: 1.0e-5
+    acc: 1.0e-4
+    gyr: 1.0e-4
+  init_state:
+    gravity: [0., 0., -9.81]
+    vel: [0., 0., 0.]
+    ba: [0., 0., 0.]
+    bg: [0., 0., 0.]
+imu:
+  second_order: true   # include dt² Jacobian terms F_x[P,R] and F_x[P,G]
+  sensor:
+    range_err: 0.05
+    angle_err_deg: 0.2
+  ds:
+    ds_leaf_size: 2.5e-2
+lio:
+  ekf:
+    max_iterations: 5
+    residual_weighting: "none"
+    min_norm_dtheta: 1.0e-3
+    min_norm_dt: 1.0e-2
+    min_diff_error: 1.0e-2
+voxel_map:
+  map:
+    voxel_size: 0.5
+    max_layer: 2
+    decimate_points: false
+  plane:
+    plane_threshold: 2.5e-3
+  points:
+    min_init: 5
+    min_update: 5
+    max: 50
+  residual:
+    sigma_num: 3.0
+    max_radius: 3.0
+  search:
+    neighborhood_size: 1
+vio:
+  enable: true  # set by test_*.sh
+  ekf:
+    # max_iterations/min_diff_error matched to FAST-LIVO2 myvio's own
+    # production values (10 / 0.0001, both HILTI/NTU_VIRAL configs) on
+    # 2026-08-15 -- see VIO_METHODOLOGY_DIFF.md's cross-codebase comparison.
+    # Previously 50 / 1.0e-3 (5x more iterations allowed, a 10x looser
+    # relative-improvement stop).
+    max_iterations: 10
+    min_norm_dtheta: 0.0  # never activates by default -- see VioProcOptions::min_norm_dtheta's doc comment
+    min_norm_dt: 0.0      # never activates by default -- see VioProcOptions::min_norm_dt's doc comment
+    min_diff_error: 1.0e-4
+    max_avg_error: 5.0  # reject (roll back) the whole frame if the best fit is still worse than this
+    anchor_split_depth: 0.0  # pos_/neg_epipolar_residual_var split threshold -- see that option's doc comment
+    distortion_weight_on: false  # rigorous per-point distortion weighting -- see that option's doc comment
+    weight_pixel_noise_px: 0.5   # only consulted when distortion_weight_on is true
+  log:
+    log_iterations: false
+    log_point_residuals: false
+    log_residual_counts: false
+    log_raw_tracker_output: false
+    dry_run: false
+    log_norm_l_low_frac: 0.3
+    # log_path deliberately NOT set here -- letting VioProc::loadParameters()'s
+    # own C++ default (debugLogPath("livo_recon_myvio_log.txt"), see
+    # utils/log/debug_log_dir.h) apply. A hardcoded "/tmp/..." string here
+    # would always win (rosparam values set by a <rosparam file> load take
+    # precedence over a pnh.param() call's C++ default, which is only a
+    # fallback for keys never set on the server at all) and silently defeat
+    # outputs/debug_log_dir regardless of what it's set to.
+combined:
+  # Opt-in joint LIO+VIO EKF step (default off -- see combined_processing.h).
+  # Requires vio/enable: true too (see livo_recon_node.cpp's loadParameters()
+  # doc comment) for the tracker backend to actually load.
+  enable: false
+  max_iterations: 5
+  ekf:
+    min_norm_dtheta: 0.0
+    min_norm_dt: 0.0
+    min_diff_error: -1.0
+    max_avg_error: 5.0
+tracker:
+  backend: "cotracker"  # set by test_*.sh
+  device: "cuda"
+  tracker_format: "jit"  # "jit" (default), "aot" (AOTInductor, fp16), or "aot_fp32" (AOTInductor, full precision) -- cotracker only, see Tracker::loadParameters. AOT packages must match grid_selection/grid_rows x grid_cols (filename-encoded query count).
+  grid_selection:
+    grid_rows: 16
+    grid_cols: 16  # set by test_*.sh
+  reseed:
+    active_fraction: 0.9  # reseed the whole tracked-point grid once fewer than this fraction stay visible -- ignored by the cotracker backend, which always reseeds
+    min_candidate_fraction: 0.25  # fraction of grid_rows*grid_cols selectAnchors must find a candidate for before a reseed is actually committed to. NOTE: the achievable fraction under healthy conditions drops as grid_rows*grid_cols grows -- retune lower when increasing grid resolution
+  track_cache_path: ""  # path to a .rlivtrackcache file (src/tools/cache_tracker_output.cpp). Empty (default) = live tracking. When set, skips the GPU tracker pass entirely and replays cached TrackedFrame records by timestamp -- see TrackerOptions::track_cache_path's doc comment.
+common:
+  offline_bag_path: ""       # path to a bag to read directly in-process (no rosbag play, no ROS transport) instead of via live subscribers. Empty = live mode (run()), unchanged.
+  offline_duration_secs: -1.0  # caps runOffline() to the first N seconds (bag-relative). <= 0 = no cap, process the whole bag.
+evo:
+  enable: false
+  gt_source: "topic"  # "topic" or "file"
+  gt_topic: "/leica/pose/relative"
+  gt_file: ""  # TUM-format path, used when gt_source == "file"
+  queue_size: 2000
+  max_time_diff: 0.05  # seconds; nearest-match tolerance (file) or RTE/ROE pairing tolerance (topic)
+  rpe:
+    compute_rte: false  # relative translation error (RPE's translation part) -- topic mode only
+    compute_roe: false  # relative rotation error (RPE's rotation part) -- topic mode only; a diagnostic curiosity against position-only ground truth, not a true orientation error (see evo_processing.cpp's logStage())
+    delta_s: 1.0         # seconds between the pose pair RTE/ROE compare
+topics:
+  image: "/left_camera/image"
+  lidar: "/livox/lidar"
+  imu: "/livox/imu"
+  queue_size: 20000
+frames:
+  camera: camera_link
+  lidar: lidar_link
+extrinsics:
+  R_l2i: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+  t_l2i: [0., 0., 0.]
+  R_l2c: [-0.0036250, -0.9998907, -0.0143360, 0.0075568, 0.0143083, -0.9998690, 0.9999649, -0.0037329, 0.0075041]
+  t_l2c: [0.00549469, 0.0712101, 0.0322054]
+camera:
+  width: 1280
+  height: 1024
+  fx: 1311.89517127580
+  fy: 1311.36488586115
+  cx: 656.523841857393
+  cy: 504.136322840350
+  distortion_model: plumb_bob
+  distortion_coeffs: [-0.0780830982640722, 0.146382433670493, -0.00110111633050301, -0.00110752991013068, 0.0]
+cbk:
+  lidar:
+    type: avia   # avia | mid360 | pcl
+    blind: 1.0
+  imu:
+    acc_type: "g"  # unverified default, matches the previous unconditional *G_m_s2 behavior -- retune if this dataset shows the same runaway-accel-bias symptom NTU VIRAL did (see /tmp/imu.txt's bias_acc trace)
+    gyr_type: "rad_s"

@@ -1,0 +1,7 @@
+# Default (no-op) rosparam file for livo_recon_slam_2023.launch's
+# overrides_file arg -- an empty, valid YAML map. Loaded LAST (after
+# config/slam_2023.yaml) so a real override file, when passed via
+# overrides_file:=/path/to/file.yaml, always wins over the checked-in
+# config without needing to edit it. Needed in particular for evo/gt_file,
+# which (unlike evo/gt_topic) must vary per SEQUENCE, not per dataset.
+{}

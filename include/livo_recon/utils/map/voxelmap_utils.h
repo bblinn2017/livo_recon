@@ -1,0 +1,394 @@
+#pragma once
+
+#include "livo_recon/utils/algo/math.h"
+#include "livo_recon/utils/data/data_wrappers.h"
+#include "livo_recon/utils/algo/hashing.h"
+
+#include <atomic>
+#include <memory>
+#include <vector>
+#include <Eigen/Eigenvalues>
+
+namespace livo_recon
+{
+
+struct Residual
+{
+  double r;
+  V3D normal;
+  // Rotation Jacobian: point.cross(R1^T*normal), the R1 (rotation)
+  // Jacobian column (lio_accumulator.cpp's accumulateLioResiduals()).
+  V3D point_cross_normal;
+  // VARIANCE (not standard deviation), despite the name -- independent
+  // (sensor+pose) noise, plus this plane's own fit uncertainty
+  // (plane_var_term below) folded in directly. Used as 1/sigma_squared,
+  // the inverse-variance weight in the weighted normal equations
+  // (solveSystem()'s HtH/Htz accumulation) and as the variance in gate()'s
+  // N-sigma accept/reject test.
+  double sigma_squared;
+
+  // Identity of the VoxelPlane this residual matched against (the VoxelPlane
+  // instance's own address, stable for the lifetime of that voxel). Null
+  // only for a residual that hasn't been matched to a plane yet.
+  const void* plane_id = nullptr;
+
+  // This plane's own fit-uncertainty contribution (n * plane_var * n),
+  // added into sigma_squared by LioProc::buildResiduals().
+  double plane_var_term = 0.0;
+
+  // Which tier of VoxelMap::findPlaneResidual()'s fallback matched this
+  // point: 0 = primary voxel, 1 = single directional neighbor (the only
+  // fallback FAST-LIVO2 also has), 2 = the full neighborhood_size box
+  // search (livo_recon-only, picks the best-scoring candidate among up to
+  // ~(2*neighborhood_size+1)^3 voxels rather than giving up). Debug-only,
+  // for attributing residual-quality issues to a specific tier.
+  int match_tier = 0;
+};
+
+// A world-frame point with its covariance kept as two separate
+// contributions rather than pre-summed:
+//   - sensor_cov: the point's own independent per-point sensor noise,
+//     rotated to world frame (StateGroup::toWorld()).
+//   - pose_cov: the current state's pose (rotation+position) uncertainty's
+//     contribution to this point's world-frame position (StateGroup::
+//     poseCovAt()) -- NOT independent per point (every point in the frame
+//     shares the same pose uncertainty), and already accounted for once,
+//     correctly, via the EKF's own prior-covariance term in the update --
+//     so it belongs in plane-match *gating* (a wider gate is reasonable
+//     when the prior pose is less certain) but must NOT also inflate the
+//     residual *weight*, which would double-count it.
+struct WorldPointCov
+{
+  V3D point;
+  M3D sensor_cov;
+  M3D pose_cov;
+
+  M3D total() const { return sensor_cov + pose_cov; }
+};
+
+struct PlaneInfo
+{
+  V3D normal = V3D::Zero();
+  V3D center = V3D::Zero();
+  double d   = 0.0;  // -normal.dot(center)
+};
+
+struct PlaneVizInfo
+{
+  V3D   center;
+  V3D   normal;
+  float radius;
+  bool  is_converged;
+};
+
+struct PlaneUpdate
+{
+  int32_t      node_id;
+  bool         deleted;  // true = remove from cache; false = add/update
+  PlaneVizInfo info;     // valid when !deleted
+};
+
+// Running sufficient statistics for VoxelNode's DEFAULT (unweighted,
+// equal-weight-per-point) points_ accumulation path, maintained
+// incrementally in O(1) per inserted point (see VoxelNode::insertPoints())
+// so VoxelPlane::update() can derive mean/covariance in O(1) at fit time
+// instead of re-scanning every accumulated point on every refit -- exact,
+// not an approximation. Only valid when every point contributing to a fit
+// carries equal weight, which is true for VoxelNode's raw points_ path but
+// NOT the separate weighted bin path (see PointBin/useBins()) --
+// VoxelPlane::update() only consults this when explicitly passed a
+// non-null pointer, and callers must not pass one alongside `weights`.
+struct RunningMoments
+{
+  double sum_w  = 0.0;          // == point count so far (equal-weight path)
+  V3D    sum_p  = V3D::Zero();  // Sigma (p_i - ref)
+  M3D    sum_pp = M3D::Zero();  // Sigma (p_i - ref)(p_i - ref)^T
+  V3D    ref    = V3D::Zero();  // reference point subtracted before accumulating (conditioning only, exact either way)
+
+  void reset(const V3D& new_ref)
+  {
+    sum_w = 0.0;
+    sum_p.setZero();
+    sum_pp.setZero();
+    ref = new_ref;
+  }
+
+  void add(const V3D& p)
+  {
+    const V3D d = p - ref;
+    sum_w += 1.0;
+    sum_p += d;
+    sum_pp.noalias() += d * d.transpose();
+  }
+};
+
+struct VoxelOpts
+{
+  int    max_layer                 = 2;
+  double voxel_size                = 0.5;
+  double plane_threshold           = 0.01;
+  int    min_init_points           = 5;
+  int    min_update_points         = 5;
+  int    max_points                = 50;
+  double sigma_num_squared         = 9.0;
+  double max_radius                = 3.0;
+
+  // true -- VoxelPlane::gate()'s sigma_diag_squared includes pose_cov (the
+  // point's own deskew-transform uncertainty, itself derived from the
+  // state's prior covariance) alongside sensor_cov, despite that being a
+  // double-count against solveSystem's own P_before^-1 prior term.
+  // Originally kept true because excluding it regressed badly in isolation
+  // (pre-info_gain/pre-var_acc-based-time_based_process_noise), acting as
+  // necessary damping. false (now the default) -- exclude pose_cov from
+  // sigma_diag_squared entirely (gate() still uses sensor_cov only); confirmed on
+  // eee_01 (90s, clean/fair harness, imu/undistort/time_based_process_noise
+  // ="var_acc") to further improve ATE 0.090m -> 0.078m on top of the
+  // var_acc-based noise-floor fix, which now supplies the damping this
+  // double-count was standing in for, without inheriting the collapse
+  // risk of using pose_cov to do it.
+  bool pose_cov_in_sigma           = false;
+
+  // Gates VoxelNode::debugLogPlaneInit()'s per-voxel-first-plane-fit dump
+  // (/tmp/plane_init.txt) and VoxelPlane's noise-floor dump
+  // (/tmp/noise_floor.txt) -- both were previously unconditional (2026-08-09
+  // cleanup, task #149: unlike most of this codebase's debug logs, these
+  // had no gate at all). Off by default.
+  bool log_debug_en                = false;
+
+  // use_disc_distance (2026-08-04, tried and REMOVED): treated each
+  // VoxelPlane as a finite disc (radius_ around center) rather than an
+  // infinite plane, computing r as the true 3D point-to-disc distance
+  // (Pythagorean combination of perpendicular + excess in-plane distance
+  // beyond radius_, with the residual's gradient direction rotating
+  // toward the in-plane radial direction for points past the edge) instead
+  // of today's plane-only r gated by a hard max_radius*radius_ cutoff.
+  // Motivated by nya_02's cov_acc collapse investigation (a genuine
+  // physical argument -- the flat-plane assumption is shakiest right at a
+  // patch's edge) but regressed badly on nya_02 across every cov_acc
+  // tested, including ones that were otherwise clean without it: 0.01
+  // (0.81m -> 8498.7m), 0.1 (0.033m -> 0.200m), gradually-compounding not
+  // an instant blowup. Consistent with this session's broader pattern --
+  // every attempt to make residual weighting more "statistically honest"
+  // (info_gain, Woodbury, cross_frame_reuse, this) has hurt real-world
+  // tracking robustness rather than helped it.
+
+  // cross_frame_reuse_ref (2026-08-03, tried and REMOVED): a per-plane
+  // discount based on VoxelPlane::match_streak_ (how many consecutive
+  // frames had matched at least one residual against a plane), motivated
+  // by trace(P_PP)'s anti-correlation with error persisting over a ~1-2s
+  // (many-frame) window rather than a single-frame spike -- unlike every
+  // other mechanism tried this investigation (density_sigma_ref, the
+  // abandoned plane_averaged/count_weighted/info_gain/
+  // woodbury_plane_correction), this was the only one that looked at
+  // cross-frame (not within-frame) correlation. It DID change the
+  // qualitative oscillation character (at cross_frame_reuse_ref=2, eee_01:
+  // mean-crossings of trace(P_PP) dropped ~60%, 113->45, and coefficient
+  // of variation dropped ~23%, 6.09->4.67) but produced no meaningful ATE
+  // improvement across ref values 2/5/10/20 (0.0256/0.0254/0.0254/0.0252m
+  // vs 0.0254m baseline, all within noise) -- removed as not worth the
+  // added complexity given the effect size.
+
+  // Tiered fallback when the primary voxel's own findPlaneResidual() misses
+  // (see VoxelMap::findPlaneResidual()): (1) primary voxel -- (2) the single
+  // FAST-LIVO2-style directional neighbor the point geometrically leans
+  // toward (one extra hash lookup, catches the common case cheaply) --
+  // (3) only if that also misses, an exhaustive box search over
+  // neighborhood_size voxels in each direction, scored and best-of-N. Tier 3
+  // alone (skipping tier 2) was the original livo_recon behavior; tier 2
+  // alone regressed ATE badly on eee_01 under dynamic motion (residual
+  // count collapse -- a single wrong directional guess had no second
+  // chance). Both tiers together give tier 2's low steady-state cost with
+  // tier 3's robustness as a real safety net.
+  int    neighborhood_size         = 1;
+
+  // "normal" (default): once a node's accumulated points_size_ reaches
+  // max_points, lock permanently into CONVERGED (if now_plane) or DISABLED
+  // (if not) -- matches FAST-LIVO2's own max_points_num_/update_enable_=
+  // false mechanism exactly (voxel_map.cpp there uses the same default,
+  // 50).
+  // "always_update": a node that currently has a valid plane (now_plane)
+  // never locks into CONVERGED -- points_ keeps growing and
+  // VoxelPlane::update() keeps refitting from scratch every
+  // min_update_points new points, indefinitely. The non-planar/DISABLED
+  // dead-end path (gives up at max_layer once truly full) is unaffected --
+  // this only removes the "freeze a good plane forever" behavior, not the
+  // "give up on a hopeless voxel" one. No upper bound on points_'s growth
+  // in this mode -- fine for the short investigation runs this was added
+  // for, not intended for long/production runs without a rethink of the
+  // O(N) full-refit-from-scratch cost in VoxelPlane::update().
+  // "frame_gated": same lock-in as "normal", but ALSO requires
+  // distinct_frames_ >= min_frames_to_converge (VoxelNode's count of
+  // distinct frames that have contributed points since node creation) --
+  // targets the specific failure found when undecimated map insertion lets
+  // a single frame's dense point cluster fill a voxel to max_points before
+  // it's seen enough independent viewpoints/scan passes.
+  std::string convergence_mode      = "normal";
+  int    min_frames_to_converge     = 5;
+
+  // 1 (default, no-op) -- a voxel's FIRST plane fit (isInit() threshold,
+  // min_init_points above) may happen off points from a single frame.
+  // >1 -- ALSO require VoxelNode::distinct_frames_ >= min_frames_to_init
+  // before that first fit, same spirit as min_frames_to_converge but
+  // applied at init instead of lock-in. Targets a failure min_frames_to_
+  // converge/max_points can't: with point_filter_num relaxed toward
+  // "keep everything", a single dense frame near the sensor can hand a
+  // voxel min_init_points-worth of points in one shot -- a PCA fit off
+  // points from one instant/viewing angle, immediately live for residuals
+  // (VoxelNode::hasConvergedPlane()'s docs: usable the moment isPlane()
+  // is true, not gated on CONVERGED) -- confirmed empirically: raising
+  // min_init_points alone (a point-count proxy for view diversity) fixed
+  // an NTU_VIRAL point_filter_num=1 ATE regression (eee_01: 1.48m ->
+  // 0.12m) where min_frames_to_converge/max_points changes had zero
+  // effect, but a point-count threshold doesn't generalize across lidars
+  // with different angular resolution/point density the way a frame-count
+  // requirement does.
+  //
+  // Skipped entirely for the calibration/bootstrap frame (global frame
+  // index 0 -- see VoxelNode::insertPoints()'s g_current_frame_idx check,
+  // and CalibProc::estimateFromBuffer()/skipCalibration(), which both push
+  // their very first MeasureGroup as frame 0): that frame already
+  // legitimately aggregates many real distinct lidar frames captured
+  // while the sensor was stationary (CalibProc::collectSamples()'
+  // num_samples), and LIO needs SOME usable planes the instant calibration
+  // ends, not after min_frames_to_init more real frames separately elapse.
+  int    min_frames_to_init         = 1;
+
+  // false (default) -- VoxelPlane::update()'s acceptance test trusts the
+  // raw empirical eigen_values_(0) (perpendicular/out-of-plane variance)
+  // unconditionally, however small a sample produced it. true -- floor it
+  // at this voxel's own points' average per-point measurement noise
+  // (PointXYZCov::cov, already carrying sensor+deskew-integration
+  // uncertainty from ImuProc::deskewPoints()) projected onto the candidate
+  // normal, before the plane_threshold comparison. Targets the failure
+  // mode found investigating point_filter_num=1's ATE regression: a small,
+  // single-viewpoint sample (all points from one lidar sweep/frame) can
+  // look implausibly flat -- empirical eig0 orders of magnitude below what
+  // that sensor's own noise model says is achievable -- not because the
+  // surface is that flat, but because points from one instant/vantage
+  // point share correlated noise sources undecorrelated by genuine
+  // multi-frame view diversity (confirmed empirically: median eig0 for
+  // single/few-frame inits was ~200x smaller than for 10+-frame inits on
+  // NTU_VIRAL eee_01, despite similar in-plane point spread). If the
+  // floored eig0 would reach or exceed eigen_values_(1), the fit is
+  // rejected outright instead (the noise floor alone already explains the
+  // observed "flatness" -- this candidate can't be distinguished from
+  // non-planar). Complements, not replaces, min_frames_to_init: doesn't
+  // fix the underlying single-viewpoint estimation problem, just stops the
+  // acceptance test and plane_var_ from trusting an eig0 the sensor's own
+  // model says is implausible.
+  bool   sensor_noise_floor_eig0    = false;
+
+  // "pca" (default): today's unchanged behavior -- unweighted PCA on raw
+  // point positions, plane_var_ (fit uncertainty) a separate O(N)
+  // per-point Jacobian sandwich propagating each point's PointXYZCov::cov.
+  // "debiased": VoxelPlane fits the normal DIRECTLY from a debiased
+  // (noise-corrected) structure tensor, M_debiased = Spp/N - mean*mean^T -
+  // Scov/N (Scov = sum of point covariances) -- a closed-form correction
+  // for the fact that E[(p-mean)(p-mean)^T] = TrueScatter + Cov under
+  // additive per-point measurement noise, so subtracting the accumulated
+  // noise term gives a consistent (unbiased) estimate of the noise-free
+  // plane structure without needing IRLS/iteration. plane_var_ is
+  // reconstructed from a second set of O(1) fixed-size accumulators
+  // (cross-moments of point position against point covariance) instead of
+  // replaying raw points -- see docs/debiased_voxel_plane_fit_2026aug24.md
+  // for the full derivation. VoxelNode never locks a "debiased" voxel into
+  // CONVERGED (no O(N) cost to keep refitting, so no reason to stop and
+  // discard further points) -- min_update_points/max_points/
+  // convergence_mode/min_frames_to_converge are PCA-mode-only under this
+  // setting. KNOWN CAVEAT: the debiasing correction assumes independent
+  // per-point noise; points from a single lidar frame/viewpoint have
+  // documented correlated noise (see sensor_noise_floor_eig0's docs above)
+  // that can make Scov over-subtract and drive the debiased eigenvalue
+  // negative on early/single-frame fits -- min_frames_to_init and the
+  // sensor_noise_floor_eig0 floor both still apply to guard this, but
+  // debiased mode may reject/collapse more often on early voxels than pca
+  // mode until this is characterized by a real comparative sweep.
+  std::string plane_fit_mode        = "pca";
+
+  // Controls plane_var_'s own residual-weighting propagation -- a
+  // DIFFERENT quantity from pose_cov_in_sigma above (which controls only
+  // gate()'s sigma_diag_squared). Applies to BOTH plane_fit_mode paths:
+  // the PCA Jmin loop (VoxelPlane::update()) and, since 2026-08-24 pass4
+  // (see docs/debiased_voxel_plane_fit_2026aug24.md), the debiased path's
+  // own Scov_/V_/W_ accumulators too -- initially scoped PCA-only, but
+  // live diagnostics showed plane_var_ blowups (traces >900,000) driven
+  // by pos_cov's own magnitude for fresh/small-N voxels, independent of
+  // the denom1/denom2 eigengap guard, so debiased mode needs this
+  // exclusion option too. "combined" (default, unchanged) -- sensor_cov+
+  // pos_cov, the full noise budget. "sensor_only" -- excludes pos_cov
+  // from this propagation entirely (pos_cov, poseCovAt()'s range^2
+  // lever-arm term, is documented to "dwarf true sensor noise for far
+  // points" -- the same reason pose_cov_in_sigma defaults false).
+  std::string plane_fit_pose_cov_mode = "combined";
+};
+using VoxelOptsPtr = std::shared_ptr<VoxelOpts>;
+
+enum class VoxelStatus { OPEN, PARENT, CONVERGED, DISABLED };
+
+struct VoxelStats
+{
+  std::atomic<int>     open{0};
+  std::atomic<int>     parent{0};
+  std::atomic<int>     converged{0};
+  std::atomic<int>     disabled{0};
+  std::atomic<int>     planes{0};  // non-disabled, non-parent nodes currently fitting a plane
+  std::atomic<int32_t> next_node_id{0};
+
+  // init_frames_sum/init_count: VoxelNode::distinct_frames_'s value (total
+  // distinct frames seen since node creation) at the moment of each node's
+  // FIRST VoxelPlane::update() call -- answers "how many distinct frames
+  // of view diversity had accumulated by the time this voxel was first
+  // judged", the same quantity min_init_points is meant to proxy for via
+  // raw point count alone.
+  //
+  // update_frames_sum/update_count: for every SUBSEQUENT refit, the number
+  // of NEW distinct frames since that node's previous update() call (see
+  // VoxelNode::last_update_distinct_frames_) -- i.e. the actual refit
+  // INTERVAL in frames, not distinct_frames_'s own cumulative since-
+  // creation total (which would conflate "how long has this voxel
+  // existed" with "how often does it get refit").
+  std::atomic<long long> init_frames_sum{0};
+  std::atomic<long long> init_count{0};
+  std::atomic<long long> update_frames_sum{0};
+  std::atomic<long long> update_count{0};
+
+  int total() const { return open + converged + disabled; }
+
+  void increment(VoxelStatus s)
+  {
+    switch (s) {
+      case VoxelStatus::OPEN:      open.fetch_add(1,      std::memory_order_relaxed); break;
+      case VoxelStatus::PARENT:    parent.fetch_add(1,    std::memory_order_relaxed); break;
+      case VoxelStatus::CONVERGED: converged.fetch_add(1, std::memory_order_relaxed); break;
+      case VoxelStatus::DISABLED:  disabled.fetch_add(1,  std::memory_order_relaxed); break;
+    }
+  }
+
+  void decrement(VoxelStatus s)
+  {
+    switch (s) {
+      case VoxelStatus::OPEN:      open.fetch_sub(1,      std::memory_order_relaxed); break;
+      case VoxelStatus::PARENT:    parent.fetch_sub(1,    std::memory_order_relaxed); break;
+      case VoxelStatus::CONVERGED: converged.fetch_sub(1, std::memory_order_relaxed); break;
+      case VoxelStatus::DISABLED:  disabled.fetch_sub(1,  std::memory_order_relaxed); break;
+    }
+  }
+
+  void transition(VoxelStatus from, VoxelStatus to)
+  {
+    decrement(from);
+    increment(to);
+  }
+};
+using VoxelStatsPtr = std::shared_ptr<VoxelStats>;
+
+struct BucketEntry
+{
+  std::vector<PointXYZCov> world;
+  std::vector<V3D>         body;
+};
+
+class VoxelMap;
+using VoxelMapPtr = std::shared_ptr<VoxelMap>;
+
+}

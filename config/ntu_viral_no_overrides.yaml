@@ -1,0 +1,9 @@
+# Default (no-op) rosparam file for livo_recon_ntu_viral.launch's
+# overrides_file arg -- an empty, valid YAML map. Loaded LAST (after
+# config/ntu_viral.yaml) so a real override file, when passed via
+# overrides_file:=/path/to/file.yaml, always wins over the checked-in
+# config without needing to edit it. Lets concurrently running test
+# instances (e.g. separate Docker containers sharing this source tree)
+# each supply their own uniquely named override file instead of racing on
+# a shared config/ntu_viral.yaml write.
+{}

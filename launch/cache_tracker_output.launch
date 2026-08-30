@@ -1,0 +1,38 @@
+<launch>
+  <!-- Generates a .rlivtrackcache file for one sequence via the standalone
+       cache_tracker_output_livo_recon tool (src/tools/cache_tracker_output.cpp),
+       running the tracker backend ONCE over a bag and skipping all LIO/VIO/EKF
+       machinery entirely (the tool's own main() only needs state.h for
+       camera intrinsics/extrinsics and Tracker itself). Loads the SAME
+       single consolidated config/$(arg dataset).yaml the real dataset
+       launch files use (2026-08-16, see that file's own header comment),
+       so intrinsics/grid config AND preprocess/image_subsample_n always
+       match (2026-08-14: the tool previously fed every image regardless,
+       producing a cache whose tracking dynamics didn't match a real run's
+       decimated frame sequence on datasets with image_subsample_n > 1,
+       see cache_tracker_output.cpp's own doc comment on that field). The
+       vio/lio/combined/calib/evo blocks this tool never reads just sit
+       unused on the param server, harmless, and loading the one
+       consolidated file (vs. hand-picking a subset) guarantees this tool
+       never silently drifts from what a real run actually uses.
+
+       Usage:
+         roslaunch livo_recon cache_tracker_output.launch \
+           dataset:=slam_2022 \
+           bag:=/root/datasets_test/slam_2022/exp01_construction_ground_level.bag \
+           out:=/root/catkin_ws/track_cache_livo_recon/exp01_construction_ground_level.rlivtrackcache
+  -->
+  <arg name="dataset" />
+  <arg name="bag" />
+  <arg name="out" />
+
+  <node pkg="livo_recon"
+        type="cache_tracker_output_livo_recon"
+        name="cache_tracker_output"
+        output="screen">
+    <rosparam file="$(find livo_recon)/config/$(arg dataset).yaml" command="load" />
+
+    <param name="common/offline_bag_path"  value="$(arg bag)" />
+    <param name="tracker/cache_out_path"   value="$(arg out)" />
+  </node>
+</launch>

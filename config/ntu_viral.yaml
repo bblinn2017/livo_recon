@@ -1,0 +1,278 @@
+# ntu_viral: single, fully self-contained livo_recon config file.
+# 2026-08-16: consolidated from config/defaults/*.yaml + config/ntu_viral/*.yaml
+# (the old defaults/dataset-override split across ~10-13 per-topic files
+# each) into one file per dataset -- every option this dataset actually
+# runs with lives here, nothing implicit from a separate defaults/ layer.
+# Loaded via a single <rosparam file> in launch/livo_recon_ntu_viral.launch,
+# followed by overrides_file (test-only escape hatch, still separate).
+# Merge verified byte-exact against the old multi-file load via a
+# rosparam-dump diff before the old files were removed -- see
+# VIO_METHODOLOGY_DIFF.md or task #292 if this history matters.
+
+cuda:
+  enable: false  # set true to dispatch H^T*W*H accumulation (LIO) and affine warp (VIO) to GPU
+viz:
+  enable: true  # normally overridden by the launch file's viz/enable param, set directly from the rviz:= launch arg (see livo_recon_*.launch) -- this default only applies if that param load is bypassed, e.g. loading this file's params directly outside a launch file
+  grid_map: false
+  grid_map_color_weight: 0.5  # 0=all grayscale, 1=all color tint
+  plane_map: false
+  uv_tracking: true  # publish rgb_img with arrows showing vio's tracked uv displacements
+  ds:
+    ds_leaf_size: 0.05
+outputs:
+  # Self-shutdown for headless/scripted test runs: once popMeasureGroup()
+  # has come back empty for auto_terminate_idle_secs real (wall-clock)
+  # seconds straight, LivoReconNode::run() exits its own loop cleanly
+  # instead of idling forever. Enabled by default so test_common.sh's
+  # run_one() (and any other headless launcher) can just wait() on the
+  # process rather than guessing "is it done" from a stall heuristic on
+  # console output, which misfires on GPU-bound VIO frontends (can go
+  # quiet for seconds at a time mid-frame while blocked on a GPU kernel).
+  auto_terminate_on_idle: true
+  auto_terminate_idle_secs: 5.0
+  profiler:
+    export_path: "/tmp/livo_recon_profile.txt"
+  path: ""          # base directory for COLMAP dataset export (empty = disabled)
+  pcd:
+    export: false   # accumulate and write sparse/0/points3D.bin on shutdown
+  image:
+    export: false   # save images to images/ and write cameras.bin + images.bin on shutdown
+    interval: 1     # export every N-th frame (must be >= 1)
+  printer:
+    # params/calib default to true (matching Printer's own C++ constructor
+    # default) so load-confirmation output -- tracker backend load status
+    # in particular -- is actually visible in a normal run's console log.
+    # Confirmed 2026-08-12: this default being false meant NOTHING from
+    # loadParameters() across every subsystem (including a successful/
+    # failed tracker load) ever printed, making a real investigation (does
+    # the tracker actually load, what did calib produce) impossible without
+    # first discovering and overriding this flag by hand.
+    params:
+      enable: true
+    voxel:
+      enable: false
+    state:
+      enable: false
+    calib:
+      enable: true
+    vio:
+      enable: false
+    lio:
+      enable: false
+    evo:
+      enable: true
+    profiler:
+      enable: false
+    throttle_s: 0.
+calib:
+  num_samples: 100
+  use_calib: true
+  use_calib_var: false
+  use_calib_bias: true
+state:
+  est:
+    bg: true
+    ba: true
+    gravity: true
+    cov_acc: false
+    cov_gyr: false
+  cov:
+    # Hardcoded per-sensor process noise for this dataset's IMU (VN-100),
+    # not derived from calibration (calib/use_calib_var defaults false --
+    # see CalibProcOptions's docs). Matches FAST-LIVO2's own tuned
+    # NTU_VIRAL.yaml acc_cov/gyr_cov -- confirmed via sweep to sit well
+    # inside the stable range (acc: flat 5-30x the sensor's own datasheet
+    # std; gyr: flat from ~150x upward, with a real failure threshold
+    # below ~90x and no penalty at all for going higher).
+    rot: 1.0e-2
+    pos: 1.0e-2
+    vel: 1.0e-2
+    bg: 1.0e-5
+    ba: 1.0e-5
+    gravity: 1.0e-5
+    acc: 0.5
+    gyr: 0.3
+  init_state:
+    gravity: [0., 0., -9.81]
+    vel: [0., 0., 0.]
+    ba: [0., 0., 0.]
+    bg: [0., 0., 0.]
+imu:
+  # FAST-LIVO2's own NTU_VIRAL.yaml value (lio/beam_err: 0.01 degrees, same
+  # Ouster OS1-64), matching the sensor's actual angular precision rather
+  # than defaults/imu.yaml's generic angle_err_deg=0.15. An OLD A/B (same
+  # harness, same 90s window) once found 0.15 gave better ATE than 0.01
+  # (0.159m vs 0.416m) and kept the untuned generic default instead --
+  # re-verified on 2026-08-01 (same 90s eee_01 window, production
+  # point_filter_num=3) now that the surrounding voxel-map/plane-fitting
+  # code has changed materially since that old result, and the outcome has
+  # REVERSED: 0.01 now beats 0.15 (0.0212m vs 0.0329m). Re-run a fresh A/B
+  # if ATE regresses unexpectedly on this dataset -- this value has already
+  # flipped once as the rest of the pipeline evolved.
+  second_order: true   # include dt² Jacobian terms F_x[P,R] and F_x[P,G]
+  sensor:
+    range_err: 0.02
+    angle_err_deg: 0.01
+  ds:
+    # Default (defaults/imu.yaml) leaves this at 0.0 (downsampling disabled),
+    # which was letting every undistorted LIDAR point flow straight into
+    # LIO's point-to-plane residuals -- ~12k residuals/frame here vs
+    # FAST-LIVO2's ~3k (it voxel-downsamples to filter_size_surf=0.1 before
+    # LIO, see NTU_VIRAL.yaml). Densely-sampled voxels were dominating the
+    # LIO information matrix and driving trace(P_PP) to collapse and pin at
+    # an overconfident floor right when real motion starts. Matching
+    # FAST-LIVO2's leaf size here for a fair comparison.
+    ds_leaf_size: 0.1
+    # Downsample-reduction mode A/B test (see hashing.h's DsMode docs):
+    # "first" (default) ties "average" w/ literal mean-covariance (both
+    # ~0.04-0.05m ATE, no divergence) -- law-of-total-variance cov badly
+    # regressed (2.62m); medoid/precision_weighted variants also tried and
+    # removed after tying/regressing. Back to "first" here since this
+    # config's active test variable is voxel_map's density_weighted_pca,
+    # not this downsampling mode.
+    mode: "first"
+lio:
+  ekf:
+    max_iterations: 5
+    residual_weighting: "none"
+voxel_map:
+  backend: "voxel"  # "voxel" (default, persistent per-voxel plane fits, VoxelMap) or
+                    # "akf" (AKF-LIO-style raw-point Gaussian merge map, AkfMap) -- see
+                    # ~/.claude/plans/imperative-tumbling-karp.md for the design.
+  map:
+    # 2026-08-14: unified to 0.425 to match HILTI (see slam_2022/
+    # voxel_map.yaml's comment for the full history) instead of staying at
+    # the global default (0.5). A dedicated compromise sweep (0.4/0.425/
+    # 0.45 across full 16-seq HILTI LIO-only + these 9 NTU_VIRAL sequences)
+    # found 0.425 keeps NTU_VIRAL's own ATE essentially unchanged (mean
+    # 0.0295m vs the 0.5-baseline's 0.0294m) while letting HILTI use the
+    # SAME value and get a full 16/16 healthy(<10m ATE) sequences (better
+    # than HILTI's own previously-tuned 0.35, which only got 15/16).
+    voxel_size: 0.425
+    max_layer: 2
+    decimate_points: false
+  plane:
+    plane_threshold: 2.5e-3
+  points:
+    min_init: 5
+    min_update: 5
+    max: 50
+  residual:
+    sigma_num: 3.0
+    max_radius: 3.0
+  search:
+    neighborhood_size: 1
+vio:
+  enable: true  # set by test_*.sh
+  ekf:
+    # max_iterations/min_diff_error matched to FAST-LIVO2 myvio's own
+    # production values (10 / 0.0001, both HILTI/NTU_VIRAL configs) on
+    # 2026-08-15 -- see VIO_METHODOLOGY_DIFF.md's cross-codebase comparison.
+    # Previously 50 / 1.0e-3 (5x more iterations allowed, a 10x looser
+    # relative-improvement stop).
+    max_iterations: 10
+    min_norm_dtheta: 0.0  # never activates by default -- see VioProcOptions::min_norm_dtheta's doc comment
+    min_norm_dt: 0.0      # never activates by default -- see VioProcOptions::min_norm_dt's doc comment
+    min_diff_error: 1.0e-4
+    max_avg_error: 5.0  # reject (roll back) the whole frame if the best fit is still worse than this
+    anchor_split_depth: 0.0  # pos_/neg_epipolar_residual_var split threshold -- see that option's doc comment
+    distortion_weight_on: false  # rigorous per-point distortion weighting -- see that option's doc comment
+    weight_pixel_noise_px: 0.5   # only consulted when distortion_weight_on is true
+  log:
+    log_iterations: false
+    log_point_residuals: false
+    log_residual_counts: false
+    log_raw_tracker_output: false
+    dry_run: false
+    log_norm_l_low_frac: 0.3
+    # log_path deliberately NOT set here -- letting VioProc::loadParameters()'s
+    # own C++ default (debugLogPath("livo_recon_myvio_log.txt"), see
+    # utils/log/debug_log_dir.h) apply. A hardcoded "/tmp/..." string here
+    # would always win (rosparam values set by a <rosparam file> load take
+    # precedence over a pnh.param() call's C++ default, which is only a
+    # fallback for keys never set on the server at all) and silently defeat
+    # outputs/debug_log_dir regardless of what it's set to.
+combined:
+  # Opt-in joint LIO+VIO EKF step (default off -- see combined_processing.h).
+  # Requires vio/enable: true too (see livo_recon_node.cpp's loadParameters()
+  # doc comment) for the tracker backend to actually load.
+  enable: false
+  max_iterations: 5
+  ekf:
+    min_norm_dtheta: 0.0
+    min_norm_dt: 0.0
+    min_diff_error: -1.0
+    max_avg_error: 5.0
+tracker:
+  backend: "cotracker"  # set by test_*.sh
+  device: "cuda"
+  tracker_format: "jit"  # "jit" (default), "aot" (AOTInductor, fp16), or "aot_fp32" (AOTInductor, full precision) -- cotracker only, see Tracker::loadParameters. AOT packages must match grid_selection/grid_rows x grid_cols (filename-encoded query count).
+  grid_selection:
+    grid_rows: 16
+    grid_cols: 16  # set by test_*.sh
+  reseed:
+    active_fraction: 0.9  # reseed the whole tracked-point grid once fewer than this fraction stay visible -- ignored by the cotracker backend, which always reseeds
+    min_candidate_fraction: 0.25  # fraction of grid_rows*grid_cols selectAnchors must find a candidate for before a reseed is actually committed to. NOTE: the achievable fraction under healthy conditions drops as grid_rows*grid_cols grows -- retune lower when increasing grid resolution
+  track_cache_path: ""  # path to a .rlivtrackcache file (src/tools/cache_tracker_output.cpp). Empty (default) = live tracking. When set, skips the GPU tracker pass entirely and replays cached TrackedFrame records by timestamp -- see TrackerOptions::track_cache_path's doc comment.
+common:
+  offline_bag_path: ""       # path to a bag to read directly in-process (no rosbag play, no ROS transport) instead of via live subscribers. Empty = live mode (run()), unchanged.
+  offline_duration_secs: -1.0  # caps runOffline() to the first N seconds (bag-relative). <= 0 = no cap, process the whole bag.
+evo:
+  enable: true
+  gt_source: "topic"  # "topic" or "file"
+  gt_topic: "/leica/pose/relative"
+  # Body/IMU -> Leica-prism lever arm, matching FAST-LIVO2's own
+  # Log/result/ntu_viral/evaluate_viral.py (trans_B2prism). Without this,
+  # est_pos is compared directly against the prism's raw tracked position,
+  # missing an orientation-dependent offset of up to ~0.4m (this vector's
+  # own norm).
+  gt_file: ""  # TUM-format path, used when gt_source == "file"
+  queue_size: 2000
+  max_time_diff: 0.05  # seconds; nearest-match tolerance (file) or RTE/ROE pairing tolerance (topic)
+  rpe:
+    compute_rte: true   # relative translation error (RPE's translation part) -- topic mode only
+    compute_roe: true   # relative rotation error (RPE's rotation part) -- topic mode only; a diagnostic curiosity against position-only ground truth, not a true orientation error (see evo_processing.cpp's logStage())
+    delta_s: 1.0         # seconds between the pose pair RTE/ROE compare
+  gt_lever_arm: [-0.293656, -0.012288, -0.273095]
+topics:
+  image: "/left/image_raw"
+  lidar: "/os1_cloud_node1/points"
+  imu: "/imu/imu"
+  queue_size: 20000
+frames:
+  camera: camera_link
+  lidar: lidar_link
+extrinsics:
+  R_l2i: [1, 0, 0, 0, 1, 0, 0, 0, 1]
+  t_l2i: [-0.050, 0.000, 0.055]
+  R_l2c: [0.0218308, 0.99976, -0.00201407, -0.0131205, 0.00230088, 0.999911, 0.999676, -0.0218025, 0.0131676]
+  t_l2c: [0.122993, 0.0398643, -0.0577101]
+camera:
+  width: 752
+  height: 480
+  fx: 425.0258563372763
+  fy: 426.7976260903337
+  cx: 386.0151866550880
+  cy: 241.9130336743440
+  distortion_model: plumb_bob
+  distortion_coeffs: [-0.288105327549552, 0.074578284234601, 7.784489598138802e-04, -2.277853975035461e-04, 0.0]
+preprocess:
+  # NTU VIRAL's camera/lidar rates don't have the mismatch HILTI's does
+  # (see slam_2022/slam_2023*'s cbk.yaml) -- process every frame.
+  image_subsample_n: 1
+cbk:
+  lidar:
+    type: pcl   # avia | mid360 | pcl (NTU VIRAL uses an Ouster OS1, generic PointCloud2)
+    blind: 1.0
+    point_filter_num: 3
+    # Matches FAST-LIVO2's own NTU_VIRAL.yaml (time_offset/lidar_time_offset:
+    # -0.1) -- corrects a fixed ~100ms clock/latency skew between this
+    # dataset's Ouster lidar driver and its IMU/camera streams. livo_recon
+    # had no equivalent of this at all until it was added specifically to
+    # test whether the missing correction explains a velocity-correlated
+    # (not fixed-frame) position bias found during sustained fast motion
+    # (t=73-85s on eee_01) that FAST-LIVO2 doesn't share.
+    time_offset: -0.1
+  imu:
+    acc_type: "m_s2"  # NTU VIRAL's IMU already reports linear_acceleration in m/s^2 -- confirmed empirically: the old unconditional *G_m_s2 scaling produced a runaway ~-84 m/s^2 accel bias (the EKF trying to absorb a ~9.81x-too-large acceleration reading)
+    gyr_type: "rad_s"

@@ -1,0 +1,25 @@
+<launch>
+  <arg name="rviz" default="true" />
+
+  <node pkg="livo_recon"
+        type="livo_recon_node"
+        name="livo_recon"
+        output="screen">
+    <!-- 2026-08-16: consolidated from config/defaults/*.yaml + config/
+         mid360/*.yaml (~22 separate files) into one self-contained
+         config/mid360.yaml, see that file's own header comment -->
+    <rosparam file="$(find livo_recon)/config/mid360.yaml" command="load" />
+    <!-- viz/enable follows the rviz arg directly, placed after every
+         rosparam load above (including dataset specific viz.yaml overrides,
+         see mid360's), so it always wins: no rviz window means livo_recon's
+         own visualization computation/publishing (point cloud, image, etc,
+         see pub_processing.cpp) is skipped too, not just the rviz process
+         itself. -->
+    <param name="viz/enable" value="$(arg rviz)" />
+  </node>
+
+  <group if="$(arg rviz)">
+    <node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz"
+          args="-d $(find livo_recon)/rviz_cfg/livo_recon.rviz" />
+  </group>
+</launch>

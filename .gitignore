@@ -1,0 +1,17 @@
+# Pretrained model weights -- too large for git, see README for how to obtain them
+checkpoints/
+
+# Internal working snapshots from refactors, not part of the published history
+refactor_snapshots/
+
+# Build artifacts
+build/
+devel/
+*.o
+*.pyc
+__pycache__/
+
+# Editor/OS cruft
+.vscode/
+*.swp
+.DS_Store

@@ -1,0 +1,35 @@
+<launch>
+  <arg name="rviz" default="true" />
+  <!-- Test-only escape hatch: a rosparam file loaded LAST (after
+       config/slam_2022_handheld.yaml below), so a real override file passed via
+       overrides_file:=/path/to/file.yaml always wins without editing the
+       checked-in config. Needed in particular for evo/gt_file, which
+       (unlike evo/gt_topic) must vary per SEQUENCE, not per dataset.
+       Defaults to a real, empty, valid-YAML no-op file so normal/default
+       runs are unaffected. -->
+  <arg name="overrides_file" default="$(find livo_recon)/config/slam_2022_handheld_no_overrides.yaml" />
+
+  <node pkg="livo_recon"
+        type="livo_recon_node"
+        name="livo_recon"
+        output="screen">
+    <!-- 2026-08-16: consolidated from config/defaults/*.yaml + config/
+         slam_2022/*.yaml (~25 separate files) into one self-contained
+         config/slam_2022_handheld.yaml (renamed 2026-08-29 for clarity,
+         this is the HILTI'22 HANDHELD config, see that file's own header comment) -->
+    <rosparam file="$(find livo_recon)/config/slam_2022_handheld.yaml" command="load" />
+    <rosparam file="$(arg overrides_file)"                    command="load" />
+    <!-- viz/enable follows the rviz arg directly, placed after every
+         rosparam load above (including dataset specific viz.yaml overrides,
+         see mid360's), so it always wins: no rviz window means livo_recon's
+         own visualization computation/publishing (point cloud, image, etc,
+         see pub_processing.cpp) is skipped too, not just the rviz process
+         itself. -->
+    <param name="viz/enable" value="$(arg rviz)" />
+  </node>
+
+  <group if="$(arg rviz)">
+    <node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz"
+          args="-d $(find livo_recon)/rviz_cfg/livo_recon.rviz" />
+  </group>
+</launch>
