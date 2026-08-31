@@ -472,6 +472,12 @@ void VoxelPlane::refitDebiased()
   covariance_.setZero();
   plane_ = {};
   is_plane_ = false;
+  // Bug ledger 2026-08-31: this was never set in debiased mode, leaving
+  // the J column of corr.csv stale/zero on every debiased run. Reset here
+  // and set to N_acc_ (this fit's effective point count) only on a
+  // committed success below, mirroring update()'s PCA-path convention
+  // (last_fit_j_ = use_weights ? N : 0).
+  last_fit_j_ = 0;
 
   const double N = N_acc_;
   if (N < 3) return;
@@ -649,6 +655,8 @@ void VoxelPlane::refitDebiased()
     }
     return;
   }
+
+  last_fit_j_ = (int)N;
 
   if (opts_->log_debug_en) {
     std::ostringstream dbg;

@@ -42,13 +42,17 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // LioProcOptions::deskew/ds_leaf_size/ds_mode's doc comments. Still the
   // SAME rosparam keys, just read by a different class now.
   paramWarn<bool>(pnh, "imu/second_order",   opts_.second_order, true);
-  paramWarn<double>(pnh, "imu/q_alpha", opts_.q_alpha, 1.0);
+  paramWarn<double>(pnh, "imu/q_alpha_acc", opts_.q_alpha_acc, 1.0);
+  paramWarn<double>(pnh, "imu/q_alpha_gyr", opts_.q_alpha_gyr, 1.0);
+  paramWarn<double>(pnh, "imu/q_alpha_bias", opts_.q_alpha_bias, 1.0);
   paramWarn<bool>(pnh, "imu/log_debug_en", opts_.log_debug_en, false);
 
   std::ostringstream oss;
   oss << "[params/imu]"
       << "\n  second_order:         " << (opts_.second_order ? "true" : "false")
-      << "\n  q_alpha:              " << opts_.q_alpha;
+      << "\n  q_alpha_acc:          " << opts_.q_alpha_acc
+      << "\n  q_alpha_gyr:          " << opts_.q_alpha_gyr
+      << "\n  q_alpha_bias:         " << opts_.q_alpha_bias;
   return oss.str();
 }
 
@@ -140,32 +144,36 @@ void ImuProc::propagate(MeasureGroup& mg)
       F_x.block(StateGroup::idxV(), state_->idxG(), 3, 3) = Eye3d * dt;
 
     // Rotation noise
-    cov_w.block<3,3>(StateGroup::idxR(), StateGroup::idxR()).diagonal() = state_->varGyr() * dt2;
+    cov_w.block<3,3>(StateGroup::idxR(), StateGroup::idxR()).diagonal() =
+        opts_.q_alpha_gyr * state_->varGyr() * dt2;
 
     // Velocity noise
-    cov_w.block<3,3>(StateGroup::idxV(), StateGroup::idxV()) = acc_noise_world * dt2;
+    cov_w.block<3,3>(StateGroup::idxV(), StateGroup::idxV()) =
+        opts_.q_alpha_acc * acc_noise_world * dt2;
 
     // Bias Gyro random-walk noise
     if (state_->estBG())
       cov_w.block(state_->idxBG(), state_->idxBG(), 3, 3).diagonal() =
-          (state_->covBiasGyr() * dt).eval();
+          (opts_.q_alpha_bias * state_->covBiasGyr() * dt).eval();
 
     // Bias Acc random-walk noise
     if (state_->estBA())
       cov_w.block(state_->idxBA(), state_->idxBA(), 3, 3).diagonal() =
-          (state_->covBiasAcc() * dt).eval();
+          (opts_.q_alpha_bias * state_->covBiasAcc() * dt).eval();
 
     if (opts_.second_order)
     {
       // Position noise from dp = 0.5*R*n_a*dt²; cross-term with dv = R*n_a*dt
-      cov_w.block<3,3>(StateGroup::idxP(), StateGroup::idxP()) = 0.25 * dt2 * dt2 * acc_noise_world;
-      cov_w.block<3,3>(StateGroup::idxP(), StateGroup::idxV()) = 0.5  * dt  * dt2 * acc_noise_world;
-      cov_w.block<3,3>(StateGroup::idxV(), StateGroup::idxP()) = 0.5  * dt  * dt2 * acc_noise_world;
+      // -- both derived from the same accel noise, so scaled by q_alpha_acc.
+      cov_w.block<3,3>(StateGroup::idxP(), StateGroup::idxP()) = opts_.q_alpha_acc * 0.25 * dt2 * dt2 * acc_noise_world;
+      cov_w.block<3,3>(StateGroup::idxP(), StateGroup::idxV()) = opts_.q_alpha_acc * 0.5  * dt  * dt2 * acc_noise_world;
+      cov_w.block<3,3>(StateGroup::idxV(), StateGroup::idxP()) = opts_.q_alpha_acc * 0.5  * dt  * dt2 * acc_noise_world;
     }
 
-    // T0-E: q_alpha scales the WHOLE process-noise contribution uniformly
-    // -- 1.0 (default) is bit-identical to the pre-T0-E formula.
-    state_->covMut() = F_x * state_->cov() * F_x.transpose() + opts_.q_alpha * cov_w;
+    // T0-E/T7 step 2: each block above is already pre-scaled by its own
+    // q_alpha_{acc,gyr,bias} -- cov_w is added unscaled here. All three
+    // at 1.0 (default) is bit-identical to the pre-split formula.
+    state_->covMut() = F_x * state_->cov() * F_x.transpose() + cov_w;
 
     // ---- state propagation ----
     // World-frame acc is the average of acc transformed by head and tail rotations
