@@ -172,6 +172,24 @@ struct LioProcOptions
   // so it was never really an "IMU" concern either).
   double ds_leaf_size = 0.15;
   std::string ds_mode = "first";
+
+  // T0-D (2026-08-31): scan.csv -- one row per LIO frame, for
+  // scripts/analysis/consistency.py's scan-level covariates (the
+  // corr.csv-only core already answers the calibration/whiteness
+  // questions; this is the extra panel). Columns: scan_id (=VoxelMap::
+  // frame_idx_, matching corr.csv's scan_id exactly), t (=t_abs), dt
+  // (time since the previous logged scan), trP_pos/trP_vel/trP_att
+  // (trace of this frame's POSTERIOR P_PP/P_VV/P_RR blocks), omega_norm/
+  // acc_norm (mean |gyr|/|0.5*(acc_head+acc_tail)| over this frame's
+  // mg.poses -- mg.imu_samples is already cleared by the time processLIO()
+  // runs, see the .cpp call site).
+  // trQdt_* (process-noise-authority columns) are NOT logged -- Q is
+  // applied during ImuProc's propagation, a different module than this
+  // one, and threading it through was scoped out the same way range/
+  // incidence was for corr.csv (see VoxelOpts::log_consistency_covariates_
+  // en's docs) -- consistency.py's Q-authority panel simply skips when
+  // the column is absent. Off by default.
+  bool log_consistency_scan_en = false;
 };
 
 
@@ -194,9 +212,15 @@ public:
   // downsamplePoints() used to provide unconditionally before this move.
   void deskewAndDownsample(MeasureGroup& mg);
 
+  // allow_consistency_log: T0-D's corr.csv wants the FIRST-iteration
+  // (pre-update, un-relinearized) innovation only -- true only from
+  // processLIO()'s iter==0 call; every later re-linearizing iteration,
+  // and every call from runDryRunShadowPass()'s throwaway shadow pass,
+  // passes false. See VoxelMap::setAllowConsistencyLog()'s doc comment.
   void buildResiduals(
     const std::vector<PointXYZCov>& pts,
-    std::vector<Residual>& residuals) const;
+    std::vector<Residual>& residuals,
+    bool allow_consistency_log = true) const;
 
   void solveSystem(const std::vector<Residual>& residuals) const;
   void solveSystem_cuda(const std::vector<Residual>& residuals) const;
@@ -204,7 +228,8 @@ public:
   double estimateStateCorrection(
     const std::vector<PointXYZCov>& pts,
     V3D &dtheta,
-    V3D &dt);
+    V3D &dt,
+    bool allow_consistency_log = true);
 
   // Assumes deskewAndDownsample(mg) already ran this frame (mg.points
   // populated) -- see that method's doc comment for why this isn't called
@@ -244,6 +269,10 @@ private:
   DataQueuesPtr data_queues_;  // for start_time -- see debugLogLio()'s absolute timestamps
 
   LioProcOptions opts_;
+
+  // T0-D scan.csv's dt column -- previous logged scan's t_abs, -1 before
+  // the first logged scan (dt written as 0 that first time).
+  mutable double last_scan_t_abs_ = -1.0;
 
   std::vector<Residual> residuals_;
   mutable std::vector<std::vector<Residual>> build_thread_residuals_;

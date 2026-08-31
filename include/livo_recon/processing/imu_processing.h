@@ -15,6 +15,20 @@ struct ImuProcOptions
   // default.
   bool   log_debug_en = false;
   bool   second_order = true;
+
+  // T0-E (2026-08-31): Q = q_alpha * Q0 -- uniformly scales the WHOLE
+  // process-noise matrix (cov_w: rotation/velocity/position noise from
+  // varGyr/varAcc, plus bias random-walk noise) built each IMU
+  // propagation substep, before it's added into state_->cov(). 1.0
+  // (default) is exactly today's behavior, bit-identical -- this option
+  // exists purely so scripts/analysis/{consistency.py's NLL panel,
+  // qsens.py's secant driver} can externally re-run the same sequence at
+  // different alpha and compare total NLL (see LioProcOptions::
+  // log_nll_en) to find the alpha that maximizes filter consistency,
+  // without touching per-term (gyro-vs-accel-vs-bias) weighting -- a
+  // single global scalar, not the 3-axis alpha_acc/alpha_gyr/alpha_bias
+  // qsens.py's own doc comment mentions as the eventual generalization.
+  double q_alpha = 1.0;
 };
 
 class ImuProc

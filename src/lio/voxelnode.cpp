@@ -32,7 +32,7 @@ VoxelNode::VoxelNode(VoxelOptsPtr opts, VoxelStatsPtr stats, int layer, const V3
   : opts_(opts), stats_(stats), plane_ptr_(new VoxelPlane(opts)), layer_(layer),
     voxel_center_(center), status_(VoxelStatus::OPEN),
     node_id_(stats->next_node_id.fetch_add(1, std::memory_order_relaxed)),
-    density_weight_leaf_(kDensityWeightLeafFraction * opts->voxel_size / (1 << layer))
+    density_weight_leaf_(opts->bin_size_fraction * opts->voxel_size / (1 << layer))
 {
   for (int i = 0; i < 8; i++)
     leaves_[i] = nullptr;
@@ -56,10 +56,12 @@ int VoxelNode::childIndex(const V3D& p) const
        | (p.z() > voxel_center_.z() ? 1 : 0);
 }
 
-void VoxelNode::buildBinReps(std::vector<PointXYZCov>& reps, std::vector<double>& weights) const
+void VoxelNode::buildBinReps(std::vector<PointXYZCov>& reps, std::vector<double>& fit_weights,
+                              std::vector<double>& var_weights) const
 {
   reps.reserve(bins_.size());
-  weights.reserve(bins_.size());
+  fit_weights.reserve(bins_.size());
+  var_weights.reserve(bins_.size());
   for (const auto& kv : bins_) {
     const auto& bin = kv.second;
     const double inv_count = 1.0 / bin.count;
@@ -68,7 +70,8 @@ void VoxelNode::buildBinReps(std::vector<PointXYZCov>& reps, std::vector<double>
     rep.sensor_cov  = bin.sum_sensor_cov * inv_count;
     rep.pos_cov     = bin.sum_pos_cov * inv_count;
     reps.push_back(rep);
-    weights.push_back(static_cast<double>(bin.count));
+    fit_weights.push_back(opts_->bin_weight_mode_fit == "uniform" ? 1.0 : static_cast<double>(bin.count));
+    var_weights.push_back(opts_->bin_weight_mode_var == "uniform" ? 1.0 : static_cast<double>(bin.count));
   }
 }
 
@@ -193,9 +196,9 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
 
     if (use_bins) {
       std::vector<PointXYZCov> bin_reps;
-      std::vector<double> bin_weights;
-      buildBinReps(bin_reps, bin_weights);
-      plane_ptr_->update(bin_reps, total_count_, &bin_weights);
+      std::vector<double> fit_weights, var_weights;
+      buildBinReps(bin_reps, fit_weights, var_weights);
+      plane_ptr_->update(bin_reps, total_count_, &fit_weights, nullptr, &var_weights);
     } else {
       plane_ptr_->update(points_, -1, nullptr, &running_moments_);
     }
@@ -264,8 +267,8 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       // weighting once handed to a child, an accepted approximation for
       // this rare non-planar/give-up path -- see PointBin's docs).
       std::vector<PointXYZCov> bin_reps;
-      std::vector<double> bin_weights_unused;
-      buildBinReps(bin_reps, bin_weights_unused);
+      std::vector<double> fit_weights_unused, var_weights_unused;
+      buildBinReps(bin_reps, fit_weights_unused, var_weights_unused);
       passToChildren(bin_reps, updates);
       bins_.clear();
       total_count_ = 0;
@@ -336,18 +339,18 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
   }
 }
 
-bool VoxelNode::findPlaneResidual(const WorldPointCov& pt, Residual& res) const
+bool VoxelNode::findPlaneResidual(const WorldPointCov& pt, Residual& res, int scan_id) const
 {
   if (status_ == VoxelStatus::DISABLED) return false;
 
   if (status_ == VoxelStatus::PARENT) {
     const VoxelNode* child = leaves_[childIndex(pt.point)];
     if (!child) return false;
-    return child->findPlaneResidual(pt, res);
+    return child->findPlaneResidual(pt, res, scan_id);
   }
 
   if (!plane_ptr_) return false;
-  return plane_ptr_->computeResidual(pt, res);
+  return plane_ptr_->computeResidual(pt, res, scan_id);
 }
 
 }  // namespace livo_recon

@@ -32,9 +32,16 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "voxel_map/residual/max_radius",  opts_->max_radius,          3.);
   paramWarn<bool>(pnh, "voxel_map/residual/pose_cov_in_sigma", opts_->pose_cov_in_sigma, false);
   paramWarn<bool>(pnh, "voxel_map/plane/log_debug_en", opts_->log_debug_en, false);
+  paramWarn<bool>(pnh, "voxel_map/plane/log_variance_shares_en", opts_->log_variance_shares_en, false);
   paramWarn<int>(pnh, "voxel_map/search/neighborhood_size", opts_->neighborhood_size,   1);
   paramWarn<std::string>(pnh, "voxel_map/plane/plane_fit_mode", opts_->plane_fit_mode, "pca");
   paramWarn<std::string>(pnh, "voxel_map/plane/plane_fit_pose_cov_mode", opts_->plane_fit_pose_cov_mode, "combined");
+  paramWarn<std::string>(pnh, "voxel_map/plane/bin_weight_mode_fit", opts_->bin_weight_mode_fit, "count");
+  paramWarn<std::string>(pnh, "voxel_map/plane/bin_weight_mode_var", opts_->bin_weight_mode_var, "count");
+  paramWarn<double>(pnh, "voxel_map/plane/bin_size_fraction", opts_->bin_size_fraction, 0.2);
+  paramWarn<bool>(pnh, "voxel_map/plane/use_bins", opts_->use_bins, false);
+  paramWarn<bool>(pnh, "voxel_map/plane/log_consistency_corr_en", opts_->log_consistency_corr_en, false);
+  paramWarn<bool>(pnh, "voxel_map/plane/log_consistency_covariates_en", opts_->log_consistency_covariates_en, false);
 
   std::ostringstream oss;
   oss << "[params/voxel_map]"
@@ -47,6 +54,13 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/plane_threshold:           " << opts_->plane_threshold
       << "\n  plane/plane_fit_mode:            " << opts_->plane_fit_mode
       << "\n  plane/plane_fit_pose_cov_mode:   " << opts_->plane_fit_pose_cov_mode
+      << "\n  plane/bin_weight_mode_fit:       " << opts_->bin_weight_mode_fit
+      << "\n  plane/bin_weight_mode_var:       " << opts_->bin_weight_mode_var
+      << "\n  plane/bin_size_fraction:         " << opts_->bin_size_fraction
+      << "\n  plane/use_bins:                  " << (opts_->use_bins ? "true" : "false")
+      << "\n  plane/log_variance_shares_en:    " << (opts_->log_variance_shares_en ? "true" : "false")
+      << "\n  plane/log_consistency_corr_en:   " << (opts_->log_consistency_corr_en ? "true" : "false")
+      << "\n  plane/log_consistency_covariates_en: " << (opts_->log_consistency_covariates_en ? "true" : "false")
       << "\n  points/min_init:  " << opts_->min_init_points
       << "\n  points/max:       " << opts_->max_points
       << "\n  points/min_update:" << opts_->min_update_points
@@ -191,7 +205,7 @@ void VoxelMap::ensureNode(const VoxelKey& key)
 }
 
 bool VoxelMap::findPlaneResidualDirectional(const WorldPointCov& pt, const VoxelKey& base, Residual &res,
-                                            VoxelKey* tried_key) const
+                                            VoxelKey* tried_key, int scan_id) const
 {
   // FAST-LIVO2-style single-neighbor step: the primary voxel missed, so
   // step to the one neighbor the point actually leans toward -- per axis,
@@ -217,13 +231,13 @@ bool VoxelMap::findPlaneResidualDirectional(const WorldPointCov& pt, const Voxel
 
   auto it_near = voxel_map_.find(near_key);
   if (it_near == voxel_map_.end() || !it_near->second) return false;
-  if (!it_near->second->findPlaneResidual(pt, res)) return false;
+  if (!it_near->second->findPlaneResidual(pt, res, scan_id)) return false;
   res.match_tier = 1;
   return true;
 }
 
 bool VoxelMap::findPlaneResidualNeighborhood(const WorldPointCov& pt, const VoxelKey& base, Residual &res,
-                                             const VoxelKey* exclude) const
+                                             const VoxelKey* exclude, int scan_id) const
 {
   // Exhaustive box search (original livo_recon approach): score every
   // candidate voxel within neighborhood_size in each direction and keep
@@ -249,7 +263,7 @@ bool VoxelMap::findPlaneResidualNeighborhood(const WorldPointCov& pt, const Voxe
     if (it == voxel_map_.end() || !it->second) continue;
 
     Residual cand;
-    if (!it->second->findPlaneResidual(pt, cand)) continue;
+    if (!it->second->findPlaneResidual(pt, cand, scan_id)) continue;
 
     const double score = (1.0 / std::sqrt(cand.sigma_squared)) *
                          std::exp(-0.5 * cand.r * cand.r / cand.sigma_squared);
@@ -285,7 +299,7 @@ bool VoxelMap::findPlaneResidual(const WorldPointCov& pt, Residual &res, bool* t
   const VoxelKey base = worldToKey(pt.point);
 
   auto it = voxel_map_.find(base);
-  if (it != voxel_map_.end() && it->second && it->second->findPlaneResidual(pt, res))
+  if (it != voxel_map_.end() && it->second && it->second->findPlaneResidual(pt, res, allow_consistency_log_ ? frame_idx_ : -1))
     return true;
 
   if (tier0_had_plane)
@@ -297,12 +311,13 @@ bool VoxelMap::findPlaneResidual(const WorldPointCov& pt, Residual &res, bool* t
   // search (expensive, but a real safety net -- see the residual-count
   // collapse this was reinstated to fix: the directional-only fallback let
   // matching thin out badly during dynamic motion, since a wrong single
-  // guess had no second chance).
+  // guess had no second chance). frame_idx_ (this frame's scan_id, for
+  // T0-D's corr.csv) is threaded through every tier the same way.
   VoxelKey directional_key = base;
-  if (findPlaneResidualDirectional(pt, base, res, &directional_key))
+  if (findPlaneResidualDirectional(pt, base, res, &directional_key, allow_consistency_log_ ? frame_idx_ : -1))
     return true;
 
-  return findPlaneResidualNeighborhood(pt, base, res, &directional_key);
+  return findPlaneResidualNeighborhood(pt, base, res, &directional_key, allow_consistency_log_ ? frame_idx_ : -1);
 }
 
 // ── Visualization list helpers ────────────────────────────────────────────────

@@ -14,10 +14,16 @@ public:
   bool isPlane() const { return is_plane_; }
   bool isFull() const { return points_size_ >= opts_->max_points; }
 
-  bool computeResidual(const WorldPointCov& pt, Residual& res) const;
+  // scan_id (default -1 -> no logging regardless of opts_ flags): the
+  // calling frame's VoxelMap::frame_idx_, threaded down only for T0-D's
+  // corr.csv (see VoxelOpts::log_consistency_corr_en) -- not used for
+  // anything else. Callers outside the VoxelMap frame-processing path
+  // (none today) can safely omit it.
+  bool computeResidual(const WorldPointCov& pt, Residual& res, int scan_id = -1) const;
   bool getVizInfo(PlaneVizInfo& info) const;
 
   int pointsSize() const { return points_size_; }
+  int lastFitJ() const { return last_fit_j_; }
 
   // Diagnostic-only accessors (see the point_filter_num=1 single-frame-
   // init failure-mode investigation): expose the raw PCA outputs so a
@@ -50,9 +56,16 @@ public:
   // exact, not an approximation. `points` is still required alongside it
   // for the per-point plane_var_ Jacobian loop, which this does not
   // affect. Must not be passed together with `weights`.
+  // `var_weights`: separate weight vector for the plane_var_ Jacobian
+  // loop only (see T3-0c) -- lets a caller change the fitted plane
+  // (center/covariance/normal, via `weights`) independently of the
+  // uncertainty scaling attached to it. Defaults to `weights` itself
+  // when null, matching pre-2026-08-30 behavior (one weight vector for
+  // both fit and uncertainty).
   void update(const std::vector<PointXYZCov>& points, int total_count = -1,
               const std::vector<double>* weights = nullptr,
-              const RunningMoments* running = nullptr);
+              const RunningMoments* running = nullptr,
+              const std::vector<double>* var_weights = nullptr);
 
   // opts_->plane_fit_mode == "debiased" path: folds `points` into this
   // VoxelPlane's own PERSISTENT O(1) accumulators (never cleared/replayed)
@@ -110,9 +123,16 @@ private:
   // separately so the caller (VoxelPlane::computeResidual()) can add it
   // into Residual::sigma_squared. The accept/reject gate still uses the
   // full (sigma_diag_squared + plane_var_term) combined variance.
+  // is_candidate (default nullptr): set true as soon as this point clears
+  // the purely-geometric checks (finite r, within max_radius*radius_ of
+  // this plane's center) -- i.e. "this is a real correspondence, whatever
+  // the chi2 test below decides" -- regardless of gate()'s own return
+  // value (which still means the full accept/reject decision, unchanged).
+  // T0-D's corr.csv wants exactly this population (pre-outlier-gate), see
+  // computeResidual().
   bool gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
             double& r, double& sigma_diag_squared, double& plane_var_term,
-            Eigen::Matrix<double, 1, 3>& J_nq) const;
+            Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate = nullptr) const;
 
   VoxelOptsPtr opts_;
 
@@ -141,6 +161,14 @@ private:
 
   int points_size_ = 0;
   bool is_plane_ = false;
+
+  // Occupied-bin count (J) from this plane's last update() call that used
+  // weights (0 for an unweighted/unbinned fit, or for a refitDebiased()
+  // fit -- debiased mode has no binning concept) -- stored so
+  // computeResidual() can log it per-correspondence without recomputing
+  // (see VoxelOpts::log_consistency_covariates_en). Mirrors
+  // debugLogPlaneFitStats()'s own `j` local exactly, just persisted.
+  int last_fit_j_ = 0;
 };
 
 }  // namespace livo_recon

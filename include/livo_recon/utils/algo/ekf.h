@@ -110,6 +110,56 @@ struct EkfUpdate
         state->covMut() = P_new;
     }
 
+    // T0-E (2026-08-31): the quadratic+log-determinant terms of this
+    // frame's batch-update NLL, i.e. everything EXCEPT the purely
+    // residual-level pieces (sum_i log(sigma_i^2), sum_i r_i^2/sigma_i^2)
+    // the caller already has from iterating residuals_ for reduced_chi2 --
+    // see LioProc::estimateStateCorrection()'s log_nll_en block for how
+    // the two halves combine into the full per-frame NLL.
+    //
+    // Derivation: for a linear-Gaussian batch update with prior x~N(x0,P0)
+    // and independent per-residual noise r_i~N(0,sigma_i^2), the marginal
+    // (prior-predictive) NLL of the batch is NLL = 1/2*[log det(S_full) +
+    // r^T S_full^-1 r] where S_full = H_full P0 H_full^T + R_full
+    // (R_full = diag(sigma_i^2)) -- an N_CORR x N_CORR matrix, infeasible
+    // to form directly. Two standard identities avoid ever forming it:
+    //   det(S_full) = det(R_full) * det(P0) * det(A),  A = P0^-1 + HtH
+    //   r^T S_full^-1 r = r^T R_full^-1 r  -  Htz^T A^-1 Htz
+    // (HtH = H_full^T R_full^-1 H_full, Htz = H_full^T R_full^-1 r -- both
+    // exactly this class's own HtH/Htz accumulators, and A is exactly
+    // applyMeanUpdate()'s own A). So NLL = 1/2*[ sum_i log(sigma_i^2) +
+    // sum_i r_i^2/sigma_i^2 + log det(P0) + log det(A) - Htz^T A^-1 Htz ]
+    // -- this function returns log det(P0) + log det(A) - Htz^T A^-1 Htz;
+    // the caller adds the two residual-level sums and halves the total.
+    //
+    // Computed from a FRESH LDLT of A/prior_cov, independent of
+    // applyMeanUpdate()'s own (called separately, doesn't require this
+    // to run before/after it, doesn't touch last_H_full_/last_K1_/
+    // state_ at all -- purely read-only over HtH/Htz/prior_cov). "Frozen
+    // Jacobian" scope note: this is the NLL of the CURRENT frame's prior
+    // (state_->cov() before this frame's own correction) against its
+    // OWN residuals -- exactly the T0-D-style "first-iteration,
+    // un-relinearized" quantity, not a converged-update NLL.
+    double nllQuadraticAndLogdet(const Eigen::MatrixXd& prior_cov) const
+    {
+      const int dim = prior_cov.rows();
+      const int n = static_cast<int>(HtH.rows());
+      Eigen::MatrixXd H_full = Eigen::MatrixXd::Zero(dim, dim);
+      H_full.block(StateGroup::idxR(), StateGroup::idxR(), n, n) = HtH;
+      const Eigen::MatrixXd A = H_full + prior_cov.inverse();
+
+      Eigen::LDLT<Eigen::MatrixXd> ldlt_A(A);
+      Eigen::VectorXd Htz_full = Eigen::VectorXd::Zero(dim);
+      Htz_full.segment(StateGroup::idxR(), n) = Htz;
+      const double quad = Htz_full.dot(ldlt_A.solve(Htz_full));
+      const double logdet_A = ldlt_A.vectorD().array().log().sum();
+
+      Eigen::LDLT<Eigen::MatrixXd> ldlt_prior(prior_cov);
+      const double logdet_prior = ldlt_prior.vectorD().array().log().sum();
+
+      return logdet_prior + logdet_A - quad;
+    }
+
 private:
     Eigen::LDLT<Eigen::MatrixXd> ldlt_;
     Eigen::MatrixXd last_H_full_;

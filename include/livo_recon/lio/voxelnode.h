@@ -59,7 +59,10 @@ public:
 
   void insertPoints(const std::vector<PointXYZCov>& points_world,
                     std::vector<PlaneUpdate>& updates);
-  bool findPlaneResidual(const WorldPointCov& pt, Residual& res) const;
+  // scan_id: threaded straight through to VoxelPlane::computeResidual()'s
+  // own scan_id param (see its doc comment) -- only VoxelMap::
+  // findPlaneResidual() ever supplies one (its own frame_idx_ member).
+  bool findPlaneResidual(const WorldPointCov& pt, Residual& res, int scan_id = -1) const;
 
   int32_t nodeId() const { return node_id_; }
 
@@ -86,7 +89,11 @@ private:
   // when refitting and (rarely) when subdividing a non-planar always_update
   // node, so children/VoxelPlane::update() see bins_'s current contents
   // either way. See PointBin's docs for the weight choice.
-  void buildBinReps(std::vector<PointXYZCov>& reps, std::vector<double>& weights) const;
+  // fit_weights: opts_->bin_weight_mode_fit. var_weights: opts_->
+  // bin_weight_mode_var (see T3-0c -- separate weightings for the plane
+  // fit vs. its uncertainty scaling).
+  void buildBinReps(std::vector<PointXYZCov>& reps, std::vector<double>& fit_weights,
+                     std::vector<double>& var_weights) const;
 
   VoxelOptsPtr  opts_;
   VoxelStatsPtr stats_;
@@ -112,15 +119,23 @@ private:
   robin_hood::unordered_flat_map<VoxelKey, PointBin, VoxelKeyHash> bins_;
 
   int total_count_ = 0;
-  bool useBins() const { return opts_->convergence_mode == "always_update"; }
+
+  // Was `convergence_mode == "always_update"` until 2026-08-30 (T0-B-4):
+  // that conflated binning with never-locking, so every experiment
+  // comparing a binned vs. "unbinned" arm via convergence_mode also
+  // changed whether the voxel could converge and freeze -- a confound
+  // T0-B-2/T0-B-3/T3-0's "unbounded, no binning" arm (convergence_mode:
+  // "normal", max_points: 100000) never separated from binning itself.
+  // Decoupled onto its own opts_->use_bins flag so binning and
+  // convergence-locking can be varied independently.
+  bool useBins() const { return opts_->use_bins; }
 
   // This node's own bin size for the PointBin accumulator, in world
-  // units -- a fixed fraction (kDensityWeightLeafFraction) of this node's
-  // OWN voxel extent (opts_->voxel_size / 2^layer_), computed once at
+  // units -- a fraction (opts_->bin_size_fraction) of this node's OWN
+  // voxel extent (opts_->voxel_size / 2^layer_), computed once at
   // construction so subdivided (smaller, deeper) nodes get proportionally
   // finer bins instead of a single fixed-meters size that would be
   // misscaled for most layers.
-  static constexpr double kDensityWeightLeafFraction = 0.2;
   const double density_weight_leaf_;
 
   // Frame-diversity tracking (see setCurrentFrame()'s docs):

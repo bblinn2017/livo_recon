@@ -2,6 +2,7 @@
 #include "livo_recon/utils/log/debug_log_dir.h"
 #include <fstream>
 #include <sstream>
+#include <mutex>
 
 namespace livo_recon
 {
@@ -14,6 +15,71 @@ void debugLogNoiseFloor(const std::string& msg)
   std::ofstream ofs(debugLogPath("noise_floor.txt"), first_call ? std::ios::trunc : std::ios::app);
   first_call = false;
   ofs << msg << "\n";
+}
+
+// T3-0d: computeResidual() runs inside LioProc::buildResiduals()'s OMP
+// parallel-for loop, so this needs its own lock -- debugLogNoiseFloor()
+// above is only ever called from single-threaded contexts and has no such
+// guard. Off by default (log_variance_shares_en), so the lock is never
+// taken in a normal run.
+void debugLogVarianceShare(double sigma_diag_squared, double plane_var_term)
+{
+  static bool first_call = true;
+  static std::mutex mtx;
+  const double total = sigma_diag_squared + plane_var_term;
+  const double share = total > 0.0 ? plane_var_term / total : 0.0;
+  std::lock_guard<std::mutex> lock(mtx);  // guards first_call too -- see comment above
+  std::ofstream ofs(debugLogPath("variance_shares.txt"), first_call ? std::ios::trunc : std::ios::app);
+  first_call = false;
+  ofs << sigma_diag_squared << " " << plane_var_term << " " << share << "\n";
+}
+
+// T3-0d: N/J/N_eff/trace(plane_var_) per VoxelPlane::update() call that
+// commits a plane -- lets a bin_size_fraction or bin_weight_mode sweep be
+// read against how much the effective sample size actually moved, rather
+// than inferred from ATE alone. May be called concurrently across
+// different voxels during map insertion, hence the same mutex pattern as
+// debugLogVarianceShare() above.
+void debugLogPlaneFitStats(int n, int j, double n_eff, double trace_plane_var)
+{
+  static bool first_call = true;
+  static std::mutex mtx;
+  std::lock_guard<std::mutex> lock(mtx);
+  std::ofstream ofs(debugLogPath("plane_fit_stats.txt"), first_call ? std::ios::trunc : std::ios::app);
+  first_call = false;
+  ofs << n << " " << j << " " << n_eff << " " << trace_plane_var << "\n";
+}
+
+// T0-D (2026-08-31): corr.csv for scripts/analysis/consistency.py --
+// header written once on first call (trunc), core-vs-full row shape
+// decided by whether the covariate fields are finite/non-empty (see
+// computeResidual()'s call site: covariates are all left at their default
+// -1.0/-1 sentinel when log_consistency_covariates_en is off, and this
+// function omits those columns from the header AND every row in that
+// case, since consistency.py keys off column presence, not sentinel
+// values). Same per-call mutex pattern as the two functions above --
+// computeResidual() runs inside LioProc::buildResiduals()'s OMP
+// parallel-for.
+void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, double S,
+                              double s_sensor, double s_plane_tilt, double s_plane_d,
+                              double s_pose, int n, int j, double aniso, int gated,
+                              double s_prior_pose)
+{
+  static bool first_call = true;
+  static std::mutex mtx;
+  std::lock_guard<std::mutex> lock(mtx);
+  std::ofstream ofs(debugLogPath("corr.csv"), first_call ? std::ios::trunc : std::ios::app);
+  if (first_call) {
+    ofs << "scan_id,nu,S,gated";
+    if (with_covariates) ofs << ",S_sensor,S_plane_tilt,S_plane_d,S_pose,S_prior_pose,N,J,aniso";
+    ofs << "\n";
+  }
+  first_call = false;
+  ofs << scan_id << "," << nu << "," << S << "," << gated;
+  if (with_covariates)
+    ofs << "," << s_sensor << "," << s_plane_tilt << "," << s_plane_d << "," << s_pose
+        << "," << s_prior_pose << "," << n << "," << j << "," << aniso;
+  ofs << "\n";
 }
 }  // namespace
 
@@ -30,7 +96,7 @@ VoxelPlane::VoxelPlane(VoxelOptsPtr opts)
 
 bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
                       double& r, double& sigma_diag_squared, double& plane_var_term,
-                      Eigen::Matrix<double, 1, 3>& J_nq) const
+                      Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate) const
 {
   const V3D& n = plane_.normal;
   r = n.dot(p) + plane_.d;
@@ -39,6 +105,8 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
   const double dis_to_center = (p - plane_.center).squaredNorm();
   const double range_dis = std::sqrt(std::max(0.0, dis_to_center - r * r));
   if (range_dis > opts_->max_radius * radius_) return false;
+
+  if (is_candidate) *is_candidate = true;
 
   const V3D d_center = p - plane_.center;
   J_nq(0, 0) = d_center.dot(y_normal_);
@@ -61,19 +129,65 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
   return r * r <= opts_->sigma_num_squared * sigma_gate_squared;
 }
 
-bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res) const
+bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int scan_id) const
 {
   if (!is_plane_) return false;
 
   double r, sigma_diag_squared, plane_var_term;
   Eigen::Matrix<double, 1, 3> J_nq;
-  if (!gate(pt.point, pt.sensor_cov, pt.pose_cov, r, sigma_diag_squared, plane_var_term, J_nq)) return false;
+  bool is_candidate = false;
+  const bool accepted = gate(pt.point, pt.sensor_cov, pt.pose_cov, r, sigma_diag_squared,
+                              plane_var_term, J_nq, &is_candidate);
+
+  if (opts_->log_consistency_corr_en && is_candidate && scan_id >= 0) {
+    const bool cov = opts_->log_consistency_covariates_en;
+    double s_sensor = -1.0, s_tilt = -1.0, s_d = -1.0, s_pose = -1.0, aniso = -1.0;
+    int n = -1, j = -1;
+    if (cov) {
+      const V3D& normal = plane_.normal;
+      s_sensor = normal.dot(pt.sensor_cov * normal);
+      s_pose   = normal.dot(pt.pose_cov * normal);
+      // Exact split of plane_var_term = J_nq*plane_var_*J_nq^T: tilt
+      // covers the [theta1,theta2] 2x2 sub-block, d covers plane_var_
+      // (2,2) alone, and the tilt/d cross terms are divided evenly
+      // between the two so s_tilt+s_d == plane_var_term exactly.
+      const double tilt_only = J_nq(0) * J_nq(0) * plane_var_(0, 0)
+                              + J_nq(1) * J_nq(1) * plane_var_(1, 1)
+                              + 2.0 * J_nq(0) * J_nq(1) * plane_var_(0, 1);
+      const double d_only = J_nq(2) * J_nq(2) * plane_var_(2, 2);
+      const double cross = 2.0 * J_nq(2) * (J_nq(0) * plane_var_(0, 2) + J_nq(1) * plane_var_(1, 2));
+      s_tilt = tilt_only + 0.5 * cross;
+      s_d    = d_only + 0.5 * cross;
+      n = points_size_;
+      j = last_fit_j_;
+      aniso = eigen_values_(2) / std::max(eigen_values_(1), 1e-12);
+    }
+    // H P- H^T: the frame's PRIOR pose uncertainty projected through this
+    // correspondence's own Jacobian -- the textbook S = H P- H^T + R term
+    // this codebase's batch-WLS IEKF has no other use for (see
+    // WorldPointCov::prior_cov_rp's doc comment), computed here purely so
+    // corr.csv's S column matches the register's definition, not folded
+    // into res.sigma_squared/the real gate() accept-reject decision
+    // (unchanged, still measurement-noise-only, matching this codebase's
+    // actual production weighting). point_cross_normal mirrors LioProc::
+    // buildResiduals()'s own res.point_cross_normal formula exactly.
+    const V3D point_cross_normal = pt.body_point.cross(pt.rot_transpose * plane_.normal);
+    Eigen::Matrix<double, 1, 6> H_i;
+    H_i << point_cross_normal.transpose(), plane_.normal.transpose();
+    const double s_prior_pose = (H_i * pt.prior_cov_rp * H_i.transpose()).value();
+    const double S = 1e-3 + sigma_diag_squared + plane_var_term + s_prior_pose;
+    debugLogConsistencyCorr(cov, scan_id, r, S, s_sensor, s_tilt, s_d, s_pose, n, j, aniso,
+                             accepted ? 0 : 1, s_prior_pose);
+  }
+
+  if (!accepted) return false;
 
   res.r              = r;
   res.normal         = plane_.normal;
   res.sigma_squared  = 1e-3 + sigma_diag_squared;
   res.plane_id       = this;
   res.plane_var_term = plane_var_term;
+  if (opts_->log_variance_shares_en) debugLogVarianceShare(sigma_diag_squared, plane_var_term);
   return true;
 }
 
@@ -89,7 +203,8 @@ bool VoxelPlane::getVizInfo(PlaneVizInfo& info) const
 
 void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
                         const std::vector<double>* weights_in,
-                        const RunningMoments* running)
+                        const RunningMoments* running,
+                        const std::vector<double>* var_weights_in)
 {
   plane_var_.setZero();
   covariance_.setZero();
@@ -106,6 +221,19 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   const std::vector<double>* weights = weights_in;
   double weight_sum = N;
   const bool use_weights = (weights_in != nullptr);
+
+  // Independent weighting for the plane_var_ Jacobian loop below (see
+  // T3-0c) -- falls back to `weights`/`weight_sum` when not supplied, so
+  // a caller that only passes `weights` gets the pre-2026-08-30 behavior
+  // (fit and uncertainty share one weighting) unchanged. weight_sum is
+  // finalized by the fit block below, so var_weight_sum's fallback is
+  // resolved after it, not here.
+  const std::vector<double>* var_weights = var_weights_in ? var_weights_in : weights;
+  const bool use_var_weights = (var_weights != nullptr);
+  double var_weight_sum = 0.0;
+  if (var_weights_in) {
+    for (double w : *var_weights) var_weight_sum += w;
+  }
 
   if (running) {
     // O(1) mean/covariance from pre-accumulated running sums (see
@@ -128,6 +256,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
       covariance_ += (*weights)[i] * (d * d.transpose());
     }
     covariance_ /= weight_sum;
+    if (!var_weights_in) var_weight_sum = weight_sum;  // fallback resolved now that weight_sum is final
   } else {
     for (const auto& pt : points)
       plane_.center += pt.point;
@@ -224,8 +353,13 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
     // only correct in the unweighted path. Using inv_N unconditionally
     // here when weighting is on would over-count dense/high-weight
     // entries and under-count sparse/low-weight ones in this
-    // fit-uncertainty propagation.
-    const double w = use_weights ? ((*weights)[i] / weight_sum) : inv_N;
+    // fit-uncertainty propagation. `var_weights` (T3-0c) deliberately
+    // decouples this from the fit's own weights when the caller supplies
+    // it separately -- that makes this no longer the exact derivative of
+    // THIS fit, but an intentional independent uncertainty-scaling
+    // experiment (T3's actual proposal: reweight the uncertainty without
+    // touching the fitted normal/center/covariance at all).
+    const double w = use_var_weights ? ((*var_weights)[i] / var_weight_sum) : inv_N;
 
     // Minimal 3x3 Jmin, the direct equivalent of T * J_old (see
     // plane_var_'s docs in voxelplane.h) -- row0/row1 are
@@ -259,6 +393,18 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
     const M3D residual_cov = (opts_->plane_fit_pose_cov_mode == "sensor_only")
         ? pt.sensor_cov : M3D(pt.sensor_cov + pt.pos_cov);
     plane_var_.noalias() += Jmin * residual_cov * Jmin.transpose();
+  }
+
+  last_fit_j_ = use_weights ? N : 0;
+
+  if (opts_->log_variance_shares_en) {
+    double n_eff = N;
+    if (use_var_weights) {
+      double sum_sq = 0.0;
+      for (double w : *var_weights) sum_sq += w * w;
+      n_eff = sum_sq > 0.0 ? (var_weight_sum * var_weight_sum) / sum_sq : 0.0;
+    }
+    debugLogPlaneFitStats(points_size_, last_fit_j_, n_eff, plane_var_.trace());
   }
 }
 

@@ -31,6 +31,20 @@ public:
   // hasConvergedNeighbor()'s broader, whole-pipeline counterpart).
   bool findPlaneResidual(const WorldPointCov& pt, Residual &res, bool* tier0_had_plane = nullptr) const override;
 
+  // T0-D (2026-08-31): gates whether findPlaneResidual() passes a real
+  // scan_id (enabling corr.csv logging, see VoxelOpts::
+  // log_consistency_corr_en) or -1 (no-op) down to VoxelPlane::
+  // computeResidual() -- NOT part of the MapBackend virtual interface,
+  // since only LioProc's own IEKF loop knows which call is the frame's
+  // FIRST buildResiduals() (the pre-update, un-relinearized innovation
+  // the register's nu/S spec wants) versus a later re-linearizing
+  // iteration or a throwaway runDryRunShadowPass() call, neither of which
+  // should be logged. Defaults true (log allowed) so any call site that
+  // doesn't explicitly manage this (there are none as of this writing,
+  // but a future one would silently get the safe default rather than
+  // silently losing all logging) still works.
+  void setAllowConsistencyLog(bool v) { allow_consistency_log_ = v; }
+
   // Diagnostic-only (see investigation into livo_recon's fast-motion
   // tier0/1 hit-rate drop vs FAST-LIVO2): true iff any voxel within
   // neighborhood_size of p_world's key has a converged plane -- called only
@@ -60,6 +74,9 @@ public:
                                                   const ros::Time& stamp) override;
 
 private:
+  // See setAllowConsistencyLog()'s doc comment above.
+  bool allow_consistency_log_ = true;
+
   VoxelOptsPtr  opts_;
   VoxelStatsPtr stats_;
   StateGroupPtr state_;
@@ -99,10 +116,15 @@ private:
   // node_id → point index in dot_list_
   robin_hood::unordered_flat_map<int32_t, uint32_t> dot_pt_idx_;
 
+  // scan_id: passed straight through from findPlaneResidual() (which
+  // supplies its own frame_idx_ member) down to VoxelNode::
+  // findPlaneResidual()/VoxelPlane::computeResidual() -- see the latter's
+  // doc comment. Kept as an explicit param rather than reading frame_idx_
+  // directly so these two stay pure/testable in isolation.
   bool findPlaneResidualDirectional(const WorldPointCov& pt, const VoxelKey& base, Residual &res,
-                                    VoxelKey* tried_key = nullptr) const;
+                                    VoxelKey* tried_key = nullptr, int scan_id = -1) const;
   bool findPlaneResidualNeighborhood(const WorldPointCov& pt, const VoxelKey& base, Residual &res,
-                                     const VoxelKey* exclude = nullptr) const;
+                                     const VoxelKey* exclude = nullptr, int scan_id = -1) const;
 
   void eraseDisc(int32_t id);
   void eraseDot(int32_t id);

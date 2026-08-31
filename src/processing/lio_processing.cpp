@@ -57,6 +57,24 @@ void debugLogLioDryRun(const std::string& msg)
   ofs << msg << "\n";
 }
 
+// T0-D (2026-08-31): scan.csv for scripts/analysis/consistency.py -- see
+// LioProcOptions::log_consistency_scan_en's doc comment for the column
+// list. Called once per frame from processLIO(), single-threaded (no OMP
+// context here, unlike voxelplane.cpp's per-correspondence logs), so no
+// mutex needed -- same truncate-on-first-call/append convention as every
+// other debug log in this file.
+void debugLogConsistencyScan(int scan_id, double t, double dt, double trP_pos,
+                              double trP_vel, double trP_att, double omega_norm, double acc_norm)
+{
+  static bool first_call = true;
+  std::ofstream ofs(debugLogPath("scan.csv"), first_call ? std::ios::trunc : std::ios::app);
+  if (first_call)
+    ofs << "scan_id,t,dt,trP_pos,trP_vel,trP_att,omega_norm,acc_norm\n";
+  first_call = false;
+  ofs << scan_id << "," << t << "," << dt << "," << trP_pos << "," << trP_vel << ","
+      << trP_att << "," << omega_norm << "," << acc_norm << "\n";
+}
+
 // 2026-08-24: REMOVED debugLogSplineIter()/debugLogSplineFit()/
 // debugLogSplineFitPoints()/debugLogSplineKinFit() -- temporary debug
 // logging for the removed iterative-deskew Hermite-spline mechanism. See
@@ -75,6 +93,7 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "lio/ekf/min_norm_dt",     opts_.min_norm_dt,     0.0);
   paramWarn<double>(pnh, "lio/ekf/min_diff_error",  opts_.min_diff_error,  -1.0);
   paramWarn<bool>(pnh, "lio/log_debug_en",          opts_.log_debug_en,   false);
+  paramWarn<bool>(pnh, "lio/log_consistency_scan_en", opts_.log_consistency_scan_en, false);
   paramWarn<int>(pnh, "lio/dry_run_point_filter_num", opts_.dry_run_point_filter_num, 0);
   paramWarn<double>(pnh, "lio/ekf/density_sigma_ref", opts_.density_sigma_ref, 0.0);
   paramWarn<std::string>(pnh, "lio/ekf/density_sigma_mode", opts_.density_sigma_mode, "linear");
@@ -97,6 +116,7 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
 
   std::ostringstream oss;
   oss << "[params/lio]"
+      << "\n  log_consistency_scan_en:   " << (opts_.log_consistency_scan_en ? "true" : "false")
       << "\n  ekf/max_iterations:        " << opts_.max_iterations
       << "\n  ekf/min_norm_dtheta:       " << opts_.min_norm_dtheta
       << "\n  ekf/min_norm_dt:           " << opts_.min_norm_dt
@@ -115,7 +135,13 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
 // Residual and EKF code
 void LioProc::buildResiduals(
   const std::vector<PointXYZCov>& pts,
-  std::vector<Residual>& residuals) const {
+  std::vector<Residual>& residuals,
+  bool allow_consistency_log) const {
+  // Single-threaded, before the OMP region starts below -- see
+  // VoxelMap::setAllowConsistencyLog()'s doc comment.
+  if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get()))
+    vm->setAllowConsistencyLog(allow_consistency_log);
+
   const int n = (int)pts.size();
   const int threads = cappedOmpThreads();
 
@@ -124,12 +150,25 @@ void LioProc::buildResiduals(
   build_thread_miss_.assign(threads, {0, 0});
   build_thread_tier0_miss_.assign(threads, {0, 0});
 
+  // Frame-constant context for T0-D's corr.csv S column (H P- H^T + R) --
+  // see WorldPointCov::body_point/rot_transpose/prior_cov_rp's doc
+  // comment. Computed once here (not per point) and copied onto every
+  // pt_world below; cheap regardless of whether logging is actually on
+  // this call, so no separate gate is needed.
+  const M3D rot_transpose = state_->rot().transpose();
+  Eigen::Matrix<double, 6, 6> prior_cov_rp = Eigen::Matrix<double, 6, 6>::Zero();
+  if (prior_cov_.rows() >= StateGroup::idxR() + 6 && prior_cov_.cols() >= StateGroup::idxR() + 6)
+    prior_cov_rp = prior_cov_.block<6, 6>(StateGroup::idxR(), StateGroup::idxR());
+
   #pragma omp parallel for schedule(static) num_threads(threads)
   for (int i = 0; i < n; ++i)
   {
     const PointXYZCov sensor_world = state_->toWorld(pts[i]);
-    const WorldPointCov pt_world{
+    WorldPointCov pt_world{
         sensor_world.point, sensor_world.sensor_cov, state_->poseCovAt(pts[i].point)};
+    pt_world.body_point = pts[i].point;
+    pt_world.rot_transpose = rot_transpose;
+    pt_world.prior_cov_rp = prior_cov_rp;
     Residual res{};
     bool tier0_had_plane = false;
     bool tier0_missed = true;
@@ -193,11 +232,12 @@ void LioProc::solveSystem(const std::vector<Residual>& residuals) const {
 double LioProc::estimateStateCorrection(
   const std::vector<PointXYZCov>& pts,
   V3D &dtheta,
-  V3D &dt) {
+  V3D &dt,
+  bool allow_consistency_log) {
 
   {
     TimedScope ts(profiler_, "lio/ekf/build_residuals");
-    buildResiduals(pts, residuals_);
+    buildResiduals(pts, residuals_, allow_consistency_log);
   }
   if (residuals_.empty())
     return 0.0;
@@ -332,7 +372,10 @@ void LioProc::runDryRunShadowPass(const MeasureGroup& mg)
   bool any_solved = false;
 
   for (; iter < opts_.max_iterations; iter++) {
-    double error = estimateStateCorrection(mg.dry_run_points, dtheta, dt);
+    // allow_consistency_log=false unconditionally -- this whole pass is
+    // discarded (see this method's own doc comment), so none of its
+    // residuals, first-iteration or not, belong in corr.csv.
+    double error = estimateStateCorrection(mg.dry_run_points, dtheta, dt, /*allow_consistency_log=*/false);
     if (!residuals_.empty()) any_solved = true;
     total_dtheta += dtheta;
     total_dt     += dt;
@@ -502,7 +545,11 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     bool any_solved = false;
 
     for (; iter < opts_.max_iterations; iter++) {
-      double error = estimateStateCorrection(mg.points, dtheta, dt);
+      // T0-D wants the first-iteration (pre-update, un-relinearized)
+      // innovation only -- later iterations relinearize at an
+      // already-partially-corrected state, which is not the quantity NIS
+      // is defined over.
+      double error = estimateStateCorrection(mg.points, dtheta, dt, /*allow_consistency_log=*/iter == 0);
       if (!residuals_.empty()) any_solved = true;
       total_dtheta += dtheta;
       total_dt     += dt;
@@ -541,6 +588,38 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     // exactly as it was going into this frame.
     if (any_solved)
       ekf_.applyCovarianceUpdate(state_, prior_cov_);
+
+    if (opts_.log_consistency_scan_en)
+    {
+      const double t_abs = mg.image.t + data_queues_->start_time;
+      const double dt = (last_scan_t_abs_ < 0.0) ? 0.0 : (t_abs - last_scan_t_abs_);
+      last_scan_t_abs_ = t_abs;
+
+      const auto& P = state_->cov();
+      const double trP_pos = P.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()).trace();
+      const double trP_vel = P.block<3, 3>(StateGroup::idxV(), StateGroup::idxV()).trace();
+      const double trP_att = P.block<3, 3>(StateGroup::idxR(), StateGroup::idxR()).trace();
+
+      // mg.imu_samples is already cleared by ImuProc::propagate() (see its
+      // doc comment there) by the time processLIO() runs -- mg.poses is
+      // the per-IMU-step record propagate() leaves behind instead. `gyr`
+      // is the bias-corrected body-frame angular velocity used for each
+      // step's rotation propagation; acc_head/acc_tail are WORLD-frame
+      // true linear acceleration (gravity already added back, see Pose6D's
+      // doc comment) -- their average norm is near 0 for a near-stationary/
+      // constant-velocity segment and grows with genuine dynamic motion,
+      // which is the excitation signal T0-D's dynamics-slope panel wants
+      // (a cleaner proxy than raw specific-force magnitude, which would be
+      // dominated by the ~9.8 m/s^2 gravity constant).
+      double sum_omega = 0.0, sum_acc = 0.0;
+      for (const auto& p : mg.poses) {
+        sum_omega += p.gyr.norm();
+        sum_acc   += (0.5 * (p.acc_head + p.acc_tail)).norm();
+      }
+      const double n_poses = std::max<size_t>(1, mg.poses.size());
+      debugLogConsistencyScan(voxel_map_->frame_idx_, t_abs, dt, trP_pos, trP_vel, trP_att,
+                               sum_omega / n_poses, sum_acc / n_poses);
+    }
 
     std::ostringstream oss;
     oss << "[lio/ekf] iters=" << iter + 1 << "  stop=" << stop

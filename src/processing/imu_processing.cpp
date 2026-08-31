@@ -42,11 +42,13 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // LioProcOptions::deskew/ds_leaf_size/ds_mode's doc comments. Still the
   // SAME rosparam keys, just read by a different class now.
   paramWarn<bool>(pnh, "imu/second_order",   opts_.second_order, true);
+  paramWarn<double>(pnh, "imu/q_alpha", opts_.q_alpha, 1.0);
   paramWarn<bool>(pnh, "imu/log_debug_en", opts_.log_debug_en, false);
 
   std::ostringstream oss;
   oss << "[params/imu]"
-      << "\n  second_order:         " << (opts_.second_order ? "true" : "false");
+      << "\n  second_order:         " << (opts_.second_order ? "true" : "false")
+      << "\n  q_alpha:              " << opts_.q_alpha;
   return oss.str();
 }
 
@@ -161,7 +163,9 @@ void ImuProc::propagate(MeasureGroup& mg)
       cov_w.block<3,3>(StateGroup::idxV(), StateGroup::idxP()) = 0.5  * dt  * dt2 * acc_noise_world;
     }
 
-    state_->covMut() = F_x * state_->cov() * F_x.transpose() + cov_w;
+    // T0-E: q_alpha scales the WHOLE process-noise contribution uniformly
+    // -- 1.0 (default) is bit-identical to the pre-T0-E formula.
+    state_->covMut() = F_x * state_->cov() * F_x.transpose() + opts_.q_alpha * cov_w;
 
     // ---- state propagation ----
     // World-frame acc is the average of acc transformed by head and tail rotations
