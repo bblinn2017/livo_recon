@@ -79,14 +79,14 @@ void debugLogConsistencyScan(int scan_id, double t, double dt, double trP_pos,
 // comment for the column/formula. Called once per frame (single-
 // threaded, no OMP context here), same truncate-on-first-call/append
 // convention as every other debug log in this file.
-void debugLogNll(double t_abs, double nll)
+void debugLogNll(double t_abs, double nll, int n_residuals)
 {
   static bool first_call = true;
   std::ofstream ofs(debugLogPath("nll.txt"), first_call ? std::ios::trunc : std::ios::app);
   if (first_call)
-    ofs << "t,nll\n";
+    ofs << "t,nll,n_residuals\n";
   first_call = false;
-  ofs << t_abs << "," << nll << "\n";
+  ofs << t_abs << "," << nll << "," << n_residuals << "\n";
 }
 
 // 2026-08-24: REMOVED debugLogSplineIter()/debugLogSplineFit()/
@@ -574,15 +574,40 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       // (see estimateStateCorrection()'s allow_consistency_log doc
       // comment) -- this frame's prior_cov_/ekf_.HtH/ekf_.Htz are exactly
       // what this iteration's solveSystem() just accumulated.
-      if (iter == 0 && opts_.log_nll_en && !residuals_.empty())
+      // 2026-08-31 code-audit fixes (see LioProcOptions::log_nll_en's doc
+      // comment): (1) log EVERY frame, including zero-residual ones
+      // (n_residuals=0, nll=0.5*(logdet(P0)+logdet(A)) is still
+      // well-defined there since HtH/Htz vanish) -- line count is now
+      // frame-count-invariant, not correspondence-count-invariant, so
+      // runs at different alpha stay row-comparable by index/timestamp.
+      // (2) n_residuals logged explicitly so callers can normalize
+      // per-correspondence (nll/n_residuals, or sum(nll)/sum(n_residuals)
+      // across a run) instead of summing a quantity whose per-frame N
+      // varies with both frame content AND alpha. (3) the previously-
+      // dropped n*log(2*pi) Gaussian normalization term is now included
+      // -- omitting it is harmless for a FIXED N but not when N varies
+      // between the runs being compared, which is exactly this
+      // objective's use case.
+      if (iter == 0 && opts_.log_nll_en)
       {
-        double sum_chi2 = 0.0, sum_log_sigma2 = 0.0;
-        for (const auto& r : residuals_) {
-          sum_chi2 += (r.r * r.r) / r.sigma_squared;
-          sum_log_sigma2 += std::log(r.sigma_squared);
+        const int n_res = static_cast<int>(residuals_.size());
+        double nll = 0.0;
+        if (n_res > 0) {
+          // Only defined when solveSystem() actually ran this iteration
+          // (estimateStateCorrection() returns early on an empty
+          // residuals_ WITHOUT calling solveSystem(), which is the only
+          // thing that (re-)accumulates ekf_.HtH/Htz -- calling
+          // nllQuadraticAndLogdet() in the n_res==0 branch would silently
+          // read a STALE HtH/Htz left over from a previous frame).
+          double sum_chi2 = 0.0, sum_log_sigma2 = 0.0;
+          for (const auto& r : residuals_) {
+            sum_chi2 += (r.r * r.r) / r.sigma_squared;
+            sum_log_sigma2 += std::log(r.sigma_squared);
+          }
+          nll = 0.5 * (n_res * std::log(2.0 * M_PI) + sum_log_sigma2 + sum_chi2
+                       + ekf_.nllQuadraticAndLogdet(prior_cov_));
         }
-        const double nll = 0.5 * (sum_log_sigma2 + sum_chi2 + ekf_.nllQuadraticAndLogdet(prior_cov_));
-        debugLogNll(mg.image.t + data_queues_->start_time, nll);
+        debugLogNll(mg.image.t + data_queues_->start_time, nll, n_res);
       }
 
       const double prev = prev_error;

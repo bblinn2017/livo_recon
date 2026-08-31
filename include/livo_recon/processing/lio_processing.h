@@ -191,16 +191,31 @@ struct LioProcOptions
   // the column is absent. Off by default.
   bool log_consistency_scan_en = false;
 
-  // T0-E (2026-08-31): nll.txt -- one line per frame (first IEKF
-  // iteration only, same "un-relinearized prior" scope as T0-D's
-  // corr.csv/scan.csv): t_abs, nll = 0.5*(sum_log_sigma2 + sum_chi2 +
-  // EkfUpdate::nllQuadraticAndLogdet(prior_cov_)) -- see that function's
-  // doc comment for the full derivation. An external driver
-  // (scripts/analysis/qsens.py's eventual real-EKF port) re-runs the
-  // same sequence at several ImuProcOptions::q_alpha values and sums
-  // this column per run to find the alpha that minimizes total NLL
-  // (maximizes filter consistency), instead of differentiating through
-  // the update analytically. Off by default.
+  // T0-E (2026-08-31): nll.txt -- one line per frame, EVERY frame
+  // (including n_residuals=0 ones -- 2026-08-31 code-audit fix: silently
+  // skipping empty frames made the line count alpha-dependent, since
+  // alpha changes the trajectory and hence which frames match), first
+  // IEKF iteration only, same "un-relinearized prior" scope as T0-D's
+  // corr.csv/scan.csv. Columns: t_abs, nll = 0.5*(n_residuals*log(2*pi) +
+  // sum_log_sigma2 + sum_chi2 + EkfUpdate::nllQuadraticAndLogdet(
+  // prior_cov_)) [0 when n_residuals==0], n_residuals. The log(2*pi)
+  // term and the n_residuals column are BOTH 2026-08-31 code-audit fixes
+  // (the term was previously dropped, safe only when every compared run
+  // has the same N per frame, which is false across a q_alpha sweep since
+  // alpha changes N) -- an external driver (scripts/analysis/qsens.py's
+  // eventual real-EKF port) re-runs the same sequence at several
+  // ImuProcOptions::q_alpha values and compares sum(nll)/sum(n_residuals)
+  // (per-correspondence-normalized, NOT a raw sum(nll)) to find the alpha
+  // that minimizes NLL per correspondence, instead of differentiating
+  // through the update analytically.
+  //
+  // Known gaps, not yet fixed: dead in CombinedProc (which calls
+  // processLIO() only as its own fallback, so a q_alpha sweep on a
+  // combined LIO+VIO config silently yields a near-empty nll.txt); the
+  // CUDA residual-accumulation path (accumulateLioResidualsCuda) returns
+  // float-precision HtH/Htz, so nll.txt is not bit-reproducible between
+  // CPU and GPU builds -- hold the build fixed across any alpha sweep
+  // until this is addressed.
   bool log_nll_en = false;
 };
 

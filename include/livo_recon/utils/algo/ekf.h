@@ -1,5 +1,6 @@
 #pragma once
 #include "livo_recon/utils/state/state.h"
+#include <limits>
 
 namespace livo_recon {
 
@@ -112,10 +113,17 @@ struct EkfUpdate
 
     // T0-E (2026-08-31): the quadratic+log-determinant terms of this
     // frame's batch-update NLL, i.e. everything EXCEPT the purely
-    // residual-level pieces (sum_i log(sigma_i^2), sum_i r_i^2/sigma_i^2)
-    // the caller already has from iterating residuals_ for reduced_chi2 --
-    // see LioProc::estimateStateCorrection()'s log_nll_en block for how
-    // the two halves combine into the full per-frame NLL.
+    // residual-level pieces (sum_i log(sigma_i^2), sum_i r_i^2/sigma_i^2,
+    // and n_residuals*log(2*pi) -- the Gaussian normalization term,
+    // 2026-08-31 code-audit fix: dropping it is harmless comparing runs
+    // with the same n_residuals per frame, but n_residuals varies both
+    // per-frame and with q_alpha, so it must be included when comparing
+    // totals ACROSS runs) the caller already has from iterating
+    // residuals_ -- see LioProc::estimateStateCorrection()'s log_nll_en
+    // block for how the pieces combine into the full per-frame NLL, and
+    // LioProcOptions::log_nll_en's doc comment for the frame-accounting
+    // fix (log every frame including n_residuals=0 ones, never silently
+    // skip) that makes runs at different q_alpha comparable at all.
     //
     // Derivation: for a linear-Gaussian batch update with prior x~N(x0,P0)
     // and independent per-residual noise r_i~N(0,sigma_i^2), the marginal
@@ -148,6 +156,11 @@ struct EkfUpdate
       H_full.block(StateGroup::idxR(), StateGroup::idxR(), n, n) = HtH;
       const Eigen::MatrixXd A = H_full + prior_cov.inverse();
 
+      // 2026-08-31 code-audit fix: a numerically non-PD prior/A (e.g. a
+      // pathological q_alpha sweep value) previously wrote a silent NaN
+      // into nll.txt instead of failing loudly -- NaN is easy to miss in
+      // a summed column and would masquerade as "this alpha is somehow
+      // infinitely good/bad" rather than "the covariance broke".
       Eigen::LDLT<Eigen::MatrixXd> ldlt_A(A);
       Eigen::VectorXd Htz_full = Eigen::VectorXd::Zero(dim);
       Htz_full.segment(StateGroup::idxR(), n) = Htz;
@@ -156,6 +169,10 @@ struct EkfUpdate
 
       Eigen::LDLT<Eigen::MatrixXd> ldlt_prior(prior_cov);
       const double logdet_prior = ldlt_prior.vectorD().array().log().sum();
+
+      if (ldlt_A.info() != Eigen::Success || ldlt_prior.info() != Eigen::Success ||
+          !(ldlt_A.isPositive() && ldlt_prior.isPositive()))
+        return std::numeric_limits<double>::quiet_NaN();
 
       return logdet_prior + logdet_A - quad;
     }
