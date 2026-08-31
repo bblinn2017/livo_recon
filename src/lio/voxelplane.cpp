@@ -63,7 +63,7 @@ void debugLogPlaneFitStats(int n, int j, double n_eff, double trace_plane_var)
 void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, double S,
                               double s_sensor, double s_plane_tilt, double s_plane_d,
                               double s_pose, int n, int j, double aniso, int gated,
-                              double s_prior_pose)
+                              double s_prior_pose, double lambda0)
 {
   static bool first_call = true;
   static std::mutex mtx;
@@ -71,14 +71,19 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
   std::ofstream ofs(debugLogPath("corr.csv"), first_call ? std::ios::trunc : std::ios::app);
   if (first_call) {
     ofs << "scan_id,nu,S,gated";
-    if (with_covariates) ofs << ",S_sensor,S_plane_tilt,S_plane_d,S_pose,S_prior_pose,N,J,aniso";
+    // T0-G (2026-08-31): lambda0 added -- eigen_values_(0), the plane fit's
+    // smallest eigenvalue (its own is_plane_ = eigen_values_(0) <
+    // plane_threshold test uses this directly). T8-0b/T8-d's outcome
+    // variable ("median lambda0"); previously computed but never logged
+    // anywhere.
+    if (with_covariates) ofs << ",S_sensor,S_plane_tilt,S_plane_d,S_pose,S_prior_pose,N,J,aniso,lambda0";
     ofs << "\n";
   }
   first_call = false;
   ofs << scan_id << "," << nu << "," << S << "," << gated;
   if (with_covariates)
     ofs << "," << s_sensor << "," << s_plane_tilt << "," << s_plane_d << "," << s_pose
-        << "," << s_prior_pose << "," << n << "," << j << "," << aniso;
+        << "," << s_prior_pose << "," << n << "," << j << "," << aniso << "," << lambda0;
   ofs << "\n";
 }
 }  // namespace
@@ -141,9 +146,10 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
 
   if (opts_->log_consistency_corr_en && is_candidate && scan_id >= 0) {
     const bool cov = opts_->log_consistency_covariates_en;
-    double s_sensor = -1.0, s_tilt = -1.0, s_d = -1.0, s_pose = -1.0, aniso = -1.0;
+    double s_sensor = -1.0, s_tilt = -1.0, s_d = -1.0, s_pose = -1.0, aniso = -1.0, lambda0 = -1.0;
     int n = -1, j = -1;
     if (cov) {
+      lambda0 = eigen_values_(0);
       const V3D& normal = plane_.normal;
       s_sensor = normal.dot(pt.sensor_cov * normal);
       s_pose   = normal.dot(pt.pose_cov * normal);
@@ -177,7 +183,7 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
     const double s_prior_pose = (H_i * pt.prior_cov_rp * H_i.transpose()).value();
     const double S = 1e-3 + sigma_diag_squared + plane_var_term + s_prior_pose;
     debugLogConsistencyCorr(cov, scan_id, r, S, s_sensor, s_tilt, s_d, s_pose, n, j, aniso,
-                             accepted ? 0 : 1, s_prior_pose);
+                             accepted ? 0 : 1, s_prior_pose, lambda0);
   }
 
   if (!accepted) return false;

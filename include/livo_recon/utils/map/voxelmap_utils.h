@@ -434,7 +434,9 @@ struct VoxelOpts
   // (this plane's total accumulated point count), J (occupied bin count if
   // this plane is bin-fit, else 0), aniso (eigen_values_(2)/
   // eigen_values_(1), in-plane coverage anisotropy -- T3's premise
-  // directly: consistency.py's panel 5 bins NIS by this). range/incidence
+  // directly: consistency.py's panel 5 bins NIS by this), lambda0
+  // (eigen_values_(0), T0-G 2026-08-31 -- the plane fit's own is_plane_
+  // threshold quantity; T8-0b's/T8-d's outcome variable). range/incidence
   // are NOT logged -- computing them needs the sensor's world position,
   // which isn't available at VoxelPlane::computeResidual()'s call depth
   // without threading it through the whole MapBackend virtual interface;
