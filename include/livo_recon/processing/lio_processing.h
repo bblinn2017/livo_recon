@@ -190,6 +190,18 @@ struct LioProcOptions
   // en's docs) -- consistency.py's Q-authority panel simply skips when
   // the column is absent. Off by default.
   bool log_consistency_scan_en = false;
+
+  // T0-E (2026-08-31): nll.txt -- one line per frame (first IEKF
+  // iteration only, same "un-relinearized prior" scope as T0-D's
+  // corr.csv/scan.csv): t_abs, nll = 0.5*(sum_log_sigma2 + sum_chi2 +
+  // EkfUpdate::nllQuadraticAndLogdet(prior_cov_)) -- see that function's
+  // doc comment for the full derivation. An external driver
+  // (scripts/analysis/qsens.py's eventual real-EKF port) re-runs the
+  // same sequence at several ImuProcOptions::q_alpha values and sums
+  // this column per run to find the alpha that minimizes total NLL
+  // (maximizes filter consistency), instead of differentiating through
+  // the update analytically. Off by default.
+  bool log_nll_en = false;
 };
 
 

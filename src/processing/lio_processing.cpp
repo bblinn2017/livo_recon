@@ -75,6 +75,20 @@ void debugLogConsistencyScan(int scan_id, double t, double dt, double trP_pos,
       << trP_att << "," << omega_norm << "," << acc_norm << "\n";
 }
 
+// T0-E (2026-08-31): nll.txt -- see LioProcOptions::log_nll_en's doc
+// comment for the column/formula. Called once per frame (single-
+// threaded, no OMP context here), same truncate-on-first-call/append
+// convention as every other debug log in this file.
+void debugLogNll(double t_abs, double nll)
+{
+  static bool first_call = true;
+  std::ofstream ofs(debugLogPath("nll.txt"), first_call ? std::ios::trunc : std::ios::app);
+  if (first_call)
+    ofs << "t,nll\n";
+  first_call = false;
+  ofs << t_abs << "," << nll << "\n";
+}
+
 // 2026-08-24: REMOVED debugLogSplineIter()/debugLogSplineFit()/
 // debugLogSplineFitPoints()/debugLogSplineKinFit() -- temporary debug
 // logging for the removed iterative-deskew Hermite-spline mechanism. See
@@ -94,6 +108,7 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "lio/ekf/min_diff_error",  opts_.min_diff_error,  -1.0);
   paramWarn<bool>(pnh, "lio/log_debug_en",          opts_.log_debug_en,   false);
   paramWarn<bool>(pnh, "lio/log_consistency_scan_en", opts_.log_consistency_scan_en, false);
+  paramWarn<bool>(pnh, "lio/log_nll_en", opts_.log_nll_en, false);
   paramWarn<int>(pnh, "lio/dry_run_point_filter_num", opts_.dry_run_point_filter_num, 0);
   paramWarn<double>(pnh, "lio/ekf/density_sigma_ref", opts_.density_sigma_ref, 0.0);
   paramWarn<std::string>(pnh, "lio/ekf/density_sigma_mode", opts_.density_sigma_mode, "linear");
@@ -117,6 +132,7 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   std::ostringstream oss;
   oss << "[params/lio]"
       << "\n  log_consistency_scan_en:   " << (opts_.log_consistency_scan_en ? "true" : "false")
+      << "\n  log_nll_en:                " << (opts_.log_nll_en ? "true" : "false")
       << "\n  ekf/max_iterations:        " << opts_.max_iterations
       << "\n  ekf/min_norm_dtheta:       " << opts_.min_norm_dtheta
       << "\n  ekf/min_norm_dt:           " << opts_.min_norm_dt
@@ -553,6 +569,21 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       if (!residuals_.empty()) any_solved = true;
       total_dtheta += dtheta;
       total_dt     += dt;
+
+      // T0-E: same first-iteration-only scope as T0-D's corr.csv/scan.csv
+      // (see estimateStateCorrection()'s allow_consistency_log doc
+      // comment) -- this frame's prior_cov_/ekf_.HtH/ekf_.Htz are exactly
+      // what this iteration's solveSystem() just accumulated.
+      if (iter == 0 && opts_.log_nll_en && !residuals_.empty())
+      {
+        double sum_chi2 = 0.0, sum_log_sigma2 = 0.0;
+        for (const auto& r : residuals_) {
+          sum_chi2 += (r.r * r.r) / r.sigma_squared;
+          sum_log_sigma2 += std::log(r.sigma_squared);
+        }
+        const double nll = 0.5 * (sum_log_sigma2 + sum_chi2 + ekf_.nllQuadraticAndLogdet(prior_cov_));
+        debugLogNll(mg.image.t + data_queues_->start_time, nll);
+      }
 
       const double prev = prev_error;
       prev_error = error;
