@@ -198,7 +198,10 @@ struct LioProcOptions
   // IEKF iteration only, same "un-relinearized prior" scope as T0-D's
   // corr.csv/scan.csv. Columns: t_abs, nll = 0.5*(n_residuals*log(2*pi) +
   // sum_log_sigma2 + sum_chi2 + EkfUpdate::nllQuadraticAndLogdet(
-  // prior_cov_)) [0 when n_residuals==0], n_residuals. The log(2*pi)
+  // prior_cov_)) [0 when n_residuals==0], n_residuals, pivot_ratio
+  // (T0-E-4, 2026-08-31: EkfUpdate::pivotRatio(), max/min |LDLT diagonal|
+  // of the actual solve this frame -- NaN when n_residuals==0, same
+  // staleness caveat). The log(2*pi)
   // term and the n_residuals column are BOTH 2026-08-31 code-audit fixes
   // (the term was previously dropped, safe only when every compared run
   // has the same N per frame, which is false across a q_alpha sweep since

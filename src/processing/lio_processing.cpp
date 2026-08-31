@@ -79,14 +79,18 @@ void debugLogConsistencyScan(int scan_id, double t, double dt, double trP_pos,
 // comment for the column/formula. Called once per frame (single-
 // threaded, no OMP context here), same truncate-on-first-call/append
 // convention as every other debug log in this file.
-void debugLogNll(double t_abs, double nll, int n_residuals)
+// T0-E-4 (2026-08-31): pivot_ratio column added -- max/min |LDLT diagonal|
+// of the actual EKF solve this frame (NaN when n_residuals==0, same
+// staleness caveat as nll itself). See EkfUpdate::pivotRatio()'s doc
+// comment.
+void debugLogNll(double t_abs, double nll, int n_residuals, double pivot_ratio)
 {
   static bool first_call = true;
   std::ofstream ofs(debugLogPath("nll.txt"), first_call ? std::ios::trunc : std::ios::app);
   if (first_call)
-    ofs << "t,nll,n_residuals\n";
+    ofs << "t,nll,n_residuals,pivot_ratio\n";
   first_call = false;
-  ofs << t_abs << "," << nll << "," << n_residuals << "\n";
+  ofs << t_abs << "," << nll << "," << n_residuals << "," << pivot_ratio << "\n";
 }
 
 // 2026-08-24: REMOVED debugLogSplineIter()/debugLogSplineFit()/
@@ -607,7 +611,8 @@ std::string LioProc::processLIO(MeasureGroup& mg)
           nll = 0.5 * (n_res * std::log(2.0 * M_PI) + sum_log_sigma2 + sum_chi2
                        + ekf_.nllQuadraticAndLogdet(prior_cov_));
         }
-        debugLogNll(mg.image.t + data_queues_->start_time, nll, n_res);
+        const double pivot_ratio = (n_res > 0) ? ekf_.pivotRatio() : std::numeric_limits<double>::quiet_NaN();
+        debugLogNll(mg.image.t + data_queues_->start_time, nll, n_res, pivot_ratio);
       }
 
       const double prev = prev_error;

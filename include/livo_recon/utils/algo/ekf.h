@@ -177,6 +177,23 @@ struct EkfUpdate
       return logdet_prior + logdet_A - quad;
     }
 
+    // T0-E-4 (2026-08-31): condition-number proxy for the LAST applyMeanUpdate()/
+    // applyCovarianceUpdate() solve (A = H_full + prior_cov^-1), i.e. the actual
+    // EKF solve path -- NOT nllQuadraticAndLogdet()'s own separate fresh LDLT,
+    // which is a diagnostic-only decomposition. max(|D_ii|)/min(|D_ii|) from the
+    // LDLT's diagonal is a cheap proxy for cond(A) (exact for a diagonal A;
+    // an underestimate in general, but tracks the same order of magnitude and
+    // needs no extra decomposition). Same staleness caveat as HtH/Htz: only
+    // meaningful when applyMeanUpdate() actually ran this iteration (n_res>0).
+    double pivotRatio() const {
+      const auto& d = ldlt_.vectorD();
+      if (d.size() == 0) return std::numeric_limits<double>::quiet_NaN();
+      const double max_d = d.array().abs().maxCoeff();
+      const double min_d = d.array().abs().minCoeff();
+      if (min_d <= 0.0) return std::numeric_limits<double>::infinity();
+      return max_d / min_d;
+    }
+
 private:
     Eigen::LDLT<Eigen::MatrixXd> ldlt_;
     Eigen::MatrixXd last_H_full_;
