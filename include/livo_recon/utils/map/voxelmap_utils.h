@@ -442,6 +442,19 @@ struct VoxelOpts
   // column is absent, so this was scoped out rather than done partially.
   // No-op unless log_consistency_corr_en is also true. Off by default.
   bool log_consistency_covariates_en = false;
+
+  // T0-G (2026-08-31): diagnostic-only. 0 (default) -- no-op, today's
+  // behavior unchanged. Nonzero -- deterministically shuffle each frame's
+  // point order (std::mt19937 seeded from this value XOR'd with the frame
+  // index, so every frame gets a distinct but reproducible permutation)
+  // immediately before VoxelMap::updateMap()'s bucket-build step. Point
+  // order affects nothing SEMANTICALLY (a voxel's accumulated sums are
+  // order-independent in exact arithmetic), but floating-point summation
+  // is order-dependent -- this exists purely to measure how much that
+  // last-bit-level nondeterminism can move ATE, i.e. this register's first
+  // error bar. See VoxelMap::updateMap()'s call site for the actual
+  // shuffle.
+  int shuffle_insertion_seed = 0;
 };
 using VoxelOptsPtr = std::shared_ptr<VoxelOpts>;
 

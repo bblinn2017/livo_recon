@@ -2,6 +2,10 @@
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 
+#include <algorithm>
+#include <numeric>
+#include <random>
+
 namespace livo_recon
 {
 
@@ -42,6 +46,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "voxel_map/plane/use_bins", opts_->use_bins, false);
   paramWarn<bool>(pnh, "voxel_map/plane/log_consistency_corr_en", opts_->log_consistency_corr_en, false);
   paramWarn<bool>(pnh, "voxel_map/plane/log_consistency_covariates_en", opts_->log_consistency_covariates_en, false);
+  paramWarn<int>(pnh, "voxel_map/map/shuffle_insertion_seed", opts_->shuffle_insertion_seed, 0);
 
   std::ostringstream oss;
   oss << "[params/voxel_map]"
@@ -61,6 +66,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/log_variance_shares_en:    " << (opts_->log_variance_shares_en ? "true" : "false")
       << "\n  plane/log_consistency_corr_en:   " << (opts_->log_consistency_corr_en ? "true" : "false")
       << "\n  plane/log_consistency_covariates_en: " << (opts_->log_consistency_covariates_en ? "true" : "false")
+      << "\n  map/shuffle_insertion_seed:      " << opts_->shuffle_insertion_seed
       << "\n  points/min_init:  " << opts_->min_init_points
       << "\n  points/max:       " << opts_->max_points
       << "\n  points/min_update:" << opts_->min_update_points
@@ -106,8 +112,25 @@ void VoxelMap::updateMap(MeasureGroup& mg) {
       thread_keys_.resize(threads);
       for (auto& v : thread_keys_) v.clear();
 
+      // T0-G (2026-08-31): diagnostic-only permutation of the PROCESSING
+      // ORDER (which point lands in which OMP static-schedule chunk, and
+      // in what order within a chunk's thread-local key list) -- see
+      // VoxelOpts::shuffle_insertion_seed's doc comment. proc_order[oi] is
+      // the original point index processed at loop position oi; identity
+      // (no-op) when the seed is 0. Distinct per frame (seed XOR
+      // frame_idx_) so a multi-frame run doesn't apply the same
+      // permutation to every frame's point count.
+      std::vector<int> proc_order(np);
+      std::iota(proc_order.begin(), proc_order.end(), 0);
+      if (opts_->shuffle_insertion_seed != 0) {
+        std::mt19937 rng(static_cast<unsigned int>(opts_->shuffle_insertion_seed) ^
+                          static_cast<unsigned int>(frame_idx_));
+        std::shuffle(proc_order.begin(), proc_order.end(), rng);
+      }
+
       #pragma omp parallel for schedule(static) num_threads(threads)
-      for (int i = 0; i < np; ++i) {
+      for (int oi = 0; oi < np; ++oi) {
+        const int i = proc_order[oi];
         pts_world_[i] = state_->toWorld(map_pts[i]);
         // sensor_cov (see PointXYZCov's docs) is always sensor-only, never
         // mutated downstream -- a consumer needing the isotropic proxy
