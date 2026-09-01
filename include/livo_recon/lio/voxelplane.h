@@ -1,6 +1,7 @@
 #pragma once
 
 #include "livo_recon/utils/map/voxelmap_utils.h"
+#include <cstdint>
 
 namespace livo_recon
 {
@@ -169,6 +170,31 @@ private:
   // (see VoxelOpts::log_consistency_covariates_en). Mirrors
   // debugLogPlaneFitStats()'s own `j` local exactly, just persisted.
   int last_fit_j_ = 0;
+
+  // T3-0e (2026-08-31): 8x8 tangent-frame occupancy bitmask, cell size
+  // opts_->voxel_size/8 -- see updateOccupancy()'s doc comment (in the
+  // .cpp) for the full design, anchoring, and reset rule. Same structure
+  // T8-b's card independently proposes reusing later (J_eff = popcount,
+  // the gap detector, the m2 leverage term); built here first because
+  // T3-0e needs it now and T8-b is not yet scheduled.
+  uint64_t occupancy_bitmask_ = 0;
+  V3D occ_anchor_normal_   = V3D::Zero();
+  V3D occ_anchor_x_normal_ = V3D::Zero();
+  V3D occ_anchor_y_normal_ = V3D::Zero();
+  V3D occ_anchor_center_   = V3D::Zero();
+  bool occ_anchored_ = false;
+
+  void updateOccupancy(const V3D& world_point);
+
+public:
+  // a = lambda1(M_cov)/lambda2(M_cov) of the OCCUPIED cell centers (one
+  // sample per occupied cell, unweighted by point count) in the anchored
+  // tangent frame -- T3-0e's in-plane COVERAGE anisotropy, distinct from
+  // eigenValues()'s point-scatter (density-weighted) anisotropy. Returns
+  // -1.0 if fewer than 3 cells are occupied (covariance undefined/
+  // degenerate below that).
+  double occupancyAnisotropy() const;
+  int occupiedCellCount() const;
 };
 
 // T0-F-2b (2026-08-31): per-frame aggregates across every VoxelPlane fit

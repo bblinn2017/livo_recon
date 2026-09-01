@@ -5,6 +5,9 @@
 #include <mutex>
 #include <atomic>
 #include <limits>
+#include <vector>
+#include <cmath>
+#include <functional>
 
 namespace livo_recon
 {
@@ -76,7 +79,7 @@ void debugLogPlaneFitStats(int n, int j, double n_eff, double trace_plane_var)
 void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, double S,
                               double s_sensor, double s_plane_tilt, double s_plane_d,
                               double s_pose, int n, int j, double aniso, int gated,
-                              double s_prior_pose, double lambda0)
+                              double s_prior_pose, double lambda0, double occ_aniso, int occ_cells)
 {
   static bool first_call = true;
   static std::mutex mtx;
@@ -88,15 +91,19 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
     // smallest eigenvalue (its own is_plane_ = eigen_values_(0) <
     // plane_threshold test uses this directly). T8-0b/T8-d's outcome
     // variable ("median lambda0"); previously computed but never logged
-    // anywhere.
-    if (with_covariates) ofs << ",S_sensor,S_plane_tilt,S_plane_d,S_pose,S_prior_pose,N,J,aniso,lambda0";
+    // anywhere. T3-0e (2026-08-31): occ_aniso/occ_cells added --
+    // VoxelPlane::occupancyAnisotropy()/occupiedCellCount(), the OCCUPANCY-
+    // based (density-independent) in-plane coverage anisotropy, distinct
+    // from `aniso` (point-scatter/density-weighted).
+    if (with_covariates) ofs << ",S_sensor,S_plane_tilt,S_plane_d,S_pose,S_prior_pose,N,J,aniso,lambda0,occ_aniso,occ_cells";
     ofs << "\n";
   }
   first_call = false;
   ofs << scan_id << "," << nu << "," << S << "," << gated;
   if (with_covariates)
     ofs << "," << s_sensor << "," << s_plane_tilt << "," << s_plane_d << "," << s_pose
-        << "," << s_prior_pose << "," << n << "," << j << "," << aniso << "," << lambda0;
+        << "," << s_prior_pose << "," << n << "," << j << "," << aniso << "," << lambda0
+        << "," << occ_aniso << "," << occ_cells;
   ofs << "\n";
 }
 }  // namespace
@@ -151,6 +158,25 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
     if (range_dis > opts_->max_radius * radius_) return false;
   }
 
+  // T3-0e: drop this whole PLANE from the residual (not just this one
+  // correspondence -- the decision is per-plane, evaluated identically
+  // for every correspondence that hits it) if the coverage-anisotropy
+  // ablation says so. See VoxelOpts::occ_aniso_drop_mode's doc comment.
+  if (opts_->occ_aniso_drop_mode == "top") {
+    if (occupancyAnisotropy() > opts_->occ_aniso_drop_threshold) return false;
+  } else if (opts_->occ_aniso_drop_mode == "random") {
+    // Deterministic per-plane hash of (plane_.center, seed) -> [0,1).
+    // std::hash has no cross-run stability guarantee for doubles in
+    // general, but within one process/build it is stable across every
+    // call this run makes, which is all reproducibility here needs (the
+    // seed is recorded in the job's own config.yaml either way).
+    std::size_t h = std::hash<double>{}(plane_.center.x() * 1e6 + opts_->occ_aniso_drop_seed);
+    h ^= std::hash<double>{}(plane_.center.y() * 1e6 + opts_->occ_aniso_drop_seed * 2.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    h ^= std::hash<double>{}(plane_.center.z() * 1e6 + opts_->occ_aniso_drop_seed * 3.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    const double u01 = static_cast<double>(h % 1000000ULL) / 1000000.0;
+    if (u01 < opts_->occ_aniso_drop_fraction) return false;
+  }
+
   if (is_candidate) *is_candidate = true;
   J_nq(0, 0) = d_center.dot(y_normal_);
   J_nq(0, 1) = d_center.dot(x_normal_);
@@ -185,9 +211,12 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
   if (opts_->log_consistency_corr_en && is_candidate && scan_id >= 0) {
     const bool cov = opts_->log_consistency_covariates_en;
     double s_sensor = -1.0, s_tilt = -1.0, s_d = -1.0, s_pose = -1.0, aniso = -1.0, lambda0 = -1.0;
-    int n = -1, j = -1;
+    double occ_aniso = -1.0;
+    int n = -1, j = -1, occ_cells = -1;
     if (cov) {
       lambda0 = eigen_values_(0);
+      occ_aniso = occupancyAnisotropy();
+      occ_cells = occupiedCellCount();
       const V3D& normal = plane_.normal;
       s_sensor = normal.dot(pt.sensor_cov * normal);
       s_pose   = normal.dot(pt.pose_cov * normal);
@@ -221,7 +250,7 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
     const double s_prior_pose = (H_i * pt.prior_cov_rp * H_i.transpose()).value();
     const double S = 1e-3 + sigma_diag_squared + plane_var_term + s_prior_pose;
     debugLogConsistencyCorr(cov, scan_id, r, S, s_sensor, s_tilt, s_d, s_pose, n, j, aniso,
-                             accepted ? 0 : 1, s_prior_pose, lambda0);
+                             accepted ? 0 : 1, s_prior_pose, lambda0, occ_aniso, occ_cells);
   }
 
   if (!accepted) return false;
@@ -451,6 +480,12 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
     debugLogPlaneFitStats(points_size_, last_fit_j_, n_eff, plane_var_.trace());
   }
   updateMaxPlaneVarTrace(plane_var_.trace());
+
+  // T3-0e: same occupancy update as addPoints()'s debiased path, using the
+  // tangent frame just fitted above. `points` may be bin representatives
+  // rather than raw points (see `running`/use_weights above) -- fine for
+  // occupancy purposes, a bin rep already represents one occupied region.
+  for (int i = 0; i < N; ++i) updateOccupancy(points[i].point);
 }
 
 void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_count,
@@ -509,6 +544,13 @@ void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_cou
   points_size_ = (total_count >= 0) ? total_count : (int)N_acc_;
   if (distinct_frames > 0) distinct_frames_ = distinct_frames;
   refitDebiased();
+
+  // T3-0e: occupancy uses whatever tangent frame refitDebiased() just left
+  // (is_plane_ may still be false on early/rejected fits -- updateOccupancy()
+  // itself no-ops until an anchor exists, so this is safe to call
+  // unconditionally).
+  if (is_plane_)
+    for (const auto& pt : points) updateOccupancy(pt.point);
 }
 
 void VoxelPlane::refitDebiased()
@@ -713,6 +755,83 @@ void VoxelPlane::refitDebiased()
         << " normal=[" << plane_.normal.transpose() << "]";
     debugLogNoiseFloor(dbg.str());
   }
+}
+
+// T3-0e (2026-08-31): 8x8 tangent-frame occupancy bitmask. Cell size
+// opts_->voxel_size/8, grid spans [-4,4) cells each axis (i.e. +/-
+// voxel_size/2 centered on the anchor). The basis is ANCHORED (frozen at
+// the first call after a successful fit) rather than re-derived from the
+// current x_normal_/y_normal_ every call, for two reasons: (1) a tangent
+// frame that shifts slightly every refit would make "which cell is this"
+// answer differently for the same physical point across calls, corrupting
+// the occupancy pattern instead of accumulating it; (2) it matches T8-b's
+// own card, which anchors for the same reason and resets only when the
+// normal has rotated >~10 degrees (a reset reads as low coverage, which
+// inflates uncertainty -- the safe direction, not a correctness bug).
+void VoxelPlane::updateOccupancy(const V3D& world_point)
+{
+  if (!is_plane_) return;
+
+  constexpr double kResetCosThreshold = 0.9848;  // cos(10 deg)
+  if (!occ_anchored_ || occ_anchor_normal_.dot(plane_.normal) < kResetCosThreshold) {
+    occ_anchor_normal_   = plane_.normal;
+    occ_anchor_x_normal_ = x_normal_;
+    occ_anchor_y_normal_ = y_normal_;
+    occ_anchor_center_   = plane_.center;
+    occupancy_bitmask_   = 0;
+    occ_anchored_ = true;
+  }
+
+  const double cell_size = opts_->voxel_size / 8.0;
+  const V3D d = world_point - occ_anchor_center_;
+  const double u = d.dot(occ_anchor_x_normal_);
+  const double v = d.dot(occ_anchor_y_normal_);
+  const int cu = static_cast<int>(std::floor(u / cell_size)) + 4;
+  const int cv = static_cast<int>(std::floor(v / cell_size)) + 4;
+  if (cu < 0 || cu >= 8 || cv < 0 || cv >= 8) return;  // outside the tracked window -- not an error, just untracked
+  occupancy_bitmask_ |= (uint64_t(1) << (cu * 8 + cv));
+}
+
+int VoxelPlane::occupiedCellCount() const
+{
+  return __builtin_popcountll(occupancy_bitmask_);
+}
+
+double VoxelPlane::occupancyAnisotropy() const
+{
+  const double cell_size = opts_->voxel_size / 8.0;
+  std::vector<std::pair<double, double>> centers;
+  for (int cu = 0; cu < 8; ++cu) {
+    for (int cv = 0; cv < 8; ++cv) {
+      if (occupancy_bitmask_ & (uint64_t(1) << (cu * 8 + cv))) {
+        // cell CENTER in tangent (u,v) -- inverse of updateOccupancy()'s
+        // floor((u/cell_size)) + 4 binning.
+        centers.emplace_back((cu - 4 + 0.5) * cell_size, (cv - 4 + 0.5) * cell_size);
+      }
+    }
+  }
+  if (centers.size() < 3) return -1.0;
+  double mean_u = 0.0, mean_v = 0.0;
+  for (const auto& c : centers) { mean_u += c.first; mean_v += c.second; }
+  mean_u /= centers.size();
+  mean_v /= centers.size();
+  double var_u = 0.0, var_v = 0.0, cov_uv = 0.0;
+  for (const auto& c : centers) {
+    const double du = c.first - mean_u, dv = c.second - mean_v;
+    var_u += du * du;
+    var_v += dv * dv;
+    cov_uv += du * dv;
+  }
+  const double n = static_cast<double>(centers.size());
+  var_u /= n; var_v /= n; cov_uv /= n;
+  // 2x2 symmetric eigenvalues, closed form.
+  const double tr = var_u + var_v;
+  const double det = var_u * var_v - cov_uv * cov_uv;
+  const double disc = std::sqrt(std::max(0.0, tr * tr / 4.0 - det));
+  const double lambda1 = tr / 2.0 + disc;
+  const double lambda2 = tr / 2.0 - disc;
+  constexpr double eps = 1e-12;
+  return lambda1 / std::max(lambda2, eps);
 }
 
 }  // namespace livo_recon

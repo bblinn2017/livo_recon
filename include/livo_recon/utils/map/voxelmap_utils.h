@@ -458,6 +458,32 @@ struct VoxelOpts
   // opted into explicitly.
   std::string plane_gate_mode = "disc";
 
+  // T3-0e (2026-08-31): test T3's DIRECTIONAL premise directly -- drop
+  // correspondences from planes whose occupancy anisotropy (see
+  // VoxelPlane::occupancyAnisotropy()) is judged "bad" by one of two
+  // rules, applied at gate() time (a genuine drop from the residual, not
+  // just a logged diagnostic):
+  //   "none" (default): no dropping, bit-identical to today.
+  //   "top": drop if occupancyAnisotropy() > occ_aniso_drop_threshold.
+  //     The threshold must be supplied externally (occ_aniso_drop_threshold
+  //     has no sensible default) -- computed from a baseline pass's own
+  //     occ_aniso distribution (e.g. its 90th percentile, for a "top
+  //     decile" cut). Leaving it at -1 (a value no real anisotropy can be
+  //     below) makes "top" mode a no-op, matching "none" -- a safe default
+  //     rather than an easy-to-miss misconfiguration.
+  //   "random": drop with probability occ_aniso_drop_fraction, decided
+  //     once per PLANE (not per correspondence) via a fixed-seed hash of
+  //     plane_.center -- deterministic and reproducible, but only
+  //     approximately size-matched to "top" mode's actual drop count (in
+  //     EXPECTATION, not exact count) since this codebase has no
+  //     first-class per-plane identity to do an exact two-pass match
+  //     against. Document this approximation plainly if this arm's own
+  //     result is ever quoted.
+  std::string occ_aniso_drop_mode = "none";
+  double occ_aniso_drop_threshold = -1.0;
+  double occ_aniso_drop_fraction = 0.1;
+  int occ_aniso_drop_seed = 0;
+
   // T0-G (2026-08-31): diagnostic-only. 0 (default) -- no-op, today's
   // behavior unchanged. Nonzero -- deterministically shuffle each frame's
   // point order (std::mt19937 seeded from this value XOR'd with the frame

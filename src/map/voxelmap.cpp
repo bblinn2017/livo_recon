@@ -68,6 +68,10 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "voxel_map/plane/bin_size_fraction", opts_->bin_size_fraction, 0.2);
   paramWarn<bool>(pnh, "voxel_map/plane/use_bins", opts_->use_bins, false);
   paramWarn<std::string>(pnh, "voxel_map/plane/plane_gate_mode", opts_->plane_gate_mode, "disc");
+  paramWarn<std::string>(pnh, "voxel_map/plane/occ_aniso_drop_mode", opts_->occ_aniso_drop_mode, "none");
+  paramWarn<double>(pnh, "voxel_map/plane/occ_aniso_drop_threshold", opts_->occ_aniso_drop_threshold, -1.0);
+  paramWarn<double>(pnh, "voxel_map/plane/occ_aniso_drop_fraction", opts_->occ_aniso_drop_fraction, 0.1);
+  paramWarn<int>(pnh, "voxel_map/plane/occ_aniso_drop_seed", opts_->occ_aniso_drop_seed, 0);
   paramWarn<bool>(pnh, "voxel_map/plane/log_consistency_corr_en", opts_->log_consistency_corr_en, false);
   paramWarn<bool>(pnh, "voxel_map/plane/log_consistency_covariates_en", opts_->log_consistency_covariates_en, false);
   paramWarn<int>(pnh, "voxel_map/map/shuffle_insertion_seed", opts_->shuffle_insertion_seed, 0);
@@ -90,6 +94,10 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/use_bins:                  " << (opts_->use_bins ? "true" : "false")
       << "\n  plane/log_variance_shares_en:    " << (opts_->log_variance_shares_en ? "true" : "false")
       << "\n  plane/plane_gate_mode:           " << opts_->plane_gate_mode
+      << "\n  plane/occ_aniso_drop_mode:       " << opts_->occ_aniso_drop_mode
+      << "\n  plane/occ_aniso_drop_threshold:  " << opts_->occ_aniso_drop_threshold
+      << "\n  plane/occ_aniso_drop_fraction:   " << opts_->occ_aniso_drop_fraction
+      << "\n  plane/occ_aniso_drop_seed:       " << opts_->occ_aniso_drop_seed
       << "\n  plane/log_consistency_corr_en:   " << (opts_->log_consistency_corr_en ? "true" : "false")
       << "\n  plane/log_consistency_covariates_en: " << (opts_->log_consistency_covariates_en ? "true" : "false")
       << "\n  map/shuffle_insertion_seed:      " << opts_->shuffle_insertion_seed
