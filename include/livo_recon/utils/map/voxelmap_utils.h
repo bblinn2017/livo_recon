@@ -445,6 +445,17 @@ struct VoxelOpts
   // No-op unless log_consistency_corr_en is also true. Off by default.
   bool log_consistency_covariates_en = false;
 
+  // 14c (2026-09-01): 1 = a corr.csv row for every candidate (today's
+  // behaviour, ~1GB/job with covariates on). N = every Nth. Level
+  // statistics (mean NIS, accept fraction, dropped-by-ablation count) are
+  // UNAFFECTED by this -- they come from corr_scan.csv, an exact per-scan
+  // aggregate updated for every candidate regardless of stride (see
+  // debugAccumConsistencyCorr()). corr.csv itself is for distributional
+  // questions only (percentiles, decile cuts), which tolerate subsampling.
+  // Keep this PRIME: LiDAR returns arrive in ring/azimuth order, so a round
+  // stride (50, 64, 100) can alias with the beam count.
+  int log_consistency_corr_stride = 1;
+
   // T8-a (2026-08-31): "disc" (default) -- today's isotropic admission
   // test, range_dis > max_radius*radius_ with radius_ = sqrt(lambda2) (the
   // LARGEST in-plane eigenvalue) -- a sliver sampled 1m along one axis and

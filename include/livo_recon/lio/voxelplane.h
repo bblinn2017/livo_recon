@@ -249,4 +249,11 @@ public:
 void voxelPlaneFrameStatsReset();
 void voxelPlaneFrameStatsRead(int& denom_rejected_count, double& max_plane_var_trace);
 
+// 14b (2026-09-01): corr_scan.csv's per-scan accumulator flushes itself on
+// every scan_id change (see debugAccumConsistencyCorr() in voxelplane.cpp),
+// but the LAST scan of a run never sees a subsequent scan_id to trigger that
+// -- call this once, at shutdown, to flush it. No-op if
+// log_consistency_corr_en was never on.
+void debugFlushConsistencyCorr();
+
 }  // namespace livo_recon

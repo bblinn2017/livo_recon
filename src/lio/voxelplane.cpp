@@ -8,6 +8,7 @@
 #include <vector>
 #include <cmath>
 #include <functional>
+#include <cstdint>
 
 namespace livo_recon
 {
@@ -83,11 +84,22 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
                               int dropped_by_ablation, double occ_var_u, double occ_var_v,
                               double plane_conf_factor)
 {
-  static bool first_call = true;
+  // 14a (2026-09-01): one stream, opened once, held open, with a large
+  // buffer. The previous form opened and closed the file PER CORRESPONDENCE
+  // (~12M times per job at full stride) under a global lock inside the
+  // residual loop -- confirmed live to add minutes of wall-clock per job and,
+  // more importantly, an UNVERIFIED determinism risk (the lock serializes a
+  // section that's otherwise threaded/CUDA-dispatched, which can perturb
+  // floating-point accumulation order -- T0-E-4 found this surface sensitive
+  // to ~1e-5 relative changes). Same first-call truncate semantics as before.
   static std::mutex mtx;
+  static std::vector<char> buf(1 << 20);
+  static std::ofstream ofs;
+  static bool first_call = true;
   std::lock_guard<std::mutex> lock(mtx);
-  std::ofstream ofs(debugLogPath("corr.csv"), first_call ? std::ios::trunc : std::ios::app);
   if (first_call) {
+    ofs.rdbuf()->pubsetbuf(buf.data(), static_cast<std::streamsize>(buf.size()));
+    ofs.open(debugLogPath("corr.csv"), std::ios::trunc);
     // dropped_by_ablation (2026-08-31, code-review fix): unconditional,
     // not gated behind with_covariates -- T3-0e's ablation arms need this
     // even in a plain (non-covariates) NIS run, to know which rows were
@@ -118,7 +130,84 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
         << "," << occ_var_u << "," << occ_var_v << "," << plane_conf_factor;
   ofs << "\n";
 }
+
+// 14b (2026-09-01): exact per-scan aggregates, so a level statistic (mean
+// NIS, accept fraction, dropped-by-ablation count) never depends on the
+// corr.csv row stride below -- every candidate updates this accumulator
+// regardless of whether it also gets a full corr.csv row. corr_scan.csv is
+// therefore the source of truth for anything a cell is actually judged on;
+// corr.csv (now strided, see 14c) exists only for distributional questions
+// (percentiles, decile cuts) that genuinely need individual rows.
+struct CorrScanAccum {
+  int scan_id = -1;
+  long n_candidates = 0, n_accepted = 0, n_dropped = 0, n_nis_finite = 0;
+  double sum_nis = 0.0, sum_nis2 = 0.0, sum_log_nis = 0.0, max_nis = 0.0;
+  long n_share = 0; double sum_share = 0.0;
+};
+std::mutex g_corr_scan_mtx;
+CorrScanAccum g_corr_scan;
+
+void flushCorrScan(CorrScanAccum& a)
+{
+  if (a.scan_id < 0) return;
+  static bool first = true;
+  static std::ofstream ofs;
+  if (first) {
+    ofs.open(debugLogPath("corr_scan.csv"), std::ios::trunc);
+    ofs << "scan_id,n_candidates,n_accepted,n_dropped,n_nis_finite,"
+           "sum_nis,sum_nis2,sum_log_nis,max_nis,n_share,sum_share\n";
+    first = false;
+  }
+  ofs << a.scan_id << ',' << a.n_candidates << ',' << a.n_accepted << ','
+      << a.n_dropped << ',' << a.n_nis_finite << ',' << a.sum_nis << ','
+      << a.sum_nis2 << ',' << a.sum_log_nis << ',' << a.max_nis << ','
+      << a.n_share << ',' << a.sum_share << '\n';
+  a = CorrScanAccum{};
+}
+
+// Called for EVERY candidate, always, regardless of the corr.csv stride.
+// Cheap: a few adds under a lock, no I/O except once per scan.
+void debugAccumConsistencyCorr(int scan_id, double nu, double S, int gated,
+                               int dropped, double plane_share)
+{
+  std::lock_guard<std::mutex> lock(g_corr_scan_mtx);
+  if (scan_id != g_corr_scan.scan_id) {
+    flushCorrScan(g_corr_scan);
+    g_corr_scan.scan_id = scan_id;
+  }
+  auto& a = g_corr_scan;
+  a.n_candidates++;
+  if (dropped) { a.n_dropped++; return; }
+  if (gated == 0) {
+    a.n_accepted++;
+    if (S > 0.0 && std::isfinite(nu) && std::isfinite(S)) {
+      const double nis = nu * nu / S;
+      if (std::isfinite(nis) && nis > 0.0) {
+        a.n_nis_finite++;
+        a.sum_nis += nis;
+        a.sum_nis2 += nis * nis;
+        a.sum_log_nis += std::log(nis);
+        if (nis > a.max_nis) a.max_nis = nis;
+      }
+    }
+    if (plane_share >= 0.0 && std::isfinite(plane_share)) {
+      a.n_share++; a.sum_share += plane_share;
+    }
+  }
+}
+
 }  // namespace
+
+// The final scan never sees a scan_id change, so it needs an explicit flush.
+// Wired into VoxelMap's shutdown path -- see the call site added near this
+// codebase's other end-of-run debug-log finalization. External linkage
+// (unlike debugAccumConsistencyCorr()/flushCorrScan(), only ever called from
+// this file) so a different translation unit can trigger the final flush.
+void debugFlushConsistencyCorr()
+{
+  std::lock_guard<std::mutex> lock(g_corr_scan_mtx);
+  flushCorrScan(g_corr_scan);
+}
 
 void voxelPlaneFrameStatsReset()
 {
@@ -352,9 +441,31 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
       s_prior_pose = (H_i * pt.prior_cov_rp * H_i.transpose()).value();
       S = 1e-3 + sigma_diag_squared + plane_var_term + s_prior_pose;
     }
-    debugLogConsistencyCorr(cov, scan_id, r, S, s_sensor, s_tilt, s_d, s_pose, n, j, aniso,
-                             accepted ? 0 : 1, s_prior_pose, lambda0, occ_aniso, occ_cells,
-                             dropped_by_ablation ? 1 : 0, occ_var_u, occ_var_v, plane_conf_factor);
+
+    // 14b: exact per-scan aggregates for EVERY candidate, regardless of the
+    // corr.csv stride below -- level statistics (mean NIS, accept fraction,
+    // dropped-by-ablation count) must never depend on which rows happened
+    // to survive striding.
+    const double plane_share = (cov && S > 0.0 && s_tilt >= 0.0 && s_d >= 0.0)
+        ? (s_tilt + s_d) / S : -1.0;
+    debugAccumConsistencyCorr(scan_id, r, S, accepted ? 0 : 1,
+                              dropped_by_ablation ? 1 : 0, plane_share);
+
+    // 14c: full per-correspondence rows only every Nth candidate. The
+    // stride is PRIME on purpose -- LiDAR returns arrive in ring/azimuth
+    // order, so a round stride (50, 64, 100) can alias with the beam count
+    // (a 64-beam sensor sampled every 64th return is one ring, not a
+    // sample of the scan). DISTRIBUTIONS (percentiles, decile cuts) are
+    // the only thing that needs individual rows -- level statistics come
+    // from corr_scan.csv above and are unaffected by the stride.
+    static std::atomic<uint64_t> corr_row_counter{0};
+    const uint64_t k = corr_row_counter.fetch_add(1, std::memory_order_relaxed);
+    const int stride = std::max(1, opts_->log_consistency_corr_stride);
+    if ((k % static_cast<uint64_t>(stride)) == 0) {
+      debugLogConsistencyCorr(cov, scan_id, r, S, s_sensor, s_tilt, s_d, s_pose, n, j, aniso,
+                               accepted ? 0 : 1, s_prior_pose, lambda0, occ_aniso, occ_cells,
+                               dropped_by_ablation ? 1 : 0, occ_var_u, occ_var_v, plane_conf_factor);
+    }
   }
 
   if (!accepted) return false;

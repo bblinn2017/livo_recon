@@ -1,6 +1,7 @@
 #include "livo_recon/livo_recon_node.h"
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/utils/log/debug_log_dir.h"
+#include "livo_recon/lio/voxelplane.h"
 
 #include <stdexcept>
 
@@ -245,6 +246,12 @@ namespace
 {
 void finishRun(NodeContext& ctx, PubProc& pub_proc, EvoProc& evo_proc)
 {
+  // 14b (2026-09-01): corr_scan.csv's per-scan accumulator only flushes on a
+  // scan_id CHANGE -- the last scan of a run never sees one, so it would sit
+  // unflushed in memory forever without this. No-op if
+  // log_consistency_corr_en was never on.
+  debugFlushConsistencyCorr();
+
   // Stop the async tracking thread cleanly before shutdown (task #145) --
   // no-op if it was never started (VIO disabled or tracker failed to load).
   ctx.tracker->stopAsyncTracking();
