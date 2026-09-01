@@ -251,4 +251,74 @@ void deskewPointsSplineSubset(
   }
 }
 
+void deskewPointsSplineCsr(
+    const StateGroupPtr& state,
+    const ScanSpline& spline,
+    double scan_end_time,
+    const std::vector<PointXYZT>& points,
+    const std::vector<int>& offsets,
+    const std::vector<int>& members,
+    const DeskewOptions& opts,
+    bool keep_time_noise,
+    std::vector<PointXYZCov>& points_out)
+{
+  if (offsets.size() < 2) { points_out.clear(); return; }
+  const size_t n_out = offsets.size() - 1;
+  points_out.resize(n_out);
+
+  const M3D R_end_T = spline.rotAt(scan_end_time).transpose();
+  const V3D p_end   = spline.posAt(scan_end_time);
+  const M3D vel_noise_end = splineVelNoise(state, opts, keep_time_noise);
+
+  for (size_t i = 0; i < n_out; ++i)
+  {
+    const int b = offsets[i], e = offsets[i + 1];
+    if (e <= b) continue;
+
+    // Single-member cell: identical to deskewPointsSplineSubset().  This is
+    // every cell in FIRST mode, so that mode stays bit-for-bit what it was.
+    if (e - b == 1)
+    {
+      const int idx = members[b];
+      if (idx < 0 || idx >= static_cast<int>(points.size())) continue;
+      points_out[i] = deskewOnePointSpline(state, spline, R_end_T, p_end,
+                                           scan_end_time, points[idx], opts,
+                                           keep_time_noise, vel_noise_end);
+      continue;
+    }
+
+    // Multi-member cell: re-place each member from its RAW coordinates, then
+    // average exactly as voxelDownsample(AVERAGE) does -- literal mean
+    // position, literal mean of each covariance component kept separate, and
+    // mean capture time to match the mean position.
+    V3D sum_point = V3D::Zero();
+    M3D sum_sensor_cov = M3D::Zero();
+    M3D sum_pos_cov    = M3D::Zero();
+    double sum_t = 0.0;
+    int n = 0;
+    for (int k = b; k < e; ++k)
+    {
+      const int idx = members[k];
+      if (idx < 0 || idx >= static_cast<int>(points.size())) continue;
+      const PointXYZCov d = deskewOnePointSpline(state, spline, R_end_T, p_end,
+                                                 scan_end_time, points[idx], opts,
+                                                 keep_time_noise, vel_noise_end);
+      sum_point      += d.point;
+      sum_sensor_cov += d.sensor_cov;
+      sum_pos_cov    += d.pos_cov;
+      sum_t          += d.t;
+      ++n;
+    }
+    if (n == 0) continue;
+
+    PointXYZCov out{};
+    const double dn = static_cast<double>(n);
+    out.point      = sum_point / dn;
+    out.sensor_cov = sum_sensor_cov / dn;
+    out.pos_cov    = sum_pos_cov / dn;
+    out.t          = sum_t / dn;
+    points_out[i]  = out;
+  }
+}
+
 }  // namespace livo_recon

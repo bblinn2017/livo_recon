@@ -370,7 +370,8 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
   // ScanSpline refuses to extrapolate, and a point outside the window would
   // otherwise be silently clamped to an endpoint.
   spline_ok_ = false;
-  ds_indices_.clear();
+  ds_offsets_.clear();
+  ds_members_.clear();
   if (opts_.spline.enable && !mg.poses.empty())
   {
     TimedScope ts_fit(profiler_, "lio/spline/fit");
@@ -395,20 +396,27 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
 
   if (opts_.ds_leaf_size > 0.0) {
     DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
-    // Track which raw points survive, so the per-iteration re-deskew can
-    // re-place exactly this set from their raw coordinates.  Only possible
-    // in FIRST mode (an averaged point has no single source) -- see
-    // voxelDownsampleIndexed()'s doc comment.
-    if (spline_ok_ && opts_.spline.redeskew_each_iteration && mode == DsMode::FIRST)
-      voxelDownsampleIndexed(deskewed, mg.points, ds_indices_,
-                             PointXYZCovKeyFn{opts_.ds_leaf_size});
+    // Track which raw points each surviving output point was built from, so
+    // the per-iteration re-deskew can re-place exactly this set from their raw
+    // coordinates.  Both modes: FIRST gives one member per cell, AVERAGE gives
+    // the whole cell and the re-deskew re-averages it.  Output is bit-identical
+    // to voxelDownsample() in the matching mode -- see
+    // voxelDownsampleIndexedCsr()'s doc comment.
+    if (spline_ok_ && opts_.spline.redeskew_each_iteration)
+      voxelDownsampleIndexedCsr(deskewed, mg.points, ds_offsets_, ds_members_,
+                                PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
     else
       voxelDownsample(deskewed, mg.points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
   } else {
     mg.points = std::move(deskewed);
     if (spline_ok_ && opts_.spline.redeskew_each_iteration) {
-      ds_indices_.resize(mg.points.size());
-      for (size_t i = 0; i < ds_indices_.size(); ++i) ds_indices_[i] = static_cast<int>(i);
+      ds_members_.resize(mg.points.size());
+      ds_offsets_.resize(mg.points.size() + 1);
+      for (size_t i = 0; i < ds_members_.size(); ++i) {
+        ds_members_[i] = static_cast<int>(i);
+        ds_offsets_[i] = static_cast<int>(i);
+      }
+      ds_offsets_.back() = static_cast<int>(ds_members_.size());
     }
   }
 
@@ -432,8 +440,8 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
 bool LioProc::redeskewFromSpline(MeasureGroup& mg)
 {
   if (!spline_ok_ || !opts_.spline.redeskew_each_iteration) return false;
-  if (ds_indices_.empty()) return false;
-  if (ds_indices_.size() != mg.points.size()) return false;
+  if (ds_offsets_.size() < 2) return false;
+  if (ds_offsets_.size() != mg.points.size() + 1) return false;
 
   TimedScope ts(profiler_, "lio/spline/redeskew");
 
@@ -446,7 +454,16 @@ bool LioProc::redeskewFromSpline(MeasureGroup& mg)
     lidar_obs_.reserve(residuals_.size());
     for (const auto& r : residuals_)
     {
-      if (r.t <= 0.0) continue;                 // no timestamp -> not usable
+      // Inside the fitted window, not "> 0".  The window runs from the first
+      // IMU pose to the frame reference time precisely so that every LiDAR
+      // return in the scan lands in it (see the fit call above), so this
+      // rejects nothing in normal operation -- which is the point: the old
+      // t > 0 test was a sentinel check reading a real coordinate.  Frame
+      // times are start_time-relative and start_time is the calibration-end
+      // image stamp (DataQueues::setStartTime), so a scan straddling the end
+      // of calibration has genuinely NEGATIVE point times, and that test
+      // silently dropped exactly those points.
+      if (!(r.t >= spline_.t0() && r.t <= spline_.t1())) continue;
       SplineLidarObs o;
       o.t      = r.t;
       o.normal = r.normal;
@@ -468,9 +485,9 @@ bool LioProc::redeskewFromSpline(MeasureGroup& mg)
   // IMU-only propagation gave it.
   spline_.anchorTo(mg.image.t, state_->rot(), state_->pos());
 
-  deskewPointsSplineSubset(state_, spline_, mg.image.t, mg.lidar_points,
-                           ds_indices_, opts_.deskew,
-                           opts_.spline_keep_time_noise, mg.points);
+  deskewPointsSplineCsr(state_, spline_, mg.image.t, mg.lidar_points,
+                        ds_offsets_, ds_members_, opts_.deskew,
+                        opts_.spline_keep_time_noise, mg.points);
   return true;
 }
 

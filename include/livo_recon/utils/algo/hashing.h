@@ -106,38 +106,100 @@ void voxelDownsample(
   }
 }
 
-// As voxelDownsample() in DsMode::FIRST, but also reports which INPUT index
-// each surviving output point came from.  The scan-spline re-deskew
-// (LioProc::redeskewFromSpline()) needs this: it re-places the kept points
-// against an updated spline every IEKF iteration, and to do that it has to
-// go back to each point's RAW LiDAR-frame coordinates, which the
-// downsampled output has already transformed away.
+// As voxelDownsample(), but ALSO reports which INPUT points each surviving
+// output point was built from, as a CSR membership set:
 //
-// FIRST only, by construction: an AVERAGE cell's output point is a blend
-// of several inputs and has no single source index, so there is nothing
-// honest to return.  Callers needing AVERAGE re-deskew the full cloud and
-// re-downsample instead (correct, just more expensive, and the kept set can
-// shift between iterations).
+//     out_offsets.size() == output.size() + 1
+//     the members of output[i] are
+//         out_members[out_offsets[i] .. out_offsets[i+1])
+//
+// The scan-spline re-deskew (LioProc::redeskewFromSpline()) needs this: it
+// re-places the kept points against an updated spline every IEKF iteration,
+// and to do that it has to go back to each point\'s RAW LiDAR-frame
+// coordinates, which the downsampled output has already transformed away.
+//
+// BOTH modes are supported, which is the point of the CSR shape.  FIRST
+// yields exactly one member per output point, so out_offsets is 0,1,2,...
+// and the set degenerates to the old flat index vector.  AVERAGE yields the
+// whole cell, and the re-deskew re-averages the members it just re-placed --
+// which is what an averaged point actually is.  The earlier version of this
+// function was FIRST-only on the grounds that "an AVERAGE cell has no single
+// source index", which is true and beside the point: it has a source SET.
+// The practical cost of that restriction was that spline/lidar_refine_cp and
+// the per-iteration re-deskew were silently inert under ds_mode:=average,
+// making those sweep cells duplicates of their refine=false partners rather
+// than measurements.
+//
+// Cell MEMBERSHIP is frozen at the first downsample and never recomputed,
+// in both modes.  Re-binning each iteration would let the kept set -- and
+// therefore the residual count, and therefore the update -- move for reasons
+// unrelated to the state.
+//
+// Output is bit-identical to voxelDownsample() in the corresponding mode:
+// same map type, same insertion order, same accumulation order.
 template <typename PointType, typename KeyFunc>
-void voxelDownsampleIndexed(
+void voxelDownsampleIndexedCsr(
     const std::vector<PointType>& input,
     std::vector<PointType>& output,
-    std::vector<int>& out_indices,
-    KeyFunc key_func)
+    std::vector<int>& out_offsets,
+    std::vector<int>& out_members,
+    KeyFunc key_func,
+    DsMode mode = DsMode::FIRST)
 {
   output.clear();
-  out_indices.clear();
+  out_offsets.clear();
+  out_members.clear();
 
-  robin_hood::unordered_flat_map<VoxelKey, int, VoxelKeyHash> voxel_map;
+  if (mode == DsMode::FIRST) {
+    robin_hood::unordered_flat_map<VoxelKey, int, VoxelKeyHash> voxel_map;
+    voxel_map.reserve(input.size());
+    for (int i = 0; i < static_cast<int>(input.size()); ++i)
+      voxel_map.emplace(key_func(input[i]), i);
+
+    output.reserve(voxel_map.size());
+    out_members.reserve(voxel_map.size());
+    out_offsets.reserve(voxel_map.size() + 1);
+    out_offsets.push_back(0);
+    for (const auto& kv : voxel_map) {
+      out_members.push_back(kv.second);
+      out_offsets.push_back(static_cast<int>(out_members.size()));
+      output.push_back(input[kv.second]);
+    }
+    return;
+  }
+
+  robin_hood::unordered_flat_map<VoxelKey, std::vector<int>, VoxelKeyHash> voxel_map;
   voxel_map.reserve(input.size());
   for (int i = 0; i < static_cast<int>(input.size()); ++i)
-    voxel_map.emplace(key_func(input[i]), i);
+    voxel_map[key_func(input[i])].push_back(i);
 
   output.reserve(voxel_map.size());
-  out_indices.reserve(voxel_map.size());
+  out_offsets.reserve(voxel_map.size() + 1);
+  out_offsets.push_back(0);
   for (const auto& kv : voxel_map) {
-    out_indices.push_back(kv.second);
-    output.push_back(input[kv.second]);
+    const auto& idx = kv.second;
+    for (int i : idx) out_members.push_back(i);
+    out_offsets.push_back(static_cast<int>(out_members.size()));
+
+    if (idx.size() == 1) { output.push_back(input[idx[0]]); continue; }
+
+    V3D sum_point = V3D::Zero();
+    M3D sum_sensor_cov = M3D::Zero();
+    M3D sum_pos_cov    = M3D::Zero();
+    for (int i : idx) {
+      sum_point      += input[i].point;
+      sum_sensor_cov += input[i].sensor_cov;
+      sum_pos_cov    += input[i].pos_cov;
+    }
+    const double n = static_cast<double>(idx.size());
+    PointType out_pt{};
+    out_pt.point      = sum_point / n;
+    out_pt.sensor_cov = sum_sensor_cov / n;
+    out_pt.pos_cov    = sum_pos_cov / n;
+    double sum_t = 0.0;
+    for (int i : idx) sum_t += input[i].t;
+    out_pt.t = sum_t / n;
+    output.push_back(out_pt);
   }
 }
 

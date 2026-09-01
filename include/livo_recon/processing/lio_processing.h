@@ -241,9 +241,17 @@ private:
   bool       spline_ok_ = false;      // fit succeeded for THIS frame
   // Raw-cloud indices of the points that survived the Stage-1 downsample,
   // captured once per frame so the per-iteration re-deskew can go back to
-  // each kept point's raw LiDAR-frame coordinates.  Empty when the spline
-  // is off or ds_mode is "average" (see voxelDownsampleIndexed()'s docs).
-  std::vector<int> ds_indices_;
+  // each kept point's raw LiDAR-frame coordinates.  Empty only when the
+  // spline is off or spline/redeskew_each_iteration is false -- ds_mode no
+  // longer matters, which is the whole point of the CSR shape.
+  //
+  // CSR membership set from the voxel downsample: the raw-point indices
+  // behind output point i are ds_members_[ds_offsets_[i] .. ds_offsets_[i+1]).
+  // ds_offsets_.size() == mg.points.size() + 1 when it is live.  Populated in
+  // BOTH ds_modes -- in FIRST every cell has one member, in AVERAGE the cell
+  // is the source set the averaged point was built from.
+  std::vector<int> ds_offsets_;
+  std::vector<int> ds_members_;
   // Scratch for the control-point refinement, reused across iterations and
   // frames so the per-iteration path allocates nothing.
   std::vector<SplineLidarObs> lidar_obs_;

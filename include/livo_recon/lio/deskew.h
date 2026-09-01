@@ -93,6 +93,25 @@ void deskewPointsSpline(
 // Re-running the downsample itself each iteration would also let the KEPT
 // SET change between iterations, which would make the residual count --
 // and therefore the update -- move for reasons unrelated to the state.
+// As deskewPointsSplineSubset(), but over the CSR membership set that
+// voxelDownsampleIndexedCsr() produces, so it covers ds_mode:=average as
+// well as first.  points_out[i] is rebuilt from the members of output point
+// i: each member is re-placed from its RAW coordinates against the current
+// spline, and the results are then averaged exactly as
+// voxelDownsample(AVERAGE) averages them.  A single-member cell -- every
+// cell in FIRST mode -- takes the same code path as the old subset call and
+// is bit-identical to it.
+void deskewPointsSplineCsr(
+    const StateGroupPtr& state,
+    const ScanSpline& spline,
+    double scan_end_time,
+    const std::vector<PointXYZT>& points,
+    const std::vector<int>& offsets,
+    const std::vector<int>& members,
+    const DeskewOptions& opts,
+    bool keep_time_noise,
+    std::vector<PointXYZCov>& points_out);
+
 void deskewPointsSplineSubset(
     const StateGroupPtr& state,
     const ScanSpline& spline,
