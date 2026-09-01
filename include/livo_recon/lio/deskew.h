@@ -5,6 +5,7 @@
 
 #include "livo_recon/utils/data/data_wrappers.h"
 #include "livo_recon/utils/state/state.h"
+#include "livo_recon/lio/spline.h"
 
 // Per-point LiDAR deskewing. Only ONE strategy lives here now:
 // deskewPoints(), a one-shot deskew against the piecewise-IMU-integrated
@@ -66,6 +67,53 @@ void deskewPoints(
     double scan_end_time,
     const std::vector<PointXYZT>& points,
     const DeskewOptions& opts,
+    std::vector<PointXYZCov>& points_out);
+
+// Spline deskew.  Places every point at the pose the spline gives for the
+// point's OWN timestamp, expressed in the scan-end IMU frame, and rotates
+// its sensor covariance by the same relative rotation.  Unlike
+// deskewPoints() this is safe -- and intended -- to call repeatedly within
+// one frame: re-anchor the spline to the corrected state (ScanSpline::
+// anchorTo()) and call this again, and every point moves with the
+// correction instead of only the scan-end pose moving.
+//
+// The time_based_process_noise inflation is deliberately NOT applied here.
+// That term exists to stand in for trajectory uncertainty that the one-shot
+// deskew cannot express, and it does so by putting a PROCESS-noise quantity
+// (state->varAcc(), the same variable cov_w's accelerometer block is built
+// from) inside a MEASUREMENT covariance -- the same number on both sides of
+// S = H P H^T + R.  With the spline carrying intra-scan trajectory shape
+// explicitly, the term has nothing left to stand in for, and dropping it
+// restores a clean separation between Q and R.  That separation is a
+// precondition for AdaptiveQ meaning anything: with var_acc in R as well as
+// in Q, "measure the noise, apply it as process noise" would feed back into
+// its own measurement.  Set spline/keep_time_noise to restore the legacy
+// term for an A/B against this reasoning.
+void deskewPointsSpline(
+    const StateGroupPtr& state,
+    const ScanSpline& spline,
+    double scan_end_time,
+    const std::vector<PointXYZT>& points,
+    const DeskewOptions& opts,
+    bool keep_time_noise,
+    std::vector<PointXYZCov>& points_out);
+
+// As above, but only for the points at `indices` into `points`, writing into
+// points_out[i] for i in [0, indices.size()).  Used for the per-IEKF-
+// iteration re-deskew: the voxel downsample runs ONCE (on iteration 0) and
+// its surviving raw indices are reused every iteration afterwards, so the
+// re-deskew costs one spline evaluation per kept point and no re-hashing.
+// Re-running the downsample itself each iteration would also let the KEPT
+// SET change between iterations, which would make the residual count --
+// and therefore the update -- move for reasons unrelated to the state.
+void deskewPointsSplineSubset(
+    const StateGroupPtr& state,
+    const ScanSpline& spline,
+    double scan_end_time,
+    const std::vector<PointXYZT>& points,
+    const std::vector<int>& indices,
+    const DeskewOptions& opts,
+    bool keep_time_noise,
     std::vector<PointXYZCov>& points_out);
 
 }  // namespace livo_recon

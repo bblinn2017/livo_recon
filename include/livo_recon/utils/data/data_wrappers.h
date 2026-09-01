@@ -46,6 +46,16 @@ struct PointXYZT
 struct PointXYZCov {
   V3D point;
 
+  // Capture time of the LiDAR return, on the SAME base as PointXYZT::t
+  // (frame-relative, mg.image.t == scan end).  Carried through deskew and
+  // downsample so a residual can be evaluated against the scan spline at
+  // the instant the point was actually measured, and so the spline's
+  // control points can be refined by the points in their own temporal
+  // neighbourhood.  Zero for points produced before this existed and for
+  // the poses-empty fallback path; ScanSpline evaluation clamps, so a zero
+  // here degrades to "scan start", never to undefined behaviour.
+  double t = 0.0;
+
   // PURE sensor+deskew measurement-noise covariance (independent per
   // point) -- rotated body->world by StateGroup::toWorld()/toCamera().
   // NEVER has pose uncertainty folded in, and never mutated downstream --

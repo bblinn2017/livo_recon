@@ -28,6 +28,15 @@ struct MeasureGroup
   // IMU Processing
   std::vector<Pose6D> poses;
 
+  // A copy of this frame's raw IMU samples, kept ONLY when the scan-spline
+  // mechanism is on (SplineOptions::enable).  ImuProc::propagate() clears
+  // imu_samples once it has consumed them, but the spline-vs-IMU residual
+  // -- which is the whole basis of the live Q estimate -- needs the raw,
+  // unaveraged, un-bias-corrected stream afterwards.  Empty (and never
+  // populated, zero cost) with the feature off.  Includes the interpolated
+  // final sample at mg.image.t so the residual covers the full scan.
+  std::vector<ImuSample> imu_samples_raw;
+
   // LIO Processing -- the single point set used for both residual matching
   // and voxel-map insertion (VoxelMap::updateMap()). Built from
   // lidar_points via point_filter_num (keep-every-Nth, applied at

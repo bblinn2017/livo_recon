@@ -9,6 +9,12 @@ namespace livo_recon
 
 struct ImuProcOptions
 {
+  // Retain a copy of each frame's raw IMU samples in
+  // MeasureGroup::imu_samples_raw before propagate() consumes and clears
+  // them.  Set from LioProcOptions::spline.enable by the node wiring, not
+  // from its own rosparam -- there is no reason to pay for the copy unless
+  // the spline residual is going to read it.
+  bool keep_raw_samples = false;
   // Gates the per-propagation /tmp/imu.txt dump (debugLogImu), which
   // includes a full flattened state covariance matrix every call --
   // previously unconditional (2026-08-09 cleanup, task #149). Off by

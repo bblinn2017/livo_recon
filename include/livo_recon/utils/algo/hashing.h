@@ -96,7 +96,48 @@ void voxelDownsample(
     out_pt.point = sum_point / n;
     out_pt.sensor_cov = sum_sensor_cov / n;
     out_pt.pos_cov    = sum_pos_cov / n;
+    // Mean capture time, to match the mean position.  Previously left at
+    // the default-constructed 0, which silently mislabelled every averaged
+    // point as "scan start" for any consumer that reads the timestamp.
+    double sum_t = 0.0;
+    for (const auto* p : pts) sum_t += p->t;
+    out_pt.t = sum_t / n;
     output.push_back(out_pt);
+  }
+}
+
+// As voxelDownsample() in DsMode::FIRST, but also reports which INPUT index
+// each surviving output point came from.  The scan-spline re-deskew
+// (LioProc::redeskewFromSpline()) needs this: it re-places the kept points
+// against an updated spline every IEKF iteration, and to do that it has to
+// go back to each point's RAW LiDAR-frame coordinates, which the
+// downsampled output has already transformed away.
+//
+// FIRST only, by construction: an AVERAGE cell's output point is a blend
+// of several inputs and has no single source index, so there is nothing
+// honest to return.  Callers needing AVERAGE re-deskew the full cloud and
+// re-downsample instead (correct, just more expensive, and the kept set can
+// shift between iterations).
+template <typename PointType, typename KeyFunc>
+void voxelDownsampleIndexed(
+    const std::vector<PointType>& input,
+    std::vector<PointType>& output,
+    std::vector<int>& out_indices,
+    KeyFunc key_func)
+{
+  output.clear();
+  out_indices.clear();
+
+  robin_hood::unordered_flat_map<VoxelKey, int, VoxelKeyHash> voxel_map;
+  voxel_map.reserve(input.size());
+  for (int i = 0; i < static_cast<int>(input.size()); ++i)
+    voxel_map.emplace(key_func(input[i]), i);
+
+  output.reserve(voxel_map.size());
+  out_indices.reserve(voxel_map.size());
+  for (const auto& kv : voxel_map) {
+    out_indices.push_back(kv.second);
+    output.push_back(input[kv.second]);
   }
 }
 

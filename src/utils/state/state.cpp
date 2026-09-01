@@ -123,6 +123,12 @@ void StateGroup::setNoiseParams(const V3D& var_acc, const V3D& var_gyr)
   var_gyr_ = var_gyr;
 }
 
+void StateGroup::setNoiseFloor(const V3D& var_acc_floor, const V3D& var_gyr_floor)
+{
+  var_acc_floor_ = var_acc_floor;
+  var_gyr_floor_ = var_gyr_floor;
+}
+
 void StateGroup::setPropagatedState(const M3D& rot, const V3D& pos, const V3D& vel)
 {
   rot_ = rot; pos_ = pos; vel_ = vel;

@@ -1,0 +1,112 @@
+# ============================================================================
+# Overrides for the scan-spline + live process-noise arms.
+#
+# Pass on top of a dataset config, which is loaded first:
+#   roslaunch livo_recon livo_recon_ntu_viral.launch \
+#     overrides_file:=$(rospack find livo_recon)/config/spline_adaptive_q.yaml
+#
+# The sweep harness generates per-cell copies of this file with the fields
+# below substituted; this checked-in version is the CENTRE CELL, i.e. the
+# configuration the plateau measurement in include/livo_recon/lio/
+# adaptive_q.h says to ship.
+#
+# Every switch here defaults to OFF in code.  With spline/enable false the
+# frame path is byte-identical to the pre-change build, so the a0 baseline
+# cell is the existing binary and does not need a separate build.
+# ============================================================================
+
+spline:
+  # Master switch for the scan-spline trajectory.
+  enable: true
+
+  # Control points over one scan window.  THE ablation knob.  8 sits in the
+  # middle of the measured plateau (4-10) where the IMU-noise estimate
+  # recovers 0.81-0.96 of truth with a white residual.  Above ~12 on a 0.1 s
+  # scan the second derivative starts chasing integrated-IMU noise and the
+  # estimate blows up (4.8x at 14, 13.4x at 18) -- ablate across that cliff
+  # deliberately, do not ship past it.
+  n_control_points: 8
+
+  # Alternative parameterisation: control points per second, converted
+  # against the actual scan duration.  0 = use n_control_points directly.
+  # 80 Hz over a 0.1 s scan is n_cp = 11, i.e. the top of the plateau.
+  control_point_hz: 0.0
+  n_control_points_max: 32
+
+  # Fit conditioning.  fit_reg_max_frac refuses the fit outright (falling
+  # back to the legacy one-shot deskew for that frame) if the regularizer is
+  # carrying more than this fraction of the normal matrix -- an over-smoothed
+  # spline would report a falsely small IMU noise.
+  fit_regularization: 1.0e-6
+  fit_reg_max_frac: 0.05
+
+  # Re-deskew every IEKF inner iteration against the re-anchored spline.
+  # This is the mechanism's point.  Set false to separate "spline deskew"
+  # from "iterated deskew" as independent arms.
+  redeskew_each_iteration: true
+
+  # Refit the position control points against the current iteration's
+  # point-to-plane residuals, so a LiDAR return influences the control points
+  # in its own temporal neighbourhood rather than only through the rigid
+  # 6-dof state correction.  Its own arm; off in the centre cell.
+  lidar_refine_cp: false
+  lidar_refine_damping: 1.0e-2
+  lidar_refine_prior_w: 1.0
+  lidar_refine_iters: 1
+
+  # Keep the legacy total_dt^3 * var_acc inflation on each point's
+  # covariance.  OFF here on purpose: that term puts state->varAcc() -- the
+  # same variable cov_w's accelerometer block is built from -- inside the
+  # MEASUREMENT covariance, and leaving it on while adaptive_q measures and
+  # applies that quantity closes a loop through the measurement model.
+  keep_time_noise: false
+
+  log_en: true
+
+adaptive_q:
+  enable: true
+
+  # Bounded excursion: applied = nominal * 10^(beta * tanh(z)).
+  # 0.3 is +/- 2x.  This is a SAFETY parameter -- the reachable set is finite
+  # and enumerable so it can be swept offline and certified before it runs.
+  beta_acc: 0.3
+  beta_gyr: 0.3
+
+  # Per-frame cap on the movement of z.  0.02 at ~10 Hz needs ~5 s to cross
+  # the band, so no single frame's measurement moves the filter far.
+  z_rate_limit: 0.02
+
+  # Whiteness gate.  This is the anchor that actually binds: it is what
+  # catches an over-resolved spline whose second derivative has started
+  # chasing noise.  0.35 passes genuinely white residuals at n ~ 20 (where
+  # the ACF's own standard error is ~0.22) and catches the +0.31/-0.51 seen
+  # past the control-point cliff.
+  acf1_max: 0.35
+
+  # Hard bounds relative to the YAML nominal, on top of beta.
+  max_ratio: 100.0
+  min_ratio: 0.01
+
+  # Use CalibProc's measured static-window variance as a hard lower bound.
+  # Always available now: calib publishes it via setNoiseFloor() on every
+  # run regardless of calib/use_calib_var, instead of computing and
+  # discarding it.  NOTE this is the PHYSICAL floor; the config's own sweep
+  # comment puts the gyro's EMPIRICAL stability floor around 90x the
+  # datasheet sigma, which is a different and much higher quantity --
+  # noise_floor_scale is where that gets expressed if it turns out to bind.
+  use_noise_floor: true
+  noise_floor_scale: 1.0
+
+  # Observe before acting.  AKF-LIO's published failure is a ~10 s transient
+  # during which its adaptation is actively harmful; 20 frames at 10 Hz is
+  # 2 s of pure observation before anything is applied.
+  warmup_frames: 20
+  ema: 0.9
+  log_en: true
+
+# Leave the calibration's own value/floor split alone.  use_calib_var: true
+# would REPLACE the operating variance with the measured floor, which per the
+# sweep comment above would put the gyro deep inside the region that sweep
+# found catastrophic.  The floor is published regardless.
+calib:
+  use_calib_var: false
