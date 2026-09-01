@@ -122,10 +122,13 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "spline/fit_regularization",  opts_.spline.fit_regularization, 1e-6);
   paramWarn<double>(pnh, "spline/fit_reg_max_frac",    opts_.spline.fit_reg_max_frac, 0.05);
   paramWarn<bool>  (pnh, "spline/redeskew_each_iteration", opts_.spline.redeskew_each_iteration, true);
+  paramWarn<std::string>(pnh, "spline/rot_mode",       opts_.spline.rot_mode, std::string("tangent"));
+  paramWarn<int>   (pnh, "spline/rot_fit_iters",       opts_.spline.rot_fit_iters, 2);
   paramWarn<bool>  (pnh, "spline/lidar_refine_cp",     opts_.spline.lidar_refine_cp, false);
   paramWarn<double>(pnh, "spline/lidar_refine_damping",opts_.spline.lidar_refine_damping, 1e-2);
   paramWarn<double>(pnh, "spline/lidar_refine_prior_w",opts_.spline.lidar_refine_prior_w, 1.0);
   paramWarn<int>   (pnh, "spline/lidar_refine_iters",  opts_.spline.lidar_refine_iters, 1);
+  paramWarn<double>(pnh, "spline/lidar_refine_max_step",opts_.spline.lidar_refine_max_step, 0.10);
   paramWarn<bool>  (pnh, "spline/log_en",              opts_.spline.log_en, false);
   paramWarn<bool>  (pnh, "spline/keep_time_noise",     opts_.spline_keep_time_noise, false);
 
@@ -172,6 +175,7 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  spline/n_control_points:   " << opts_.spline.n_control_points
       << "\n  spline/control_point_hz:   " << opts_.spline.control_point_hz
       << "\n  spline/redeskew_each_iter: " << (opts_.spline.redeskew_each_iteration ? "true" : "false")
+      << "\n  spline/rot_mode:           " << opts_.spline.rot_mode
       << "\n  spline/lidar_refine_cp:    " << (opts_.spline.lidar_refine_cp ? "true" : "false")
       << "\n  spline/keep_time_noise:    " << (opts_.spline_keep_time_noise ? "true" : "false")
       << "\n  adaptive_q/enable:         " << (opts_.adaptive_q.enable ? "true" : "false")
@@ -227,6 +231,7 @@ void LioProc::buildResiduals(
     if (voxel_map_->findPlaneResidual(pt_world, res, &tier0_had_plane)) {
       res.point_cross_normal = pts[i].point.cross(state_->rot().transpose() * res.normal);
       res.sigma_squared += res.plane_var_term;
+      res.t = pts[i].t;   // for the spline control-point refinement
       build_thread_residuals_[omp_get_thread_num()].push_back(res);
       tier0_missed = (res.match_tier != 0);
     } else {
@@ -432,6 +437,27 @@ bool LioProc::redeskewFromSpline(MeasureGroup& mg)
 
   TimedScope ts(profiler_, "lio/spline/redeskew");
 
+  // (1) SHAPE, from the map.  Must run BEFORE anchorTo(), which moves every
+  // point and would leave these residuals describing a spline that no longer
+  // exists.  See SplineOptions::lidar_refine_cp for the division of labour.
+  if (opts_.spline.lidar_refine_cp && !residuals_.empty())
+  {
+    lidar_obs_.clear();
+    lidar_obs_.reserve(residuals_.size());
+    for (const auto& r : residuals_)
+    {
+      if (r.t <= 0.0) continue;                 // no timestamp -> not usable
+      SplineLidarObs o;
+      o.t      = r.t;
+      o.normal = r.normal;
+      o.r      = r.r;
+      o.sigma2 = r.sigma_squared;
+      lidar_obs_.push_back(o);
+    }
+    spline_.refineWithLidar(lidar_obs_, opts_.spline);
+  }
+
+  // (2) POSE, from the IEKF.
   // Carry the IEKF's correction into EVERY control point, not just the
   // scan-end pose.  anchorTo() is a rigid transform of the whole spline
   // that makes its pose at the frame reference time equal the corrected
@@ -505,7 +531,8 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
     {
       ofs << "scan_id," << adaptive_q_.csvHeader()
           << ",spline_ok,n_cp,fit_res_pos,fit_res_rot,fit_reg_frac,rot_chord_deg,"
-             "fit_fail_count,frame_count,max_abs_acc,max_abs_gyr\n";
+             "fit_fail_count,frame_count,max_abs_acc,max_abs_gyr,"
+             "n_cp_req,rot_mode,refine_applied,refine_rejects,last_refine_step\n";
       first = false;
     }
     const double t_abs = mg.image.t + data_queues_->start_time;
@@ -518,7 +545,12 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
         << (spline_ok_ ? spline_.fitRegFrac() : 0.0) << ','
         << (spline_ok_ ? spline_.rotationChordDeg() : 0.0) << ','
         << spline_fit_fail_count_ << ',' << spline_frame_count_ << ','
-        << last_spline_stats_.max_abs_acc << ',' << last_spline_stats_.max_abs_gyr
+        << last_spline_stats_.max_abs_acc << ',' << last_spline_stats_.max_abs_gyr << ','
+        << (spline_ok_ ? spline_.nControlPointsRequested() : 0) << ','
+        << (spline_ok_ ? (spline_.cumulative() ? "cumulative" : "tangent") : "-") << ','
+        << (spline_ok_ ? spline_.refineApplied() : 0) << ','
+        << (spline_ok_ ? spline_.refineRejects() : 0) << ','
+        << (spline_ok_ ? spline_.lastRefineStep() : 0.0)
         << '\n';
   }
 }
@@ -808,6 +840,15 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     // exactly as it was going into this frame.
     if (any_solved)
       ekf_.applyCovarianceUpdate(state_, prior_cov_);
+
+    // FINAL re-deskew, against the converged state.  redeskewFromSpline()
+    // runs at the TOP of each iteration, so without this call the last
+    // solve's correction never reaches mg.points -- and the node calls
+    // VoxelMap::updateMap() on exactly those points once processLIO()
+    // returns.  The map would be built, permanently, from points placed by
+    // the second-to-last state.  Also runs one last shape refinement against
+    // the final residual set.
+    redeskewFromSpline(mg);
 
     // Measure the IMU against the converged spline and, if enabled, update
     // the applied process noise for the NEXT frame.  Placed after the

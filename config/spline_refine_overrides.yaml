@@ -1,0 +1,22 @@
+# Additional keys for the LiDAR control-point refinement and the rotation-mode
+# check. Layer on top of config/spline_adaptive_q.yaml; only the differing keys
+# need to appear in a sweep cell.
+spline:
+  # "tangent" (default) | "cumulative". Tangent is the default because it is
+  # measurably better over a single scan -- see the table in lio/spline.h and
+  # scripts/test/test_spline_rotation.cpp. Cumulative is retained as a check on
+  # real bags, not as an improvement.
+  rot_mode: tangent
+  rot_fit_iters: 2
+
+  # The control-point refinement. Previously declared, parsed, printed and
+  # never read by any algorithm -- so SP-4a's on/off arm was bit-identical
+  # because the code path did not exist, not because the geometry was inert.
+  lidar_refine_cp: false
+  lidar_refine_damping: 1.0e-2
+  lidar_refine_prior_w: 1.0
+  lidar_refine_iters: 1
+  # Reject the whole step if any control point would move more than this.
+  # Fails safe to the unrefined spline; the rejection is counted in
+  # spline_q.csv's refine_rejects rather than hidden.
+  lidar_refine_max_step: 0.10

@@ -244,6 +244,9 @@ private:
   // each kept point's raw LiDAR-frame coordinates.  Empty when the spline
   // is off or ds_mode is "average" (see voxelDownsampleIndexed()'s docs).
   std::vector<int> ds_indices_;
+  // Scratch for the control-point refinement, reused across iterations and
+  // frames so the per-iteration path allocates nothing.
+  std::vector<SplineLidarObs> lidar_obs_;
   AdaptiveQ  adaptive_q_;
   bool       adaptive_q_primed_ = false;
   SplineImuResidualStats last_spline_stats_;

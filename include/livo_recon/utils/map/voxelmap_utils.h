@@ -16,6 +16,16 @@ struct Residual
 {
   double r;
   V3D normal;
+
+  // Capture time of the point this residual came from, copied straight from
+  // PointXYZCov::t in LioProc::buildResiduals().  Only the scan-spline
+  // control-point refinement reads it (lio/spline.h, refineWithLidar): a
+  // residual's time is what selects the four control points it acts on, and
+  // without it the refinement cannot be built from the residual set the IEKF
+  // already accumulated.  0.0 on any path that does not set it, which
+  // ScanSpline treats as "outside the window" and skips rather than
+  // mis-attributing to the scan start.
+  double t = 0.0;
   // Rotation Jacobian: point.cross(R1^T*normal), the R1 (rotation)
   // Jacobian column (lio_accumulator.cpp's accumulateLioResiduals()).
   V3D point_cross_normal;
