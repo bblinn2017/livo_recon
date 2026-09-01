@@ -63,6 +63,11 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "imu/q_alpha_bias", opts_.q_alpha_bias, 1.0);
   paramWarn<bool>(pnh, "imu/log_debug_en", opts_.log_debug_en, false);
   paramWarn<bool>(pnh, "imu/log_qhat_en", opts_.log_qhat_en, false);
+  // Read directly rather than being wired from LioProcOptions: the two
+  // classes are constructed independently and this keeps the single source
+  // of truth in the parameter server, where the sweep harness writes it.
+  // The copy is skipped entirely when the spline is off.
+  paramWarn<bool>(pnh, "spline/enable", opts_.keep_raw_samples, false);
   { std::lock_guard<std::mutex> lock(g_qhat_mtx); g_qhat_enabled = opts_.log_qhat_en; }
 
   std::ostringstream oss;
@@ -71,7 +76,8 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  q_alpha_acc:          " << opts_.q_alpha_acc
       << "\n  q_alpha_gyr:          " << opts_.q_alpha_gyr
       << "\n  q_alpha_bias:         " << opts_.q_alpha_bias
-      << "\n  log_qhat_en:          " << (opts_.log_qhat_en ? "true" : "false");
+      << "\n  log_qhat_en:          " << (opts_.log_qhat_en ? "true" : "false")
+      << "\n  keep_raw_samples:     " << (opts_.keep_raw_samples ? "true" : "false");
   return oss.str();
 }
 
@@ -99,6 +105,20 @@ void ImuProc::propagate(MeasureGroup& mg)
   V3D pos_imu(state_->pos()), vel_imu(state_->vel());
 
   const M3D var_acc_diag = state_->varAcc().asDiagonal();
+
+  // Snapshot the raw stream BEFORE the loop consumes it -- the spline-vs-
+  // IMU residual (lio/spline.h) needs the unaveraged, un-bias-corrected
+  // samples, and mg.imu_samples is cleared at the end of this function.
+  // The loop below also interpolates the final sample onto t_curr; that
+  // interpolated tail is appended after the loop so the residual covers
+  // the whole scan window rather than stopping at the last raw sample.
+  if (opts_.keep_raw_samples)
+  {
+    mg.imu_samples_raw.clear();
+    mg.imu_samples_raw.reserve(mg.imu_samples.size() + 1);
+    for (const auto& s : mg.imu_samples)
+      if (s.t <= t_curr) mg.imu_samples_raw.push_back(s);
+  }
 
   ImuSample head = last_imu_sample_;
   auto it = mg.imu_samples.begin();
@@ -231,6 +251,14 @@ void ImuProc::propagate(MeasureGroup& mg)
 
     if (is_last)
       break;
+  }
+
+  if (opts_.keep_raw_samples)
+  {
+    // `head` is the loop's final tail, already interpolated onto t_curr on
+    // the is_last path.  Append it only if it actually extends the window.
+    if (mg.imu_samples_raw.empty() || head.t > mg.imu_samples_raw.back().t + 1e-12)
+      mg.imu_samples_raw.push_back(head);
   }
 
   last_imu_sample_ = head;

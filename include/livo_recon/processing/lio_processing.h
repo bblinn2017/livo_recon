@@ -8,6 +8,8 @@
 #include "livo_recon/utils/data/measures.h"
 #include "livo_recon/utils/log/profiler.h"
 #include "livo_recon/lio/deskew.h"
+#include "livo_recon/lio/spline.h"
+#include "livo_recon/lio/adaptive_q.h"
 
 #include <array>
 
@@ -117,6 +119,25 @@ struct LioProcOptions
   double ds_leaf_size = 0.15;
   std::string ds_mode = "first";
 
+  // ── Scan-spline trajectory + live process-noise estimation ──────────────
+  // See include/livo_recon/lio/spline.h and adaptive_q.h for the full
+  // rationale.  Both default OFF; with spline.enable false not one line of
+  // either subsystem executes and the frame path is byte-identical to the
+  // pre-change build.
+  SplineOptions    spline;
+  AdaptiveQOptions adaptive_q;
+
+  // Keep the legacy total_dt^3 * var_acc inflation on each point's
+  // covariance even when the spline is fitting the intra-scan trajectory.
+  // Default false BECAUSE that term puts state->varAcc() -- the same
+  // variable cov_w's accelerometer block is built from -- inside the
+  // MEASUREMENT covariance, i.e. the same quantity on both sides of
+  // S = H P H^T + R.  Leaving it on while AdaptiveQ measures and applies
+  // that quantity would close a feedback loop through the estimator's own
+  // measurement model.  Exposed so the reasoning can be A/B tested rather
+  // than assumed.
+  bool spline_keep_time_noise = false;
+
   // History (176-191): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-176
   bool log_consistency_scan_en = false;
 
@@ -143,6 +164,22 @@ public:
   // populated, mirroring the guarantee ImuProc::undistortLidar()/
   // downsamplePoints() used to provide unconditionally before this move.
   void deskewAndDownsample(MeasureGroup& mg);
+
+  // Re-place this frame's kept points against the spline after the spline
+  // has been re-anchored to the corrected state.  Called at the top of
+  // every IEKF inner iteration after the first, when
+  // spline.redeskew_each_iteration is on.  No-op (returns false) if the
+  // spline is not valid for this frame, so a failed fit degrades to the
+  // legacy one-shot deskew rather than to garbage.
+  bool redeskewFromSpline(MeasureGroup& mg);
+
+  // Fit the spline, and afterwards measure the IMU residual against it and
+  // hand the result to AdaptiveQ.  Split from deskewAndDownsample() so the
+  // measurement happens AFTER the frame's IEKF has converged and the
+  // spline has been anchored to the final state -- measuring against the
+  // propagated-only spline would fold the frame's own correction error
+  // into the "noise".
+  void finalizeSplineAndQ(MeasureGroup& mg);
 
   // allow_consistency_log: T0-D's corr.csv wants the FIRST-iteration
   // (pre-update, un-relinearized) innovation only -- true only from
@@ -198,6 +235,20 @@ private:
   mutable double last_scan_t_abs_ = -1.0;
 
   std::vector<Residual> residuals_;
+
+  // ── Scan-spline state, all per-frame ────────────────────────────────────
+  ScanSpline spline_;
+  bool       spline_ok_ = false;      // fit succeeded for THIS frame
+  // Raw-cloud indices of the points that survived the Stage-1 downsample,
+  // captured once per frame so the per-iteration re-deskew can go back to
+  // each kept point's raw LiDAR-frame coordinates.  Empty when the spline
+  // is off or ds_mode is "average" (see voxelDownsampleIndexed()'s docs).
+  std::vector<int> ds_indices_;
+  AdaptiveQ  adaptive_q_;
+  bool       adaptive_q_primed_ = false;
+  SplineImuResidualStats last_spline_stats_;
+  int        spline_fit_fail_count_ = 0;
+  int        spline_frame_count_ = 0;
   mutable std::vector<std::vector<Residual>> build_thread_residuals_;
 
   // Per-thread miss classification for points where findPlaneResidual()

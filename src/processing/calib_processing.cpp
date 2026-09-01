@@ -174,6 +174,12 @@ std::string CalibProc::estimateFromBuffer()
   // use_calib_var defaults false -- see CalibProcOptions's docs. var_acc/
   // var_gyr (computed above) are discarded in that case; state.yaml's
   // cov/acc,gyr (hardcoded, per-sensor) stays in effect untouched.
+  // ALWAYS publish the measured variance as a FLOOR, whatever
+  // use_calib_var says -- see StateGroup::setNoiseFloor()'s doc comment for
+  // why the bound and the operating value must stay separate quantities.
+  // Previously this number was computed on every run and then discarded
+  // whenever use_calib_var was false, which is both shipped configs.
+  state_->setNoiseFloor(var_acc, var_gyr);
   if (opts_.use_calib_var)
     state_->setNoiseParams(var_acc, var_gyr);
 
@@ -182,6 +188,8 @@ std::string CalibProc::estimateFromBuffer()
       << "\n  gyro bias:  " << state_->biasGyr().transpose()
       << "\n  acc noise:  " << state_->varAcc().transpose()
       << "\n  gyro noise: " << state_->varGyr().transpose()
+      << "\n  acc floor:  " << state_->varAccFloor().transpose()
+      << "\n  gyro floor: " << state_->varGyrFloor().transpose()
       << "\n  gravity:    " << state_->gravity().transpose();
   const std::string done_msg = oss.str();
 

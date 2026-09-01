@@ -114,6 +114,44 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   opts_.deskew.sigma_a2 = sin_angle_err * sin_angle_err;
   paramWarn<std::string>(pnh, "imu/undistort/time_based_process_noise",
                           opts_.deskew.time_based_process_noise, "var_acc");
+  // ── scan spline ──────────────────────────────────────────────────────
+  paramWarn<bool>  (pnh, "spline/enable",              opts_.spline.enable, false);
+  paramWarn<int>   (pnh, "spline/n_control_points",    opts_.spline.n_control_points, 8);
+  paramWarn<double>(pnh, "spline/control_point_hz",    opts_.spline.control_point_hz, 0.0);
+  paramWarn<int>   (pnh, "spline/n_control_points_max",opts_.spline.n_control_points_max, 32);
+  paramWarn<double>(pnh, "spline/fit_regularization",  opts_.spline.fit_regularization, 1e-6);
+  paramWarn<double>(pnh, "spline/fit_reg_max_frac",    opts_.spline.fit_reg_max_frac, 0.05);
+  paramWarn<bool>  (pnh, "spline/redeskew_each_iteration", opts_.spline.redeskew_each_iteration, true);
+  paramWarn<bool>  (pnh, "spline/lidar_refine_cp",     opts_.spline.lidar_refine_cp, false);
+  paramWarn<double>(pnh, "spline/lidar_refine_damping",opts_.spline.lidar_refine_damping, 1e-2);
+  paramWarn<double>(pnh, "spline/lidar_refine_prior_w",opts_.spline.lidar_refine_prior_w, 1.0);
+  paramWarn<int>   (pnh, "spline/lidar_refine_iters",  opts_.spline.lidar_refine_iters, 1);
+  paramWarn<bool>  (pnh, "spline/log_en",              opts_.spline.log_en, false);
+  paramWarn<bool>  (pnh, "spline/keep_time_noise",     opts_.spline_keep_time_noise, false);
+
+  // ── live process-noise estimation ────────────────────────────────────
+  paramWarn<bool>  (pnh, "adaptive_q/enable",          opts_.adaptive_q.enable, false);
+  paramWarn<double>(pnh, "adaptive_q/beta_acc",        opts_.adaptive_q.beta_acc, 0.3);
+  paramWarn<double>(pnh, "adaptive_q/beta_gyr",        opts_.adaptive_q.beta_gyr, 0.3);
+  paramWarn<double>(pnh, "adaptive_q/z_rate_limit",    opts_.adaptive_q.z_rate_limit, 0.02);
+  paramWarn<double>(pnh, "adaptive_q/acf1_max",        opts_.adaptive_q.acf1_max, 0.35);
+  paramWarn<double>(pnh, "adaptive_q/max_ratio",       opts_.adaptive_q.max_ratio, 100.0);
+  paramWarn<double>(pnh, "adaptive_q/min_ratio",       opts_.adaptive_q.min_ratio, 0.01);
+  paramWarn<bool>  (pnh, "adaptive_q/use_noise_floor", opts_.adaptive_q.use_noise_floor, true);
+  paramWarn<double>(pnh, "adaptive_q/noise_floor_scale", opts_.adaptive_q.noise_floor_scale, 1.0);
+  paramWarn<int>   (pnh, "adaptive_q/warmup_frames",   opts_.adaptive_q.warmup_frames, 20);
+  paramWarn<double>(pnh, "adaptive_q/ema",             opts_.adaptive_q.ema, 0.9);
+  paramWarn<bool>  (pnh, "adaptive_q/log_en",          opts_.adaptive_q.log_en, false);
+  adaptive_q_.configure(opts_.adaptive_q);
+
+  // The spline residual needs the raw IMU stream, which ImuProc otherwise
+  // consumes and clears.  Refuse the combination rather than silently
+  // producing an empty residual and a Q estimate that never updates.
+  if (opts_.adaptive_q.enable && !opts_.spline.enable)
+    ROS_WARN("[lio] adaptive_q/enable is set but spline/enable is not -- the Q "
+             "estimate is read from the spline-vs-IMU residual, so it will "
+             "never update. Set spline/enable:=true.");
+
   paramWarn<double>(pnh, "imu/ds/ds_leaf_size", opts_.ds_leaf_size, 0.15);
   paramWarn<std::string>(pnh, "imu/ds/mode", opts_.ds_mode, "first");
 
@@ -130,6 +168,16 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  deskew/sigma_r2:           " << opts_.deskew.sigma_r2
       << "\n  deskew/sigma_a2:           " << opts_.deskew.sigma_a2
       << "\n  deskew/time_based_process_noise: " << opts_.deskew.time_based_process_noise
+      << "\n  spline/enable:             " << (opts_.spline.enable ? "true" : "false")
+      << "\n  spline/n_control_points:   " << opts_.spline.n_control_points
+      << "\n  spline/control_point_hz:   " << opts_.spline.control_point_hz
+      << "\n  spline/redeskew_each_iter: " << (opts_.spline.redeskew_each_iteration ? "true" : "false")
+      << "\n  spline/lidar_refine_cp:    " << (opts_.spline.lidar_refine_cp ? "true" : "false")
+      << "\n  spline/keep_time_noise:    " << (opts_.spline_keep_time_noise ? "true" : "false")
+      << "\n  adaptive_q/enable:         " << (opts_.adaptive_q.enable ? "true" : "false")
+      << "\n  adaptive_q/beta_acc:       " << opts_.adaptive_q.beta_acc
+      << "\n  adaptive_q/beta_gyr:       " << opts_.adaptive_q.beta_gyr
+      << "\n  adaptive_q/warmup_frames:  " << opts_.adaptive_q.warmup_frames
       << "\n  ds/ds_leaf_size:           " << opts_.ds_leaf_size
       << "\n  ds/mode:                   " << opts_.ds_mode
       << "\n  cuda/enable:               " << (cuda_enable_ ? "true" : "false");
@@ -311,13 +359,52 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
 {
   TimedScope ts(profiler_, "lio/deskew");
 
+  // ── fit this frame's trajectory spline ────────────────────────────────
+  // The window runs from the first IMU pose to the frame reference time so
+  // that every LiDAR return in the scan lands inside the fitted domain --
+  // ScanSpline refuses to extrapolate, and a point outside the window would
+  // otherwise be silently clamped to an endpoint.
+  spline_ok_ = false;
+  ds_indices_.clear();
+  if (opts_.spline.enable && !mg.poses.empty())
+  {
+    TimedScope ts_fit(profiler_, "lio/spline/fit");
+    spline_frame_count_++;
+    spline_ok_ = spline_.fit(mg.poses, mg.poses.front().t, mg.image.t, opts_.spline);
+    if (!spline_ok_)
+    {
+      // Never substitute a bad spline for a working deskew.  Count the
+      // failures loudly (reported in finalizeSplineAndQ()) rather than
+      // degrading silently -- a run where the fit failed on most frames is
+      // not the experiment anyone thinks they ran.
+      spline_fit_fail_count_++;
+    }
+  }
+
   std::vector<PointXYZCov> deskewed;
-  deskewPoints(state_, mg.poses, mg.image.t, mg.lidar_points, opts_.deskew, deskewed);
+  if (spline_ok_)
+    deskewPointsSpline(state_, spline_, mg.image.t, mg.lidar_points,
+                       opts_.deskew, opts_.spline_keep_time_noise, deskewed);
+  else
+    deskewPoints(state_, mg.poses, mg.image.t, mg.lidar_points, opts_.deskew, deskewed);
+
   if (opts_.ds_leaf_size > 0.0) {
     DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
-    voxelDownsample(deskewed, mg.points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
+    // Track which raw points survive, so the per-iteration re-deskew can
+    // re-place exactly this set from their raw coordinates.  Only possible
+    // in FIRST mode (an averaged point has no single source) -- see
+    // voxelDownsampleIndexed()'s doc comment.
+    if (spline_ok_ && opts_.spline.redeskew_each_iteration && mode == DsMode::FIRST)
+      voxelDownsampleIndexed(deskewed, mg.points, ds_indices_,
+                             PointXYZCovKeyFn{opts_.ds_leaf_size});
+    else
+      voxelDownsample(deskewed, mg.points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
   } else {
     mg.points = std::move(deskewed);
+    if (spline_ok_ && opts_.spline.redeskew_each_iteration) {
+      ds_indices_.resize(mg.points.size());
+      for (size_t i = 0; i < ds_indices_.size(); ++i) ds_indices_[i] = static_cast<int>(i);
+    }
   }
 
   // See LioProcOptions::dry_run_point_filter_num's doc comment. Identical
@@ -334,6 +421,105 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
     } else {
       mg.dry_run_points = std::move(dry_run_deskewed);
     }
+  }
+}
+
+bool LioProc::redeskewFromSpline(MeasureGroup& mg)
+{
+  if (!spline_ok_ || !opts_.spline.redeskew_each_iteration) return false;
+  if (ds_indices_.empty()) return false;
+  if (ds_indices_.size() != mg.points.size()) return false;
+
+  TimedScope ts(profiler_, "lio/spline/redeskew");
+
+  // Carry the IEKF's correction into EVERY control point, not just the
+  // scan-end pose.  anchorTo() is a rigid transform of the whole spline
+  // that makes its pose at the frame reference time equal the corrected
+  // state, so the intra-scan SHAPE the fit found is preserved exactly
+  // while the whole trajectory moves with the correction.  This is the
+  // difference from the legacy one-shot deskew, where only the scan-end
+  // pose is ever corrected and every earlier point keeps the pose the
+  // IMU-only propagation gave it.
+  spline_.anchorTo(mg.image.t, state_->rot(), state_->pos());
+
+  deskewPointsSplineSubset(state_, spline_, mg.image.t, mg.lidar_points,
+                           ds_indices_, opts_.deskew,
+                           opts_.spline_keep_time_noise, mg.points);
+  return true;
+}
+
+void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
+{
+  if (!opts_.spline.enable) return;
+
+  last_spline_stats_ = SplineImuResidualStats{};
+
+  if (spline_ok_)
+  {
+    // Anchor to the CONVERGED state before measuring.  Measuring against
+    // the propagated-only spline would fold this frame's own correction
+    // error into a number we are about to call "IMU noise".
+    spline_.anchorTo(mg.image.t, state_->rot(), state_->pos());
+
+    if (!mg.imu_samples_raw.empty())
+    {
+      TimedScope ts(profiler_, "lio/spline/imu_residual");
+      last_spline_stats_ = computeSplineImuResidual(
+          spline_, mg.imu_samples_raw,
+          state_->biasAcc(), state_->biasGyr(), state_->gravity());
+    }
+  }
+
+  if (opts_.adaptive_q.enable)
+  {
+    if (!adaptive_q_primed_)
+    {
+      // The NOMINAL is whatever the state was configured with before any
+      // adaptation -- the YAML's state/cov/{acc,gyr} (or the calibration
+      // values, if use_calib_var is on).  The FLOOR is the calibration
+      // window's measured variance, always available now regardless of
+      // use_calib_var.  Isotropic scalars, matching the trace/3 reduction
+      // used at every other point in the pipeline.
+      adaptive_q_.setNominal(state_->varAcc().mean(), state_->varGyr().mean());
+      adaptive_q_.setFloor(state_->varAccFloor().mean(), state_->varGyrFloor().mean());
+      adaptive_q_primed_ = true;
+    }
+
+    adaptive_q_.update(last_spline_stats_);
+
+    // Push the applied values into the state, where ImuProc::propagate()
+    // reads them to build cov_w on the NEXT frame.  One physical quantity,
+    // measured as a measurement covariance and applied as process noise --
+    // see adaptive_q.h's header for why that is legitimate rather than a
+    // category error.  Note this deliberately does NOT touch the floor.
+    if (adaptive_q_.active())
+      state_->setNoiseParams(V3D::Constant(adaptive_q_.varAcc()),
+                             V3D::Constant(adaptive_q_.varGyr()));
+  }
+
+  if (opts_.spline.log_en || opts_.adaptive_q.log_en)
+  {
+    static bool first = true;
+    std::ofstream ofs(debugLogPath("spline_q.csv"), first ? std::ios::trunc : std::ios::app);
+    if (first)
+    {
+      ofs << "scan_id," << adaptive_q_.csvHeader()
+          << ",spline_ok,n_cp,fit_res_pos,fit_res_rot,fit_reg_frac,rot_chord_deg,"
+             "fit_fail_count,frame_count,max_abs_acc,max_abs_gyr\n";
+      first = false;
+    }
+    const double t_abs = mg.image.t + data_queues_->start_time;
+    ofs << voxel_map_->frame_idx_ << ','
+        << adaptive_q_.csvRow(t_abs, last_spline_stats_) << ','
+        << (spline_ok_ ? 1 : 0) << ','
+        << (spline_ok_ ? spline_.nControlPoints() : 0) << ','
+        << (spline_ok_ ? spline_.fitResidualPos() : 0.0) << ','
+        << (spline_ok_ ? spline_.fitResidualRot() : 0.0) << ','
+        << (spline_ok_ ? spline_.fitRegFrac() : 0.0) << ','
+        << (spline_ok_ ? spline_.rotationChordDeg() : 0.0) << ','
+        << spline_fit_fail_count_ << ',' << spline_frame_count_ << ','
+        << last_spline_stats_.max_abs_acc << ',' << last_spline_stats_.max_abs_gyr
+        << '\n';
   }
 }
 
@@ -545,6 +731,15 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     bool any_solved = false;
 
     for (; iter < opts_.max_iterations; iter++) {
+      // Re-place every kept point against the spline, re-anchored to
+      // whatever the previous iteration corrected the state to.  Skipped on
+      // iteration 0 (mg.points is already the freshly-deskewed set) and a
+      // no-op unless spline/redeskew_each_iteration is on.  This is the
+      // mechanism's point: the residuals the next solve sees are computed
+      // from points placed by the CURRENT trajectory estimate, not by the
+      // IMU-only propagation that produced the frame.
+      if (iter > 0) redeskewFromSpline(mg);
+
       // T0-D wants the first-iteration (pre-update, un-relinearized)
       // innovation only -- later iterations relinearize at an
       // already-partially-corrected state, which is not the quantity NIS
@@ -613,6 +808,13 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     // exactly as it was going into this frame.
     if (any_solved)
       ekf_.applyCovarianceUpdate(state_, prior_cov_);
+
+    // Measure the IMU against the converged spline and, if enabled, update
+    // the applied process noise for the NEXT frame.  Placed after the
+    // covariance update so the spline is anchored to the final state --
+    // see finalizeSplineAndQ()'s own doc comment for why measuring earlier
+    // would contaminate the statistic with this frame's correction error.
+    finalizeSplineAndQ(mg);
 
     // T7-a. dx must be read here and not inside the loop: it is the FRAME's
     // correction, and reading it mid-iteration would report one Gauss-Newton

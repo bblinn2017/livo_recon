@@ -36,6 +36,19 @@ public:
 
   void setCalibResult(const M3D& rot, const V3D& bias_gyr, const V3D& bias_acc);
   void setNoiseParams(const V3D& var_acc, const V3D& var_gyr);
+
+  // The sensor's OWN measured noise, from CalibProc's static window --
+  // stored ALWAYS, independently of calib/use_calib_var, and never used as
+  // the operating value.  use_calib_var replaces the operating variance
+  // with this, which per the config's own sweep comment would put the gyro
+  // roughly two orders of magnitude inside the region that sweep found
+  // catastrophic (it fails below ~90x the datasheet sigma and runs at
+  // >=150x).  So the two are deliberately different quantities: this is a
+  // BOUND, consumed by AdaptiveQ (lio/adaptive_q.h) as the lower anchor
+  // that makes its estimate well-posed.  Zero until CalibProc sets it
+  // (the skipCalibration() path never does, and AdaptiveQ treats a zero
+  // floor as "no floor available" rather than as "floor of zero").
+  void setNoiseFloor(const V3D& var_acc_floor, const V3D& var_gyr_floor);
   void setPropagatedState(const M3D& rot, const V3D& pos, const V3D& vel);
   Eigen::MatrixXd& covMut() { return cov_; }
   void applyDelta(const Eigen::VectorXd& dx);
@@ -63,6 +76,8 @@ public:
   const Eigen::MatrixXd& cov() const { return cov_; }
   const V3D& varAcc()     const { return var_acc_; }
   const V3D& varGyr()     const { return var_gyr_; }
+  const V3D& varAccFloor() const { return var_acc_floor_; }
+  const V3D& varGyrFloor() const { return var_gyr_floor_; }
   const V3D& covBiasGyr() const { return cov_bias_gyr_; }
   const V3D& covBiasAcc() const { return cov_bias_acc_; }
 
@@ -139,6 +154,7 @@ private:
   V3D pos_, vel_, bias_gyr_, bias_acc_, gravity_;
   Eigen::MatrixXd cov_;   // dimState() × dimState()
   V3D var_acc_, var_gyr_, cov_bias_gyr_, cov_bias_acc_;
+  V3D var_acc_floor_ = V3D::Zero(), var_gyr_floor_ = V3D::Zero();
 
   // Extrinsics
   M3D R_li_, R_il_, R_lc_, R_ic_;

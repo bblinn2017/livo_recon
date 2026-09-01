@@ -125,6 +125,8 @@ add_executable(livo_recon_node
   src/lio/voxelnode.cpp
   src/lio/lio_accumulator.cpp
   src/lio/deskew.cpp
+  src/lio/spline.cpp
+  src/lio/adaptive_q.cpp
   src/map/voxelmap.cpp
   src/map/akf_map.cpp
   src/map/map_backend_factory.cpp
