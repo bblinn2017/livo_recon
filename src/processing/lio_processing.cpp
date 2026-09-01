@@ -82,8 +82,14 @@ void debugLogLioDryRun(const std::string& msg)
 // onto that boundary and reported an improvement. The honest form of adaptive
 // Q on this evidence is offline estimation with a stability margin, which is
 // what this logger supports and what an in-loop adaptation would not.
+// acw_diag is the accumulated cov_w's diagonal (the frame's process noise as
+// actually built at the run's q_alpha_* values) -- kept as its own column
+// block so an offline reducer (scripts/analysis/qhat.py) can recover the
+// at-alpha=1 per-block reference the estimator's alpha ratio is defined
+// against, without re-deriving IMU noise propagation in Python.
 void debugLogQhat(int scan_id, double t_abs, const Eigen::VectorXd& dx,
-                  const Eigen::VectorXd& expected_diag)
+                  const Eigen::VectorXd& expected_diag,
+                  const Eigen::VectorXd& acw_diag)
 {
   static bool first_call = true;
   static std::mutex mtx;
@@ -94,12 +100,14 @@ void debugLogQhat(int scan_id, double t_abs, const Eigen::VectorXd& dx,
     ofs << "scan_id,t,dim";
     for (int i = 0; i < n; ++i) ofs << ",dx" << i;
     for (int i = 0; i < n; ++i) ofs << ",exp" << i;
+    for (int i = 0; i < n; ++i) ofs << ",acw" << i;
     ofs << "\n";
   }
   first_call = false;
   ofs << scan_id << "," << t_abs << "," << n;
   for (int i = 0; i < n; ++i) ofs << "," << dx(i);
   for (int i = 0; i < n; ++i) ofs << "," << expected_diag(i);
+  for (int i = 0; i < n; ++i) ofs << "," << acw_diag(i);
   ofs << "\n";
 }
 
@@ -666,7 +674,8 @@ std::string LioProc::processLIO(MeasureGroup& mg)
         const Eigen::MatrixXd& P_post = state_->cov();
         if (phi_p_phit.rows() == P_post.rows()) {
           const double t_abs = mg.image.t + data_queues_->start_time;
-          debugLogQhat(voxel_map_->frame_idx_, t_abs, dx, (phi_p_phit - P_post).diagonal());
+          debugLogQhat(voxel_map_->frame_idx_, t_abs, dx, (phi_p_phit - P_post).diagonal(),
+                       accum_cov_w.diagonal());
         }
       }
     }
