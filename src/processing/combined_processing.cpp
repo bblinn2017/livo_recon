@@ -1,5 +1,6 @@
 #include "livo_recon/processing/combined_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
+#include "livo_recon/utils/log/consistency_log.h"
 #include "livo_recon/processing/lio_processing.h"
 #include "livo_recon/processing/vio_processing.h"
 
@@ -22,6 +23,7 @@ std::string CombinedProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "combined/ekf/min_diff_error",  opts_.min_diff_error,  -1.0);
   paramWarn<double>(pnh, "combined/ekf/max_avg_error",   opts_.max_avg_error,   5.0);
   paramWarn<bool>(pnh, "combined/log_debug_en",       opts_.log_debug_en,   false);
+  paramWarn<bool>(pnh, "combined/log_consistency_en", opts_.log_consistency_en, false);
 
   std::ostringstream oss;
   oss << "[params/combined]"
@@ -30,7 +32,8 @@ std::string CombinedProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  ekf/min_norm_dtheta:" << opts_.min_norm_dtheta
       << "\n  ekf/min_norm_dt:    " << opts_.min_norm_dt
       << "\n  ekf/min_diff_error: " << opts_.min_diff_error
-      << "\n  ekf/max_avg_error:  " << opts_.max_avg_error;
+      << "\n  ekf/max_avg_error:  " << opts_.max_avg_error
+      << "\n  log_consistency_en: " << (opts_.log_consistency_en ? "true" : "false");
   return oss.str();
 }
 
@@ -68,6 +71,13 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProc& lio_proc, V
   // different scales/units.
   double best_avg_res_lio = std::numeric_limits<double>::max();
   float  best_avg_err_vio = std::numeric_limits<float>::max();
+  // G6 (2026-09-01): mirrors best_avg_res_lio/best_avg_err_vio's own
+  // "last applied iteration's value" semantics, just for n_meas -- needed by
+  // logConsistencyNll() below, which wants the joint update's ACTUAL last
+  // solve, not a per-iteration-loop-local value gone out of scope by the
+  // time the loop ends.
+  int last_n_meas_lio = 0;
+  int last_n_meas_vio = 0;
 
   for (; iter < opts_.max_iterations; ++iter)
   {
@@ -86,8 +96,8 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProc& lio_proc, V
       stop = "no_improve";
       break;
     }
-    if (have_lio) best_avg_res_lio = avg_res_lio;
-    if (have_vio) best_avg_err_vio = avg_err_vio;
+    if (have_lio) { best_avg_res_lio = avg_res_lio; last_n_meas_lio = lio_part.n_meas; }
+    if (have_vio) { best_avg_err_vio = avg_err_vio; last_n_meas_vio = vio_part.n_meas; }
 
     if (have_vio) { vio_ever_contributed = true; last_avg_err_vio = avg_err_vio; }
 
@@ -124,6 +134,19 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProc& lio_proc, V
   if (any_solved)
     ekf_.applyCovarianceUpdate(state_, prior_cov_);
 
+  if (opts_.log_consistency_en) {
+    // Both channels, same statistic, same frame. This is the measurement the
+    // unification argument needs: if the two channels' NIS levels differ
+    // materially at the same instant, they are calibrated inconsistently
+    // relative to each other, which is a concrete argument for one filter.
+    // If they agree, REA-LVIO's decoupling case is the better one and the
+    // goal should be restated rather than pursued.
+    logConsistencyNll("lio", mg.image.t, best_avg_res_lio, last_n_meas_lio,
+                      ekf_.pivotRatio(), ekf_.kalmanGainNorm());
+    logConsistencyNll("vio", mg.image.t, last_avg_err_vio, last_n_meas_vio,
+                      ekf_.pivotRatio(), ekf_.kalmanGainNorm());
+  }
+
   bool rejected = false;
   if (vio_ever_contributed && last_avg_err_vio > static_cast<float>(opts_.max_avg_error))
   {
@@ -132,6 +155,8 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProc& lio_proc, V
     // see combined_processing.h's doc comment. Discard the whole result
     // and re-run LIO alone, unmodified, as the fallback.
     *state_ = state_before_frame;
+    if (opts_.log_consistency_en)
+      logConsistencyNll("rollback", mg.image.t, last_avg_err_vio, 0, 0.0, 0.0);
     lio_proc.processLIO(mg);
     rejected = true;
   }

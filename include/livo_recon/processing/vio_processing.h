@@ -197,6 +197,12 @@ struct VioProcOptions
   bool log_residual_counts = false;
   double log_norm_l_low_frac = 0.3;
 
+  // G6 (2026-09-01): VIO-side correspondence log (vio_corr.csv), mirroring
+  // voxelplane.cpp's corr.csv nu/S columns so both channels are scored by
+  // the same statistic -- see consistency_log.h's doc comment for why
+  // combined mode had no VIO-side consistency instrument before this.
+  bool log_consistency_corr_en = false;
+
   // One line per frame, logged in processVIO() from the already-computed
   // TrackedFrame it's handed -- BEFORE estimateStateCorrection() ever
   // touches the values, so this is the tracker's raw output completely

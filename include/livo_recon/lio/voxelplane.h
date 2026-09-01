@@ -201,7 +201,22 @@ private:
   // occupancyAnisotropy()'s own "undefined, <3 cells" sentinel).
   double cached_occ_aniso_ = -2.0;
   int cached_occ_cells_ = 0;
+  // T8-b: per-axis occupancy second moments, in the (x_normal_, y_normal_)
+  // frame the bitmask is anchored in. recomputeOccupancyCache() already
+  // computes these on its way to the anisotropy ratio; caching them
+  // separately is what lets the coverage term act per tangent axis
+  // instead of as one scalar. Units are m^2.
+  double cached_occ_var_u_ = 0.0;   // along occ_anchor_x_normal_ (lambda2 dir)
+  double cached_occ_var_v_ = 0.0;   // along occ_anchor_y_normal_ (lambda1 dir)
+  // Diagnostic only: the scalar trace ratio applied by applyPlaneConfidence()
+  // on the most recent fit. 1.0 means the terms were off or inert.
+  double last_plane_conf_factor_ = 1.0;
   void recomputeOccupancyCache();
+
+  // T8-b: applies the redundancy and coverage terms to plane_var_ in place.
+  // MUST be called after recomputeOccupancyCache(), never before -- it reads
+  // the occupancy cache this fit just rebuilt.
+  void applyPlaneConfidence();
 
   void updateOccupancy(const V3D& world_point);
 
@@ -215,6 +230,9 @@ public:
   // fit, see recomputeOccupancyCache().
   double occupancyAnisotropy() const { return cached_occ_aniso_ < -1.5 ? -1.0 : cached_occ_aniso_; }
   int occupiedCellCount() const { return cached_occ_cells_; }
+  double occupancyVarU() const { return cached_occ_var_u_; }
+  double occupancyVarV() const { return cached_occ_var_v_; }
+  double planeConfFactor() const { return last_plane_conf_factor_; }
 };
 
 // T0-F-2b (2026-08-31): per-frame aggregates across every VoxelPlane fit

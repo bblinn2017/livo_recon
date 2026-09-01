@@ -5,6 +5,7 @@
 
 #include <fstream>
 #include <iomanip>
+#include <mutex>
 
 namespace livo_recon
 {
@@ -28,7 +29,28 @@ void debugLogImu(const std::string& msg)
   ofs << msg << "\n";
 }
 
+// T7-a (2026-09-01): Myers-Tapley process-noise-estimator accumulators.
+// See imu_processing.h's imuProcQhatRead() doc comment for the recursion
+// this implements and why it's a recursion, not a sum, across substeps.
+bool g_qhat_enabled = false;
+bool g_qhat_primed  = false;
+Eigen::MatrixXd g_qhat_accum_cov_w;   // A <- F A F^T + cov_w, over one frame
+Eigen::MatrixXd g_qhat_p_after;       // P after the frame's last propagation
+std::mutex g_qhat_mtx;
+
 }  // namespace
+
+bool imuProcQhatRead(Eigen::MatrixXd& phi_p_phit, Eigen::MatrixXd& accum_cov_w)
+{
+  std::lock_guard<std::mutex> lock(g_qhat_mtx);
+  if (!g_qhat_enabled || !g_qhat_primed) return false;
+  accum_cov_w = g_qhat_accum_cov_w;
+  // Phi P+_{k-1} Phi^T = (propagated P) - (accumulated process noise)
+  phi_p_phit = g_qhat_p_after - g_qhat_accum_cov_w;
+  g_qhat_accum_cov_w.setZero();
+  g_qhat_primed = false;
+  return true;
+}
 
 ImuProc::ImuProc(NodeContext& ctx)
   : state_(ctx.state), profiler_(ctx.profiler), data_queues_(ctx.data_queues)
@@ -46,13 +68,16 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "imu/q_alpha_gyr", opts_.q_alpha_gyr, 1.0);
   paramWarn<double>(pnh, "imu/q_alpha_bias", opts_.q_alpha_bias, 1.0);
   paramWarn<bool>(pnh, "imu/log_debug_en", opts_.log_debug_en, false);
+  paramWarn<bool>(pnh, "imu/log_qhat_en", opts_.log_qhat_en, false);
+  { std::lock_guard<std::mutex> lock(g_qhat_mtx); g_qhat_enabled = opts_.log_qhat_en; }
 
   std::ostringstream oss;
   oss << "[params/imu]"
       << "\n  second_order:         " << (opts_.second_order ? "true" : "false")
       << "\n  q_alpha_acc:          " << opts_.q_alpha_acc
       << "\n  q_alpha_gyr:          " << opts_.q_alpha_gyr
-      << "\n  q_alpha_bias:         " << opts_.q_alpha_bias;
+      << "\n  q_alpha_bias:         " << opts_.q_alpha_bias
+      << "\n  log_qhat_en:          " << (opts_.log_qhat_en ? "true" : "false");
   return oss.str();
 }
 
@@ -174,6 +199,16 @@ void ImuProc::propagate(MeasureGroup& mg)
     // q_alpha_{acc,gyr,bias} -- cov_w is added unscaled here. All three
     // at 1.0 (default) is bit-identical to the pre-split formula.
     state_->covMut() = F_x * state_->cov() * F_x.transpose() + cov_w;
+
+    if (opts_.log_qhat_en) {
+      std::lock_guard<std::mutex> lock(g_qhat_mtx);
+      if (g_qhat_accum_cov_w.rows() != dim) {
+        g_qhat_accum_cov_w = Eigen::MatrixXd::Zero(dim, dim);
+      }
+      g_qhat_accum_cov_w = F_x * g_qhat_accum_cov_w * F_x.transpose() + cov_w;
+      g_qhat_p_after = state_->cov();
+      g_qhat_primed = true;
+    }
 
     // ---- state propagation ----
     // World-frame acc is the average of acc transformed by head and tail rotations

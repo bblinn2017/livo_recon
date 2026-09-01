@@ -41,6 +41,14 @@ struct CombinedProcOptions
   double max_avg_error   = 5.0;
 
   bool   log_debug_en    = false;
+
+  // G6 (2026-09-01). Logs both channels' NLL (nll.txt, channel="lio"/"vio")
+  // for the SAME frame via the shared consistency_log.h writers -- see that
+  // header's doc comment for why this was previously unaskable in combined
+  // mode. Also logs a "rollback" row when the whole-frame VIO rejection
+  // fires, so a rejected frame is recorded as one that happened rather than
+  // silently vanishing from the log.
+  bool   log_consistency_en = false;
 };
 
 // Opt-in combined LIO+VIO EKF step. Each iteration: asks LioProc and

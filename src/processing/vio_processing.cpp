@@ -68,6 +68,7 @@ std::string VioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "vio/log/log_iterations",       opts_.log_iterations,       false);
   paramWarn<bool>(pnh, "vio/log/log_point_residuals",  opts_.log_point_residuals,  false);
   paramWarn<bool>(pnh, "vio/log/log_residual_counts",  opts_.log_residual_counts,  false);
+  paramWarn<bool>(pnh, "vio/log/log_consistency_corr_en", opts_.log_consistency_corr_en, false);
   paramWarn<bool>(pnh, "vio/log/log_raw_tracker_output", opts_.log_raw_tracker_output, false);
   paramWarn<bool>(pnh, "vio/log/dry_run",              opts_.dry_run,              false);
   paramWarn<double>(pnh, "vio/log/log_norm_l_low_frac", opts_.log_norm_l_low_frac, 0.3);
@@ -94,6 +95,7 @@ std::string VioProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  log_iterations:        " << (opts_.log_iterations ? "true" : "false")
       << "\n  log_point_residuals:   " << (opts_.log_point_residuals ? "true" : "false")
       << "\n  log_residual_counts:   " << (opts_.log_residual_counts ? "true" : "false")
+      << "\n  log_consistency_corr_en: " << (opts_.log_consistency_corr_en ? "true" : "false")
       << "\n  log_raw_tracker_output:" << (opts_.log_raw_tracker_output ? "true" : "false")
       << "\n  dry_run:               " << (opts_.dry_run ? "true" : "false")
       << "\n  log_norm_l_low_frac:   " << opts_.log_norm_l_low_frac
@@ -125,6 +127,7 @@ VioAccumulateOptions VioProc::accumulateOptions() const
   a.log_residual_counts        = opts_.log_residual_counts;
   a.log_norm_l_low_frac        = opts_.log_norm_l_low_frac;
   a.log_path                   = opts_.log_path;
+  a.log_consistency_corr_en    = opts_.log_consistency_corr_en;
   return a;
 }
 

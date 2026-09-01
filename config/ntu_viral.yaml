@@ -231,7 +231,20 @@ evo:
   max_time_diff: 0.05  # seconds; nearest-match tolerance (file) or RTE/ROE pairing tolerance (topic)
   rpe:
     compute_rte: true   # relative translation error (RPE's translation part) -- topic mode only
-    compute_roe: true   # relative rotation error (RPE's rotation part) -- topic mode only; a diagnostic curiosity against position-only ground truth, not a true orientation error (see evo_processing.cpp's logStage())
+    # GT AUDIT, 2026-08-31 / disabled 2026-09-01. FALSE ON PURPOSE, and it
+    # must not be turned back on for this dataset. /leica/pose/relative is a
+    # single-prism laser tracker: it measures POSITION ONLY and its
+    # quaternion column is identity at every sample. A "relative rotation
+    # error" against an identity reference is not an error -- it is the
+    # angular magnitude of the aligned estimate, compared against nothing.
+    # That is why the number barely moved across a 32x change in ATE
+    # (9.80 deg on a 0.036 m run, 9.81 deg on a 1.158 m run), and the
+    # near-constancy was read as evidence when it was the symptom.
+    # bench_eval/evaluate.py already guards this correctly and returns
+    # ape_rot_deg = None; this path did not.
+    # Real SE(3) references exist ONLY on HILTI exp04/exp05/exp06, via their
+    # _imu.txt files -- see T0-H1.
+    compute_roe: false
     delta_s: 1.0         # seconds between the pose pair RTE/ROE compare
   gt_lever_arm: [-0.293656, -0.012288, -0.273095]
 topics:

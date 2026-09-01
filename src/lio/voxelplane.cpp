@@ -80,7 +80,8 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
                               double s_sensor, double s_plane_tilt, double s_plane_d,
                               double s_pose, int n, int j, double aniso, int gated,
                               double s_prior_pose, double lambda0, double occ_aniso, int occ_cells,
-                              int dropped_by_ablation)
+                              int dropped_by_ablation, double occ_var_u, double occ_var_v,
+                              double plane_conf_factor)
 {
   static bool first_call = true;
   static std::mutex mtx;
@@ -105,7 +106,7 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
     // VoxelPlane::occupancyAnisotropy()/occupiedCellCount(), the OCCUPANCY-
     // based (density-independent) in-plane coverage anisotropy, distinct
     // from `aniso` (point-scatter/density-weighted).
-    if (with_covariates) ofs << ",S_sensor,S_plane_tilt,S_plane_d,S_pose,S_prior_pose,N,J,aniso,lambda0,occ_aniso,occ_cells";
+    if (with_covariates) ofs << ",S_sensor,S_plane_tilt,S_plane_d,S_pose,S_prior_pose,N,J,aniso,lambda0,occ_aniso,occ_cells,occ_var_u,occ_var_v,plane_conf_factor";
     ofs << "\n";
   }
   first_call = false;
@@ -113,7 +114,8 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
   if (with_covariates)
     ofs << "," << s_sensor << "," << s_plane_tilt << "," << s_plane_d << "," << s_pose
         << "," << s_prior_pose << "," << n << "," << j << "," << aniso << "," << lambda0
-        << "," << occ_aniso << "," << occ_cells;
+        << "," << occ_aniso << "," << occ_cells
+        << "," << occ_var_u << "," << occ_var_v << "," << plane_conf_factor;
   ofs << "\n";
 }
 }  // namespace
@@ -152,17 +154,42 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
 
   const V3D d_center = p - plane_.center;
 
-  if (opts_->plane_gate_mode == "ellipse") {
+  if (opts_->plane_gate_mode == "ellipse" ||
+      opts_->plane_gate_mode == "ellipse_area_matched") {
     // T8-a: Mahalanobis ellipse of the fit's own sampling, replacing the
     // isotropic disc -- same x_normal_/y_normal_ basis J_nq uses below, no
     // new geometry. eigen_values_(2)/(1) are the largest/second-largest
     // in-plane eigenvalues (x_normal_/y_normal_'s own axes respectively).
     constexpr double eps = 1e-12;
-    const double u1 = d_center.dot(x_normal_);
-    const double u2 = d_center.dot(y_normal_);
-    const double m2 = u1 * u1 / std::max(eigen_values_(2), eps)
-                     + u2 * u2 / std::max(eigen_values_(1), eps);
-    if (m2 > opts_->max_radius * opts_->max_radius) return false;
+    const double l2 = std::max(eigen_values_(2), eps);   // major in-plane
+    const double l1 = std::max(eigen_values_(1), eps);   // minor in-plane
+    const double u1 = d_center.dot(x_normal_);           // along the l2 axis
+    const double u2 = d_center.dot(y_normal_);           // along the l1 axis
+    const double m2 = u1 * u1 / l2 + u2 * u2 / l1;
+    double thr2 = opts_->max_radius * opts_->max_radius;
+    // AUDIT, 2026-09-01. "ellipse" is not a shape-only change. Its region
+    // has semi-axes max_radius*sqrt(l2) and max_radius*sqrt(l1) against the
+    // disc's radius max_radius*sqrt(l2), so it is strictly CONTAINED in the
+    // disc and admits sqrt(l1/l2) of its area. On a sliver at aniso 1000
+    // that is 1/32 of the correspondences. An ellipse-vs-disc comparison
+    // therefore confounds "the gate is the wrong shape" with "the gate
+    // admitted far fewer points", and the size of the confound scales with
+    // the very anisotropy under test -- exactly the population-matching
+    // defect the T3-0e review found in the drop ablation.
+    //
+    // ellipse area = pi * T * sqrt(l1*l2);  disc area = pi * R^2 * l2
+    // equal  =>  T = R^2 * sqrt(l2/l1)
+    // "ellipse_area_matched" is the shape change at matched admitted area,
+    // and is the arm the coverage hypothesis is actually about.
+    if (opts_->plane_gate_mode == "ellipse_area_matched") {
+      // Capped at 4x. Beyond aniso ~16 the areas are only PARTIALLY matched
+      // and the arm drifts back toward the plain ellipse -- which is the
+      // safe direction to fail, since the alternative is admitting points
+      // arbitrarily far from a barely-sampled axis just to hit exact area
+      // parity (audit finding A2, 2026-09-01).
+      thr2 *= std::min(4.0, std::sqrt(l2 / l1));
+    }
+    if (m2 > thr2) return false;
   } else {
     const double dis_to_center = d_center.squaredNorm();
     const double range_dis = std::sqrt(std::max(0.0, dis_to_center - r * r));
@@ -207,13 +234,25 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
     // fixes). Still only APPROXIMATELY stable (a rare reset changes the
     // draw), not a first-class per-plane identity, but no longer redrawn
     // every single fit.
-    std::size_t h = std::hash<double>{}(occ_anchor_center_.x() * 1e6 + opts_->occ_aniso_drop_seed);
-    h ^= std::hash<double>{}(occ_anchor_center_.y() * 1e6 + opts_->occ_aniso_drop_seed * 2.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<double>{}(occ_anchor_center_.z() * 1e6 + opts_->occ_aniso_drop_seed * 3.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    const double u01 = static_cast<double>(h % 1000000ULL) / 1000000.0;
-    if (u01 < opts_->occ_aniso_drop_fraction) {
-      if (dropped_by_ablation) *dropped_by_ablation = true;
-      return false;
+    // POPULATION MATCH (T3-0e blocking fix, 2026-09-01). The "top" arm can
+    // only ever select planes whose occ_aniso is DEFINED -- >= 3 occupied
+    // cells -- unless occ_aniso_undefined_as_top says otherwise. Drawing
+    // "random" from every plane makes arm 3 a draw from a strictly larger
+    // population than arm 2, so the two arms remove different KINDS of
+    // plane and the comparison has no control. Gate eligibility on the same
+    // predicate "top" uses, so the two arms stay matched under either
+    // setting of occ_aniso_undefined_as_top rather than only under one.
+    const bool eligible = opts_->occ_aniso_undefined_as_top
+                        || (occupancyAnisotropy() >= 0.0);
+    if (eligible) {
+      std::size_t h = std::hash<double>{}(occ_anchor_center_.x() * 1e6 + opts_->occ_aniso_drop_seed);
+      h ^= std::hash<double>{}(occ_anchor_center_.y() * 1e6 + opts_->occ_aniso_drop_seed * 2.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
+      h ^= std::hash<double>{}(occ_anchor_center_.z() * 1e6 + opts_->occ_aniso_drop_seed * 3.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
+      const double u01 = static_cast<double>(h % 1000000ULL) / 1000000.0;
+      if (u01 < opts_->occ_aniso_drop_fraction) {
+        if (dropped_by_ablation) *dropped_by_ablation = true;
+        return false;
+      }
     }
   }
 
@@ -253,6 +292,10 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
     double s_sensor = -1.0, s_tilt = -1.0, s_d = -1.0, s_pose = -1.0, aniso = -1.0, lambda0 = -1.0;
     double occ_aniso = -1.0;
     int n = -1, j = -1, occ_cells = -1;
+    // T8-b: logged unconditionally on the covariate path so that an inert
+    // switch and a null effect are distinguishable after the fact. A run
+    // where plane_conf_factor is 1.0 everywhere did not test the hypothesis.
+    double occ_var_u = -1.0, occ_var_v = -1.0, plane_conf_factor = -1.0;
     if (cov) {
       // Plane-level quantities (independent of THIS correspondence's own
       // gate() outcome) are always valid, even for a dropped-by-ablation
@@ -261,6 +304,9 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
       lambda0 = eigen_values_(0);
       occ_aniso = occupancyAnisotropy();
       occ_cells = occupiedCellCount();
+      occ_var_u = occupancyVarU();
+      occ_var_v = occupancyVarV();
+      plane_conf_factor = planeConfFactor();
       n = points_size_;
       j = last_fit_j_;
       aniso = eigen_values_(2) / std::max(eigen_values_(1), 1e-12);
@@ -308,7 +354,7 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
     }
     debugLogConsistencyCorr(cov, scan_id, r, S, s_sensor, s_tilt, s_d, s_pose, n, j, aniso,
                              accepted ? 0 : 1, s_prior_pose, lambda0, occ_aniso, occ_cells,
-                             dropped_by_ablation ? 1 : 0);
+                             dropped_by_ablation ? 1 : 0, occ_var_u, occ_var_v, plane_conf_factor);
   }
 
   if (!accepted) return false;
@@ -528,6 +574,23 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
 
   last_fit_j_ = use_weights ? N : 0;
 
+  // T1: refitDebiased() rejects a fit whose eigengap denominators are within
+  // eps of zero; this path had no such guard and would divide plane_var_ by
+  // an arbitrarily small denom1. Same eps, same counter, same rejection --
+  // so that the two arms are finally doing the same thing here. Off by
+  // default (see the NOTE above -- this measurably changes PCA's own output
+  // when on, which is the whole point of it being an ablatable switch now
+  // instead of a permanent behavior change).
+  if (opts_->plane_var_denom_floor_en) {
+    const double eps_denom = std::max(1e-8, 0.1 * opts_->plane_threshold);
+    if (std::fabs(denom1) < eps_denom || std::fabs(denom2) < eps_denom) {
+      is_plane_ = false;
+      plane_var_.setZero();
+      g_denom_rejected_count.fetch_add(1, std::memory_order_relaxed);
+      return;
+    }
+  }
+
   if (opts_->log_variance_shares_en) {
     double n_eff = N;
     if (use_var_weights) {
@@ -537,7 +600,6 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
     }
     debugLogPlaneFitStats(points_size_, last_fit_j_, n_eff, plane_var_.trace());
   }
-  updateMaxPlaneVarTrace(plane_var_.trace());
 
   // T3-0e: same occupancy update as addPoints()'s debiased path, using the
   // tangent frame just fitted above. `points` may be bin representatives
@@ -545,6 +607,12 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   // occupancy purposes, a bin rep already represents one occupied region.
   for (int i = 0; i < N; ++i) updateOccupancy(points[i].point);
   recomputeOccupancyCache();
+  applyPlaneConfidence();
+  // Moved BELOW applyPlaneConfidence so frame_stats' max_plane_var_trace
+  // reports the covariance the residual actually uses, not the pre-inflation
+  // one. With both terms off this is the same number as before, in the same
+  // place in the sequence of writes.
+  updateMaxPlaneVarTrace(plane_var_.trace());
 }
 
 void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_count,
@@ -611,6 +679,12 @@ void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_cou
   if (is_plane_) {
     for (const auto& pt : points) updateOccupancy(pt.point);
     recomputeOccupancyCache();
+    applyPlaneConfidence();
+    // refitDebiased() already recorded the pre-inflation trace; this second
+    // call (no-op when both T8-b terms are off) updates it to the
+    // post-inflation value actually used downstream, same reasoning as
+    // update()'s call site above.
+    updateMaxPlaneVarTrace(plane_var_.trace());
   }
 }
 
@@ -874,7 +948,12 @@ void VoxelPlane::recomputeOccupancyCache()
       }
     }
   }
-  if (centers.size() < 3) { cached_occ_aniso_ = -1.0; return; }
+  if (centers.size() < 3) {
+    cached_occ_aniso_ = -1.0;
+    cached_occ_var_u_ = 0.0;
+    cached_occ_var_v_ = 0.0;
+    return;
+  }
   double mean_u = 0.0, mean_v = 0.0;
   for (const auto& c : centers) { mean_u += c.first; mean_v += c.second; }
   mean_u /= centers.size();
@@ -888,6 +967,8 @@ void VoxelPlane::recomputeOccupancyCache()
   }
   const double n = static_cast<double>(centers.size());
   var_u /= n; var_v /= n; cov_uv /= n;
+  cached_occ_var_u_ = var_u;
+  cached_occ_var_v_ = var_v;
   // 2x2 symmetric eigenvalues, closed form.
   const double tr = var_u + var_v;
   const double det = var_u * var_v - cov_uv * cov_uv;
@@ -896,6 +977,109 @@ void VoxelPlane::recomputeOccupancyCache()
   const double lambda2 = tr / 2.0 - disc;
   constexpr double eps = 1e-12;
   cached_occ_aniso_ = lambda1 / std::max(lambda2, eps);
+}
+
+// T8-b (2026-09-01). The two plane-confidence terms livo_recon did not have.
+//
+// Both are multiplicative on plane_var_ and both are the IDENTITY when their
+// switch is off. The coverage term is additionally the identity when coverage
+// is isotropic (var_u == var_v), which is what makes a null result on this
+// switch distinguishable from an inert switch: if occ_cells is healthy and
+// plane_conf_factor is still 1.0 across a run, the geometry -- not the code --
+// is what made it inert.
+//
+// Applied AFTER the fit and AFTER recomputeOccupancyCache(), never inside the
+// fit itself, so the eigen-decomposition, the plane_threshold acceptance test
+// and (on the debiased path) the ceiling rejection all still see the RAW fit.
+// A switch that could change which planes exist would not be ablatable.
+void VoxelPlane::applyPlaneConfidence()
+{
+  last_plane_conf_factor_ = 1.0;
+  if (!is_plane_) return;
+  if (!opts_->plane_conf_redundancy_en && !opts_->plane_conf_coverage_en) return;
+
+  const double trace_before = plane_var_.trace();
+
+  // ---- redundancy -------------------------------------------------------
+  // plane_var_ ~ 1/N. The occupied-cell count is a density-INDEPENDENT
+  // measure of how much distinct surface the fit actually saw, so N/cells is
+  // the redundancy factor the debiased path never removes. Capped, because on
+  // a dense return this ratio is unbounded and an unbounded inflation would
+  // silently become a gate (every residual would pass sigma_num).
+  if (opts_->plane_conf_redundancy_en) {
+    const double n_raw = (last_fit_j_ > 0) ? static_cast<double>(last_fit_j_)
+                                           : static_cast<double>(points_size_);
+    if (cached_occ_cells_ >= 3 && n_raw > 0.0) {
+      double f = n_raw / static_cast<double>(cached_occ_cells_);
+      if (f < 1.0) f = 1.0;
+      // AUDIT A3: NOT comparable across arms. On the pca path (without
+      // use_bins, which defaults false) last_fit_j_ is 0 so n_raw falls
+      // through to points_size_, capped at max_points (~50). On the debiased
+      // path last_fit_j_ is N_acc_, uncapped and growing for the voxel's
+      // whole life. The inflation ratio therefore has a hard ceiling of
+      // ~max_points/64 on one arm and none on the other -- defensible as a
+      // MODEL (debiased really does accumulate unboundedly) but it means
+      // this factor is not comparable ACROSS arms. Compare within an arm
+      // only; plane_conf_factor is logged so the number is visible rather
+      // than hidden behind the cap.
+      if (f > opts_->plane_conf_redundancy_cap) f = opts_->plane_conf_redundancy_cap;
+      plane_var_ *= f;
+    }
+  }
+
+  // ---- coverage ---------------------------------------------------------
+  // plane_var_ is expressed over [theta1, theta2, d]. From gate():
+  //   J_nq(0) = d_center . y_normal_   -> component 0's lever arm is along v
+  //   J_nq(1) = d_center . x_normal_   -> component 1's lever arm is along u
+  // A tilt is poorly determined when the plane was sampled thinly along the
+  // direction that would have revealed it, so component 0 is inflated by how
+  // thin the footprint is along v, and component 1by how thin it is along u.
+  // Scaling as D * plane_var_ * D with D diagonal keeps the result symmetric
+  // and positive semi-definite, which a naive per-entry scaling would not.
+  //
+  // AUDIT A1: the bitmask's (u, v) axes are a SNAPSHOT of (x_normal_,
+  // y_normal_) taken at anchor time. Re-anchoring is triggered by normal
+  // rotation only (see updateOccupancy()), so the in-plane axes -- the
+  // eigenvectors of a 2x2 whose eigenvalues are nearly equal on a
+  // well-covered plane -- can rotate or swap freely while the normal never
+  // moves at all. Applying the term through a stale frame would attribute
+  // cached_occ_var_u_/v_ to the wrong tangent component and inflate the
+  // WELL-sampled axis instead of the thin one: not a weaker effect, a
+  // sign-inverted one, on exactly the isotropic planes where it should have
+  // been inert. Guard on the anchor frame still being aligned with the
+  // CURRENT fit's own tangent basis (same 10-degree threshold
+  // updateOccupancy() uses, for consistency) before trusting it.
+  constexpr double kFrameAlignThreshold = 0.9848;  // cos(10 deg)
+  const bool frame_fresh =
+      occ_anchored_ &&
+      std::fabs(occ_anchor_x_normal_.dot(x_normal_)) > kFrameAlignThreshold &&
+      std::fabs(occ_anchor_y_normal_.dot(y_normal_)) > kFrameAlignThreshold;
+  if (opts_->plane_conf_coverage_en && cached_occ_cells_ >= 3 && frame_fresh) {
+    constexpr double eps = 1e-12;
+    const double vu = std::max(cached_occ_var_u_, eps);
+    const double vv = std::max(cached_occ_var_v_, eps);
+    const double vref = std::max(vu, vv);
+    const double b = opts_->plane_conf_coverage_beta;
+    double f0 = std::pow(vref / vv, b);   // theta1: lever arm along v
+    double f1 = std::pow(vref / vu, b);   // theta2: lever arm along u
+    const double cap = opts_->plane_conf_coverage_cap;
+    if (!std::isfinite(f0) || f0 > cap) f0 = cap;
+    if (!std::isfinite(f1) || f1 > cap) f1 = cap;
+    if (f0 < 1.0) f0 = 1.0;
+    if (f1 < 1.0) f1 = 1.0;
+    V3D d(std::sqrt(f0), std::sqrt(f1), 1.0);
+    const M3D D = d.asDiagonal();
+    plane_var_ = D * plane_var_ * D;
+  }
+
+  if (!plane_var_.allFinite()) {
+    // An inflation that produced a non-finite covariance is a bug, not a
+    // result. Fail loudly rather than letting it reach the residual.
+    is_plane_ = false;
+    last_plane_conf_factor_ = 0.0;
+    return;
+  }
+  last_plane_conf_factor_ = (trace_before > 0.0) ? (plane_var_.trace() / trace_before) : 1.0;
 }
 
 }  // namespace livo_recon

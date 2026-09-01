@@ -103,6 +103,9 @@ struct VioAccumulateOptions
   bool        log_residual_counts  = false;
   double      log_norm_l_low_frac  = 0.3;
   std::string log_path             = "/tmp/livo_recon_myvio_log.txt";
+  // G6 (2026-09-01): see VioProcOptions::log_consistency_corr_en's doc
+  // comment.
+  bool        log_consistency_corr_en = false;
 };
 
 class VioAccumulator

@@ -74,6 +74,12 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<int>(pnh, "voxel_map/plane/occ_aniso_drop_seed", opts_->occ_aniso_drop_seed, 0);
   paramWarn<bool>(pnh, "voxel_map/plane/log_consistency_corr_en", opts_->log_consistency_corr_en, false);
   paramWarn<bool>(pnh, "voxel_map/plane/log_consistency_covariates_en", opts_->log_consistency_covariates_en, false);
+  paramWarn<bool>(pnh, "voxel_map/plane/plane_conf_redundancy_en", opts_->plane_conf_redundancy_en, false);
+  paramWarn<double>(pnh, "voxel_map/plane/plane_conf_redundancy_cap", opts_->plane_conf_redundancy_cap, 16.0);
+  paramWarn<bool>(pnh, "voxel_map/plane/plane_conf_coverage_en", opts_->plane_conf_coverage_en, false);
+  paramWarn<double>(pnh, "voxel_map/plane/plane_conf_coverage_beta", opts_->plane_conf_coverage_beta, 1.0);
+  paramWarn<double>(pnh, "voxel_map/plane/plane_conf_coverage_cap", opts_->plane_conf_coverage_cap, 100.0);
+  paramWarn<bool>(pnh, "voxel_map/plane/plane_var_denom_floor_en", opts_->plane_var_denom_floor_en, false);
   paramWarn<int>(pnh, "voxel_map/map/shuffle_insertion_seed", opts_->shuffle_insertion_seed, 0);
   paramWarn<bool>(pnh, "voxel_map/map/log_frame_stats_en", opts_->log_frame_stats_en, false);
 
@@ -100,6 +106,12 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/occ_aniso_drop_seed:       " << opts_->occ_aniso_drop_seed
       << "\n  plane/log_consistency_corr_en:   " << (opts_->log_consistency_corr_en ? "true" : "false")
       << "\n  plane/log_consistency_covariates_en: " << (opts_->log_consistency_covariates_en ? "true" : "false")
+      << "\n  plane/plane_conf_redundancy_en:  " << (opts_->plane_conf_redundancy_en ? "true" : "false")
+      << "\n  plane/plane_conf_redundancy_cap: " << opts_->plane_conf_redundancy_cap
+      << "\n  plane/plane_conf_coverage_en:    " << (opts_->plane_conf_coverage_en ? "true" : "false")
+      << "\n  plane/plane_conf_coverage_beta:  " << opts_->plane_conf_coverage_beta
+      << "\n  plane/plane_conf_coverage_cap:   " << opts_->plane_conf_coverage_cap
+      << "\n  plane/plane_var_denom_floor_en:  " << (opts_->plane_var_denom_floor_en ? "true" : "false")
       << "\n  map/shuffle_insertion_seed:      " << opts_->shuffle_insertion_seed
       << "\n  map/log_frame_stats_en:          " << (opts_->log_frame_stats_en ? "true" : "false")
       << "\n  points/min_init:  " << opts_->min_init_points

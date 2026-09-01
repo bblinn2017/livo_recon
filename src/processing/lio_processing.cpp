@@ -1,5 +1,7 @@
 #include "livo_recon/processing/lio_processing.h"
+#include "livo_recon/processing/imu_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
+#include "livo_recon/utils/log/consistency_log.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 #include "livo_recon/utils/algo/hashing.h"
 #include "livo_recon/utils/log/debug_log_dir.h"
@@ -11,6 +13,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <mutex>
 
 namespace livo_recon
 {
@@ -57,49 +60,48 @@ void debugLogLioDryRun(const std::string& msg)
   ofs << msg << "\n";
 }
 
-// T0-D (2026-08-31): scan.csv for scripts/analysis/consistency.py -- see
-// LioProcOptions::log_consistency_scan_en's doc comment for the column
-// list. Called once per frame from processLIO(), single-threaded (no OMP
-// context here, unlike voxelplane.cpp's per-correspondence logs), so no
-// mutex needed -- same truncate-on-first-call/append convention as every
-// other debug log in this file.
-void debugLogConsistencyScan(int scan_id, double t, double dt, double trP_pos,
-                              double trP_vel, double trP_att, double omega_norm, double acc_norm)
-{
-  static bool first_call = true;
-  std::ofstream ofs(debugLogPath("scan.csv"), first_call ? std::ios::trunc : std::ios::app);
-  if (first_call)
-    ofs << "scan_id,t,dt,trP_pos,trP_vel,trP_att,omega_norm,acc_norm\n";
-  first_call = false;
-  ofs << scan_id << "," << t << "," << dt << "," << trP_pos << "," << trP_vel << ","
-      << trP_att << "," << omega_norm << "," << acc_norm << "\n";
-}
-
-// T0-E (2026-08-31): nll.txt -- see LioProcOptions::log_nll_en's doc
-// comment for the column/formula. Called once per frame (single-
-// threaded, no OMP context here), same truncate-on-first-call/append
-// convention as every other debug log in this file.
-// T0-E-4 (2026-08-31): pivot_ratio column added -- max/min |LDLT diagonal|
-// of the actual EKF solve this frame (NaN when n_residuals==0, same
-// staleness caveat as nll itself). See EkfUpdate::pivotRatio()'s doc
-// comment.
-// T0-F-2b (2026-08-31): kalman_gain_norm column added -- EkfUpdate::
-// kalmanGainNorm(), ||K1_cols|| for this frame's last applyMeanUpdate()
-// solve. Same staleness caveat (NaN when n_residuals==0).
-void debugLogNll(double t_abs, double nll, int n_residuals, double pivot_ratio, double kalman_gain_norm)
-{
-  static bool first_call = true;
-  std::ofstream ofs(debugLogPath("nll.txt"), first_call ? std::ios::trunc : std::ios::app);
-  if (first_call)
-    ofs << "t,nll,n_residuals,pivot_ratio,kalman_gain_norm\n";
-  first_call = false;
-  ofs << t_abs << "," << nll << "," << n_residuals << "," << pivot_ratio << "," << kalman_gain_norm << "\n";
-}
+// T0-D (2026-08-31): scan.csv, T0-E (2026-08-31): nll.txt -- see
+// LioProcOptions::log_consistency_scan_en/log_nll_en's doc comments for the
+// column lists/formula. G6 (2026-09-01): the writers themselves moved to
+// utils/log/consistency_log.h/.cpp (logConsistencyScan()/logConsistencyNll())
+// so CombinedProc can also call them -- this anonymous namespace previously
+// made both reachable ONLY from LioProc::processLIO(), which meant
+// combined/LIVO mode had no consistency instrument at all. Call sites below
+// pass channel="lio".
 
 // 2026-08-24: REMOVED debugLogSplineIter()/debugLogSplineFit()/
 // debugLogSplineFitPoints()/debugLogSplineKinFit() -- temporary debug
 // logging for the removed iterative-deskew Hermite-spline mechanism. See
 // docs/removed_livo_recon_spline_deskew_2026aug24.md.
+
+// T7-a (2026-09-01). One row per frame. The estimator is formed OFFLINE from
+// these columns -- deliberately not online.
+//
+// T0-E-3(C) measured NIS lowest at the WORST alpha on site1_handheld_4, so an
+// online scheme watching a consistency statistic would have steered the filter
+// onto that boundary and reported an improvement. The honest form of adaptive
+// Q on this evidence is offline estimation with a stability margin, which is
+// what this logger supports and what an in-loop adaptation would not.
+void debugLogQhat(int scan_id, double t_abs, const Eigen::VectorXd& dx,
+                  const Eigen::VectorXd& expected_diag)
+{
+  static bool first_call = true;
+  static std::mutex mtx;
+  std::lock_guard<std::mutex> lock(mtx);
+  const int n = static_cast<int>(dx.size());
+  std::ofstream ofs(debugLogPath("qhat.csv"), first_call ? std::ios::trunc : std::ios::app);
+  if (first_call) {
+    ofs << "scan_id,t,dim";
+    for (int i = 0; i < n; ++i) ofs << ",dx" << i;
+    for (int i = 0; i < n; ++i) ofs << ",exp" << i;
+    ofs << "\n";
+  }
+  first_call = false;
+  ofs << scan_id << "," << t_abs << "," << n;
+  for (int i = 0; i < n; ++i) ofs << "," << dx(i);
+  for (int i = 0; i < n; ++i) ofs << "," << expected_diag(i);
+  ofs << "\n";
+}
 
 }  // namespace
 
@@ -616,7 +618,7 @@ std::string LioProc::processLIO(MeasureGroup& mg)
         }
         const double pivot_ratio = (n_res > 0) ? ekf_.pivotRatio() : std::numeric_limits<double>::quiet_NaN();
         const double kalman_gain_norm = (n_res > 0) ? ekf_.kalmanGainNorm() : std::numeric_limits<double>::quiet_NaN();
-        debugLogNll(mg.image.t + data_queues_->start_time, nll, n_res, pivot_ratio, kalman_gain_norm);
+        logConsistencyNll("lio", mg.image.t + data_queues_->start_time, nll, n_res, pivot_ratio, kalman_gain_norm);
       }
 
       const double prev = prev_error;
@@ -654,6 +656,21 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     if (any_solved)
       ekf_.applyCovarianceUpdate(state_, prior_cov_);
 
+    // T7-a. dx must be read here and not inside the loop: it is the FRAME's
+    // correction, and reading it mid-iteration would report one Gauss-Newton
+    // step rather than the process-model error the measurement disagreed with.
+    {
+      Eigen::MatrixXd phi_p_phit, accum_cov_w;
+      if (imuProcQhatRead(phi_p_phit, accum_cov_w)) {
+        const Eigen::VectorXd dx = state_->boxminusFromPropagat(state_propagat_);
+        const Eigen::MatrixXd& P_post = state_->cov();
+        if (phi_p_phit.rows() == P_post.rows()) {
+          const double t_abs = mg.image.t + data_queues_->start_time;
+          debugLogQhat(voxel_map_->frame_idx_, t_abs, dx, (phi_p_phit - P_post).diagonal());
+        }
+      }
+    }
+
     if (opts_.log_consistency_scan_en)
     {
       const double t_abs = mg.image.t + data_queues_->start_time;
@@ -682,8 +699,8 @@ std::string LioProc::processLIO(MeasureGroup& mg)
         sum_acc   += (0.5 * (p.acc_head + p.acc_tail)).norm();
       }
       const double n_poses = std::max<size_t>(1, mg.poses.size());
-      debugLogConsistencyScan(voxel_map_->frame_idx_, t_abs, dt, trP_pos, trP_vel, trP_att,
-                               sum_omega / n_poses, sum_acc / n_poses);
+      logConsistencyScan("lio", voxel_map_->frame_idx_, t_abs, dt, trP_pos, trP_vel, trP_att,
+                          sum_omega / n_poses, sum_acc / n_poses);
     }
 
     std::ostringstream oss;

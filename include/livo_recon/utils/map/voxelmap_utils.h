@@ -456,6 +456,13 @@ struct VoxelOpts
   // max_radius^2. Bit-identical to "disc" only in the degenerate case
   // lambda1==lambda2; otherwise a real behavior change, so it must be
   // opted into explicitly.
+  // "ellipse_area_matched" (2026-09-01): "ellipse" above is strictly
+  // CONTAINED in the disc (admits only sqrt(lambda1/lambda2) of its area),
+  // so an ellipse-vs-disc comparison confounds shape with admitted-area --
+  // this mode rescales the ellipse's threshold by sqrt(lambda2/lambda1)
+  // (capped at 4x, see gate()'s AUDIT comment) so the admitted AREA matches
+  // the disc's, isolating the shape change the coverage hypothesis is
+  // actually about.
   std::string plane_gate_mode = "disc";
 
   // T3-0e (2026-08-31): test T3's DIRECTIONAL premise directly -- drop
@@ -497,6 +504,44 @@ struct VoxelOpts
   // gains a dropped_by_ablation column) so this bucket's size is visible,
   // not just its existence.
   bool occ_aniso_undefined_as_top = false;
+
+  // ------------------------------------------------------------------
+  // T8-b (2026-09-01): the three plane-confidence terms, each on its own
+  // switch so the grid can turn them on and off independently. A
+  // point-to-plane update can be wrong for three separable reasons --
+  // the points were noisy, the points were redundant, the points did not
+  // cover the plane -- and livo_recon has had a partial answer to each
+  // that could not compose. These two flags supply the missing two.
+  //
+  // Both are EXACTLY behaviour-preserving when off, and the coverage term
+  // is additionally an identity when coverage is isotropic, so a null
+  // result is distinguishable from an inert switch: see the occ_cells
+  // and plane_conf_factor columns in corr.csv.
+  //
+  // redundancy: plane_var_ scales as 1/N. On the pca path the bin
+  // weights already discount repeated returns; on the debiased path
+  // N_acc_ counts every redundant return, so debiased is over-confident
+  // by the redundancy factor precisely where binning exists to prevent
+  // it. Replace the raw count with a coverage-derived effective sample
+  // size (occupied 8x8 cells) and inflate by the ratio.
+  bool   plane_conf_redundancy_en  = false;
+  double plane_conf_redundancy_cap = 16.0;  // hard ceiling on the inflation ratio
+
+  // coverage: inflate each TANGENT axis of plane_var_ by how thinly the
+  // plane was sampled along that axis's lever arm. Uses the occupancy
+  // bitmask's per-axis second moments, which are density-independent by
+  // construction -- that is the whole reason to read coverage off the
+  // bitmask rather than off the scatter eigenvalues.
+  bool   plane_conf_coverage_en   = false;
+  double plane_conf_coverage_beta = 1.0;    // 0 = identity, 1 = full ratio
+  double plane_conf_coverage_cap  = 100.0;  // ceiling on either axis factor
+
+  // T1 (2026-09-01): refitDebiased() rejects a fit whose eigengap
+  // denominators are within eps of zero; update() -- the pca path -- has
+  // NO such guard and will happily divide plane_var_ by an arbitrarily
+  // small denom1. That asymmetry sits underneath every pca-vs-debiased
+  // comparison in the register. On: apply the identical guard to both.
+  bool plane_var_denom_floor_en = false;
 
   // T0-G (2026-08-31): diagnostic-only. 0 (default) -- no-op, today's
   // behavior unchanged. Nonzero -- deterministically shuffle each frame's

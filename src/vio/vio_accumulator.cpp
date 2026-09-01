@@ -1,5 +1,6 @@
 #include "livo_recon/vio/vio_accumulator.h"
 #include "livo_recon/utils/algo/omp_utils.h"
+#include "livo_recon/utils/log/consistency_log.h"
 
 #include <cmath>
 #include <fstream>
@@ -483,6 +484,15 @@ bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<Anc
     // is scaled down below, so existing max_avg_error tuning keeps meaning
     // what it always meant.
     const double mdist2 = residual * residual * weight;
+
+    if (opts.log_consistency_corr_en) {
+      // Logged BEFORE any further rejection, for the same reason corr.csv
+      // logs candidates rather than acceptances: a NIS computed over the
+      // survivors of its own gate is biased low, which T0-D measured at
+      // 2.59 -> 1.85 on a fixture. weight is an inverse variance, so S = 1/weight.
+      logConsistencyVioCorr(t_abs, iter, residual, (weight > 0.0 ? 1.0 / weight : -1.0),
+                            opts.residual_mode.c_str());
+    }
 
     // See VioAccumulateOptions::pos_weight_scale's doc comment -- scale
     // J's position columns (last 3) directly before forming the outer
