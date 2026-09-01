@@ -29,9 +29,7 @@ void debugLogImu(const std::string& msg)
   ofs << msg << "\n";
 }
 
-// T7-a (2026-09-01): Myers-Tapley process-noise-estimator accumulators.
-// See imu_processing.h's imuProcQhatRead() doc comment for the recursion
-// this implements and why it's a recursion, not a sum, across substeps.
+// History (32-34): see docs/livo_recon_changelog.md#src-processing-imu_processing.cpp-32
 bool g_qhat_enabled = false;
 bool g_qhat_primed  = false;
 Eigen::MatrixXd g_qhat_accum_cov_w;   // A <- F A F^T + cov_w, over one frame
@@ -58,11 +56,7 @@ ImuProc::ImuProc(NodeContext& ctx)
 
 std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
 {
-  // sensor/range_err, sensor/angle_err_deg, ds/*, undistort/
-  // time_based_process_noise moved to LioProc::loadParameters()
-  // (2026-08-18) -- deskewing/downsampling now live there, see
-  // LioProcOptions::deskew/ds_leaf_size/ds_mode's doc comments. Still the
-  // SAME rosparam keys, just read by a different class now.
+  // History (61-65): see docs/livo_recon_changelog.md#src-processing-imu_processing.cpp-61
   paramWarn<bool>(pnh, "imu/second_order",   opts_.second_order, true);
   paramWarn<double>(pnh, "imu/q_alpha_acc", opts_.q_alpha_acc, 1.0);
   paramWarn<double>(pnh, "imu/q_alpha_gyr", opts_.q_alpha_gyr, 1.0);

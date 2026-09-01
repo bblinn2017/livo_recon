@@ -1,20 +1,5 @@
 #pragma once
-// G6 blocker (2026-09-01). nll.txt and scan.csv are written by two static
-// helpers in the anonymous namespace of lio_processing.cpp, so they are
-// reachable ONLY from LioProc::processLIO(). CombinedProc::processCombined()
-// never calls processLIO() except on the VIO-rejection rollback path, and
-// never references log_nll_en or log_consistency_scan_en at all.
-//
-// Consequence, stated plainly: with combined/enable true, this project has NO
-// consistency instrument. Every NIS number in the register is LIO-only. The
-// question "are the LiDAR and visual channels calibrated consistently
-// relative to each other" -- which is the measured argument for or against
-// collapsing the two filters -- has not been askable, and unifying the
-// filters cannot be evaluated until it is.
-//
-// This header hoists the two writers out of that anonymous namespace so both
-// processors can call them. No behaviour change on the LIO path: same
-// filenames, same columns, same first-call truncate semantics.
+// History (2-17): see docs/livo_recon_changelog.md#include-livo_recon-utils-log-consistency_log.h-2
 #include <string>
 
 namespace livo_recon {

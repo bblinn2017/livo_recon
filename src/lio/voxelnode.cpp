@@ -132,25 +132,7 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       // VoxelPlane::addPoints()'s trust_sensor_noise docs); don't trust
       // those points' sensor_cov for the debiasing correction.
       plane_ptr_->addPoints(points_world, -1, distinct_frames_, g_current_frame_idx >= 1);
-      // Bug found 2026-08-24 (plane_fit_mode=="debiased" divergence
-      // investigation): unlike the pca branch below, which never evaluates
-      // is_plane_/acts on a rejection until update_count_ has reached
-      // min_init_points (see that branch's early return just below), this
-      // branch used to act on plane_ptr_->isPlane() immediately after
-      // EVERY addPoints() call, starting from n_points=1 -- refitDebiased()
-      // rejects (N<3, or any real fit that fails plane_threshold on a
-      // tiny/noisy sample) almost always at that size, and a rejection
-      // here triggers immediate subdivision (see !now_plane && layer_ <
-      // max_layer below), so voxels were being shattered into 8 children
-      // long before they'd ever accumulated a fair sample -- confirmed via
-      // plane_init.txt: 117955/118073 first-fit attempts on an 8s eee_01
-      // window were rejected, 114599 of those at n_points=1, vs pca mode's
-      // matching min_init_points=5 histogram peak. Fixed by gating on
-      // isInit() (points_size_ > min_init_points, cheap since points_size_
-      // is already tracked) before treating this voxel's plane status as
-      // conclusive -- addPoints() itself still runs unconditionally every
-      // call (cheap, O(1), and the whole point of this mode), only the
-      // downstream accept/reject/subdivide DECISION is gated.
+      // History (135-153): see docs/livo_recon_changelog.md#src-lio-voxelnode.cpp-135
       if (!plane_ptr_->isInit()) return;
       if (!was_init && g_current_frame_idx >= 1 &&
           distinct_frames_ < opts_->min_frames_to_init)

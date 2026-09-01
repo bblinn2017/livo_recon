@@ -21,33 +21,10 @@ struct LioProcOptions
   double min_norm_dt           = 0.0;
   double min_diff_error        = -1.0;
 
-  // Gates the per-update /tmp/lio.txt dump (debugLogLio, includes a full
-  // flattened state covariance matrix) and the per-iteration
-  // /tmp/iter_error.txt dump (debugLogIterError) -- both previously
-  // unconditional (2026-08-09 cleanup, task #149). Off by default.
+  // History (24-27): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-24
   bool   log_debug_en          = false;
 
-  // 2026-08-24: opt-in shadow dry-run diagnostic, built to isolate WHY
-  // point_filter_num=1 (undecimated) catastrophically diverges NTU_VIRAL's
-  // eee_01 compared to the production point_filter_num=3 default (see
-  // docs/ -- the residual_weighting investigation above and the voxel-map
-  // premature-plane-convergence mechanism in voxelmap_utils.h both bear on
-  // this, but neither's fix, when tested directly, actually resolved the
-  // CURRENT regression -- motivating this tool). 0 (default) = disabled,
-  // zero cost: no extra decimation, no extra deskew/downsample, no shadow
-  // IEKF pass. > 0 = for every frame, in addition to the REAL frame's own
-  // normal processing (always using the production point_filter_num, real
-  // state_/voxel_map_ updates, completely unaffected), ALSO run one full
-  // non-committing shadow IEKF convergence pass using a point set decimated
-  // at THIS filter number instead, against the SAME starting state and the
-  // SAME current voxel map the real frame is about to use -- then discard
-  // the shadow result entirely (see LioProc::runDryRunShadowPass()). This
-  // isolates whether the denser point set's own residual structure (H_pp/
-  // H_rr eigenstructure, frac_weak/frac_strong) explains the divergence
-  // independent of any map differences that build up over time when the
-  // denser filter number is used for REAL processing instead. Logged (when
-  // log_debug_en is also on) as `[lio_dryrun]` lines to /tmp/lio_dryrun.txt
-  // -- see runDryRunShadowPass()'s doc comment for the exact fields.
+  // History (30-50): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-30
   int    dry_run_point_filter_num = 0;
 
   // A per-residual reweighting mechanism (LioProc::applyResidualWeighting(),
@@ -112,24 +89,7 @@ struct LioProcOptions
   //     in both cases. A fifth independent confirmation of the same
   //     conclusion above.
 
-  // density_sigma_ref (0.0 = disabled): a DIFFERENT mechanism from the
-  // abandoned per-plane/per-residual weighting above -- applies a single
-  // UNIFORM sigma_squared multiplier to every residual in a frame,
-  // max(1, n_residuals/density_sigma_ref), instead of discounting
-  // individual residuals by their own plane's group size. Motivated by the
-  // 2026-08-03 posterior-confidence analysis: pfn1_ds000 vs pfn1_ds010
-  // (same point_filter_num, only ds_leaf_size differs) showed nearly
-  // IDENTICAL per-frame Hessian eigenvalues (H_pp_min/H_rr_min within
-  // ~3-5%) but ds000's converged trace(P_PP)/trace(P_RR) were ~1.8x
-  // smaller -- i.e. overconfidence wasn't from any one direction/plane
-  // being over-weighted (which is what sank plane_averaged/count_weighted/
-  // info_gain, each of which starved a specific position/rotation
-  // direction), but from a small, uniform ~15% higher residual COUNT every
-  // single frame compounding over thousands of frames. A uniform per-frame
-  // scalar can't reproduce that direction-specific starvation failure mode
-  // since every residual (and hence every direction) is scaled identically
-  // -- it only damps the OVERALL correction strength as density rises,
-  // never redistributes weight between planes/directions.
+  // History (115-132): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-115
   double density_sigma_ref = 0.0;
 
   // density_sigma_mode: shape of the density_sigma_ref scale curve as a
@@ -148,78 +108,19 @@ struct LioProcOptions
   // doc comment above for both.
   std::string density_sigma_mode = "linear";
 
-  // 2026-08-24: REMOVED iterative_deskew/spline_k/fine_shape_offset/
-  // wide_jacobian_vw/process_noise_update_mode -- the "iterative deskew"
-  // Hermite-spline LIO mechanism and its three follow-on experiments.
-  // Never enabled in any production config; its one validated result
-  // (gyro-tangent iterative_deskew alone, eee_01 ATE 0.0261m) came with a
-  // known, never-fixed regression (catastrophic divergence on 3 HILTI
-  // sequences), and wide_jacobian_vw was independently confirmed
-  // regressed (eee_01 0.0261m -> 0.858m). Full design, math, and removal
-  // rationale: docs/removed_livo_recon_spline_deskew_2026aug24.md.
+  // History (151-159): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-151
 
-  // Deskew params (mirrors ImuProcOptions' old sigma_r2/sigma_a2/
-  // time_based_process_noise field names exactly -- loaded from the SAME
-  // rosparam keys in LioProc::loadParameters(); deskewing/downsampling
-  // moved here from ImuProc entirely on 2026-08-18, see
-  // include/livo_recon/lio/deskew.h's module doc comment).
+  // History (161-165): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-161
   DeskewOptions deskew;
 
-  // Voxel-downsample params for the Stage-1 (deskewPoints() output)
-  // downsample -- mirrors ImuProcOptions' old ds_leaf_size/ds_mode field
-  // names exactly, same rosparam keys, moved here 2026-08-18 alongside
-  // deskewing itself (downsample always ran ON already-deskewed points,
-  // so it was never really an "IMU" concern either).
+  // History (168-172): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-168
   double ds_leaf_size = 0.15;
   std::string ds_mode = "first";
 
-  // T0-D (2026-08-31): scan.csv -- one row per LIO frame, for
-  // scripts/analysis/consistency.py's scan-level covariates (the
-  // corr.csv-only core already answers the calibration/whiteness
-  // questions; this is the extra panel). Columns: scan_id (=VoxelMap::
-  // frame_idx_, matching corr.csv's scan_id exactly), t (=t_abs), dt
-  // (time since the previous logged scan), trP_pos/trP_vel/trP_att
-  // (trace of this frame's POSTERIOR P_PP/P_VV/P_RR blocks), omega_norm/
-  // acc_norm (mean |gyr|/|0.5*(acc_head+acc_tail)| over this frame's
-  // mg.poses -- mg.imu_samples is already cleared by the time processLIO()
-  // runs, see the .cpp call site).
-  // trQdt_* (process-noise-authority columns) are NOT logged -- Q is
-  // applied during ImuProc's propagation, a different module than this
-  // one, and threading it through was scoped out the same way range/
-  // incidence was for corr.csv (see VoxelOpts::log_consistency_covariates_
-  // en's docs) -- consistency.py's Q-authority panel simply skips when
-  // the column is absent. Off by default.
+  // History (176-191): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-176
   bool log_consistency_scan_en = false;
 
-  // T0-E (2026-08-31): nll.txt -- one line per frame, EVERY frame
-  // (including n_residuals=0 ones -- 2026-08-31 code-audit fix: silently
-  // skipping empty frames made the line count alpha-dependent, since
-  // alpha changes the trajectory and hence which frames match), first
-  // IEKF iteration only, same "un-relinearized prior" scope as T0-D's
-  // corr.csv/scan.csv. Columns: t_abs, nll = 0.5*(n_residuals*log(2*pi) +
-  // sum_log_sigma2 + sum_chi2 + EkfUpdate::nllQuadraticAndLogdet(
-  // prior_cov_)) [0 when n_residuals==0], n_residuals, pivot_ratio
-  // (T0-E-4, 2026-08-31: EkfUpdate::pivotRatio(), max/min |LDLT diagonal|
-  // of the actual solve this frame -- NaN when n_residuals==0, same
-  // staleness caveat), kalman_gain_norm (T0-F-2b, 2026-08-31:
-  // EkfUpdate::kalmanGainNorm(), same staleness caveat). The log(2*pi)
-  // term and the n_residuals column are BOTH 2026-08-31 code-audit fixes
-  // (the term was previously dropped, safe only when every compared run
-  // has the same N per frame, which is false across a q_alpha sweep since
-  // alpha changes N) -- an external driver (scripts/analysis/qsens.py's
-  // eventual real-EKF port) re-runs the same sequence at several
-  // ImuProcOptions::q_alpha values and compares sum(nll)/sum(n_residuals)
-  // (per-correspondence-normalized, NOT a raw sum(nll)) to find the alpha
-  // that minimizes NLL per correspondence, instead of differentiating
-  // through the update analytically.
-  //
-  // Known gaps, not yet fixed: dead in CombinedProc (which calls
-  // processLIO() only as its own fallback, so a q_alpha sweep on a
-  // combined LIO+VIO config silently yields a near-empty nll.txt); the
-  // CUDA residual-accumulation path (accumulateLioResidualsCuda) returns
-  // float-precision HtH/Htz, so nll.txt is not bit-reproducible between
-  // CPU and GPU builds -- hold the build fixed across any alpha sweep
-  // until this is addressed.
+  // History (194-222): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-194
   bool log_nll_en = false;
 };
 
@@ -267,16 +168,7 @@ public:
   // internally here.
   std::string processLIO(MeasureGroup& mg);
 
-  // Combined-mode entry point (CombinedProc, 2026-08-14): builds this
-  // frame's residuals (same buildResiduals()/density_sigma_ref path as the
-  // sequential estimateStateCorrection() above) and accumulates them into
-  // `out` via the shared lio_accumulator -- but does NOT call
-  // applyMeanUpdate/applyCovarianceUpdate itself (CombinedProc sums this
-  // with VioProc::accumulateForCombined()'s output first). Returns false
-  // if the voxel map is empty or no residuals were found this frame (out
-  // is left untouched in that case). avg_res is the same mean-|r|
-  // diagnostic estimateStateCorrection() returns, for logging/convergence
-  // use by the caller.
+  // History (270-279): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-270
   bool accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, double& avg_res);
 
 private:

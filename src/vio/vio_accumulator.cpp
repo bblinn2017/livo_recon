@@ -332,22 +332,7 @@ bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<Anc
   const std::vector<cv::Point2f>& uv_curr = frame.uv_curr;
   const int n = static_cast<int>(indices.size());
   const int n_threads = cappedOmpThreads();
-  // Per-POINT (not per-thread) accumulators for HtH/Htz/err -- see the doc
-  // comment on the final reduction loop below for why: this makes the
-  // floating-point summation order depend only on the point count (fixed
-  // by this frame's own tracked-point data), never on how many OMP threads
-  // happened to run this call. Fixes a confirmed run-to-run non-
-  // determinism (2026-08-16): varying thread counts produced different
-  // summation groupings and therefore different LSB-level rounding in
-  // double-precision HtH/Htz, which the iterative IEKF solve then
-  // amplified into materially, occasionally catastrophically different
-  // results for byte-identical input on ill-conditioned frames -- see
-  // pinOmpThreadsForDeterminism()'s doc comment (utils/algo/omp_utils.h)
-  // for the original investigation. That fix pins the thread count so a
-  // given machine is internally reproducible; THIS fix makes the actual
-  // numeric result independent of thread count entirely, so two machines
-  // (or the same machine before/after a hardware/OMP_NUM_THREADS change)
-  // computing the identical frame get the identical HtH/Htz too.
+  // History (335-350): see docs/livo_recon_changelog.md#src-vio-vio_accumulator.cpp-335
   std::vector<Eigen::Matrix<double, 6, 6>> point_HtH(n, Eigen::Matrix<double, 6, 6>::Zero());
   std::vector<Eigen::Matrix<double, 6, 1>> point_Htz(n, Eigen::Matrix<double, 6, 1>::Zero());
   std::vector<double> point_err(n, 0.0);

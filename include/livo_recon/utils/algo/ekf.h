@@ -6,11 +6,7 @@ namespace livo_recon {
 
 struct EkfUpdate
 {
-    // 2026-08-24: reverted to fixed 6x6/6x1 (R,P) -- was Eigen::MatrixXd/
-    // VectorXd dynamically sized to also support a 12-dim (R,P,V,W) "wide"
-    // mode, which existed solely for the now-removed iterative-deskew
-    // mechanism's wide_jacobian_vw option (confirmed regressed, never
-    // usable). See docs/removed_livo_recon_spline_deskew_2026aug24.md.
+    // History (9-13): see docs/livo_recon_changelog.md#include-livo_recon-utils-algo-ekf.h-9
     Eigen::Matrix<double, 6, 6> HtH = Eigen::Matrix<double, 6, 6>::Zero();
     Eigen::Matrix<double, 6, 1> Htz = Eigen::Matrix<double, 6, 1>::Zero();
     int n_meas = 0;
@@ -111,43 +107,7 @@ struct EkfUpdate
         state->covMut() = P_new;
     }
 
-    // T0-E (2026-08-31): the quadratic+log-determinant terms of this
-    // frame's batch-update NLL, i.e. everything EXCEPT the purely
-    // residual-level pieces (sum_i log(sigma_i^2), sum_i r_i^2/sigma_i^2,
-    // and n_residuals*log(2*pi) -- the Gaussian normalization term,
-    // 2026-08-31 code-audit fix: dropping it is harmless comparing runs
-    // with the same n_residuals per frame, but n_residuals varies both
-    // per-frame and with q_alpha, so it must be included when comparing
-    // totals ACROSS runs) the caller already has from iterating
-    // residuals_ -- see LioProc::estimateStateCorrection()'s log_nll_en
-    // block for how the pieces combine into the full per-frame NLL, and
-    // LioProcOptions::log_nll_en's doc comment for the frame-accounting
-    // fix (log every frame including n_residuals=0 ones, never silently
-    // skip) that makes runs at different q_alpha comparable at all.
-    //
-    // Derivation: for a linear-Gaussian batch update with prior x~N(x0,P0)
-    // and independent per-residual noise r_i~N(0,sigma_i^2), the marginal
-    // (prior-predictive) NLL of the batch is NLL = 1/2*[log det(S_full) +
-    // r^T S_full^-1 r] where S_full = H_full P0 H_full^T + R_full
-    // (R_full = diag(sigma_i^2)) -- an N_CORR x N_CORR matrix, infeasible
-    // to form directly. Two standard identities avoid ever forming it:
-    //   det(S_full) = det(R_full) * det(P0) * det(A),  A = P0^-1 + HtH
-    //   r^T S_full^-1 r = r^T R_full^-1 r  -  Htz^T A^-1 Htz
-    // (HtH = H_full^T R_full^-1 H_full, Htz = H_full^T R_full^-1 r -- both
-    // exactly this class's own HtH/Htz accumulators, and A is exactly
-    // applyMeanUpdate()'s own A). So NLL = 1/2*[ sum_i log(sigma_i^2) +
-    // sum_i r_i^2/sigma_i^2 + log det(P0) + log det(A) - Htz^T A^-1 Htz ]
-    // -- this function returns log det(P0) + log det(A) - Htz^T A^-1 Htz;
-    // the caller adds the two residual-level sums and halves the total.
-    //
-    // Computed from a FRESH LDLT of A/prior_cov, independent of
-    // applyMeanUpdate()'s own (called separately, doesn't require this
-    // to run before/after it, doesn't touch last_H_full_/last_K1_/
-    // state_ at all -- purely read-only over HtH/Htz/prior_cov). "Frozen
-    // Jacobian" scope note: this is the NLL of the CURRENT frame's prior
-    // (state_->cov() before this frame's own correction) against its
-    // OWN residuals -- exactly the T0-D-style "first-iteration,
-    // un-relinearized" quantity, not a converged-update NLL.
+    // History (114-150): see docs/livo_recon_changelog.md#include-livo_recon-utils-algo-ekf.h-114
     double nllQuadraticAndLogdet(const Eigen::MatrixXd& prior_cov) const
     {
       const int dim = prior_cov.rows();
@@ -156,11 +116,7 @@ struct EkfUpdate
       H_full.block(StateGroup::idxR(), StateGroup::idxR(), n, n) = HtH;
       const Eigen::MatrixXd A = H_full + prior_cov.inverse();
 
-      // 2026-08-31 code-audit fix: a numerically non-PD prior/A (e.g. a
-      // pathological q_alpha sweep value) previously wrote a silent NaN
-      // into nll.txt instead of failing loudly -- NaN is easy to miss in
-      // a summed column and would masquerade as "this alpha is somehow
-      // infinitely good/bad" rather than "the covariance broke".
+      // History (159-163): see docs/livo_recon_changelog.md#include-livo_recon-utils-algo-ekf.h-159
       Eigen::LDLT<Eigen::MatrixXd> ldlt_A(A);
       Eigen::VectorXd Htz_full = Eigen::VectorXd::Zero(dim);
       Htz_full.segment(StateGroup::idxR(), n) = Htz;
@@ -177,18 +133,7 @@ struct EkfUpdate
       return logdet_prior + logdet_A - quad;
     }
 
-    // T0-E-4 (2026-08-31): condition-number proxy for the LAST applyMeanUpdate()/
-    // applyCovarianceUpdate() solve (A = H_full + prior_cov^-1), i.e. the actual
-    // EKF solve path -- NOT nllQuadraticAndLogdet()'s own separate fresh LDLT,
-    // which is a diagnostic-only decomposition. max(|D_ii|)/min(|D_ii|) from the
-    // LDLT's diagonal is a cheap proxy for cond(A) (exact for a diagonal A;
-    // an underestimate in general, but tracks the same order of magnitude and
-    // needs no extra decomposition). Same staleness caveat as HtH/Htz: only
-    // meaningful when applyMeanUpdate() actually ran this iteration (n_res>0).
-    // T0-F-2b (2026-08-31): ||K|| for the LAST applyMeanUpdate() call --
-    // Frobenius norm of K1_cols (last_K1_'s R-column block), the gain
-    // that pre-multiplies Htz in applyMeanUpdate()'s solution formula
-    // (see its own comment). Same staleness caveat as pivotRatio().
+    // History (180-191): see docs/livo_recon_changelog.md#include-livo_recon-utils-algo-ekf.h-180
     double kalmanGainNorm() const {
       if (last_K1_.size() == 0) return std::numeric_limits<double>::quiet_NaN();
       const int n = static_cast<int>(HtH.rows());

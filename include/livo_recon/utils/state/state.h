@@ -19,14 +19,7 @@ public:
   StateGroup();
   StateGroup& operator=(const StateGroup& o);
 
-  // ── Index functions ───────────────────────────────────────────────────────
-  // R, P, V are always estimated and always first in the state vector.
-  // BG, BA, G are optional; return -1 when not estimated.
-  //
-  // 2026-08-24: REMOVED idxW()/W (angular-velocity) state estimation --
-  // existed solely for the removed iterative-deskew mechanism's Hermite-
-  // spline rotation tangent. See
-  // docs/removed_livo_recon_spline_deskew_2026aug24.md.
+  // History (22-29): see docs/livo_recon_changelog.md#include-livo_recon-utils-state-state.h-22
   static constexpr int idxR() { return 0; }
   static constexpr int idxP() { return 3; }
   static constexpr int idxV() { return 6; }

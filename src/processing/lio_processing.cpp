@@ -37,9 +37,7 @@ void debugLogLio(const std::string& msg)
   ofs << msg << "\n";
 }
 
-// Temporary: per-iteration avg|r| trace within a single frame's IEKF loop,
-// for the 2026-08-03 early-stopping/convergence-shape question. Remove
-// once done debugging.
+// History (40-42): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-40
 void debugLogIterError(const std::string& msg)
 {
   static bool first_call = true;
@@ -48,10 +46,7 @@ void debugLogIterError(const std::string& msg)
   ofs << msg << "\n";
 }
 
-// 2026-08-24: shadow dry-run diagnostic trace -- see LioProcOptions::
-// dry_run_point_filter_num's doc comment and LioProc::runDryRunShadowPass().
-// Same truncate-on-first-call/append convention as debugLogLio() above, own
-// file so it never interleaves with the real per-frame [lio] lines.
+// History (51-54): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-51
 void debugLogLioDryRun(const std::string& msg)
 {
   static bool first_call = true;
@@ -60,33 +55,11 @@ void debugLogLioDryRun(const std::string& msg)
   ofs << msg << "\n";
 }
 
-// T0-D (2026-08-31): scan.csv, T0-E (2026-08-31): nll.txt -- see
-// LioProcOptions::log_consistency_scan_en/log_nll_en's doc comments for the
-// column lists/formula. G6 (2026-09-01): the writers themselves moved to
-// utils/log/consistency_log.h/.cpp (logConsistencyScan()/logConsistencyNll())
-// so CombinedProc can also call them -- this anonymous namespace previously
-// made both reachable ONLY from LioProc::processLIO(), which meant
-// combined/LIVO mode had no consistency instrument at all. Call sites below
-// pass channel="lio".
+// History (63-70): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-63
 
-// 2026-08-24: REMOVED debugLogSplineIter()/debugLogSplineFit()/
-// debugLogSplineFitPoints()/debugLogSplineKinFit() -- temporary debug
-// logging for the removed iterative-deskew Hermite-spline mechanism. See
-// docs/removed_livo_recon_spline_deskew_2026aug24.md.
+// History (72-75): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-72
 
-// T7-a (2026-09-01). One row per frame. The estimator is formed OFFLINE from
-// these columns -- deliberately not online.
-//
-// T0-E-3(C) measured NIS lowest at the WORST alpha on site1_handheld_4, so an
-// online scheme watching a consistency statistic would have steered the filter
-// onto that boundary and reported an improvement. The honest form of adaptive
-// Q on this evidence is offline estimation with a stability margin, which is
-// what this logger supports and what an in-loop adaptation would not.
-// acw_diag is the accumulated cov_w's diagonal (the frame's process noise as
-// actually built at the run's q_alpha_* values) -- kept as its own column
-// block so an offline reducer (scripts/analysis/qhat.py) can recover the
-// at-alpha=1 per-block reference the estimator's alpha ratio is defined
-// against, without re-deriving IMU noise propagation in Python.
+// History (77-89): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-77
 void debugLogQhat(int scan_id, double t_abs, const Eigen::VectorXd& dx,
                   const Eigen::VectorXd& expected_diag,
                   const Eigen::VectorXd& acw_diag)
@@ -131,9 +104,7 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<std::string>(pnh, "lio/ekf/density_sigma_mode", opts_.density_sigma_mode, "linear");
   paramWarn<bool>(pnh, "cuda/enable",               cuda_enable_,          false);
 
-  // Same rosparam keys the (removed) ImuProc deskew/downsample code used
-  // to read -- see LioProcOptions::deskew/ds_leaf_size/ds_mode's doc
-  // comments (deskewing/downsampling moved here from ImuProc 2026-08-18).
+  // History (134-136): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-134
   double range_err;
   paramWarn<double>(pnh, "imu/sensor/range_err", range_err, 0.05);
   opts_.deskew.sigma_r2 = range_err * range_err;
@@ -239,11 +210,7 @@ void LioProc::buildResiduals(
   }
 }
 
-// Both paths now just call the shared accumulator (lio/lio_accumulator.h,
-// 2026-08-14 -- extracted so CombinedProc can build the exact same HtH/Htz
-// without depending on LioProc's internals, per the plan for an opt-in
-// combined LIO+VIO EKF step) and then apply the update, unchanged from
-// before the extraction.
+// History (242-246): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-242
 void LioProc::solveSystem_cuda(const std::vector<Residual>& residuals) const {
   accumulateLioResidualsCuda(residuals, ekf_, cuda_buf_);
   ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
@@ -587,24 +554,7 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       total_dtheta += dtheta;
       total_dt     += dt;
 
-      // T0-E: same first-iteration-only scope as T0-D's corr.csv/scan.csv
-      // (see estimateStateCorrection()'s allow_consistency_log doc
-      // comment) -- this frame's prior_cov_/ekf_.HtH/ekf_.Htz are exactly
-      // what this iteration's solveSystem() just accumulated.
-      // 2026-08-31 code-audit fixes (see LioProcOptions::log_nll_en's doc
-      // comment): (1) log EVERY frame, including zero-residual ones
-      // (n_residuals=0, nll=0.5*(logdet(P0)+logdet(A)) is still
-      // well-defined there since HtH/Htz vanish) -- line count is now
-      // frame-count-invariant, not correspondence-count-invariant, so
-      // runs at different alpha stay row-comparable by index/timestamp.
-      // (2) n_residuals logged explicitly so callers can normalize
-      // per-correspondence (nll/n_residuals, or sum(nll)/sum(n_residuals)
-      // across a run) instead of summing a quantity whose per-frame N
-      // varies with both frame content AND alpha. (3) the previously-
-      // dropped n*log(2*pi) Gaussian normalization term is now included
-      // -- omitting it is harmless for a FIXED N but not when N varies
-      // between the runs being compared, which is exactly this
-      // objective's use case.
+      // History (590-607): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-590
       if (iter == 0 && opts_.log_nll_en)
       {
         const int n_res = static_cast<int>(residuals_.size());
@@ -771,18 +721,7 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       // spike in tier-2 usage correlates with degraded match quality
       // (rising mean_sigma_squared/max_abs_r) during dynamic motion.
       int n_tier0 = 0, n_tier1 = 0, n_tier2 = 0;
-      // Post-fit normalized-residual consistency check (2026-08-03, NIS-
-      // style -- see the Woodbury/Sherman-Morrison-per-plane discussion):
-      // unlike trace(P_PP)/trace(P_RR) above (which only reflect the
-      // filter's own INTERNAL belief about its uncertainty), this checks
-      // that belief against what the ACTUAL post-fit residuals look like.
-      // sum_chi2 = Sum(r_i^2/sigma_squared_i) over this frame's residuals;
-      // reduced_chi2 = sum_chi2/n_residuals should average ~1 for a
-      // correctly-calibrated noise model (each residual's squared error
-      // should be on the same scale as its own claimed variance). >>1 means
-      // sigma_squared is set too small somewhere (overconfident -- actual
-      // errors are bigger than the model expects); <<1 means it's set too
-      // large (overly conservative).
+      // History (774-785): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-774
       double sum_chi2 = 0.0;
       for (const auto& r : residuals_)
       {
@@ -834,24 +773,7 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       Eigen::SelfAdjointEigenSolver<M3D> h_rr_es(H_rr);
       const V3D h_rr_eig = h_rr_es.eigenvalues();
 
-      // Per-residual eigen-projection diagnostic (2026-08-03, temporary --
-      // see the pfn1_ds000-vs-pfn1_ds010 confidence-analysis finding that
-      // H_pp/H_rr's AGGREGATE eigenvalues were nearly identical between the
-      // two despite ds000 having ~15% more residuals every frame). Tests
-      // whether that extra residual mass is structurally redundant --
-      // concentrated on the ALREADY-well-constrained (largest-eigenvalue)
-      // direction -- rather than contributing to the weakest direction,
-      // by projecting each residual's own Jacobian (unweighted by its own
-      // sigma_squared, a purely geometric/structural quantity) onto H_pp/
-      // H_rr's eigenvectors and averaging the normalized squared-projection
-      // fraction across all residuals this frame. A LOW mean_frac_weak
-      // means most residuals barely touch the weakest direction at all
-      // (piling onto the strong one instead) -- direct, per-residual
-      // evidence for or against the "extra residuals mostly redundant"
-      // hypothesis this whole investigation has been built on, complementing
-      // (not replacing) the aggregate H_pp_eig/H_rr_eig numbers already
-      // logged above. Eigen::SelfAdjointEigenSolver returns ascending
-      // eigenvalues, so col(0)=weakest, col(2)=strongest.
+      // History (837-854): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-837
       const V3D v_pp_weak   = h_es.eigenvectors().col(0);
       const V3D v_pp_strong = h_es.eigenvectors().col(2);
       const V3D v_rr_weak   = h_rr_es.eigenvectors().col(0);

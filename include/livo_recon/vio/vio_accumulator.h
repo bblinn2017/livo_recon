@@ -4,18 +4,7 @@
 #include "livo_recon/utils/state/state.h"
 #include "livo_recon/utils/algo/ekf.h"
 
-// VIO's epipolar-line residual -> HtH/Htz accumulation, lifted out of
-// VioProc (2026-08-14) so both VioProc's own sequential solve AND
-// CombinedProc's joint LIO+VIO solve can call the exact same math without
-// CombinedProc depending on VioProc's private internals -- mirrors
-// lio/lio_accumulator.h's split for the LIO side. Needs more per-frame
-// context than the LIO accumulator (camera intrinsics, tracked anchors),
-// so it's a small stateful class (holding state_, like VioProc itself
-// did) rather than a single free function. Deliberately does NOT hold a
-// TrackerPtr (2026-08-14) -- frame.rot_anchor/pos_anchor are already
-// resolved by Tracker::resolveAnchorPose() before accumulate() is ever
-// called (see Tracker's own doc comment for that mechanism), so this
-// class has no need to reach back into Tracker itself.
+// History (7-18): see docs/livo_recon_changelog.md#include-livo_recon-vio-vio_accumulator.h-7
 namespace livo_recon
 {
 
@@ -57,41 +46,10 @@ struct VioAccumulateOptions
   bool   distortion_weight_on       = false;
   double weight_pixel_noise_px      = 0.5;
 
-  // DOF-split weighting (2026-08-15): a single epipolar residual's weight
-  // used to land identically on BOTH the rotation and position columns of
-  // J when forming HtH/Htz (thread_HtH += J^T * weight * J), even though
-  // epipolar geometry is fundamentally scale-ambiguous -- it constrains
-  // translation DIRECTION and rotation well, but has no way to observe
-  // absolute translation MAGNITUDE the way LIO's metric point-to-plane
-  // residuals can. Letting VIO's position-column contribution carry the
-  // same confidence as its rotation-column contribution lets a single
-  // marginal-quality frame's position "vote" get baked permanently into
-  // the shared voxel map (see vio_processing.cpp/livo_recon_node.cpp's
-  // updateMaps()-after-estimateState() ordering), corrupting LIO's own
-  // future residuals against a map LIO never agreed to.
-  //
-  // pos_weight_scale multiplies ONLY the position columns of J before
-  // forming HtH/Htz -- rotation columns always keep the full computed
-  // weight. 1.0 (default) reproduces the old behavior exactly (no DOF
-  // split). Set < 1.0 to let VIO keep correcting rotation at full
-  // confidence while trusting it less for position, deferring position
-  // consistency to LIO's global map.
+  // History (60-78): see docs/livo_recon_changelog.md#include-livo_recon-vio-vio_accumulator.h-60
   double pos_weight_scale          = 1.0;
 
-  // residual_mode (2026-08-16, ported from FAST-LIVO2's livo_vio ResidualMode
-  // ::kMixed -- see vio_proc.cpp's own accumulation loop): "epipolar"
-  // (default) is the original single epipolar-line residual above, whose
-  // pos_weight_scale knob is a blunt way to distrust its position-column
-  // contribution. "mixed" instead runs TWO independently-weighted residuals
-  // per point -- the same epipolar-line residual with its POSITION columns
-  // zeroed (rotation-only), plus a new ray-gap residual (perpendicular
-  // distance between the anchor and current rays' closest-approach points,
-  // computed via the SAME solveClosestRayPoints() already used for the
-  // epipolar depth-clamp decision) with its ROTATION columns zeroed
-  // (position-only) -- a principled decoupling rather than a scale-down.
-  // pos_weight_scale is ignored in "mixed" mode (the split is already
-  // structural, not a weight knob). A point is accepted only if BOTH
-  // residuals compute successfully (matches FAST-LIVO2's own behavior).
+  // History (81-94): see docs/livo_recon_changelog.md#include-livo_recon-vio-vio_accumulator.h-81
   std::string residual_mode         = "epipolar";
   double pos_ray_distance_residual_var = 1000.0;  // free-solve (unclamped) ray-gap weight -- FAST-LIVO2's own tuned default
   double neg_ray_distance_residual_var = 10.0;    // clamped (either ray) ray-gap weight -- FAST-LIVO2's own tuned default
@@ -103,8 +61,7 @@ struct VioAccumulateOptions
   bool        log_residual_counts  = false;
   double      log_norm_l_low_frac  = 0.3;
   std::string log_path             = "/tmp/livo_recon_myvio_log.txt";
-  // G6 (2026-09-01): see VioProcOptions::log_consistency_corr_en's doc
-  // comment.
+  // History (106-107): see docs/livo_recon_changelog.md#include-livo_recon-vio-vio_accumulator.h-106
   bool        log_consistency_corr_en = false;
 };
 

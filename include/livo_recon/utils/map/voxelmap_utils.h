@@ -63,28 +63,7 @@ struct WorldPointCov
   M3D sensor_cov;
   M3D pose_cov;
 
-  // T0-D (2026-08-31): the frame-level context needed to compute this
-  // correspondence's full innovation covariance S = H P- H^T + R for
-  // corr.csv (see VoxelOpts::log_consistency_corr_en) -- NOT used by any
-  // real accept/reject or EKF-weighting logic, which never needed the
-  // H P- H^T term (this codebase's IEKF is a batch-WLS normal-equation
-  // solve, not a per-correspondence sequential Kalman update -- see
-  // ekf.h's applyMeanUpdate()). Populated unconditionally (cheap: a V3D
-  // copy plus two small matrices set ONCE per frame and copied per point)
-  // by LioProc::buildResiduals() so VoxelPlane::computeResidual() can
-  // reconstruct this point's Jacobian and reach into the frame's prior
-  // covariance -- without touching VoxelPlane's own constructor/call
-  // chain, since WorldPointCov already flows unmodified through the
-  // whole findPlaneResidual() chain. body_point: this point in
-  // SENSOR/body frame (pre-toWorld) -- combined with plane_.normal (only
-  // known inside VoxelPlane) via rot_transpose to reconstruct
-  // point_cross_normal exactly as LioProc::buildResiduals() does for its
-  // own HtH accumulation. rot_transpose: state_->rot().transpose() at
-  // this frame's prior. prior_cov_rp: the frame's FIXED prior_cov_'s
-  // [R,P]x[R,P] 6x6 block (R,P are contiguous starting at
-  // StateGroup::idxR(), see ekf.h) -- the only sub-block a point-to-plane
-  // residual's Jacobian (nonzero only in R,P columns) can have any
-  // quadratic-form interaction with.
+  // History (66-87): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-66
   V3D body_point = V3D::Zero();
   M3D rot_transpose = M3D::Identity();
   Eigen::Matrix<double, 6, 6> prior_cov_rp = Eigen::Matrix<double, 6, 6>::Zero();
@@ -174,59 +153,15 @@ struct VoxelOpts
   // risk of using pose_cov to do it.
   bool pose_cov_in_sigma           = false;
 
-  // Gates VoxelNode::debugLogPlaneInit()'s per-voxel-first-plane-fit dump
-  // (/tmp/plane_init.txt) and VoxelPlane's noise-floor dump
-  // (/tmp/noise_floor.txt) -- both were previously unconditional (2026-08-09
-  // cleanup, task #149: unlike most of this codebase's debug logs, these
-  // had no gate at all). Off by default.
+  // History (177-181): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-177
   bool log_debug_en                = false;
 
-  // T3-0d (2026-08-30): does plane_var_ have enough authority in the
-  // residual variance budget to move ATE at all? Gates two debug dumps,
-  // off by default. /tmp/variance_shares.txt (one line per accepted
-  // correspondence, from VoxelPlane::computeResidual()): sigma_diag_squared,
-  // plane_var_term, and plane_var_term's share of their sum -- the direct
-  // measurement T3-0/T3-0b/T0-B-2/T0-B-3 never took, all four having
-  // turned knobs that act on plane_var_ and reported only ATE.
-  // /tmp/plane_fit_stats.txt (one line per VoxelPlane::update() call that
-  // used weights): N (points/bins seen), effective sample size N_eff =
-  // (sum w)^2 / sum(w^2), and trace(plane_var_) -- lets a bin_size_fraction
-  // or bin_weight_mode sweep be read against how much N_eff actually moved,
-  // instead of inferring it from ATE alone.
+  // History (184-195): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-184
   bool log_variance_shares_en      = false;
 
-  // use_disc_distance (2026-08-04, tried and REMOVED): treated each
-  // VoxelPlane as a finite disc (radius_ around center) rather than an
-  // infinite plane, computing r as the true 3D point-to-disc distance
-  // (Pythagorean combination of perpendicular + excess in-plane distance
-  // beyond radius_, with the residual's gradient direction rotating
-  // toward the in-plane radial direction for points past the edge) instead
-  // of today's plane-only r gated by a hard max_radius*radius_ cutoff.
-  // Motivated by nya_02's cov_acc collapse investigation (a genuine
-  // physical argument -- the flat-plane assumption is shakiest right at a
-  // patch's edge) but regressed badly on nya_02 across every cov_acc
-  // tested, including ones that were otherwise clean without it: 0.01
-  // (0.81m -> 8498.7m), 0.1 (0.033m -> 0.200m), gradually-compounding not
-  // an instant blowup. Consistent with this session's broader pattern --
-  // every attempt to make residual weighting more "statistically honest"
-  // (info_gain, Woodbury, cross_frame_reuse, this) has hurt real-world
-  // tracking robustness rather than helped it.
+  // History (198-213): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-198
 
-  // cross_frame_reuse_ref (2026-08-03, tried and REMOVED): a per-plane
-  // discount based on VoxelPlane::match_streak_ (how many consecutive
-  // frames had matched at least one residual against a plane), motivated
-  // by trace(P_PP)'s anti-correlation with error persisting over a ~1-2s
-  // (many-frame) window rather than a single-frame spike -- unlike every
-  // other mechanism tried this investigation (density_sigma_ref, the
-  // abandoned plane_averaged/count_weighted/info_gain/
-  // woodbury_plane_correction), this was the only one that looked at
-  // cross-frame (not within-frame) correlation. It DID change the
-  // qualitative oscillation character (at cross_frame_reuse_ref=2, eee_01:
-  // mean-crossings of trace(P_PP) dropped ~60%, 113->45, and coefficient
-  // of variation dropped ~23%, 6.09->4.67) but produced no meaningful ATE
-  // improvement across ref values 2/5/10/20 (0.0256/0.0254/0.0254/0.0252m
-  // vs 0.0254m baseline, all within noise) -- removed as not worth the
-  // added complexity given the effect size.
+  // History (215-229): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-215
 
   // Tiered fallback when the primary voxel's own findPlaneResidual() misses
   // (see VoxelMap::findPlaneResidual()): (1) primary voxel -- (2) the single
@@ -345,196 +280,41 @@ struct VoxelOpts
   // mode until this is characterized by a real comparative sweep.
   std::string plane_fit_mode        = "pca";
 
-  // Controls plane_var_'s own residual-weighting propagation -- a
-  // DIFFERENT quantity from pose_cov_in_sigma above (which controls only
-  // gate()'s sigma_diag_squared). Applies to BOTH plane_fit_mode paths:
-  // the PCA Jmin loop (VoxelPlane::update()) and, since 2026-08-24 pass4
-  // (see docs/debiased_voxel_plane_fit_2026aug24.md), the debiased path's
-  // own Scov_/V_/W_ accumulators too -- initially scoped PCA-only, but
-  // live diagnostics showed plane_var_ blowups (traces >900,000) driven
-  // by pos_cov's own magnitude for fresh/small-N voxels, independent of
-  // the denom1/denom2 eigengap guard, so debiased mode needs this
-  // exclusion option too. "combined" (default, unchanged) -- sensor_cov+
-  // pos_cov, the full noise budget. "sensor_only" -- excludes pos_cov
-  // from this propagation entirely (pos_cov, poseCovAt()'s range^2
-  // lever-arm term, is documented to "dwarf true sensor noise for far
-  // points" -- the same reason pose_cov_in_sigma defaults false).
+  // History (348-361): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-348
   std::string plane_fit_pose_cov_mode = "combined";
 
-  // Controls VoxelNode::buildBinReps()'s two per-bin weight vectors,
-  // consumed by VoxelPlane::update() as w_i/weight_sum (always self-
-  // normalizing, so only the RELATIVE weighting across bins matters, not
-  // the absolute scale). "count" -- weight = bin.count, i.e. the sum is
-  // the inverse participation ratio over bins, an effective sample size
-  // bounded above by the bin count J but shaped by point density within
-  // bins (the Kish effective-N). "uniform" -- weight = 1 for every
-  // occupied bin regardless of how many points landed in it, i.e. true
-  // occupancy counting (effective sample size is exactly J). Only takes
-  // effect when use_bins is true (see VoxelNode::useBins()).
-  //
-  // Split into _fit and _var 2026-08-30 (T3-0c): before this, one
-  // "bin_weight_mode" fed BOTH the plane fit (center/covariance/normal,
-  // in VoxelPlane::update()'s weighted mean/covariance) and the
-  // plane_var_ Jacobian in the same call -- so T3-0's "uniform" arm moved
-  // the ESTIMATE and its UNCERTAINTY together, the identical confound T3-0
-  // was built to strip out of T0-B-2. T3's actual proposal only reweights
-  // the uncertainty term (its directional M_cov substitutes for this
-  // scalar case) -- (fit=count, var=count) reproduces pre-split behavior;
-  // (fit=count, var=uniform) is the arm that actually tests T3's premise
-  // in isolation.
+  // History (364-384): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-364
   std::string bin_weight_mode_fit = "count";
   std::string bin_weight_mode_var = "count";
 
-  // VoxelNode's PointBin accumulator bin size, as a fraction of that
-  // node's own voxel extent (opts->voxel_size / 2^layer) -- see
-  // VoxelNode::density_weight_leaf_. Was a hard-coded
-  // kDensityWeightLeafFraction constant chosen only to bound refit cost;
-  // exposed as a config option 2026-08-30 (T3-0b) since it also sets the
-  // effective sample size (occupied-bin count J) that bin_weight_mode
-  // above operates over, and had never been swept. Smaller -> finer bins,
-  // more of them (J closer to N, less aggregation, higher refit cost).
-  // Larger -> coarser bins, fewer of them (J smaller, more aggregation).
+  // History (388-396): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-388
   double bin_size_fraction = 0.2;
 
-  // Whether VoxelNode uses the PointBin accumulator (bins_) instead of
-  // raw points_ storage -- see VoxelNode::useBins(). Split out from
-  // convergence_mode 2026-08-30 (T0-B-4): before this, "always_update"
-  // implied binning as a side effect (binning exists to bound refit cost
-  // for a voxel that never locks), which meant every prior experiment
-  // that varied convergence_mode to turn binning "on/off" also changed
-  // whether the voxel could converge and freeze -- two effects in one
-  // knob. Defaults false (raw points_, matching every non-always_update
-  // config's actual historical behavior); a config that wants the OLD
-  // "always_update implies binning" behavior must set this explicitly
-  // alongside convergence_mode: "always_update".
+  // History (399-409): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-399
   bool use_bins = false;
 
-  // T0-D (2026-08-31): corr.csv -- one row per point-to-plane
-  // correspondence, BEFORE the outlier (sigma_num_squared) gate, for
-  // offline filter-consistency diagnosis (scripts/analysis/consistency.py
-  // -- NIS/whiteness/Q-vs-R triage, no ground truth needed). Core columns
-  // only: scan_id (=this frame's VoxelMap::frame_idx_), nu (=r), S (=full
-  // residual variance, sensor[+pose]+plane_var_term), gated (0/1 -- did
-  // this correspondence pass the chi2 test, logged either way, unlike
-  // variance_shares.txt which only ever sees accepted ones -- the
-  // register's own note is that gating biases NIS DOWN by truncating the
-  // upper tail, so scoring must see the pre-gate population). Deliberately
-  // split from log_variance_shares_en (a different, narrower log already
-  // in production use) and from log_consistency_covariates_en below, so a
-  // run can log the cheap core NIS columns without paying for the extra
-  // per-point breakdown. Off by default.
+  // History (412-425): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-412
   bool log_consistency_corr_en = false;
 
-  // Extra covariate columns appended to log_consistency_corr_en's core
-  // row: S_sensor, S_pose (gate()'s two independent variance sources,
-  // logged separately regardless of pose_cov_in_sigma), S_plane_tilt,
-  // S_plane_d (plane_var_term's quadratic form split by J_nq's tilt vs. d
-  // components, off-diagonal tilt/d cross-terms divided evenly between the
-  // two -- S_plane_tilt+S_plane_d reconstructs plane_var_term exactly), N
-  // (this plane's total accumulated point count), J (occupied bin count if
-  // this plane is bin-fit, else 0), aniso (eigen_values_(2)/
-  // eigen_values_(1), in-plane coverage anisotropy -- T3's premise
-  // directly: consistency.py's panel 5 bins NIS by this), lambda0
-  // (eigen_values_(0), T0-G 2026-08-31 -- the plane fit's own is_plane_
-  // threshold quantity; T8-0b's/T8-d's outcome variable). range/incidence
-  // are NOT logged -- computing them needs the sensor's world position,
-  // which isn't available at VoxelPlane::computeResidual()'s call depth
-  // without threading it through the whole MapBackend virtual interface;
-  // consistency.py degrades gracefully (skips that one covariate) when the
-  // column is absent, so this was scoped out rather than done partially.
-  // No-op unless log_consistency_corr_en is also true. Off by default.
+  // History (428-445): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-428
   bool log_consistency_covariates_en = false;
 
-  // 14c (2026-09-01): 1 = a corr.csv row for every candidate (today's
-  // behaviour, ~1GB/job with covariates on). N = every Nth. Level
-  // statistics (mean NIS, accept fraction, dropped-by-ablation count) are
-  // UNAFFECTED by this -- they come from corr_scan.csv, an exact per-scan
-  // aggregate updated for every candidate regardless of stride (see
-  // debugAccumConsistencyCorr()). corr.csv itself is for distributional
-  // questions only (percentiles, decile cuts), which tolerate subsampling.
-  // Keep this PRIME: LiDAR returns arrive in ring/azimuth order, so a round
-  // stride (50, 64, 100) can alias with the beam count.
+  // History (448-456): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-448
   int log_consistency_corr_stride = 1;
 
-  // T8-a (2026-08-31): "disc" (default) -- today's isotropic admission
-  // test, range_dis > max_radius*radius_ with radius_ = sqrt(lambda2) (the
-  // LARGEST in-plane eigenvalue) -- a sliver sampled 1m along one axis and
-  // 3cm along the other admits correspondences 3m out along the axis it
-  // barely observed, since the disc radius is set by the axis with the
-  // MOST support. "ellipse" -- Mahalanobis ellipse of the fit's own
-  // sampling, using the SAME x_normal_/y_normal_ basis J_nq already uses
-  // (no new geometry): m2 = u1^2/lambda2 + u2^2/lambda1, gated against
-  // max_radius^2. Bit-identical to "disc" only in the degenerate case
-  // lambda1==lambda2; otherwise a real behavior change, so it must be
-  // opted into explicitly.
-  // "ellipse_area_matched" (2026-09-01): "ellipse" above is strictly
-  // CONTAINED in the disc (admits only sqrt(lambda1/lambda2) of its area),
-  // so an ellipse-vs-disc comparison confounds shape with admitted-area --
-  // this mode rescales the ellipse's threshold by sqrt(lambda2/lambda1)
-  // (capped at 4x, see gate()'s AUDIT comment) so the admitted AREA matches
-  // the disc's, isolating the shape change the coverage hypothesis is
-  // actually about.
+  // History (459-476): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-459
   std::string plane_gate_mode = "disc";
 
-  // T3-0e (2026-08-31): test T3's DIRECTIONAL premise directly -- drop
-  // correspondences from planes whose occupancy anisotropy (see
-  // VoxelPlane::occupancyAnisotropy()) is judged "bad" by one of two
-  // rules, applied at gate() time (a genuine drop from the residual, not
-  // just a logged diagnostic):
-  //   "none" (default): no dropping, bit-identical to today.
-  //   "top": drop if occupancyAnisotropy() > occ_aniso_drop_threshold.
-  //     The threshold must be supplied externally (occ_aniso_drop_threshold
-  //     has no sensible default) -- computed from a baseline pass's own
-  //     occ_aniso distribution (e.g. its 90th percentile, for a "top
-  //     decile" cut). Leaving it at -1 (a value no real anisotropy can be
-  //     below) makes "top" mode a no-op, matching "none" -- a safe default
-  //     rather than an easy-to-miss misconfiguration.
-  //   "random": drop with probability occ_aniso_drop_fraction, decided
-  //     once per PLANE (not per correspondence) via a fixed-seed hash of
-  //     plane_.center -- deterministic and reproducible, but only
-  //     approximately size-matched to "top" mode's actual drop count (in
-  //     EXPECTATION, not exact count) since this codebase has no
-  //     first-class per-plane identity to do an exact two-pass match
-  //     against. Document this approximation plainly if this arm's own
-  //     result is ever quoted.
+  // History (479-499): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-479
   std::string occ_aniso_drop_mode = "none";
   double occ_aniso_drop_threshold = -1.0;
   double occ_aniso_drop_fraction = 0.1;
   int occ_aniso_drop_seed = 0;
 
-  // Code-review fix, 2026-08-31: occupancyAnisotropy() returns -1.0
-  // (undefined) when fewer than 3 cells are occupied -- typically a plane
-  // whose normal/anchor is still settling. Under "top" mode, -1.0 used to
-  // silently never exceed occ_aniso_drop_threshold, so undefined planes
-  // were ALWAYS kept -- systematically protecting the least-converged
-  // planes, plausibly the ones the ablation most wants to be able to
-  // remove. false (default): undefined counts as "keep" (conservative,
-  // matches the old accidental behavior, now a deliberate choice). true:
-  // undefined counts as "top decile" (drop). Either way, the count of
-  // undefined-and-therefore-policy-decided planes is now logged (corr.csv
-  // gains a dropped_by_ablation column) so this bucket's size is visible,
-  // not just its existence.
+  // History (505-516): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-505
   bool occ_aniso_undefined_as_top = false;
 
-  // ------------------------------------------------------------------
-  // T8-b (2026-09-01): the three plane-confidence terms, each on its own
-  // switch so the grid can turn them on and off independently. A
-  // point-to-plane update can be wrong for three separable reasons --
-  // the points were noisy, the points were redundant, the points did not
-  // cover the plane -- and livo_recon has had a partial answer to each
-  // that could not compose. These two flags supply the missing two.
-  //
-  // Both are EXACTLY behaviour-preserving when off, and the coverage term
-  // is additionally an identity when coverage is isotropic, so a null
-  // result is distinguishable from an inert switch: see the occ_cells
-  // and plane_conf_factor columns in corr.csv.
-  //
-  // redundancy: plane_var_ scales as 1/N. On the pca path the bin
-  // weights already discount repeated returns; on the debiased path
-  // N_acc_ counts every redundant return, so debiased is over-confident
-  // by the redundancy factor precisely where binning exists to prevent
-  // it. Replace the raw count with a coverage-derived effective sample
-  // size (occupied 8x8 cells) and inflate by the ratio.
+  // History (519-537): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-519
   bool   plane_conf_redundancy_en  = false;
   double plane_conf_redundancy_cap = 16.0;  // hard ceiling on the inflation ratio
 
@@ -547,32 +327,13 @@ struct VoxelOpts
   double plane_conf_coverage_beta = 1.0;    // 0 = identity, 1 = full ratio
   double plane_conf_coverage_cap  = 100.0;  // ceiling on either axis factor
 
-  // T1 (2026-09-01): refitDebiased() rejects a fit whose eigengap
-  // denominators are within eps of zero; update() -- the pca path -- has
-  // NO such guard and will happily divide plane_var_ by an arbitrarily
-  // small denom1. That asymmetry sits underneath every pca-vs-debiased
-  // comparison in the register. On: apply the identical guard to both.
+  // History (550-554): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-550
   bool plane_var_denom_floor_en = false;
 
-  // T0-G (2026-08-31): diagnostic-only. 0 (default) -- no-op, today's
-  // behavior unchanged. Nonzero -- deterministically shuffle each frame's
-  // point order (std::mt19937 seeded from this value XOR'd with the frame
-  // index, so every frame gets a distinct but reproducible permutation)
-  // immediately before VoxelMap::updateMap()'s bucket-build step. Point
-  // order affects nothing SEMANTICALLY (a voxel's accumulated sums are
-  // order-independent in exact arithmetic), but floating-point summation
-  // is order-dependent -- this exists purely to measure how much that
-  // last-bit-level nondeterminism can move ATE, i.e. this register's first
-  // error bar. See VoxelMap::updateMap()'s call site for the actual
-  // shuffle.
+  // History (557-567): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-557
   int shuffle_insertion_seed = 0;
 
-  // T0-F-2b (2026-08-31): logs frame_stats.txt (t, frame_idx,
-  // denom_rejected_count, max_plane_var_trace) bracketing each
-  // VoxelMap::updateMap() call -- see voxelPlaneFrameStats{Reset,Read}()
-  // in voxelplane.h for what's aggregated and why here specifically
-  // (ordering-independent w.r.t. common/insert_map_after_lio). Off by
-  // default.
+  // History (570-575): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-570
   bool log_frame_stats_en = false;
 };
 using VoxelOptsPtr = std::shared_ptr<VoxelOpts>;

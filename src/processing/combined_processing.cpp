@@ -55,27 +55,10 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProc& lio_proc, V
   int iter = 0;
   bool any_solved = false;
 
-  // Per-iteration monotonic-improvement guard (2026-08-15) -- mirrors
-  // VioProc::solveSystem()'s own `if (avg_error >= last_error) return
-  // false;` check, which CombinedProc never had. Without this, EVERY
-  // iteration's joint update gets applied via applyMeanUpdate() below
-  // unconditionally, even one where either side's fit at the CURRENT
-  // (not-yet-updated-this-iteration) state has already gotten WORSE than
-  // its own best-seen-so-far -- e.g. a single frame with a degenerate/
-  // near-zero-baseline epipolar point can spike avg_err_vio by orders of
-  // magnitude for one iteration, and that iteration's HtH/Htz still got
-  // summed with LIO's and applied, permanently contaminating state (and,
-  // via updateMaps() running after estimateState(), the shared voxel map
-  // too). Tracking LIO's and VIO's own quality metrics independently
-  // (rather than one combined scalar) avoids conflating two residuals on
-  // different scales/units.
+  // History (58-71): see docs/livo_recon_changelog.md#src-processing-combined_processing.cpp-58
   double best_avg_res_lio = std::numeric_limits<double>::max();
   float  best_avg_err_vio = std::numeric_limits<float>::max();
-  // G6 (2026-09-01): mirrors best_avg_res_lio/best_avg_err_vio's own
-  // "last applied iteration's value" semantics, just for n_meas -- needed by
-  // logConsistencyNll() below, which wants the joint update's ACTUAL last
-  // solve, not a per-iteration-loop-local value gone out of scope by the
-  // time the loop ends.
+  // History (74-78): see docs/livo_recon_changelog.md#src-processing-combined_processing.cpp-74
   int last_n_meas_lio = 0;
   int last_n_meas_vio = 0;
 

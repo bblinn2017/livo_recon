@@ -5,21 +5,7 @@
 #include <string>
 #include <vector>
 
-// Every *ProcOptions field in this codebase is read via pnh.param<T>(key,
-// out, default) -- if `key` was never set (typo'd config key, a rosparam
-// that got renamed in code but not in every checked-in yaml, an option
-// that's simply missing from a particular dataset's config), pnh.param()
-// silently falls back to its C++ default with zero indication anything
-// was missing. Confirmed this session (2026-08-16): a config-loading
-// override placed under the wrong yaml section (e.g. common: instead of
-// outputs:) silently no-op'd with no error, and separately, a hardcoded
-// yaml value shadowing a just-changed C++ default silently kept the old
-// behavior -- both would have been caught immediately by a fallback
-// warning. paramWarn<T>() is a drop-in replacement for pnh.param<T>() that
-// additionally logs a ROS_WARN when the key isn't found on the param
-// server at all (i.e. every *.yaml actually loaded by this launch didn't
-// set it), before falling back to `default_value` exactly like pnh.param()
-// always has.
+// History (8-22): see docs/livo_recon_changelog.md#include-livo_recon-utils-log-param_warn.h-8
 namespace livo_recon
 {
 

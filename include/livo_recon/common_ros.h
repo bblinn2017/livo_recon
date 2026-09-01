@@ -1,13 +1,6 @@
 #pragma once
 
-// ROS/CV/PCL message-type and transport includes, split out of the old
-// common_lib.h (2026-08-14) -- these are stable EXTERNAL headers (not
-// livo_recon's own churny internal types like ekf.h/state.h), so bundling
-// them together has no rebuild-cascade cost. Only livo_recon/common_lib.h
-// (the internal-utility-header aggregator) was the actual problem; this
-// file is unaffected by that split and can still be included wherever
-// broad ROS/CV/PCL access is genuinely needed (cbk_processing, pub_
-// processing, evo_processing, livo_recon_node -- the ROS-I/O-facing files).
+// History (3-10): see docs/livo_recon_changelog.md#include-livo_recon-common_ros.h-3
 
 #include <ros/ros.h>
 #include <ros/package.h>

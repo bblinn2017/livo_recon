@@ -195,23 +195,7 @@ public:
   // have already confirmed readiness via waitReadyFor().
   bool consumeResult(TrackedFrame& out);
 
-  // Pose-history mechanism (2026-08-14, ported from FAST-LIVO2's
-  // LivoVioManager::anchor_Rt_) -- replaces the previous caller-driven
-  // "commit now" pattern (Tracker used to own mutable rot_anchor_/
-  // pos_anchor_, updated via a commitAnchorPose() call every caller had to
-  // remember to make at exactly the right time; a NEW caller (CombinedProc)
-  // forgetting to do so was a real bug this session). Instead:
-  //   - recordFramePose() is called ONCE per frame by LivoReconNode::
-  //     estimateState(), AFTER that frame's correction (sequential or
-  //     combined, whichever path ran) has fully finished -- pushes
-  //     (timestamp, state_->rot(), state_->pos()) onto a FIFO history.
-  //   - resolveAnchorPose() is called ONCE per frame, BEFORE either
-  //     correction path runs, and looks up frame.prev_timestamp in that
-  //     same history (FIFO front -- frames are consumed and recorded in
-  //     strict timestamp order) to fill frame.rot_anchor/pos_anchor.
-  // No caller-side "did I remember to commit" contract exists anymore --
-  // any consumer of a TrackedFrame just reads rot_anchor/pos_anchor,
-  // already resolved.
+  // History (198-214): see docs/livo_recon_changelog.md#include-livo_recon-vio-tracker.h-198
   void recordFramePose(double timestamp);
   void resolveAnchorPose(TrackedFrame& frame);
 
@@ -272,29 +256,7 @@ private:
 
   void asyncTrackingLoop();
 
-  // Maps a RAW (distorted) observed pixel to its distortion-corrected
-  // pixel-space equivalent (2026-08-04): (u-cx)/fx, (v-cy)/fy is only the
-  // correct inverse-pinhole projection for an IDEAL (distortion-free)
-  // pixel -- VioProc::computeEpipolarResidualAndJacobian applies exactly
-  // that projection to whatever pixel it's given, so feeding it the raw
-  // observed pixel directly (as this codebase always had, a bug shared
-  // with FAST-LIVO2's livo_vio scaffold this residual model was ported
-  // from) bakes in a real geometric bias that grows with distance from
-  // the principal point whenever the lens has non-negligible distortion
-  // (NTU_VIRAL's cam_d0 is -0.288, not negligible). Fixed HERE, once per
-  // point at the source (seed selection / tracked-position snapshot)
-  // rather than repeatedly inside the residual function every EKF
-  // iteration -- cv::undistortPoints with P=K (the camera matrix) maps
-  // the distorted pixel to its true undistorted position and
-  // re-projects it back into pixel units via P, so the OUTPUT stays a
-  // plain pixel coordinate and every downstream consumer (the epipolar
-  // residual's own (u-cx)/fx, drawUvTracking's visualization, etc.)
-  // needs no changes at all. Deliberately NOT applied to uv_out in
-  // selectAnchors() or to uv_prev_/uv_curr_ (the backend's raw I/O) --
-  // those must stay in true (distorted) image pixel space since that's
-  // what the actual image data is and what the tracking backend
-  // operates against; only the values that end up feeding the epipolar
-  // residual (AnchorPoint::uv_seed, TrackedFrame::uv_curr) are corrected.
+  // History (275-297): see docs/livo_recon_changelog.md#include-livo_recon-vio-tracker.h-275
   cv::Point2f undistortPixel(const cv::Point2f& p) const;
 
   // Local 2x2 Jacobian d(normalized_bearing)/d(raw_pixel) at a raw pixel,

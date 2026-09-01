@@ -104,11 +104,7 @@ std::string VioProc::loadParameters(ros::NodeHandle& pnh)
   return oss.str();
 }
 
-// ─────────────────────────────────────────────
-//  EKF update -- accumulation delegated to VioAccumulator (vio/
-//  vio_accumulator.h, 2026-08-14), this class now just adapts opts_ and
-//  owns the iteration/rejection/apply/logging policy.
-// ─────────────────────────────────────────────
+// History (107-111): see docs/livo_recon_changelog.md#src-processing-vio_processing.cpp-107
 
 VioAccumulateOptions VioProc::accumulateOptions() const
 {
@@ -144,32 +140,7 @@ bool VioProc::solveSystem(const TrackedFrame& frame, float& last_error, double t
 
   if (!ok) return false;
 
-  // 2026-08-16: investigated replacing this strict, zero-tolerance check
-  // (dominant stop reason on 69.6% of frames in a site1_handheld_3
-  // diagnostic, usually firing right after genuine convergence) with
-  // either full removal or a small relative tolerance, on the theory that
-  // the stop point was a coin flip decided by sub-ULP floating-point
-  // noise. Both tested empirically on site1_handheld_3:
-  //  - full removal (matching fastlivo's unconditional-apply myvio solve):
-  //    REGRESSED badly, 6.37m -> 2378.8m ATE. Not every "worse" iteration
-  //    this check catches is noise-level -- some are genuine overshoots
-  //    (livo_recon's HtH is less well-conditioned than fastlivo's, per the
-  //    anchor_split_depth/distortion_weight_on gap -- see
-  //    VIO_METHODOLOGY_DIFF.md), and applying them unconditionally bakes a
-  //    genuinely-bad overshoot into the state before rel_diff ever gets a
-  //    chance to stop the loop.
-  //  - 1e-6 relative tolerance: bit-identical ATE to the strict check
-  //    (6.37m, both n=3 and n=4 evo scores matched exactly). This is a
-  //    no-op because the OMP accumulation-order fix (see
-  //    feedback_livo_recon_omp_nondeterminism memory) already made a
-  //    single run's HtH/Htz accumulation, and therefore every avg_error
-  //    value and accept/reject decision here, fully deterministic --
-  //    there's no more run-to-run floating-point noise left for a
-  //    tolerance to absorb. The original "coin flip" framing applied to
-  //    comparing DIFFERENT thread-count runs pre-fix, not to a single
-  //    run's own reproducibility.
-  // Conclusion: this check is not broken. Reverted to the original strict
-  // form.
+  // History (147-172): see docs/livo_recon_changelog.md#src-processing-vio_processing.cpp-147
   if (avg_error >= last_error) return false;
 
   last_error = avg_error;

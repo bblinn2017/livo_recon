@@ -14,14 +14,7 @@ namespace livo_recon
 
 namespace
 {
-// T0-F-2b (2026-08-31): denom_rejected count + max plane_var_ trace,
-// bracketing THIS updateMap() call -- see voxelPlaneFrameStats{Reset,Read}()
-// in voxelplane.h. Logged here (not lio_processing.cpp) because updateMap()
-// -- and hence every VoxelPlane::update()/refitDebiased() call that can
-// touch these counters -- can run either before or after processLIO(),
-// depending on common/insert_map_after_lio; bracketing tightly around this
-// one call is the only ordering-independent way to attribute the stats to
-// the right frame.
+// History (17-24): see docs/livo_recon_changelog.md#src-map-voxelmap.cpp-17
 void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count, double max_plane_var_trace)
 {
   static bool first_call = true;
@@ -162,14 +155,7 @@ void VoxelMap::updateMap(MeasureGroup& mg) {
       thread_keys_.resize(threads);
       for (auto& v : thread_keys_) v.clear();
 
-      // T0-G (2026-08-31): diagnostic-only permutation of the PROCESSING
-      // ORDER (which point lands in which OMP static-schedule chunk, and
-      // in what order within a chunk's thread-local key list) -- see
-      // VoxelOpts::shuffle_insertion_seed's doc comment. proc_order[oi] is
-      // the original point index processed at loop position oi; identity
-      // (no-op) when the seed is 0. Distinct per frame (seed XOR
-      // frame_idx_) so a multi-frame run doesn't apply the same
-      // permutation to every frame's point count.
+      // History (165-172): see docs/livo_recon_changelog.md#src-map-voxelmap.cpp-165
       std::vector<int> proc_order(np);
       std::iota(proc_order.begin(), proc_order.end(), 0);
       if (opts_->shuffle_insertion_seed != 0) {

@@ -1,15 +1,6 @@
 #pragma once
 
-// Legacy "everything" aggregator. As of 2026-08-14, NodeContext (and hence
-// every processing/*.h) no longer includes this transitively -- see
-// node_context.h's doc comment. This header still exists for the handful
-// of files that genuinely want the full breadth (ROS/CV/PCL message types
-// AND all of livo_recon's own internal utility types together): map/
-// voxelmap.h, vio/tracker.h, tools/cache_tracker_output.cpp. New code
-// should prefer including exactly the specific internal headers it needs
-// (state.h, ekf.h, measures.h, etc.) plus common_ros.h only if it also
-// needs ROS/CV/PCL message types -- not this file -- so an unrelated
-// header change doesn't force it to rebuild.
+// History (3-12): see docs/livo_recon_changelog.md#include-livo_recon-common_lib.h-3
 
 #include "livo_recon/common_ros.h"
 

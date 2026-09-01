@@ -18,18 +18,7 @@ void DataQueues::setStartTime(const double timestamp)
       for (auto& pt : scan) pt.t -= start_time;
   }
   {
-    // See dry_run_lidar_queue's doc comment (data_queues.h) -- missed in
-    // the original addition (2026-08-24): any dry-run scans pushed before
-    // setStartTime() runs (calibration can consume several lidar/imu
-    // callbacks before the first image arrives) kept absolute timestamps
-    // forever, since only lidar_queue was corrected here. popDryRunLidar()
-    // compares its front scan's (absolute) timestamp against max_time
-    // (always relative, since it's derived from an already-adjusted image
-    // timestamp) and `break`s immediately when front > max_time -- so once
-    // even one such stale entry sat at the front, EVERY subsequent
-    // popDryRunLidar() call returned nothing, permanently, for the entire
-    // run. Confirmed via an eee_01 sanity run: 3981 real [lio] frames
-    // logged, zero [lio_dryrun] frames.
+    // History (21-32): see docs/livo_recon_changelog.md#src-utils-data-data_queues.cpp-21
     std::lock_guard<std::mutex> lock(dry_run_lidar_mutex);
     for (auto& scan : dry_run_lidar_queue)
       for (auto& pt : scan) pt.t -= start_time;

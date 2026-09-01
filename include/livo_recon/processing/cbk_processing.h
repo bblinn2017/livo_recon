@@ -51,18 +51,7 @@ struct CbkProcOptions
   // `i % point_filter_num != 0` skip). 1 = keep everything (no decimation).
   int point_filter_num = 1;
 
-  // 2026-08-24: opt-in LIO shadow dry-run diagnostic (see LioProcOptions::
-  // dry_run_point_filter_num, lio_processing.h, and MeasureGroup::
-  // dry_run_lidar_points/dry_run_points, measures.h). 0 (default) = no-op,
-  // zero cost -- the raw scan is decimated only once (at point_filter_num
-  // above), exactly as before this feature existed. > 0 = decimate the
-  // SAME raw scan a SECOND time at this point_filter_num and store it in
-  // MeasureGroup::dry_run_lidar_points, purely for LioProc's own shadow
-  // IEKF pass to consume -- never inserted into the voxel map, never
-  // affects the real trajectory. Loaded from the SAME rosparam key as
-  // LioProcOptions::dry_run_point_filter_num ("lio/dry_run_point_filter_
-  // num") -- two Options structs reading one key, to avoid a
-  // cbk_processing<->lio_processing header dependency for a single int.
+  // History (54-65): see docs/livo_recon_changelog.md#include-livo_recon-processing-cbk_processing.h-54
   int dry_run_point_filter_num = 0;
 
   LidarType lidar_type = LidarType::MID360;
@@ -83,19 +72,7 @@ struct CbkProcOptions
   bool log_sync_debug = false;
   std::string sync_debug_log_path = "/tmp/livo_recon_sync_debug.txt";
 
-  // Generalized frame-rate subsampling -- ported from FAST-LIVO2's
-  // preprocess/image_subsample_n (LIVMapper::img_cbk()). 1 (default)
-  // processes every image frame, unchanged from prior behavior. N > 1
-  // processes only every Nth frame (frame_counter % N == 0), dropping the
-  // rest before any other work (tracker feed, queue push) happens on them.
-  // Motivated by the 2026-08-12 sync investigation: a rotating lidar
-  // publishing full scans at ~10Hz alongside a 40Hz camera means 3 of
-  // every 4 image frames can never pair with a lidar scan anyway (see
-  // DataQueues::ready()'s doc comment) -- image_subsample_n=4 on such a
-  // dataset (e.g. HILTI slam_2022/2023) matches the camera to the lidar's
-  // own natural cadence instead of feeding the tracker 3x more frames than
-  // syncMeasures() can ever actually use. NTU_VIRAL's camera/lidar rates
-  // don't have this mismatch, so it stays at 1 (no skipping) there.
+  // History (86-98): see docs/livo_recon_changelog.md#include-livo_recon-processing-cbk_processing.h-86
   int image_subsample_n = 1;
 
   // Ground-truth topic ingestion (evo/gt_source=="topic", e.g. NTU_VIRAL's

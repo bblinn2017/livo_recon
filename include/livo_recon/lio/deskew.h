@@ -6,20 +6,7 @@
 #include "livo_recon/utils/data/data_wrappers.h"
 #include "livo_recon/utils/state/state.h"
 
-// Per-point LiDAR deskewing. Only ONE strategy lives here now:
-// deskewPoints(), a one-shot deskew against the piecewise-IMU-integrated
-// trajectory `poses` (ImuProc::propagate()'s output), using the IMU-only
-// propagated state. Never re-evaluated once the IEKF loop starts
-// correcting state_ -- only the single scan-end pose ever gets corrected.
-//
-// 2026-08-24: REMOVED an experimental "iterative deskew" alternative
-// (deskewAndSelect()/evalSpline(), a re-evaluated-every-IEKF-iteration
-// cubic Hermite spline over the whole scan) -- never enabled in any
-// production config, and its one validated result came with a known,
-// unresolved regression on 3 HILTI sequences. Full design, math, and
-// removal rationale preserved at
-// docs/removed_livo_recon_spline_deskew_2026aug24.md; literal pre-removal
-// code at refactor_snapshots/remove_livo_recon_spline_deskew_2026aug24/.
+// History (9-22): see docs/livo_recon_changelog.md#include-livo_recon-lio-deskew.h-9
 namespace livo_recon
 {
 

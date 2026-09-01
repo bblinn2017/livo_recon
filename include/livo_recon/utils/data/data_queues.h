@@ -57,16 +57,7 @@ struct DataQueues
 {
   std::deque<ImageData> image_queue;
   std::deque<std::vector<PointXYZT>> lidar_queue;
-  // 2026-08-24: opt-in LIO shadow dry-run diagnostic (CbkProcOptions::
-  // dry_run_point_filter_num) -- a SECOND lidar queue, populated in
-  // parallel by CbkProc's lidar callback from the SAME raw scan decimated
-  // at a different point_filter_num, popped in lockstep (same max_time
-  // window) by the same MeasureGroup-assembly call that pops the primary
-  // queue. Entirely independent state (its own mutex/latest-time
-  // bookkeeping) from lidar_queue above -- correctness only depends on
-  // both being popped with the same `max_time`, not on any cross-queue
-  // synchronization. Empty/unused (zero cost) unless dry_run_point_filter_
-  // num > 0.
+  // History (60-69): see docs/livo_recon_changelog.md#include-livo_recon-utils-data-data_queues.h-60
   std::deque<std::vector<PointXYZT>> dry_run_lidar_queue;
   std::deque<ImuSample> imu_queue;
   // Raw ground-truth pose samples (evo/gt_source=="topic") -- ingestion

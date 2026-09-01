@@ -5,19 +5,7 @@
 #include <ros/ros.h>
 #include <image_transport/image_transport.h>
 
-// Forward-declares only -- NO full type definitions here. This is the
-// single highest-leverage fix for livo_recon's rebuild-cascade problem
-// (2026-08-14): every processing/*.h includes this file, so it used to
-// transitively pull in common_lib.h (ROS/OpenCV/PCL/Eigen plus ALL of
-// livo_recon's own utility headers: ekf.h, state.h, measures.h, etc.) plus
-// the full voxelmap.h/tracker.h -- meaning a change to e.g. ekf.h alone
-// forced a rebuild of the whole package. Since NodeContext only ever
-// stores these as shared_ptr (never by value), the pointee types don't
-// need to be complete here -- shared_ptr<Incomplete> is fine as a class
-// member (its destructor doesn't need T complete, since make_shared bakes
-// a type-erased deleter into the control block at construction time).
-// The constructor body (the only place that actually needs the complete
-// types, for the make_shared<T>() calls) moved to node_context.cpp.
+// History (8-20): see docs/livo_recon_changelog.md#include-livo_recon-node_context.h-8
 namespace livo_recon
 {
 

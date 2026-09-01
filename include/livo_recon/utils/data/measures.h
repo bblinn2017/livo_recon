@@ -28,29 +28,12 @@ struct MeasureGroup
   // IMU Processing
   std::vector<Pose6D> poses;
 
-  // LIO Processing -- the single point set used for both residual matching
-  // and voxel-map insertion (VoxelMap::updateMap()). Built from
-  // lidar_points via point_filter_num (keep-every-Nth, applied at
-  // ingestion -- CbkProc) then ds_leaf_size (voxel-grid downsample,
-  // applied in LioProc::processLIO() after deskewing -- moved from
-  // ImuProc 2026-08-18) -- both no-ops at their extreme settings
-  // (point_filter_num=1, ds_leaf_size=0), so there's one point-processing
-  // pipeline, not a separate decimated/full-resolution pair. Set once
-  // (LioProc::deskewAndDownsample()) and never touched again this frame.
+  // History (31-39): see docs/livo_recon_changelog.md#include-livo_recon-utils-data-measures.h-31
   std::vector<PointXYZCov> points;
 
-  // 2026-08-24: REMOVED points_orig/points_orig_offset/spline_anchor --
-  // state for the removed iterative-deskew Hermite-spline mechanism. See
-  // docs/removed_livo_recon_spline_deskew_2026aug24.md.
+  // History (42-44): see docs/livo_recon_changelog.md#include-livo_recon-utils-data-measures.h-42
 
-  // 2026-08-24: opt-in shadow dry-run diagnostic (LioProcOptions::
-  // dry_run_point_filter_num) -- a SECOND raw point set, decimated at a
-  // different point_filter_num than the primary `points` above (see
-  // CbkProc's ingestion), used ONLY by LioProc::runDryRunShadowPass() to
-  // run a non-committing shadow IEKF pass for direct comparison against
-  // the real frame's residual structure. Empty (no-op, zero cost) unless
-  // dry_run_point_filter_num > 0. Never touched by anything else --
-  // never inserted into the voxel map, never affects `points`/state_.
+  // History (46-53): see docs/livo_recon_changelog.md#include-livo_recon-utils-data-measures.h-46
   std::vector<PointXYZT> dry_run_lidar_points;
   std::vector<PointXYZCov> dry_run_points;
 

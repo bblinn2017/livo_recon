@@ -120,14 +120,7 @@ private:
 
   int total_count_ = 0;
 
-  // Was `convergence_mode == "always_update"` until 2026-08-30 (T0-B-4):
-  // that conflated binning with never-locking, so every experiment
-  // comparing a binned vs. "unbinned" arm via convergence_mode also
-  // changed whether the voxel could converge and freeze -- a confound
-  // T0-B-2/T0-B-3/T3-0's "unbounded, no binning" arm (convergence_mode:
-  // "normal", max_points: 100000) never separated from binning itself.
-  // Decoupled onto its own opts_->use_bins flag so binning and
-  // convergence-locking can be varied independently.
+  // History (123-130): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelnode.h-123
   bool useBins() const { return opts_->use_bins; }
 
   // This node's own bin size for the PointBin accumulator, in world

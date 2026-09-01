@@ -67,16 +67,7 @@ void debugLogPlaneFitStats(int n, int j, double n_eff, double trace_plane_var)
   ofs << n << " " << j << " " << n_eff << " " << trace_plane_var << "\n";
 }
 
-// T0-D (2026-08-31): corr.csv for scripts/analysis/consistency.py --
-// header written once on first call (trunc), core-vs-full row shape
-// decided by whether the covariate fields are finite/non-empty (see
-// computeResidual()'s call site: covariates are all left at their default
-// -1.0/-1 sentinel when log_consistency_covariates_en is off, and this
-// function omits those columns from the header AND every row in that
-// case, since consistency.py keys off column presence, not sentinel
-// values). Same per-call mutex pattern as the two functions above --
-// computeResidual() runs inside LioProc::buildResiduals()'s OMP
-// parallel-for.
+// History (70-79): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-70
 void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, double S,
                               double s_sensor, double s_plane_tilt, double s_plane_d,
                               double s_pose, int n, int j, double aniso, int gated,
@@ -84,14 +75,7 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
                               int dropped_by_ablation, double occ_var_u, double occ_var_v,
                               double plane_conf_factor)
 {
-  // 14a (2026-09-01): one stream, opened once, held open, with a large
-  // buffer. The previous form opened and closed the file PER CORRESPONDENCE
-  // (~12M times per job at full stride) under a global lock inside the
-  // residual loop -- confirmed live to add minutes of wall-clock per job and,
-  // more importantly, an UNVERIFIED determinism risk (the lock serializes a
-  // section that's otherwise threaded/CUDA-dispatched, which can perturb
-  // floating-point accumulation order -- T0-E-4 found this surface sensitive
-  // to ~1e-5 relative changes). Same first-call truncate semantics as before.
+  // History (87-94): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-87
   static std::mutex mtx;
   static std::vector<char> buf(1 << 20);
   static std::ofstream ofs;
@@ -100,24 +84,9 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
   if (first_call) {
     ofs.rdbuf()->pubsetbuf(buf.data(), static_cast<std::streamsize>(buf.size()));
     ofs.open(debugLogPath("corr.csv"), std::ios::trunc);
-    // dropped_by_ablation (2026-08-31, code-review fix): unconditional,
-    // not gated behind with_covariates -- T3-0e's ablation arms need this
-    // even in a plain (non-covariates) NIS run, to know which rows were
-    // excluded from the residual by the ablation itself vs by the
-    // ordinary sigma-gate (gated=1 without this =0 means the LATTER).
-    // When this is 1, S/s_sensor/.../s_prior_pose are all the -1.0
-    // sentinel (gate() does not finish computing them for a dropped
-    // correspondence) -- only nu, N/J/aniso/lambda0/occ_aniso/occ_cells
-    // (plane-level, valid regardless) are meaningful on that row.
+    // History (103-111): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-103
     ofs << "scan_id,nu,S,gated,dropped_by_ablation";
-    // T0-G (2026-08-31): lambda0 added -- eigen_values_(0), the plane fit's
-    // smallest eigenvalue (its own is_plane_ = eigen_values_(0) <
-    // plane_threshold test uses this directly). T8-0b/T8-d's outcome
-    // variable ("median lambda0"); previously computed but never logged
-    // anywhere. T3-0e (2026-08-31): occ_aniso/occ_cells added --
-    // VoxelPlane::occupancyAnisotropy()/occupiedCellCount(), the OCCUPANCY-
-    // based (density-independent) in-plane coverage anisotropy, distinct
-    // from `aniso` (point-scatter/density-weighted).
+    // History (113-120): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-113
     if (with_covariates) ofs << ",S_sensor,S_plane_tilt,S_plane_d,S_pose,S_prior_pose,N,J,aniso,lambda0,occ_aniso,occ_cells,occ_var_u,occ_var_v,plane_conf_factor";
     ofs << "\n";
   }
@@ -131,13 +100,7 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
   ofs << "\n";
 }
 
-// 14b (2026-09-01): exact per-scan aggregates, so a level statistic (mean
-// NIS, accept fraction, dropped-by-ablation count) never depends on the
-// corr.csv row stride below -- every candidate updates this accumulator
-// regardless of whether it also gets a full corr.csv row. corr_scan.csv is
-// therefore the source of truth for anything a cell is actually judged on;
-// corr.csv (now strided, see 14c) exists only for distributional questions
-// (percentiles, decile cuts) that genuinely need individual rows.
+// History (134-140): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-134
 struct CorrScanAccum {
   int scan_id = -1;
   long n_candidates = 0, n_accepted = 0, n_dropped = 0, n_nis_finite = 0;
@@ -256,26 +219,9 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
     const double u2 = d_center.dot(y_normal_);           // along the l1 axis
     const double m2 = u1 * u1 / l2 + u2 * u2 / l1;
     double thr2 = opts_->max_radius * opts_->max_radius;
-    // AUDIT, 2026-09-01. "ellipse" is not a shape-only change. Its region
-    // has semi-axes max_radius*sqrt(l2) and max_radius*sqrt(l1) against the
-    // disc's radius max_radius*sqrt(l2), so it is strictly CONTAINED in the
-    // disc and admits sqrt(l1/l2) of its area. On a sliver at aniso 1000
-    // that is 1/32 of the correspondences. An ellipse-vs-disc comparison
-    // therefore confounds "the gate is the wrong shape" with "the gate
-    // admitted far fewer points", and the size of the confound scales with
-    // the very anisotropy under test -- exactly the population-matching
-    // defect the T3-0e review found in the drop ablation.
-    //
-    // ellipse area = pi * T * sqrt(l1*l2);  disc area = pi * R^2 * l2
-    // equal  =>  T = R^2 * sqrt(l2/l1)
-    // "ellipse_area_matched" is the shape change at matched admitted area,
-    // and is the arm the coverage hypothesis is actually about.
+    // History (259-272): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-259
     if (opts_->plane_gate_mode == "ellipse_area_matched") {
-      // Capped at 4x. Beyond aniso ~16 the areas are only PARTIALLY matched
-      // and the arm drifts back toward the plain ellipse -- which is the
-      // safe direction to fail, since the alternative is admitting points
-      // arbitrarily far from a barely-sampled axis just to hit exact area
-      // parity (audit finding A2, 2026-09-01).
+      // History (274-278): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-274
       thr2 *= std::min(4.0, std::sqrt(l2 / l1));
     }
     if (m2 > thr2) return false;
@@ -285,14 +231,7 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
     if (range_dis > opts_->max_radius * radius_) return false;
   }
 
-  // T0-D's "log before the gate" guardrail: mark candidacy (this point
-  // cleared the purely-geometric test) BEFORE any T3-0e ablation drop
-  // below, so a dropped correspondence still reaches corr.csv (as
-  // dropped_by_ablation=1) instead of vanishing from the population
-  // entirely -- code-review fix, 2026-08-31 (the original version
-  // returned false above *is_candidate=true, so drops were unlogged and
-  // any NIS/count comparison against baseline was over a silently
-  // truncated population).
+  // History (288-295): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-288
   if (is_candidate) *is_candidate = true;
 
   // T3-0e: drop this whole PLANE from the residual (not just this one
@@ -315,22 +254,7 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
       return false;
     }
   } else if (opts_->occ_aniso_drop_mode == "random") {
-    // Code-review fix: hash on occ_anchor_center_ (only reassigned on a
-    // >10-degree occupancy reset, see updateOccupancy()) instead of
-    // plane_.center (reassigned on EVERY refitDebiased()/update() call --
-    // the original version redrew this "random" decision at scan rate,
-    // ~10Hz, instead of once per plane; see the bug ledger entry this
-    // fixes). Still only APPROXIMATELY stable (a rare reset changes the
-    // draw), not a first-class per-plane identity, but no longer redrawn
-    // every single fit.
-    // POPULATION MATCH (T3-0e blocking fix, 2026-09-01). The "top" arm can
-    // only ever select planes whose occ_aniso is DEFINED -- >= 3 occupied
-    // cells -- unless occ_aniso_undefined_as_top says otherwise. Drawing
-    // "random" from every plane makes arm 3 a draw from a strictly larger
-    // population than arm 2, so the two arms remove different KINDS of
-    // plane and the comparison has no control. Gate eligibility on the same
-    // predicate "top" uses, so the two arms stay matched under either
-    // setting of occ_aniso_undefined_as_top rather than only under one.
+    // History (318-333): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-318
     const bool eligible = opts_->occ_aniso_undefined_as_top
                         || (occupancyAnisotropy() >= 0.0);
     if (eligible) {
@@ -400,13 +324,7 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
       j = last_fit_j_;
       aniso = eigen_values_(2) / std::max(eigen_values_(1), 1e-12);
     }
-    // s_sensor/s_tilt/s_d/s_pose/S/s_prior_pose all depend on J_nq/
-    // sigma_diag_squared/plane_var_term, which gate() does NOT finish
-    // computing when it returns early on a T3-0e drop (they're zero-
-    // initialized above, not meaningful) -- skip computing/logging these
-    // for a dropped row rather than logging garbage-looking zeros dressed
-    // up as real numbers. S itself logs as the -1.0 sentinel for a
-    // dropped row (code-review fix, 2026-08-31).
+    // History (403-409): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-403
     double s_prior_pose = -1.0;
     double S = -1.0;
     if (!dropped_by_ablation) {
@@ -510,12 +428,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   double weight_sum = N;
   const bool use_weights = (weights_in != nullptr);
 
-  // Independent weighting for the plane_var_ Jacobian loop below (see
-  // T3-0c) -- falls back to `weights`/`weight_sum` when not supplied, so
-  // a caller that only passes `weights` gets the pre-2026-08-30 behavior
-  // (fit and uncertainty share one weighting) unchanged. weight_sum is
-  // finalized by the fit block below, so var_weight_sum's fallback is
-  // resolved after it, not here.
+  // History (513-518): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-513
   const std::vector<double>* var_weights = var_weights_in ? var_weights_in : weights;
   const bool use_var_weights = (var_weights != nullptr);
   double var_weight_sum = 0.0;
@@ -731,28 +644,7 @@ void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_cou
 {
   for (const auto& pt : points) {
     const V3D& p = pt.point;
-    // Combined sensor+pose covariance -- for plane_var_'s accumulators
-    // only (Scov_/V_/W_), which legitimately want the full residual-noise
-    // budget, same as the PCA path's Jmin loop above. sensor_cov alone
-    // (independent per point) is what M_debiased's own fit-bias
-    // correction uses, via Scov_sensor_ below -- see refitDebiased() for
-    // why the shared pose component can't be folded in there the same
-    // naive way.
-    // 2026-08-24 pass4 diagnostic finding: plane_var_ blowups (traces up
-    // to ~965,882 seen live) persist even when the denom1/denom2 guard
-    // below passes comfortably (e.g. denom1=-0.003, eps=0.00025) -- the
-    // real driver is pos_cov's own magnitude, not the eigengap. pos_cov
-    // (poseCovAt()'s range^2 lever-arm term) is documented elsewhere in
-    // this codebase to "dwarf true sensor noise for far points"
-    // (VoxelOpts::pose_cov_in_sigma's docs, which is why THAT flag
-    // defaults false) -- every blown-up sample here was F=1, N=4-6: a
-    // fresh, barely-initialized voxel whose Scov_/V_/W_ accumulators are
-    // raw sums of only a handful of points, not yet averaged down, so one
-    // large pos_cov contribution dominates. Respect the same
-    // plane_fit_pose_cov_mode ablation used for the PCA path's Jmin loop
-    // here too (deviating from the original spec, which scoped it
-    // PCA-only, based on this evidence -- see
-    // docs/debiased_voxel_plane_fit_2026aug24.md).
+    // History (734-755): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-734
     const M3D combined_cov = (opts_->plane_fit_pose_cov_mode == "sensor_only")
         ? pt.sensor_cov : M3D(pt.sensor_cov + pt.pos_cov);
     N_acc_ += 1.0;
@@ -805,11 +697,7 @@ void VoxelPlane::refitDebiased()
   covariance_.setZero();
   plane_ = {};
   is_plane_ = false;
-  // Bug ledger 2026-08-31: this was never set in debiased mode, leaving
-  // the J column of corr.csv stale/zero on every debiased run. Reset here
-  // and set to N_acc_ (this fit's effective point count) only on a
-  // committed success below, mirroring update()'s PCA-path convention
-  // (last_fit_j_ = use_weights ? N : 0).
+  // History (808-812): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-808
   last_fit_j_ = 0;
 
   const double N = N_acc_;
@@ -845,23 +733,7 @@ void VoxelPlane::refitDebiased()
 
   if (eigen_values_(1) < 1e-8 || eigen_values_(2) < 1e-8) return;
 
-  // A population covariance's eigenvalues can never be negative -- a
-  // negative SAMPLE eigenvalue here is definitionally sampling noise (the
-  // "smallest of three correlated noisy quantities" selection is a biased
-  // estimator of the true smallest eigenvalue, especially at low N/F), not
-  // evidence the true scatter is negative. Clamping (rather than the old
-  // reject-on-any-negative behavior) lets a mildly-negative result --
-  // exactly what a genuinely flat surface's corrected estimate looks like
-  // some fraction of the time -- correctly read as "flat" instead of being
-  // thrown out. Confirmed empirically 2026-08-24: rejected candidates at
-  // N=8-24, F=2 had raw (uncorrected) eig0 of 1e-8 to 1e-4 -- genuinely
-  // near-flat -- pushed to ~-0.0002 by a sensor-noise correction of
-  // comparable magnitude to its own sampling noise, not by a real
-  // over-subtraction. See docs/debiased_voxel_plane_fit_2026aug24.md.
-  // Guarding against the SEPARATE, larger-magnitude over-subtraction
-  // failure mode (correlated noise from non-independent samples) is now
-  // handled at the source, via trust_sensor_noise excluding bootstrap
-  // points from the correction entirely, rather than by this clamp.
+  // History (848-864): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-848
   eigen_values_(0) = std::max(eigen_values_(0), 0.0);
 
   if (opts_->sensor_noise_floor_eig0) {
@@ -957,26 +829,7 @@ void VoxelPlane::refitDebiased()
   plane_var_(0, 2) = plane_var_(2, 0) = -s_t1d / denom1;
   plane_var_(1, 2) = plane_var_(2, 1) = -s_t2d / denom2;
 
-  // Sanity ceiling on plane_var_ itself, not just the denom1/denom2 gap
-  // that feeds it -- confirmed live (2026-08-24) that denom1/denom2 can sit
-  // comfortably outside eps_denom (e.g. denom1=-0.003, eps=0.001) while
-  // plane_var_'s trace still reaches ~965,882: a barely-initialized voxel
-  // (F=1, N=4-6) has Scov_/V_/W_ built from only a handful of points, so
-  // one large pos_cov contribution (documented elsewhere in this codebase
-  // to "dwarf true sensor noise for far points", see pose_cov_in_sigma's
-  // docs) dominates a still-small denominator's amplification. Rather than
-  // trying to characterize every combination of small-N/large-pos_cov/
-  // small-denom that can produce this, cap the actual output directly --
-  // this is the quantity that widens gate()'s acceptance
-  // (sigma_gate_squared = sigma_diag_squared + plane_var_term) and lets
-  // garbage-magnitude residuals through, which is the direct divergence
-  // mechanism. 1.0 is generous (orientation variance in [theta1,theta2] is
-  // radians^2-scale and d's variance is meters^2-scale; both should be
-  // small fractions for anything worth trusting as a residual source) --
-  // reject (not clamp) so an under-converged voxel just waits for more
-  // points/frames rather than silently supplying an overconfident-looking
-  // but wrong uncertainty. addPoints() keeps accumulating regardless, so
-  // this voxel can still become usable once F/N grow past this point.
+  // History (960-979): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-960
   constexpr double kPlaneVarCeiling = 1.0;
   if (!plane_var_.allFinite() || plane_var_.trace() > kPlaneVarCeiling) {
     is_plane_ = false;
@@ -1003,17 +856,7 @@ void VoxelPlane::refitDebiased()
   }
 }
 
-// T3-0e (2026-08-31): 8x8 tangent-frame occupancy bitmask. Cell size
-// opts_->voxel_size/8, grid spans [-4,4) cells each axis (i.e. +/-
-// voxel_size/2 centered on the anchor). The basis is ANCHORED (frozen at
-// the first call after a successful fit) rather than re-derived from the
-// current x_normal_/y_normal_ every call, for two reasons: (1) a tangent
-// frame that shifts slightly every refit would make "which cell is this"
-// answer differently for the same physical point across calls, corrupting
-// the occupancy pattern instead of accumulating it; (2) it matches T8-b's
-// own card, which anchors for the same reason and resets only when the
-// normal has rotated >~10 degrees (a reset reads as low coverage, which
-// inflates uncertainty -- the safe direction, not a correctness bug).
+// History (1006-1016): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-1006
 void VoxelPlane::updateOccupancy(const V3D& world_point)
 {
   if (!is_plane_) return;
@@ -1038,12 +881,7 @@ void VoxelPlane::updateOccupancy(const V3D& world_point)
   occupancy_bitmask_ |= (uint64_t(1) << (cu * 8 + cv));
 }
 
-// Code-review fix, 2026-08-31: recomputes both cached_occ_cells_ and
-// cached_occ_aniso_ ONCE per fit (called from update()/addPoints() right
-// after the occupancy-update loop), rather than on every
-// occupancyAnisotropy()/occupiedCellCount() call -- see those two
-// methods' header doc comment. Logic is otherwise unchanged from the
-// original per-call implementation.
+// History (1041-1046): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-1041
 void VoxelPlane::recomputeOccupancyCache()
 {
   cached_occ_cells_ = __builtin_popcountll(occupancy_bitmask_);
@@ -1090,19 +928,7 @@ void VoxelPlane::recomputeOccupancyCache()
   cached_occ_aniso_ = lambda1 / std::max(lambda2, eps);
 }
 
-// T8-b (2026-09-01). The two plane-confidence terms livo_recon did not have.
-//
-// Both are multiplicative on plane_var_ and both are the IDENTITY when their
-// switch is off. The coverage term is additionally the identity when coverage
-// is isotropic (var_u == var_v), which is what makes a null result on this
-// switch distinguishable from an inert switch: if occ_cells is healthy and
-// plane_conf_factor is still 1.0 across a run, the geometry -- not the code --
-// is what made it inert.
-//
-// Applied AFTER the fit and AFTER recomputeOccupancyCache(), never inside the
-// fit itself, so the eigen-decomposition, the plane_threshold acceptance test
-// and (on the debiased path) the ceiling rejection all still see the RAW fit.
-// A switch that could change which planes exist would not be ablatable.
+// History (1093-1105): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-1093
 void VoxelPlane::applyPlaneConfidence()
 {
   last_plane_conf_factor_ = 1.0;

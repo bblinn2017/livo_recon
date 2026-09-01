@@ -246,10 +246,7 @@ namespace
 {
 void finishRun(NodeContext& ctx, PubProc& pub_proc, EvoProc& evo_proc)
 {
-  // 14b (2026-09-01): corr_scan.csv's per-scan accumulator only flushes on a
-  // scan_id CHANGE -- the last scan of a run never sees one, so it would sit
-  // unflushed in memory forever without this. No-op if
-  // log_consistency_corr_en was never on.
+  // History (249-252): see docs/livo_recon_changelog.md#src-livo_recon_node.cpp-249
   debugFlushConsistencyCorr();
 
   // Stop the async tracking thread cleanly before shutdown (task #145) --
@@ -317,15 +314,7 @@ void LivoReconNode::runOffline(const std::string& bag_path)
   const CbkProcOptions& cbk_opts = cbk_proc_.opts();
   std::vector<std::string> topics = {cbk_opts.image_topic, cbk_opts.lidar_topic, cbk_opts.imu_topic};
 
-  // Ground-truth topic dispatch -- see CbkProcOptions::evo_enable's doc
-  // comment and CbkProc::gtCallback(). Only relevant for gt_source=="topic"
-  // (e.g. NTU_VIRAL's live Leica stream): runOffline() never runs rosbag
-  // play or any real ROS transport, so a plain topic subscriber would
-  // otherwise NEVER fire in offline mode -- confirmed 2026-08-12: all 9
-  // NTU_VIRAL jobs in a livo_recon offline-mode sweep failed (0 "[evo"
-  // lines each) for exactly this reason, while file-GT (HILTI) jobs worked
-  // fine since gt_source=="file" reads a static file directly, no topic
-  // delivery involved -- doesn't need gt_topic added to the bag view.
+  // History (320-328): see docs/livo_recon_changelog.md#src-livo_recon_node.cpp-320
   const bool feed_gt_topic = cbk_opts.evo_enable && cbk_opts.evo_gt_source == "topic";
   if (feed_gt_topic) topics.push_back(cbk_opts.evo_gt_topic);
 

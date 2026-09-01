@@ -13,17 +13,7 @@ class VioProc;
 
 struct CombinedProcOptions
 {
-  // Master switch -- when false (default), LivoReconNode::estimateState()
-  // takes the original, unchanged sequential LIO-then-VIO path and never
-  // touches CombinedProc at all. Opt-in per the user's explicit request
-  // (2026-08-14): fuses HtH_lio+HtH_vio into ONE joint EKF update per
-  // iteration instead of running LIO to convergence and only then starting
-  // VIO's own separate iterated update from that posterior -- intended to
-  // better balance translational/rotational correction from both
-  // modalities at once. See lio/lio_accumulator.h and vio/vio_accumulator.h
-  // for the shared accumulation code both this class and the ORIGINAL
-  // sequential LioProc/VioProc now call -- this class adds no new residual
-  // math of its own, it only sums the two existing accumulators' output.
+  // History (16-26): see docs/livo_recon_changelog.md#include-livo_recon-processing-combined_processing.h-16
   bool   enable          = false;
 
   int    max_iterations  = 5;
@@ -42,12 +32,7 @@ struct CombinedProcOptions
 
   bool   log_debug_en    = false;
 
-  // G6 (2026-09-01). Logs both channels' NLL (nll.txt, channel="lio"/"vio")
-  // for the SAME frame via the shared consistency_log.h writers -- see that
-  // header's doc comment for why this was previously unaskable in combined
-  // mode. Also logs a "rollback" row when the whole-frame VIO rejection
-  // fires, so a rejected frame is recorded as one that happened rather than
-  // silently vanishing from the log.
+  // History (45-50): see docs/livo_recon_changelog.md#include-livo_recon-processing-combined_processing.h-45
   bool   log_consistency_en = false;
 };
 

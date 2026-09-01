@@ -153,9 +153,7 @@ Eigen::VectorXd StateGroup::boxminusFromPropagat(const StateGroup& propagat) con
   return vec;
 }
 
-// 2026-08-24: REMOVED setEstAngVel()/resetAngVelCov() -- existed solely
-// for the removed iterative-deskew mechanism's W (angular-velocity) state
-// estimation. See docs/removed_livo_recon_spline_deskew_2026aug24.md.
+// History (156-158): see docs/livo_recon_changelog.md#src-utils-state-state.cpp-156
 
 std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
 {

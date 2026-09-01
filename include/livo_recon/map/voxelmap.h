@@ -31,18 +31,7 @@ public:
   // hasConvergedNeighbor()'s broader, whole-pipeline counterpart).
   bool findPlaneResidual(const WorldPointCov& pt, Residual &res, bool* tier0_had_plane = nullptr) const override;
 
-  // T0-D (2026-08-31): gates whether findPlaneResidual() passes a real
-  // scan_id (enabling corr.csv logging, see VoxelOpts::
-  // log_consistency_corr_en) or -1 (no-op) down to VoxelPlane::
-  // computeResidual() -- NOT part of the MapBackend virtual interface,
-  // since only LioProc's own IEKF loop knows which call is the frame's
-  // FIRST buildResiduals() (the pre-update, un-relinearized innovation
-  // the register's nu/S spec wants) versus a later re-linearizing
-  // iteration or a throwaway runDryRunShadowPass() call, neither of which
-  // should be logged. Defaults true (log allowed) so any call site that
-  // doesn't explicitly manage this (there are none as of this writing,
-  // but a future one would silently get the safe default rather than
-  // silently losing all logging) still works.
+  // History (34-45): see docs/livo_recon_changelog.md#include-livo_recon-map-voxelmap.h-34
   void setAllowConsistencyLog(bool v) { allow_consistency_log_ = v; }
 
   // Diagnostic-only (see investigation into livo_recon's fast-motion

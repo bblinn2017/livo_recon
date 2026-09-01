@@ -284,13 +284,7 @@ bool CoTrackerBackend::stepImpl(const cv::Mat& rgb,
     auto tacc = tracks.accessor<float, 4>();
     auto vacc = vis.accessor<float, 3>();
 
-    // Confidence gate (2026-08-15, matching FAST-LIVO2's myvio dual vis+conf
-    // gate -- see cotracker_backend.h's doc comment on outputs_conf being
-    // "read but discarded"). Only the AOT path's 3-output package actually
-    // carries a real confidence tensor -- runTracker()'s JIT branch leaves
-    // out_conf default-constructed (undefined) since pre-AOT tracker
-    // exports only ever had 2 outputs, so guard on that rather than
-    // unconditionally reading outputs_conf.
+    // History (287-293): see docs/livo_recon_changelog.md#src-vio-cotracker-cotracker_backend.cpp-287
     const bool have_conf = outputs_conf.defined();
     const torch::Tensor conf = have_conf
         ? outputs_conf.to(torch::kCPU).to(torch::kFloat32).contiguous()
