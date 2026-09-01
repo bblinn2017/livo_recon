@@ -484,6 +484,20 @@ struct VoxelOpts
   double occ_aniso_drop_fraction = 0.1;
   int occ_aniso_drop_seed = 0;
 
+  // Code-review fix, 2026-08-31: occupancyAnisotropy() returns -1.0
+  // (undefined) when fewer than 3 cells are occupied -- typically a plane
+  // whose normal/anchor is still settling. Under "top" mode, -1.0 used to
+  // silently never exceed occ_aniso_drop_threshold, so undefined planes
+  // were ALWAYS kept -- systematically protecting the least-converged
+  // planes, plausibly the ones the ablation most wants to be able to
+  // remove. false (default): undefined counts as "keep" (conservative,
+  // matches the old accidental behavior, now a deliberate choice). true:
+  // undefined counts as "top decile" (drop). Either way, the count of
+  // undefined-and-therefore-policy-decided planes is now logged (corr.csv
+  // gains a dropped_by_ablation column) so this bucket's size is visible,
+  // not just its existence.
+  bool occ_aniso_undefined_as_top = false;
+
   // T0-G (2026-08-31): diagnostic-only. 0 (default) -- no-op, today's
   // behavior unchanged. Nonzero -- deterministically shuffle each frame's
   // point order (std::mt19937 seeded from this value XOR'd with the frame

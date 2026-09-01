@@ -131,9 +131,15 @@ private:
   // value (which still means the full accept/reject decision, unchanged).
   // T0-D's corr.csv wants exactly this population (pre-outlier-gate), see
   // computeResidual().
+  // dropped_by_ablation (default nullptr): set true when T3-0e's
+  // occ_aniso_drop_mode rejected this correspondence (distinct from the
+  // ordinary sigma-gate rejection) -- set AFTER *is_candidate, so a drop
+  // still reaches corr.csv instead of silently vanishing (code-review
+  // fix, 2026-08-31 -- T0-D's own "log before the gate" guardrail).
   bool gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
             double& r, double& sigma_diag_squared, double& plane_var_term,
-            Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate = nullptr) const;
+            Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate = nullptr,
+            bool* dropped_by_ablation = nullptr) const;
 
   VoxelOptsPtr opts_;
 
@@ -184,6 +190,19 @@ private:
   V3D occ_anchor_center_   = V3D::Zero();
   bool occ_anchored_ = false;
 
+  // Code-review fix, 2026-08-31: occupancyAnisotropy() used to heap-
+  // allocate a std::vector and scan all 64 cells on EVERY call, including
+  // from computeResidual() inside LioProc::buildResiduals()'s OMP
+  // parallel-for -- once per correspondence, twice when covariates
+  // logging is on. Cached here instead (recomputed once per fit, in
+  // recomputeOccupancyCache(), called at the end of update()/addPoints()
+  // after the occupancy-update loop) -- same pattern last_fit_j_ already
+  // uses. -2.0 is "not yet computed this fit" (distinct from -1.0,
+  // occupancyAnisotropy()'s own "undefined, <3 cells" sentinel).
+  double cached_occ_aniso_ = -2.0;
+  int cached_occ_cells_ = 0;
+  void recomputeOccupancyCache();
+
   void updateOccupancy(const V3D& world_point);
 
 public:
@@ -192,9 +211,10 @@ public:
   // tangent frame -- T3-0e's in-plane COVERAGE anisotropy, distinct from
   // eigenValues()'s point-scatter (density-weighted) anisotropy. Returns
   // -1.0 if fewer than 3 cells are occupied (covariance undefined/
-  // degenerate below that).
-  double occupancyAnisotropy() const;
-  int occupiedCellCount() const;
+  // degenerate below that). O(1) -- returns a value cached at the last
+  // fit, see recomputeOccupancyCache().
+  double occupancyAnisotropy() const { return cached_occ_aniso_ < -1.5 ? -1.0 : cached_occ_aniso_; }
+  int occupiedCellCount() const { return cached_occ_cells_; }
 };
 
 // T0-F-2b (2026-08-31): per-frame aggregates across every VoxelPlane fit

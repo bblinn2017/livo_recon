@@ -10,12 +10,34 @@ Answers three questions that a Q grid sweep cannot:
 Inputs
 ------
 corr.csv   one row per point-to-plane correspondence, BEFORE outlier gating
-    scan_id, nu, S, [S_sensor, S_plane_tilt, S_plane_d, S_pose],
-    [range, incidence, N, J, aniso], [gated]
+    scan_id, nu, S, gated, dropped_by_ablation,
+    [S_sensor, S_plane_tilt, S_plane_d, S_pose],
+    [range, incidence, N, J, aniso, lambda0, occ_aniso, occ_cells]
 scan.csv   one row per LiDAR scan
     scan_id, t, dt, [trP_*], [trQdt_*], [omega_norm, acc_norm]
 
 Only scan_id/nu/S are required in corr.csv; everything else enables an extra panel.
+
+dropped_by_ablation (2026-08-31, T3-0e): 1 when a correspondence was
+excluded from the residual by voxel_map/plane/occ_aniso_drop_mode
+(distinct from `gated`, which means the ordinary sigma-gate rejected it).
+A dropped row has S=-1.0 (gate() does not finish computing S for it) --
+every panel below that divides by S already filters S>0, so these rows
+drop out of NIS/whiteness/etc automatically; they are kept in corr.csv
+only so the ablation's own drop population is auditable (count, which
+planes) by whoever is scoring T3-0e specifically, not to feed the normal
+consistency panels.
+
+occ_aniso/occ_cells (2026-08-31, T3-0e): VoxelPlane::occupancyAnisotropy()/
+occupiedCellCount() -- OCCUPANCY-based (density-independent) in-plane
+coverage anisotropy/effective sample size, distinct from `aniso` (point-
+scatter, density-weighted) and `J` (bin count, only nonzero when
+use_bins is on). NOT comparable across arms with different use_bins
+settings or between plane_fit_mode pca vs debiased (update()'s bin
+representatives, when use_bins is on, are coarser than one occupancy
+cell -- see occ_aniso's own C++ doc comment) -- state which single
+arm/config a given corr.csv came from before reading its occ_aniso/
+occ_cells distribution, do not pool across arms.
 """
 import argparse, sys
 import numpy as np
@@ -85,6 +107,12 @@ def scan_level_nis(corr, use_ungated_only=False):
     d = corr
     if use_ungated_only and "gated" in d.columns:
         d = d[d["gated"] == 0]
+    # dropped_by_ablation rows have S=-1.0 (T3-0e; see this module's own
+    # docstring) and are already excluded by the S>0 filter below -- this
+    # explicit filter is belt-and-suspenders, not load-bearing, in case
+    # that sentinel convention ever changes.
+    if "dropped_by_ablation" in d.columns:
+        d = d[d["dropped_by_ablation"] == 0]
     d = d[np.isfinite(d["nu"]) & np.isfinite(d["S"]) & (d["S"] > 0)]
     nis = d["nu"].to_numpy() ** 2 / d["S"].to_numpy()
     z = d["nu"].to_numpy() / np.sqrt(d["S"].to_numpy())
@@ -177,7 +205,8 @@ def panel_budget(corr):
 
 
 def panel_covariates(corr, per):
-    cols = [c for c in ["range", "incidence", "N", "J", "aniso"] if c in corr.columns]
+    cols = [c for c in ["range", "incidence", "N", "J", "aniso", "lambda0", "occ_aniso", "occ_cells"]
+            if c in corr.columns]
     if not cols:
         print("\n=== 5. NIS vs COVARIATES === (skipped: no covariate columns)")
         return

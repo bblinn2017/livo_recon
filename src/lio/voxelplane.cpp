@@ -79,14 +79,24 @@ void debugLogPlaneFitStats(int n, int j, double n_eff, double trace_plane_var)
 void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, double S,
                               double s_sensor, double s_plane_tilt, double s_plane_d,
                               double s_pose, int n, int j, double aniso, int gated,
-                              double s_prior_pose, double lambda0, double occ_aniso, int occ_cells)
+                              double s_prior_pose, double lambda0, double occ_aniso, int occ_cells,
+                              int dropped_by_ablation)
 {
   static bool first_call = true;
   static std::mutex mtx;
   std::lock_guard<std::mutex> lock(mtx);
   std::ofstream ofs(debugLogPath("corr.csv"), first_call ? std::ios::trunc : std::ios::app);
   if (first_call) {
-    ofs << "scan_id,nu,S,gated";
+    // dropped_by_ablation (2026-08-31, code-review fix): unconditional,
+    // not gated behind with_covariates -- T3-0e's ablation arms need this
+    // even in a plain (non-covariates) NIS run, to know which rows were
+    // excluded from the residual by the ablation itself vs by the
+    // ordinary sigma-gate (gated=1 without this =0 means the LATTER).
+    // When this is 1, S/s_sensor/.../s_prior_pose are all the -1.0
+    // sentinel (gate() does not finish computing them for a dropped
+    // correspondence) -- only nu, N/J/aniso/lambda0/occ_aniso/occ_cells
+    // (plane-level, valid regardless) are meaningful on that row.
+    ofs << "scan_id,nu,S,gated,dropped_by_ablation";
     // T0-G (2026-08-31): lambda0 added -- eigen_values_(0), the plane fit's
     // smallest eigenvalue (its own is_plane_ = eigen_values_(0) <
     // plane_threshold test uses this directly). T8-0b/T8-d's outcome
@@ -99,7 +109,7 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
     ofs << "\n";
   }
   first_call = false;
-  ofs << scan_id << "," << nu << "," << S << "," << gated;
+  ofs << scan_id << "," << nu << "," << S << "," << gated << "," << dropped_by_ablation;
   if (with_covariates)
     ofs << "," << s_sensor << "," << s_plane_tilt << "," << s_plane_d << "," << s_pose
         << "," << s_prior_pose << "," << n << "," << j << "," << aniso << "," << lambda0
@@ -133,7 +143,8 @@ VoxelPlane::VoxelPlane(VoxelOptsPtr opts)
 
 bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
                       double& r, double& sigma_diag_squared, double& plane_var_term,
-                      Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate) const
+                      Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate,
+                      bool* dropped_by_ablation) const
 {
   const V3D& n = plane_.normal;
   r = n.dot(p) + plane_.d;
@@ -158,26 +169,54 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
     if (range_dis > opts_->max_radius * radius_) return false;
   }
 
+  // T0-D's "log before the gate" guardrail: mark candidacy (this point
+  // cleared the purely-geometric test) BEFORE any T3-0e ablation drop
+  // below, so a dropped correspondence still reaches corr.csv (as
+  // dropped_by_ablation=1) instead of vanishing from the population
+  // entirely -- code-review fix, 2026-08-31 (the original version
+  // returned false above *is_candidate=true, so drops were unlogged and
+  // any NIS/count comparison against baseline was over a silently
+  // truncated population).
+  if (is_candidate) *is_candidate = true;
+
   // T3-0e: drop this whole PLANE from the residual (not just this one
   // correspondence -- the decision is per-plane, evaluated identically
   // for every correspondence that hits it) if the coverage-anisotropy
   // ablation says so. See VoxelOpts::occ_aniso_drop_mode's doc comment.
   if (opts_->occ_aniso_drop_mode == "top") {
-    if (occupancyAnisotropy() > opts_->occ_aniso_drop_threshold) return false;
+    const double a = occupancyAnisotropy();
+    // Code-review fix: a<3 occupied cells) -> -1.0 sentinel, which used to
+    // silently survive "> threshold" (never true), systematically
+    // PROTECTING planes whose normals are still rotating/unstable -- the
+    // planes T3-0e most wants to be able to drop. Explicit policy instead:
+    // occ_aniso_undefined_as_top controls whether an undefined value
+    // counts as top-decile (drop) or not (keep); default false (keep,
+    // conservative) but now a deliberate, documented, logged choice, not
+    // an accident of the sentinel's sign.
+    const bool undefined = (a < 0.0);
+    if (undefined ? opts_->occ_aniso_undefined_as_top : (a > opts_->occ_aniso_drop_threshold)) {
+      if (dropped_by_ablation) *dropped_by_ablation = true;
+      return false;
+    }
   } else if (opts_->occ_aniso_drop_mode == "random") {
-    // Deterministic per-plane hash of (plane_.center, seed) -> [0,1).
-    // std::hash has no cross-run stability guarantee for doubles in
-    // general, but within one process/build it is stable across every
-    // call this run makes, which is all reproducibility here needs (the
-    // seed is recorded in the job's own config.yaml either way).
-    std::size_t h = std::hash<double>{}(plane_.center.x() * 1e6 + opts_->occ_aniso_drop_seed);
-    h ^= std::hash<double>{}(plane_.center.y() * 1e6 + opts_->occ_aniso_drop_seed * 2.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
-    h ^= std::hash<double>{}(plane_.center.z() * 1e6 + opts_->occ_aniso_drop_seed * 3.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    // Code-review fix: hash on occ_anchor_center_ (only reassigned on a
+    // >10-degree occupancy reset, see updateOccupancy()) instead of
+    // plane_.center (reassigned on EVERY refitDebiased()/update() call --
+    // the original version redrew this "random" decision at scan rate,
+    // ~10Hz, instead of once per plane; see the bug ledger entry this
+    // fixes). Still only APPROXIMATELY stable (a rare reset changes the
+    // draw), not a first-class per-plane identity, but no longer redrawn
+    // every single fit.
+    std::size_t h = std::hash<double>{}(occ_anchor_center_.x() * 1e6 + opts_->occ_aniso_drop_seed);
+    h ^= std::hash<double>{}(occ_anchor_center_.y() * 1e6 + opts_->occ_aniso_drop_seed * 2.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
+    h ^= std::hash<double>{}(occ_anchor_center_.z() * 1e6 + opts_->occ_aniso_drop_seed * 3.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
     const double u01 = static_cast<double>(h % 1000000ULL) / 1000000.0;
-    if (u01 < opts_->occ_aniso_drop_fraction) return false;
+    if (u01 < opts_->occ_aniso_drop_fraction) {
+      if (dropped_by_ablation) *dropped_by_ablation = true;
+      return false;
+    }
   }
 
-  if (is_candidate) *is_candidate = true;
   J_nq(0, 0) = d_center.dot(y_normal_);
   J_nq(0, 1) = d_center.dot(x_normal_);
   J_nq(0, 2) = 1.0;
@@ -202,11 +241,12 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
 {
   if (!is_plane_) return false;
 
-  double r, sigma_diag_squared, plane_var_term;
-  Eigen::Matrix<double, 1, 3> J_nq;
+  double r = 0.0, sigma_diag_squared = 0.0, plane_var_term = 0.0;
+  Eigen::Matrix<double, 1, 3> J_nq = Eigen::Matrix<double, 1, 3>::Zero();
   bool is_candidate = false;
+  bool dropped_by_ablation = false;
   const bool accepted = gate(pt.point, pt.sensor_cov, pt.pose_cov, r, sigma_diag_squared,
-                              plane_var_term, J_nq, &is_candidate);
+                              plane_var_term, J_nq, &is_candidate, &dropped_by_ablation);
 
   if (opts_->log_consistency_corr_en && is_candidate && scan_id >= 0) {
     const bool cov = opts_->log_consistency_covariates_en;
@@ -214,43 +254,61 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
     double occ_aniso = -1.0;
     int n = -1, j = -1, occ_cells = -1;
     if (cov) {
+      // Plane-level quantities (independent of THIS correspondence's own
+      // gate() outcome) are always valid, even for a dropped-by-ablation
+      // row -- log them regardless, so the drop's own population (which
+      // planes, how anisotropic) is auditable.
       lambda0 = eigen_values_(0);
       occ_aniso = occupancyAnisotropy();
       occ_cells = occupiedCellCount();
-      const V3D& normal = plane_.normal;
-      s_sensor = normal.dot(pt.sensor_cov * normal);
-      s_pose   = normal.dot(pt.pose_cov * normal);
-      // Exact split of plane_var_term = J_nq*plane_var_*J_nq^T: tilt
-      // covers the [theta1,theta2] 2x2 sub-block, d covers plane_var_
-      // (2,2) alone, and the tilt/d cross terms are divided evenly
-      // between the two so s_tilt+s_d == plane_var_term exactly.
-      const double tilt_only = J_nq(0) * J_nq(0) * plane_var_(0, 0)
-                              + J_nq(1) * J_nq(1) * plane_var_(1, 1)
-                              + 2.0 * J_nq(0) * J_nq(1) * plane_var_(0, 1);
-      const double d_only = J_nq(2) * J_nq(2) * plane_var_(2, 2);
-      const double cross = 2.0 * J_nq(2) * (J_nq(0) * plane_var_(0, 2) + J_nq(1) * plane_var_(1, 2));
-      s_tilt = tilt_only + 0.5 * cross;
-      s_d    = d_only + 0.5 * cross;
       n = points_size_;
       j = last_fit_j_;
       aniso = eigen_values_(2) / std::max(eigen_values_(1), 1e-12);
     }
-    // H P- H^T: the frame's PRIOR pose uncertainty projected through this
-    // correspondence's own Jacobian -- the textbook S = H P- H^T + R term
-    // this codebase's batch-WLS IEKF has no other use for (see
-    // WorldPointCov::prior_cov_rp's doc comment), computed here purely so
-    // corr.csv's S column matches the register's definition, not folded
-    // into res.sigma_squared/the real gate() accept-reject decision
-    // (unchanged, still measurement-noise-only, matching this codebase's
-    // actual production weighting). point_cross_normal mirrors LioProc::
-    // buildResiduals()'s own res.point_cross_normal formula exactly.
-    const V3D point_cross_normal = pt.body_point.cross(pt.rot_transpose * plane_.normal);
-    Eigen::Matrix<double, 1, 6> H_i;
-    H_i << point_cross_normal.transpose(), plane_.normal.transpose();
-    const double s_prior_pose = (H_i * pt.prior_cov_rp * H_i.transpose()).value();
-    const double S = 1e-3 + sigma_diag_squared + plane_var_term + s_prior_pose;
+    // s_sensor/s_tilt/s_d/s_pose/S/s_prior_pose all depend on J_nq/
+    // sigma_diag_squared/plane_var_term, which gate() does NOT finish
+    // computing when it returns early on a T3-0e drop (they're zero-
+    // initialized above, not meaningful) -- skip computing/logging these
+    // for a dropped row rather than logging garbage-looking zeros dressed
+    // up as real numbers. S itself logs as the -1.0 sentinel for a
+    // dropped row (code-review fix, 2026-08-31).
+    double s_prior_pose = -1.0;
+    double S = -1.0;
+    if (!dropped_by_ablation) {
+      if (cov) {
+        const V3D& normal = plane_.normal;
+        s_sensor = normal.dot(pt.sensor_cov * normal);
+        s_pose   = normal.dot(pt.pose_cov * normal);
+        // Exact split of plane_var_term = J_nq*plane_var_*J_nq^T: tilt
+        // covers the [theta1,theta2] 2x2 sub-block, d covers plane_var_
+        // (2,2) alone, and the tilt/d cross terms are divided evenly
+        // between the two so s_tilt+s_d == plane_var_term exactly.
+        const double tilt_only = J_nq(0) * J_nq(0) * plane_var_(0, 0)
+                                + J_nq(1) * J_nq(1) * plane_var_(1, 1)
+                                + 2.0 * J_nq(0) * J_nq(1) * plane_var_(0, 1);
+        const double d_only = J_nq(2) * J_nq(2) * plane_var_(2, 2);
+        const double cross = 2.0 * J_nq(2) * (J_nq(0) * plane_var_(0, 2) + J_nq(1) * plane_var_(1, 2));
+        s_tilt = tilt_only + 0.5 * cross;
+        s_d    = d_only + 0.5 * cross;
+      }
+      // H P- H^T: the frame's PRIOR pose uncertainty projected through this
+      // correspondence's own Jacobian -- the textbook S = H P- H^T + R term
+      // this codebase's batch-WLS IEKF has no other use for (see
+      // WorldPointCov::prior_cov_rp's doc comment), computed here purely so
+      // corr.csv's S column matches the register's definition, not folded
+      // into res.sigma_squared/the real gate() accept-reject decision
+      // (unchanged, still measurement-noise-only, matching this codebase's
+      // actual production weighting). point_cross_normal mirrors LioProc::
+      // buildResiduals()'s own res.point_cross_normal formula exactly.
+      const V3D point_cross_normal = pt.body_point.cross(pt.rot_transpose * plane_.normal);
+      Eigen::Matrix<double, 1, 6> H_i;
+      H_i << point_cross_normal.transpose(), plane_.normal.transpose();
+      s_prior_pose = (H_i * pt.prior_cov_rp * H_i.transpose()).value();
+      S = 1e-3 + sigma_diag_squared + plane_var_term + s_prior_pose;
+    }
     debugLogConsistencyCorr(cov, scan_id, r, S, s_sensor, s_tilt, s_d, s_pose, n, j, aniso,
-                             accepted ? 0 : 1, s_prior_pose, lambda0, occ_aniso, occ_cells);
+                             accepted ? 0 : 1, s_prior_pose, lambda0, occ_aniso, occ_cells,
+                             dropped_by_ablation ? 1 : 0);
   }
 
   if (!accepted) return false;
@@ -486,6 +544,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   // rather than raw points (see `running`/use_weights above) -- fine for
   // occupancy purposes, a bin rep already represents one occupied region.
   for (int i = 0; i < N; ++i) updateOccupancy(points[i].point);
+  recomputeOccupancyCache();
 }
 
 void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_count,
@@ -549,8 +608,10 @@ void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_cou
   // (is_plane_ may still be false on early/rejected fits -- updateOccupancy()
   // itself no-ops until an anchor exists, so this is safe to call
   // unconditionally).
-  if (is_plane_)
+  if (is_plane_) {
     for (const auto& pt : points) updateOccupancy(pt.point);
+    recomputeOccupancyCache();
+  }
 }
 
 void VoxelPlane::refitDebiased()
@@ -792,13 +853,16 @@ void VoxelPlane::updateOccupancy(const V3D& world_point)
   occupancy_bitmask_ |= (uint64_t(1) << (cu * 8 + cv));
 }
 
-int VoxelPlane::occupiedCellCount() const
+// Code-review fix, 2026-08-31: recomputes both cached_occ_cells_ and
+// cached_occ_aniso_ ONCE per fit (called from update()/addPoints() right
+// after the occupancy-update loop), rather than on every
+// occupancyAnisotropy()/occupiedCellCount() call -- see those two
+// methods' header doc comment. Logic is otherwise unchanged from the
+// original per-call implementation.
+void VoxelPlane::recomputeOccupancyCache()
 {
-  return __builtin_popcountll(occupancy_bitmask_);
-}
+  cached_occ_cells_ = __builtin_popcountll(occupancy_bitmask_);
 
-double VoxelPlane::occupancyAnisotropy() const
-{
   const double cell_size = opts_->voxel_size / 8.0;
   std::vector<std::pair<double, double>> centers;
   for (int cu = 0; cu < 8; ++cu) {
@@ -810,7 +874,7 @@ double VoxelPlane::occupancyAnisotropy() const
       }
     }
   }
-  if (centers.size() < 3) return -1.0;
+  if (centers.size() < 3) { cached_occ_aniso_ = -1.0; return; }
   double mean_u = 0.0, mean_v = 0.0;
   for (const auto& c : centers) { mean_u += c.first; mean_v += c.second; }
   mean_u /= centers.size();
@@ -831,7 +895,7 @@ double VoxelPlane::occupancyAnisotropy() const
   const double lambda1 = tr / 2.0 + disc;
   const double lambda2 = tr / 2.0 - disc;
   constexpr double eps = 1e-12;
-  return lambda1 / std::max(lambda2, eps);
+  cached_occ_aniso_ = lambda1 / std::max(lambda2, eps);
 }
 
 }  // namespace livo_recon
