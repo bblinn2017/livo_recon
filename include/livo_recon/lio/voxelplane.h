@@ -171,4 +171,18 @@ private:
   int last_fit_j_ = 0;
 };
 
+// T0-F-2b (2026-08-31): per-frame aggregates across every VoxelPlane fit
+// this frame, for LioProc's per-frame diagnostic log -- file-scope atomics
+// in voxelplane.cpp rather than threading a stats object through every
+// VoxelPlane constructor call site (this diagnostic is opt-in and rare;
+// changing the constructor signature would touch every caller for a
+// feature most runs never use). Call voxelPlaneFrameStatsReset() once at
+// the start of each frame (before any VoxelPlane::update()/refitDebiased()
+// calls), then voxelPlaneFrameStatsRead() at the end of that same frame.
+// Thread-safe (the accumulation calls run inside VoxelMap's OMP
+// parallel-for over voxels); NOT re-entrant across overlapping frames --
+// this codebase processes one frame at a time, so that never happens.
+void voxelPlaneFrameStatsReset();
+void voxelPlaneFrameStatsRead(int& denom_rejected_count, double& max_plane_var_trace);
+
 }  // namespace livo_recon

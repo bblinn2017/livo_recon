@@ -3,12 +3,25 @@
 #include <fstream>
 #include <sstream>
 #include <mutex>
+#include <atomic>
+#include <limits>
 
 namespace livo_recon
 {
 
 namespace
 {
+// T0-F-2b: see voxelplane.h's voxelPlaneFrameStats{Reset,Read}() doc
+// comment. atomic<double> has no fetch_max pre-C++20 -- CAS loop instead.
+std::atomic<int> g_denom_rejected_count{0};
+std::atomic<double> g_max_plane_var_trace{-1.0};
+
+void updateMaxPlaneVarTrace(double trace)
+{
+  double cur = g_max_plane_var_trace.load(std::memory_order_relaxed);
+  while (trace > cur &&
+         !g_max_plane_var_trace.compare_exchange_weak(cur, trace, std::memory_order_relaxed)) {}
+}
 void debugLogNoiseFloor(const std::string& msg)
 {
   static bool first_call = true;
@@ -87,6 +100,18 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
   ofs << "\n";
 }
 }  // namespace
+
+void voxelPlaneFrameStatsReset()
+{
+  g_denom_rejected_count.store(0, std::memory_order_relaxed);
+  g_max_plane_var_trace.store(-1.0, std::memory_order_relaxed);
+}
+
+void voxelPlaneFrameStatsRead(int& denom_rejected_count, double& max_plane_var_trace)
+{
+  denom_rejected_count = g_denom_rejected_count.load(std::memory_order_relaxed);
+  max_plane_var_trace = g_max_plane_var_trace.load(std::memory_order_relaxed);
+}
 
 VoxelPlane::VoxelPlane(VoxelOptsPtr opts)
   : opts_(opts)
@@ -412,6 +437,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
     }
     debugLogPlaneFitStats(points_size_, last_fit_j_, n_eff, plane_var_.trace());
   }
+  updateMaxPlaneVarTrace(plane_var_.trace());
 }
 
 void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_count,
@@ -578,6 +604,7 @@ void VoxelPlane::refitDebiased()
   }
   if (denom_rejected) {
     is_plane_ = false;
+    g_denom_rejected_count.fetch_add(1, std::memory_order_relaxed);
     return;
   }
 
@@ -663,6 +690,7 @@ void VoxelPlane::refitDebiased()
   }
 
   last_fit_j_ = (int)N;
+  updateMaxPlaneVarTrace(plane_var_.trace());
 
   if (opts_->log_debug_en) {
     std::ostringstream dbg;

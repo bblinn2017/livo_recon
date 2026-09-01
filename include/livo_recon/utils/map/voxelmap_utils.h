@@ -457,6 +457,14 @@ struct VoxelOpts
   // error bar. See VoxelMap::updateMap()'s call site for the actual
   // shuffle.
   int shuffle_insertion_seed = 0;
+
+  // T0-F-2b (2026-08-31): logs frame_stats.txt (t, frame_idx,
+  // denom_rejected_count, max_plane_var_trace) bracketing each
+  // VoxelMap::updateMap() call -- see voxelPlaneFrameStats{Reset,Read}()
+  // in voxelplane.h for what's aggregated and why here specifically
+  // (ordering-independent w.r.t. common/insert_map_after_lio). Off by
+  // default.
+  bool log_frame_stats_en = false;
 };
 using VoxelOptsPtr = std::shared_ptr<VoxelOpts>;
 

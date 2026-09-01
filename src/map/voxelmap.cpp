@@ -1,13 +1,36 @@
 #include "livo_recon/map/voxelmap.h"
+#include "livo_recon/lio/voxelplane.h"
 #include "livo_recon/utils/log/param_warn.h"
+#include "livo_recon/utils/log/debug_log_dir.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 
 #include <algorithm>
 #include <numeric>
 #include <random>
+#include <fstream>
 
 namespace livo_recon
 {
+
+namespace
+{
+// T0-F-2b (2026-08-31): denom_rejected count + max plane_var_ trace,
+// bracketing THIS updateMap() call -- see voxelPlaneFrameStats{Reset,Read}()
+// in voxelplane.h. Logged here (not lio_processing.cpp) because updateMap()
+// -- and hence every VoxelPlane::update()/refitDebiased() call that can
+// touch these counters -- can run either before or after processLIO(),
+// depending on common/insert_map_after_lio; bracketing tightly around this
+// one call is the only ordering-independent way to attribute the stats to
+// the right frame.
+void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count, double max_plane_var_trace)
+{
+  static bool first_call = true;
+  std::ofstream ofs(debugLogPath("frame_stats.txt"), first_call ? std::ios::trunc : std::ios::app);
+  if (first_call) ofs << "t,frame_idx,denom_rejected_count,max_plane_var_trace\n";
+  first_call = false;
+  ofs << t_abs << "," << frame_idx << "," << denom_rejected_count << "," << max_plane_var_trace << "\n";
+}
+}  // namespace
 
 VoxelMap::VoxelMap(StateGroupPtr state, ProfilerPtr profiler, DataQueuesPtr data_queues)
   : opts_(std::make_shared<VoxelOpts>())
@@ -47,6 +70,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "voxel_map/plane/log_consistency_corr_en", opts_->log_consistency_corr_en, false);
   paramWarn<bool>(pnh, "voxel_map/plane/log_consistency_covariates_en", opts_->log_consistency_covariates_en, false);
   paramWarn<int>(pnh, "voxel_map/map/shuffle_insertion_seed", opts_->shuffle_insertion_seed, 0);
+  paramWarn<bool>(pnh, "voxel_map/map/log_frame_stats_en", opts_->log_frame_stats_en, false);
 
   std::ostringstream oss;
   oss << "[params/voxel_map]"
@@ -67,6 +91,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/log_consistency_corr_en:   " << (opts_->log_consistency_corr_en ? "true" : "false")
       << "\n  plane/log_consistency_covariates_en: " << (opts_->log_consistency_covariates_en ? "true" : "false")
       << "\n  map/shuffle_insertion_seed:      " << opts_->shuffle_insertion_seed
+      << "\n  map/log_frame_stats_en:          " << (opts_->log_frame_stats_en ? "true" : "false")
       << "\n  points/min_init:  " << opts_->min_init_points
       << "\n  points/max:       " << opts_->max_points
       << "\n  points/min_update:" << opts_->min_update_points
@@ -87,6 +112,7 @@ VoxelKey VoxelMap::worldToKey(const V3D& p_world) const
 void VoxelMap::updateMap(MeasureGroup& mg) {
   TimedScope ts_total(profiler_, "voxelmap");
   setCurrentFrame(frame_idx_++);
+  if (opts_->log_frame_stats_en) voxelPlaneFrameStatsReset();
   // The single point set (point_filter_num + ds_leaf_size, see measures.h's
   // docs on MeasureGroup::points) used for both voxel-map insertion and
   // LIO's own residual matching -- no separate full-resolution stream.
@@ -199,6 +225,14 @@ void VoxelMap::updateMap(MeasureGroup& mg) {
           viz_cache_[u.node_id] = u.info;
       }
     }
+  }
+
+  if (opts_->log_frame_stats_en) {
+    int denom_rejected_count = 0;
+    double max_plane_var_trace = -1.0;
+    voxelPlaneFrameStatsRead(denom_rejected_count, max_plane_var_trace);
+    debugLogFrameStats(mg.image.t + data_queues_->start_time, frame_idx_ - 1,
+                        denom_rejected_count, max_plane_var_trace);
   }
 }
 

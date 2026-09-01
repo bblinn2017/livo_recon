@@ -185,6 +185,16 @@ struct EkfUpdate
     // an underestimate in general, but tracks the same order of magnitude and
     // needs no extra decomposition). Same staleness caveat as HtH/Htz: only
     // meaningful when applyMeanUpdate() actually ran this iteration (n_res>0).
+    // T0-F-2b (2026-08-31): ||K|| for the LAST applyMeanUpdate() call --
+    // Frobenius norm of K1_cols (last_K1_'s R-column block), the gain
+    // that pre-multiplies Htz in applyMeanUpdate()'s solution formula
+    // (see its own comment). Same staleness caveat as pivotRatio().
+    double kalmanGainNorm() const {
+      if (last_K1_.size() == 0) return std::numeric_limits<double>::quiet_NaN();
+      const int n = static_cast<int>(HtH.rows());
+      return last_K1_.block(0, StateGroup::idxR(), last_K1_.rows(), n).norm();
+    }
+
     double pivotRatio() const {
       const auto& d = ldlt_.vectorD();
       if (d.size() == 0) return std::numeric_limits<double>::quiet_NaN();

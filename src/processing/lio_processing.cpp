@@ -83,14 +83,17 @@ void debugLogConsistencyScan(int scan_id, double t, double dt, double trP_pos,
 // of the actual EKF solve this frame (NaN when n_residuals==0, same
 // staleness caveat as nll itself). See EkfUpdate::pivotRatio()'s doc
 // comment.
-void debugLogNll(double t_abs, double nll, int n_residuals, double pivot_ratio)
+// T0-F-2b (2026-08-31): kalman_gain_norm column added -- EkfUpdate::
+// kalmanGainNorm(), ||K1_cols|| for this frame's last applyMeanUpdate()
+// solve. Same staleness caveat (NaN when n_residuals==0).
+void debugLogNll(double t_abs, double nll, int n_residuals, double pivot_ratio, double kalman_gain_norm)
 {
   static bool first_call = true;
   std::ofstream ofs(debugLogPath("nll.txt"), first_call ? std::ios::trunc : std::ios::app);
   if (first_call)
-    ofs << "t,nll,n_residuals,pivot_ratio\n";
+    ofs << "t,nll,n_residuals,pivot_ratio,kalman_gain_norm\n";
   first_call = false;
-  ofs << t_abs << "," << nll << "," << n_residuals << "," << pivot_ratio << "\n";
+  ofs << t_abs << "," << nll << "," << n_residuals << "," << pivot_ratio << "," << kalman_gain_norm << "\n";
 }
 
 // 2026-08-24: REMOVED debugLogSplineIter()/debugLogSplineFit()/
@@ -612,7 +615,8 @@ std::string LioProc::processLIO(MeasureGroup& mg)
                        + ekf_.nllQuadraticAndLogdet(prior_cov_));
         }
         const double pivot_ratio = (n_res > 0) ? ekf_.pivotRatio() : std::numeric_limits<double>::quiet_NaN();
-        debugLogNll(mg.image.t + data_queues_->start_time, nll, n_res, pivot_ratio);
+        const double kalman_gain_norm = (n_res > 0) ? ekf_.kalmanGainNorm() : std::numeric_limits<double>::quiet_NaN();
+        debugLogNll(mg.image.t + data_queues_->start_time, nll, n_res, pivot_ratio, kalman_gain_norm);
       }
 
       const double prev = prev_error;
