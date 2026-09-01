@@ -445,6 +445,19 @@ struct VoxelOpts
   // No-op unless log_consistency_corr_en is also true. Off by default.
   bool log_consistency_covariates_en = false;
 
+  // T8-a (2026-08-31): "disc" (default) -- today's isotropic admission
+  // test, range_dis > max_radius*radius_ with radius_ = sqrt(lambda2) (the
+  // LARGEST in-plane eigenvalue) -- a sliver sampled 1m along one axis and
+  // 3cm along the other admits correspondences 3m out along the axis it
+  // barely observed, since the disc radius is set by the axis with the
+  // MOST support. "ellipse" -- Mahalanobis ellipse of the fit's own
+  // sampling, using the SAME x_normal_/y_normal_ basis J_nq already uses
+  // (no new geometry): m2 = u1^2/lambda2 + u2^2/lambda1, gated against
+  // max_radius^2. Bit-identical to "disc" only in the degenerate case
+  // lambda1==lambda2; otherwise a real behavior change, so it must be
+  // opted into explicitly.
+  std::string plane_gate_mode = "disc";
+
   // T0-G (2026-08-31): diagnostic-only. 0 (default) -- no-op, today's
   // behavior unchanged. Nonzero -- deterministically shuffle each frame's
   // point order (std::mt19937 seeded from this value XOR'd with the frame

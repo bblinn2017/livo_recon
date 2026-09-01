@@ -132,13 +132,26 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
   r = n.dot(p) + plane_.d;
   if (!std::isfinite(r)) return false;
 
-  const double dis_to_center = (p - plane_.center).squaredNorm();
-  const double range_dis = std::sqrt(std::max(0.0, dis_to_center - r * r));
-  if (range_dis > opts_->max_radius * radius_) return false;
+  const V3D d_center = p - plane_.center;
+
+  if (opts_->plane_gate_mode == "ellipse") {
+    // T8-a: Mahalanobis ellipse of the fit's own sampling, replacing the
+    // isotropic disc -- same x_normal_/y_normal_ basis J_nq uses below, no
+    // new geometry. eigen_values_(2)/(1) are the largest/second-largest
+    // in-plane eigenvalues (x_normal_/y_normal_'s own axes respectively).
+    constexpr double eps = 1e-12;
+    const double u1 = d_center.dot(x_normal_);
+    const double u2 = d_center.dot(y_normal_);
+    const double m2 = u1 * u1 / std::max(eigen_values_(2), eps)
+                     + u2 * u2 / std::max(eigen_values_(1), eps);
+    if (m2 > opts_->max_radius * opts_->max_radius) return false;
+  } else {
+    const double dis_to_center = d_center.squaredNorm();
+    const double range_dis = std::sqrt(std::max(0.0, dis_to_center - r * r));
+    if (range_dis > opts_->max_radius * radius_) return false;
+  }
 
   if (is_candidate) *is_candidate = true;
-
-  const V3D d_center = p - plane_.center;
   J_nq(0, 0) = d_center.dot(y_normal_);
   J_nq(0, 1) = d_center.dot(x_normal_);
   J_nq(0, 2) = 1.0;

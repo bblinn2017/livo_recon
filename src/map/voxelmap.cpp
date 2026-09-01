@@ -67,6 +67,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<std::string>(pnh, "voxel_map/plane/bin_weight_mode_var", opts_->bin_weight_mode_var, "count");
   paramWarn<double>(pnh, "voxel_map/plane/bin_size_fraction", opts_->bin_size_fraction, 0.2);
   paramWarn<bool>(pnh, "voxel_map/plane/use_bins", opts_->use_bins, false);
+  paramWarn<std::string>(pnh, "voxel_map/plane/plane_gate_mode", opts_->plane_gate_mode, "disc");
   paramWarn<bool>(pnh, "voxel_map/plane/log_consistency_corr_en", opts_->log_consistency_corr_en, false);
   paramWarn<bool>(pnh, "voxel_map/plane/log_consistency_covariates_en", opts_->log_consistency_covariates_en, false);
   paramWarn<int>(pnh, "voxel_map/map/shuffle_insertion_seed", opts_->shuffle_insertion_seed, 0);
@@ -88,6 +89,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/bin_size_fraction:         " << opts_->bin_size_fraction
       << "\n  plane/use_bins:                  " << (opts_->use_bins ? "true" : "false")
       << "\n  plane/log_variance_shares_en:    " << (opts_->log_variance_shares_en ? "true" : "false")
+      << "\n  plane/plane_gate_mode:           " << opts_->plane_gate_mode
       << "\n  plane/log_consistency_corr_en:   " << (opts_->log_consistency_corr_en ? "true" : "false")
       << "\n  plane/log_consistency_covariates_en: " << (opts_->log_consistency_covariates_en ? "true" : "false")
       << "\n  map/shuffle_insertion_seed:      " << opts_->shuffle_insertion_seed
