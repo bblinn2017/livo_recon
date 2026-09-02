@@ -17,13 +17,18 @@ namespace livo_recon
 namespace
 {
 // History (17-24): see docs/livo_recon_changelog.md#src-map-voxelmap.cpp-17
-void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count, double max_plane_var_trace)
+void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
+                        double max_plane_var_trace, const LioFrameDiag& lio, int n_planes)
 {
   static bool first_call = true;
   std::ofstream ofs(debugLogPath("frame_stats.txt"), first_call ? std::ios::trunc : std::ios::app);
-  if (first_call) ofs << "t,frame_idx,denom_rejected_count,max_plane_var_trace\n";
+  if (first_call)
+    ofs << "t,frame_idx,denom_rejected_count,max_plane_var_trace"
+           ",n_residuals,n_planes,h_pp_min_eig,h_rr_min_eig,sum_weight\n";
   first_call = false;
-  ofs << t_abs << "," << frame_idx << "," << denom_rejected_count << "," << max_plane_var_trace << "\n";
+  ofs << t_abs << "," << frame_idx << "," << denom_rejected_count << "," << max_plane_var_trace
+      << "," << lio.n_residuals << "," << n_planes
+      << "," << lio.h_pp_min_eig << "," << lio.h_rr_min_eig << "," << lio.sum_weight << "\n";
 }
 }  // namespace
 
@@ -407,7 +412,8 @@ void VoxelMap::updateMap(MeasureGroup& mg) {
     double max_plane_var_trace = -1.0;
     voxelPlaneFrameStatsRead(denom_rejected_count, max_plane_var_trace);
     debugLogFrameStats(mg.image.t + data_queues_->start_time, frame_idx_ - 1,
-                        denom_rejected_count, max_plane_var_trace);
+                        denom_rejected_count, max_plane_var_trace,
+                        lio_frame_diag_, stats_->planes.load(std::memory_order_relaxed));
   }
 }
 

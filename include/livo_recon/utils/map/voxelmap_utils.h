@@ -513,6 +513,18 @@ using VoxelOptsPtr = std::shared_ptr<VoxelOpts>;
 
 enum class VoxelStatus { OPEN, PARENT, CONVERGED, DISABLED };
 
+// Per-frame LIO-side diagnostics carried into frame_stats.txt.  Kept here
+// rather than in lio_processing.h because VoxelMap owns the writer and must
+// not depend on LioProc.  All four are cheap scalars computed from state the
+// update already forms.
+struct LioFrameDiag
+{
+  int    n_residuals  = 0;    // point-to-plane residuals the ESIKF accumulated
+  double h_pp_min_eig = -1.0; // min eigenvalue of HtH's position block
+  double h_rr_min_eig = -1.0; // min eigenvalue of HtH's rotation block
+  double sum_weight   = 0.0;  // total residual weight, i.e. how much information
+};
+
 struct VoxelStats
 {
   std::atomic<int>     open{0};

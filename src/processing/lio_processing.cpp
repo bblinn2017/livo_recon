@@ -1246,6 +1246,28 @@ std::string LioProc::processLIO(MeasureGroup& mg)
         << "  |dtheta|=" << total_dtheta.norm() * (180.0 / M_PI) << " deg"
         << "  |dt|=" << total_dt.norm() * 1000.0 << " mm";
 
+    // Hand the per-frame LIO diagnostics to the map so frame_stats.txt can
+    // carry them.  Computed unconditionally and cheaply (two 3x3 eigen
+    // solves on a matrix the update already built) because gating them on
+    // log_debug_en is exactly how they ended up unavailable to every sweep
+    // that needed them -- H_pp_eig has existed for months, inside a
+    // free-text debug line no scorer parses.
+    {
+      LioFrameDiag diag;
+      diag.n_residuals = static_cast<int>(residuals_.size());
+      if (!residuals_.empty()) {
+        const M3D H_pp_d = ekf_.HtH.block<3, 3>(3, 3);
+        const M3D H_rr_d = ekf_.HtH.block<3, 3>(0, 0);
+        Eigen::SelfAdjointEigenSolver<M3D> es_pp(H_pp_d), es_rr(H_rr_d);
+        diag.h_pp_min_eig = es_pp.eigenvalues()(0);
+        diag.h_rr_min_eig = es_rr.eigenvalues()(0);
+        double sw = 0.0;
+        for (const auto& r : residuals_) if (r.sigma_squared > 0.0) sw += 1.0 / r.sigma_squared;
+        diag.sum_weight = sw;
+      }
+      if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) vm->noteLioFrameDiag(diag);
+    }
+
     if (opts_.log_debug_en)
     {
       const double t_abs = mg.image.t + data_queues_->start_time;

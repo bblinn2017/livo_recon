@@ -63,6 +63,18 @@ public:
   // which plane model a run selected, and an INERT cell has to be visible in
   // engagement.txt because that is the only file the scorer reads.
   const VoxelOptsPtr& opts() const { return opts_; }
+
+  // Per-frame LIO-side diagnostics, handed over so frame_stats.txt can carry
+  // them.  These are the fields F-1 asked for and W-2's dispatch plan listed
+  // as Tier A -- and which, until now, no structured log actually wrote:
+  // scan.csv carries the state covariance and IMU excitation, corr_scan.csv
+  // the correspondence aggregates, and neither carries n_residuals, the plane
+  // count, or the conditioning of HtH.  h_pp_min_eig is the 2026-08
+  // reweighting failure's own signature (H_pp collapsed ~4-4.6x while H_rr
+  // was untouched) and is the single most diagnostic number for LD-1's
+  // decimation rungs.  Set every frame; written only under
+  // voxel_map/map/log_frame_stats_en.
+  void noteLioFrameDiag(const LioFrameDiag& d) { lio_frame_diag_ = d; }
   visualization_msgs::MarkerArray buildVizMarkers(const std::string& frame_id,
                                                   const ros::Time& stamp) override;
 
@@ -70,6 +82,7 @@ private:
   // See setAllowConsistencyLog()'s doc comment above.
   bool allow_consistency_log_ = true;
 
+  LioFrameDiag  lio_frame_diag_;
   VoxelOptsPtr  opts_;
   VoxelStatsPtr stats_;
   StateGroupPtr state_;

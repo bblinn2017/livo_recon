@@ -112,7 +112,8 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
     ofs << "scan_id,nu,S,gated,dropped_by_ablation";
     // History (113-120): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-113
     if (with_covariates) ofs << ",S_sensor,S_plane_tilt,S_plane_d,S_pose,S_prior_pose,N,J,aniso,lambda0,occ_aniso,occ_cells,occ_var_u,occ_var_v,plane_conf_factor"
-                             << ",a0,a1,plane_id,roughness,sigma_bar2,n_eff,n_raw,rho,frames";
+                             << ",a0,a1,plane_id,roughness,sigma_bar2,n_eff,n_raw,rho,frames"
+                             << ",floor_term,lambda1,lambda2";
     ofs << "\n";
   }
   first_call = false;
@@ -125,7 +126,8 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
         << "," << info.a0 << "," << info.a1 << "," << info.plane_id
         << "," << info.roughness << "," << info.sigma_bar2
         << "," << info.n_eff << "," << info.n_raw << "," << info.rho
-        << "," << info.frames;
+        << "," << info.frames
+        << "," << info.floor_term << "," << info.lambda1 << "," << info.lambda2;
   ofs << "\n";
 }
 
@@ -500,6 +502,13 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
         info.n_raw      = info_n_raw_;
         info.rho        = info_rho_;
         info.frames     = distinct_frames_;
+        // Without this, S is logged but the floor's share of it is not
+        // separable -- so "does the roughness floor dominate?" (W-1's own
+        // question, asked again of a different floor) is unanswerable from
+        // the log that exists to answer it.
+        info.floor_term = floor_term;
+        info.lambda1    = eigen_values_(1);
+        info.lambda2    = eigen_values_(2);
       }
       debugLogConsistencyCorr(cov, scan_id, r, S, s_sensor, s_tilt, s_d, s_pose, n, j, aniso,
                                  accepted ? 0 : 1, s_prior_pose, lambda0, occ_aniso, occ_cells,
