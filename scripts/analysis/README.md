@@ -22,6 +22,19 @@ imports this module by path (it is not itself part of this git repo) --
 see that script's own comment for why the split is there: the sweep
 orchestration is disposable/session-specific, the statistics are not.
 
+`sm1_engagement_check.py` is the per-flag existence-proof check for the
+register's SM-1 card -- not a statistics module, since SM-1 is ~10-15
+short one-flag-at-a-time runs, not a population. Reads a job's own
+`spline_q.csv` (retained in full, no score-then-delete pass needed) and
+reports the CSV's own effective `per_iteration` value against what was
+requested, per-frame refine/reintegrate/redeskew counters and
+magnitudes, and an `odometry.txt` md5 comparison against a baseline job.
+Found a real bug while being built: a bare YAML `mode: off` parses as
+the boolean `False` under YAML 1.1's "Norway problem," so the C++ side's
+string-typed read silently fell back to its default rather than
+disabling the mechanism SM-1 was checking -- fixed in `fast_ws`'s
+`gen_jobs.py` (`_quote_if_yaml11_ambiguous()`), not in this repo.
+
 ## Step 0 — validate the analyser before trusting a word it says
 
 ```
