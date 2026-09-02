@@ -9,6 +9,17 @@
        shared config/ntu_viral.yaml write. Defaults to a real, empty,
        valid-YAML no-op file so normal/default runs are unaffected. -->
   <arg name="overrides_file" default="$(find livo_recon)/config/ntu_viral_no_overrides.yaml" />
+  <!-- 2026-09-02: escape hatch for the base config itself, not just
+       overrides on top of it - a sweep cell that needs a key UNSET
+       (e.g. imu/ds/mode: off, when ntu_viral.yaml sets imu/ds/ds_leaf_size
+       unconditionally) can't express that through overrides_file, since
+       rosparam load only ever SETS a key and this file's own base load
+       below would leave the key present regardless. gen_jobs.py's
+       split_deletions()/apply_deletions() materialize a full copy of this
+       dataset's base config with such keys actually removed and point
+       base_config_file at it instead; every job that doesn't need this
+       gets the same default as always. -->
+  <arg name="base_config_file" default="$(find livo_recon)/config/ntu_viral.yaml" />
 
   <node pkg="livo_recon"
         type="livo_recon_node"
@@ -17,7 +28,7 @@
     <!-- 2026-08-16: consolidated from config/defaults/*.yaml + config/
          ntu_viral/*.yaml (~25 separate files) into one self-contained
          config/ntu_viral.yaml, see that file's own header comment -->
-    <rosparam file="$(find livo_recon)/config/ntu_viral.yaml" command="load" />
+    <rosparam file="$(arg base_config_file)" command="load" />
     <rosparam file="$(arg overrides_file)"                    command="load" />
     <!-- viz/enable follows the rviz arg directly, placed after every
          rosparam load above (including dataset specific viz.yaml overrides,

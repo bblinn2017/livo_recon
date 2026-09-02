@@ -8,6 +8,10 @@
        Defaults to a real, empty, valid-YAML no-op file so normal/default
        runs are unaffected. -->
   <arg name="overrides_file" default="$(find livo_recon)/config/slam_2023_robot_no_overrides.yaml" />
+  <!-- 2026-09-02: escape hatch for the base config itself - see
+       livo_recon_ntu_viral.launch's matching arg for why overrides_file
+       alone can't express an UNSET. -->
+  <arg name="base_config_file" default="$(find livo_recon)/config/slam_2023_robot.yaml" />
 
   <node pkg="livo_recon"
         type="livo_recon_node"
@@ -16,7 +20,7 @@
     <!-- 2026-08-16: consolidated from config/defaults/*.yaml + config/
          slam_2023_robot/*.yaml (~25 separate files) into one self-contained
          config/slam_2023_robot.yaml, see that file's own header comment -->
-    <rosparam file="$(find livo_recon)/config/slam_2023_robot.yaml" command="load" />
+    <rosparam file="$(arg base_config_file)" command="load" />
     <rosparam file="$(arg overrides_file)"                          command="load" />
     <!-- viz/enable follows the rviz arg directly, placed after every
          rosparam load above (including dataset specific viz.yaml overrides,

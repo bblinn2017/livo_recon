@@ -83,20 +83,14 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
              "sensor_range",
              { "sensor_range", "incidence", "constant", "none", "legacy",
                "roughness" });
-    // "roughness" returns VoxelPlane::roughness_, which only the information
-    // model computes.  Pairing it with the eigengap model would floor every
-    // residual at zero and read as a silent "none" -- refuse instead.  This
-    // is the same class of defect as use_bins-on-debiased, caught before it
-    // can produce a batch.
-    if (opts_->weight_floor_mode == "roughness" &&
-        opts_->plane_var_mode != "information")
-    {
-      cfg.requireCombination(
-          "voxel_map/plane/weight_floor/mode = roughness requires "
-          "voxel_map/plane/plane_var_mode = information -- only that model "
-          "computes a per-plane roughness, and pairing them the other way "
-          "would floor every residual at 0.0 and read as a silent 'none'");
-    }
+    // The roughness/information combination check lives below, after
+    // plane_var_mode is actually loaded (see there) -- opts_->plane_var_mode
+    // still holds its struct default ("eigengap") at this point in
+    // loadParameters(), so checking the pairing here would refuse the one
+    // combination it is meant to allow. Found 2026-09-02 dispatching LD-1's
+    // R2 rung: the effective-config summary printed plane_var_mode=
+    // information correctly (set moments later, same function) while this
+    // check had already fired against the stale default.
     cfg.nested<double>(opts_->weight_floor_mode == "constant" ||
                            opts_->weight_floor_mode == "legacy",
                        "voxel_map/plane/weight_floor/mode=constant",
@@ -146,6 +140,21 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     // exist so the incumbent stays a representable control.
     cfg.mode("voxel_map/plane/plane_var_mode", opts_->plane_var_mode,
              "eigengap", { "eigengap", "information" });
+    // "roughness" returns VoxelPlane::roughness_, which only the information
+    // model computes.  Pairing it with the eigengap model would floor every
+    // residual at zero and read as a silent "none" -- refuse instead.  This
+    // is the same class of defect as use_bins-on-debiased. Checked here,
+    // not where weight_floor/mode is loaded above, because plane_var_mode
+    // is not yet read at that point in this function.
+    if (opts_->weight_floor_mode == "roughness" &&
+        opts_->plane_var_mode != "information")
+    {
+      cfg.requireCombination(
+          "voxel_map/plane/weight_floor/mode = roughness requires "
+          "voxel_map/plane/plane_var_mode = information -- only that model "
+          "computes a per-plane roughness, and pairing them the other way "
+          "would floor every residual at 0.0 and read as a silent 'none'");
+    }
     // The T8-b plane-confidence inflations and the eigengap denominator
     // floor are all corrections TO the eigengap model.  Under the
     // information model they are not merely unnecessary, they DOUBLE COUNT:
