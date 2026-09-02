@@ -171,6 +171,14 @@ public:
     claim(key);   // so refuseUnclaimed() does not also report it
   }
 
+  // A constraint BETWEEN two already-resolved keys, which neither mode() nor
+  // nested() can express: both values are individually legal and only the
+  // pairing is not.  The caller states the condition; this records the
+  // refusal with the explanation attached, so the log says what to change
+  // rather than only what was rejected.
+  void requireCombination(const std::string& explanation)
+  { errors_.push_back(explanation); }
+
   bool ok() const { return errors_.empty(); }
 
   std::string report() const

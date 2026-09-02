@@ -76,7 +76,22 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
                 std::to_string(opts_->weight_sigma_r2));
     cfg.mode("voxel_map/plane/weight_floor/mode", opts_->weight_floor_mode,
              "sensor_range",
-             { "sensor_range", "incidence", "constant", "none", "legacy" });
+             { "sensor_range", "incidence", "constant", "none", "legacy",
+               "roughness" });
+    // "roughness" returns VoxelPlane::roughness_, which only the information
+    // model computes.  Pairing it with the eigengap model would floor every
+    // residual at zero and read as a silent "none" -- refuse instead.  This
+    // is the same class of defect as use_bins-on-debiased, caught before it
+    // can produce a batch.
+    if (opts_->weight_floor_mode == "roughness" &&
+        opts_->plane_var_mode != "information")
+    {
+      cfg.requireCombination(
+          "voxel_map/plane/weight_floor/mode = roughness requires "
+          "voxel_map/plane/plane_var_mode = information -- only that model "
+          "computes a per-plane roughness, and pairing them the other way "
+          "would floor every residual at 0.0 and read as a silent 'none'");
+    }
     cfg.nested<double>(opts_->weight_floor_mode == "constant" ||
                            opts_->weight_floor_mode == "legacy",
                        "voxel_map/plane/weight_floor/mode=constant",
@@ -91,6 +106,42 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
              "none", { "none", "top", "random" });
     cfg.mode("voxel_map/plane/plane_fit_mode", opts_->plane_fit_mode, "pca",
              { "pca", "debiased" });
+    // ── the plane covariance model ───────────────────────────────────────
+    // See VoxelOpts::plane_var_mode.  "information" replaces the eigenvector
+    // -perturbation form with the directional Fisher information in the
+    // chart J_nq already uses, which is what makes roughness, sampling
+    // anisotropy and directional coverage three readings of one matrix
+    // instead of three bolted-on corrections.  Transitional: both modes
+    // exist so the incumbent stays a representable control.
+    cfg.mode("voxel_map/plane/plane_var_mode", opts_->plane_var_mode,
+             "eigengap", { "eigengap", "information" });
+    // The T8-b plane-confidence inflations and the eigengap denominator
+    // floor are all corrections TO the eigengap model.  Under the
+    // information model they are not merely unnecessary, they DOUBLE COUNT:
+    // redundancy is already in the design-effect N_eff, coverage is already
+    // the leverage a^T I^-1 a, and there is no denominator to floor.
+    // Leaving them settable would let a cell inflate a variance twice and
+    // report it as the new model's behaviour, so they are nested off.
+    const bool eigengap = (opts_->plane_var_mode == "eigengap");
+    const char* kEigScope = "voxel_map/plane/plane_var_mode=eigengap";
+    cfg.nested<bool>(eigengap, kEigScope, "voxel_map/plane/plane_conf_redundancy_en",
+                     opts_->plane_conf_redundancy_en, false);
+    cfg.nested<double>(opts_->plane_conf_redundancy_en,
+                       "voxel_map/plane/plane_conf_redundancy_en=true",
+                       "voxel_map/plane/plane_conf_redundancy_cap",
+                       opts_->plane_conf_redundancy_cap, 16.0);
+    cfg.nested<bool>(eigengap, kEigScope, "voxel_map/plane/plane_conf_coverage_en",
+                     opts_->plane_conf_coverage_en, false);
+    cfg.nested<double>(opts_->plane_conf_coverage_en,
+                       "voxel_map/plane/plane_conf_coverage_en=true",
+                       "voxel_map/plane/plane_conf_coverage_beta",
+                       opts_->plane_conf_coverage_beta, 1.0);
+    cfg.nested<double>(opts_->plane_conf_coverage_en,
+                       "voxel_map/plane/plane_conf_coverage_en=true",
+                       "voxel_map/plane/plane_conf_coverage_cap",
+                       opts_->plane_conf_coverage_cap, 100.0);
+    cfg.nested<bool>(eigengap, kEigScope, "voxel_map/plane/plane_var_denom_floor_en",
+                     opts_->plane_var_denom_floor_en, false);
     cfg.mode("voxel_map/plane/plane_fit_pose_cov_mode",
              opts_->plane_fit_pose_cov_mode, "combined",
              { "combined", "sensor_only" });
@@ -162,12 +213,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "voxel_map/plane/occ_aniso_drop_threshold", opts_->occ_aniso_drop_threshold, -1.0);
   paramWarn<double>(pnh, "voxel_map/plane/occ_aniso_drop_fraction", opts_->occ_aniso_drop_fraction, 0.1);
   paramWarn<int>(pnh, "voxel_map/plane/occ_aniso_drop_seed", opts_->occ_aniso_drop_seed, 0);
-  paramWarn<bool>(pnh, "voxel_map/plane/plane_conf_redundancy_en", opts_->plane_conf_redundancy_en, false);
-  paramWarn<double>(pnh, "voxel_map/plane/plane_conf_redundancy_cap", opts_->plane_conf_redundancy_cap, 16.0);
-  paramWarn<bool>(pnh, "voxel_map/plane/plane_conf_coverage_en", opts_->plane_conf_coverage_en, false);
-  paramWarn<double>(pnh, "voxel_map/plane/plane_conf_coverage_beta", opts_->plane_conf_coverage_beta, 1.0);
-  paramWarn<double>(pnh, "voxel_map/plane/plane_conf_coverage_cap", opts_->plane_conf_coverage_cap, 100.0);
-  paramWarn<bool>(pnh, "voxel_map/plane/plane_var_denom_floor_en", opts_->plane_var_denom_floor_en, false);
   paramWarn<int>(pnh, "voxel_map/map/shuffle_insertion_seed", opts_->shuffle_insertion_seed, 0);
   paramWarn<bool>(pnh, "voxel_map/map/log_frame_stats_en", opts_->log_frame_stats_en, false);
 
@@ -181,6 +226,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/min_frames_to_init:        " << opts_->min_frames_to_init
       << "\n  plane/plane_threshold:           " << opts_->plane_threshold
       << "\n  plane/plane_fit_mode:            " << opts_->plane_fit_mode
+      << "\n  plane/plane_var_mode:            " << opts_->plane_var_mode
       << "\n  plane/plane_fit_pose_cov_mode:   " << opts_->plane_fit_pose_cov_mode
       << "\n  plane/bin_weight_mode_fit:       " << opts_->bin_weight_mode_fit
       << "\n  plane/bin_weight_mode_var:       " << opts_->bin_weight_mode_var

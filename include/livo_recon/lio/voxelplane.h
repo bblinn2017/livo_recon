@@ -113,6 +113,62 @@ private:
   // debugLogPlaneFitStats()'s own `j` local exactly, just persisted.
   int last_fit_j_ = 0;
 
+  // ── the unified (information) plane model ────────────────────────────
+  // See VoxelOpts::plane_var_mode.  All three are written by
+  // buildInformationCovariance() and are otherwise zero, so they double as
+  // the "was this mode live" engagement counters and as D-1's covariates.
+  //
+  // roughness_ is lambda0 AFTER the measurement noise is subtracted -- the
+  // plane's own surface roughness, as a variance.  weightFloor()'s
+  // "roughness" mode returns it, which is what puts it in the residual for
+  // the first time.
+  double roughness_ = 0.0;
+  // sigma_bar^2 = mean projected measurement noise + roughness_.
+  double sigma_bar2_ = 0.0;
+  // The DESIGN-EFFECT corrected sample size actually used in I.  Raw N
+  // overstates the information whenever many returns in this voxel came from
+  // one sweep: they share that instant's pose error, so they are not N
+  // independent observations.  This is the scalar (equicorrelated) special
+  // case of the low-rank correction I = A^T(D + H P_xi H^T)^-1 A -- the
+  // directional generalisation is deferred until D-1 says the effect is
+  // worth its complexity, and info_n_raw_/distinct_frames_ are logged so
+  // D-1 can size what is being left on the table.
+  double info_n_eff_ = 0.0;
+  double info_n_raw_ = 0.0;
+  double info_rho_   = 0.0;   // intra-scan correlation used for the design effect
+
+  // Mean per-point covariance over the points this plane was fitted from,
+  // split so the shared (pose) part can be told from the independent
+  // (sensor) part -- the debiased path already keeps these as Scov_/
+  // Scov_sensor_; these are update()'s equivalents for the pca path, which
+  // has no persistent accumulator.  Write-only unless plane_var_mode is
+  // "information".
+  M3D mean_cov_all_    = M3D::Zero();
+  M3D mean_cov_sensor_ = M3D::Zero();
+
+  // I = (N_eff/sigma_bar^2)*diag(lambda1, lambda2, 1); plane_var_ = I^-1.
+  // Sets is_plane_ = false if the model cannot be formed.
+  void buildInformationCovariance(double n_raw, const M3D& mean_cov_all,
+                                  const M3D& mean_cov_sensor,
+                                  bool eig0_already_debiased);
+
+public:
+  // VoxelNode's distinct-frame counter, needed by the design-effect
+  // correction on the pca path (the debiased path receives it through
+  // addPoints()).  No-op unless plane_var_mode is "information".
+  void noteFrames(int distinct_frames)
+  { if (distinct_frames > 0) distinct_frames_ = distinct_frames; }
+
+  double roughness()   const { return roughness_; }
+  double sigmaBar2()   const { return sigma_bar2_; }
+  double infoNEff()    const { return info_n_eff_; }
+  double infoNRaw()    const { return info_n_raw_; }
+  double infoRho()     const { return info_rho_; }
+  int    distinctFrames() const { return distinct_frames_; }
+
+private:
+
+
   // History (180-185): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-180
   uint64_t occupancy_bitmask_ = 0;
   V3D occ_anchor_normal_   = V3D::Zero();
@@ -161,6 +217,11 @@ public:
 // History (238-248): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-238
 void voxelPlaneFrameStatsReset();
 void voxelPlaneFrameStatsRead(int& denom_rejected_count, double& max_plane_var_trace);
+
+// Total planes fitted under plane_var_mode = "information" since process
+// start.  Zero on a run configured for it means the mode never ran: an INERT
+// cell, which the scorer must treat as a validity failure rather than a null.
+long voxelPlaneInformationFitCount();
 
 // History (252-256): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-252
 void debugFlushConsistencyCorr();

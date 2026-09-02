@@ -8,6 +8,7 @@
 #include "livo_recon/utils/log/debug_log_dir.h"
 #include "livo_recon/utils/algo/math.h"
 #include "livo_recon/map/voxelmap.h"
+#include "livo_recon/lio/voxelplane.h"   // voxelPlaneInformationFitCount()
 #include "livo_recon/lio/lio_accumulator.h"
 #include <cuda_runtime.h>
 #include <algorithm>
@@ -836,6 +837,25 @@ std::string LioProc::engagementReport() const
              run_aq_applied_max_gyr_ <= run_aq_applied_min_gyr_)
       o << "\n    <-- INERT: the applied process noise never CHANGED, so "
            "'engaged' here means 'reported healthy', not 'adapted'";
+  }
+
+  // The plane model is a VoxelMap-side flag, but its engagement belongs in
+  // the same report -- a run that selected "information" and never built one
+  // is an inert cell for exactly the same reason a spline flag with a zero
+  // counter is, and the scorer only reads this file.
+  {
+    const long info_fits = voxelPlaneInformationFitCount();
+    o << "\n  voxel_map/plane/plane_var_mode = "
+      << voxel_map_->opts()->plane_var_mode;
+    if (voxel_map_->opts()->plane_var_mode == "information")
+    {
+      o << " count=" << info_fits;
+      if (info_fits == 0)
+        o << "   <-- INERT: the information model was selected and no plane "
+             "was ever fitted under it";
+    }
+    o << "\n  voxel_map/plane/weight_floor/mode = "
+      << voxel_map_->opts()->weight_floor_mode;
   }
 
   o << "\n  imu_fit/mode = " << opts_.spline.imu_fit_mode

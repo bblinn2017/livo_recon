@@ -300,6 +300,45 @@ struct VoxelOpts
   // History (388-396): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-388
   double bin_size_fraction = 0.2;
 
+  // ── the plane covariance: which model produces plane_var_ ────────────
+  //
+  // "eigengap" is the incumbent: differentiate the fitted eigenVECTOR with
+  // respect to each point, which introduces 1/(lambda0 - lambda_m) and is
+  // why plane_var_denom_floor_en, the debiased denom guard and the
+  // kPlaneVarCeiling reject all exist.  It blows up when the plane is
+  // nearly isotropic -- i.e. when it is barely a plane -- rather than when
+  // the plane is badly SAMPLED, which is the quantity a residual weight
+  // actually wants.
+  //
+  // "information" is the unified model.  Work directly in the local chart
+  // (theta1, theta2, d) that the lever arm J_nq already uses and accumulate
+  // the directional Fisher information
+  //
+  //     I = sum_i a_i a_i^T / sigma_i^2 ,   a_i = [d_i.y_normal, d_i.x_normal, 1]
+  //     sigma_i^2 = n^T Sigma_i n  +  lambda0_roughness
+  //
+  // then plane_var_ = I^-1.  Because the points are centred on plane_.center
+  // (so sum d_i = 0) and (x_normal_, y_normal_) are eigenvectors of the
+  // second moment, every off-diagonal term vanishes EXACTLY and this
+  // reduces to a closed form needing no new accumulator at all:
+  //
+  //     I = (N_eff / sigma_bar^2) * diag(lambda1, lambda2, 1)
+  //
+  // Three things the register has been treating as separate corrections are
+  // three projections of that one matrix: surface ROUGHNESS is the scalar in
+  // the denominator, sampling ANISOTROPY is I's conditioning, and
+  // directional COVERAGE is I^-1's eigendirections read against the query's
+  // own lever arm -- a query off the sampled band lands in the weak
+  // eigendirection and its variance grows in proportion to how far outside
+  // the support it sits, with no tuning constant anywhere.
+  //
+  // TRANSITIONAL.  Both modes exist only so the incumbent is a
+  // representable control (standing rule 10b, the lesson of weight_floor's
+  // missing "legacy").  When INT-1/D-1 decide, the loser is deleted along
+  // with plane_var_denom_floor_en and sensor_noise_floor_eig0.
+  std::string plane_var_mode = "eigengap";
+  static constexpr const char* PLANE_VAR_MODES[] = { "eigengap", "information" };
+
   // History (399-409): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-399
   //
   // pca ONLY.  VoxelNode::insertPoints()'s debiased branch hands the raw
@@ -406,9 +445,29 @@ struct VoxelOpts
   //                   the weight change, and neither is the old pair.  This
   //                   mode is that pair, provided ONLY so the control exists.
   //                   It is not defensible as a setting; do not ship it.
+  //   "roughness"   The unified model's answer, and the reason this whole
+  //                   axis exists.  The floor IS the plane's own measured
+  //                   surface roughness lambda0_deb -- the out-of-plane
+  //                   second moment after the measurement noise has been
+  //                   subtracted off.  The ledger's standing complaint is
+  //                   that "lambda0 is a binary admission test only: surface
+  //                   roughness never enters the residual variance"; here it
+  //                   is the variance component it always was, measured per
+  //                   plane instead of chosen once as a literal.  Available
+  //                   on BOTH fit modes: on the debiased path lambda0 is
+  //                   already noise-corrected, on pca the same subtraction
+  //                   is done at query time (which is one reason the unified
+  //                   model does not need plane_fit_mode as an arm).
+  //                   Requires plane_var_mode = "information", which is what
+  //                   computes it; refuses otherwise rather than silently
+  //                   floor-ing at zero.
+  //                   FALSIFIABLE, and cheaply: if this is right, the
+  //                   per-plane optimal constant floor should CORRELATE with
+  //                   that plane's lambda0_deb -- W-1's retained data can be
+  //                   re-read to check it before any of this is trusted.
   std::string weight_floor_mode = "sensor_range";
   static constexpr const char* WEIGHT_FLOOR_MODES[] = {
-      "sensor_range", "incidence", "constant", "none", "legacy" };
+      "sensor_range", "incidence", "constant", "none", "legacy", "roughness" };
   // (m^2) -- the historical literal, live only under "constant".
   double weight_floor_constant = 1e-3;
   // (m^2) -- sigma_r^2, mirrored from imu/sensor/range_err by LioProc so the

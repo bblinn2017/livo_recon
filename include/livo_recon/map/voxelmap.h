@@ -59,6 +59,10 @@ public:
   // fields inherited from MapBackend now, not redeclared here.
   VoxelKey worldToKey(const V3D &p_world) const;
   bool vizDirty() const override { return !viz_dirty_.empty(); }
+  // Read-only, for the engagement report: LioProc has to be able to say
+  // which plane model a run selected, and an INERT cell has to be visible in
+  // engagement.txt because that is the only file the scorer reads.
+  const VoxelOptsPtr& opts() const { return opts_; }
   visualization_msgs::MarkerArray buildVizMarkers(const std::string& frame_id,
                                                   const ros::Time& stamp) override;
 

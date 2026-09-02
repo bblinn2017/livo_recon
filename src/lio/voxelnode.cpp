@@ -176,6 +176,13 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       return;
     }
 
+    // The information model's design-effect correction needs to know how
+    // many DISTINCT frames these points came from -- returns from one sweep
+    // share that instant's pose error and are not independent observations.
+    // The debiased path receives this through addPoints(); the pca path has
+    // no other channel for it.
+    plane_ptr_->noteFrames(distinct_frames_);
+
     if (use_bins) {
       std::vector<PointXYZCov> bin_reps;
       std::vector<double> fit_weights, var_weights;
