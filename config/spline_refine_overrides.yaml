@@ -20,3 +20,38 @@ spline:
   # Fails safe to the unrefined spline; the rejection is counted in
   # spline_q.csv's refine_rejects rather than hidden.
   lidar_refine_max_step: 0.10
+
+  # ── Raw-IMU term in the fit ─────────────────────────────────────────────
+  # Trace-normalised, dimensionless: w = 1 means the IMU block carries as much
+  # total normal-matrix weight as the entire pose sequence. 0 = off, and the
+  # fit is then bit-identical to the pose-only one.
+  #
+  # Default 0 on purpose. Fitting to POSITIONS penalises the double integral
+  # of accel error, which is heavily low-pass, so the fit is nearly blind to
+  # the high-frequency accel noise AdaptiveQ's sigma_a is measuring. Weighting
+  # the accel residual into the fit erodes exactly that separation -- the
+  # spline starts absorbing the quantity it is about to report. The control
+  # point count bounds how far this can go (8 control points cannot
+  # interpolate 21 IMU samples) but does not remove the bias.
+  # scripts/test/test_spline_imu_fit.cpp measures the direction.
+  imu_fit_w_acc: 0.0
+  imu_fit_w_gyr: 0.0
+  # Relinearisation passes for the gyro rows only: their target is
+  # Jr(phi)^-1 (gyro - b_g), which depends on the phi being solved for. The
+  # accel target does not depend on the position control points, so it needs
+  # exactly one pass regardless.
+  imu_fit_iters: 2
+
+  # ── Re-integration under the ESIKF's bias corrections ───────────────────
+  # propagate() runs once per frame with the PRE-update bias and is never
+  # re-run, so without this the spline's shape is frozen there while every
+  # inner iteration moves the bias. anchorTo() cannot repair it -- a bias
+  # delta is a shape change, anchorTo is a rigid transform.
+  #
+  # Measured cost of leaving it off, on a 100 ms scan with a plausible
+  # correction (dba ~ 7e-3 m/s^2, dbg ~ 1.2e-3 rad/s): 3.2e-05 m and 1.1e-04
+  # rad of shape error. Compare that against the spline's OWN representation
+  # error (6.3e-3 rad/s of omega error at n_cp=8) before assuming it binds.
+  reintegrate_each_iteration: false
+  reintegrate_min_dbg: 1.0e-9
+  reintegrate_min_dba: 1.0e-9

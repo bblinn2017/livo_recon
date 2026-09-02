@@ -129,6 +129,12 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "spline/lidar_refine_prior_w",opts_.spline.lidar_refine_prior_w, 1.0);
   paramWarn<int>   (pnh, "spline/lidar_refine_iters",  opts_.spline.lidar_refine_iters, 1);
   paramWarn<double>(pnh, "spline/lidar_refine_max_step",opts_.spline.lidar_refine_max_step, 0.10);
+  paramWarn<double>(pnh, "spline/imu_fit_w_acc",       opts_.spline.imu_fit_w_acc, 0.0);
+  paramWarn<double>(pnh, "spline/imu_fit_w_gyr",       opts_.spline.imu_fit_w_gyr, 0.0);
+  paramWarn<int>   (pnh, "spline/imu_fit_iters",       opts_.spline.imu_fit_iters, 2);
+  paramWarn<bool>  (pnh, "spline/reintegrate_each_iteration", opts_.spline.reintegrate_each_iteration, false);
+  paramWarn<double>(pnh, "spline/reintegrate_min_dbg", opts_.spline.reintegrate_min_dbg, 1e-9);
+  paramWarn<double>(pnh, "spline/reintegrate_min_dba", opts_.spline.reintegrate_min_dba, 1e-9);
   paramWarn<bool>  (pnh, "spline/log_en",              opts_.spline.log_en, false);
   paramWarn<bool>  (pnh, "spline/keep_time_noise",     opts_.spline_keep_time_noise, false);
 
@@ -177,6 +183,9 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  spline/redeskew_each_iter: " << (opts_.spline.redeskew_each_iteration ? "true" : "false")
       << "\n  spline/rot_mode:           " << opts_.spline.rot_mode
       << "\n  spline/lidar_refine_cp:    " << (opts_.spline.lidar_refine_cp ? "true" : "false")
+      << "\n  spline/imu_fit_w_acc:      " << opts_.spline.imu_fit_w_acc
+      << "\n  spline/imu_fit_w_gyr:      " << opts_.spline.imu_fit_w_gyr
+      << "\n  spline/reintegrate_each_i: " << (opts_.spline.reintegrate_each_iteration ? "true" : "false")
       << "\n  spline/keep_time_noise:    " << (opts_.spline_keep_time_noise ? "true" : "false")
       << "\n  adaptive_q/enable:         " << (opts_.adaptive_q.enable ? "true" : "false")
       << "\n  adaptive_q/beta_acc:       " << opts_.adaptive_q.beta_acc
@@ -372,11 +381,20 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
   spline_ok_ = false;
   ds_offsets_.clear();
   ds_members_.clear();
+  spline_refits_ = 0;
+  spline_poses0_.clear();
+  // Per-FRAME, not per-fit: fit() no longer resets these, because with
+  // reintegrate_each_iteration on it runs once per IEKF iteration.
+  spline_.resetRefineStats();
   if (opts_.spline.enable && !mg.poses.empty())
   {
     TimedScope ts_fit(profiler_, "lio/spline/fit");
     spline_frame_count_++;
-    spline_ok_ = spline_.fit(mg.poses, mg.poses.front().t, mg.image.t, opts_.spline);
+    const SplineImuFitData ifd = splineImuFitData(mg);
+    spline_ok_ = spline_.fit(mg.poses, mg.poses.front().t, mg.image.t, opts_.spline, &ifd);
+    // Keep the pristine sequence only if something will replay it.
+    if (spline_ok_ && opts_.spline.reintegrate_each_iteration)
+      spline_poses0_ = mg.poses;
     if (!spline_ok_)
     {
       // Never substitute a bad spline for a working deskew.  Count the
@@ -437,6 +455,17 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
   }
 }
 
+SplineImuFitData LioProc::splineImuFitData(const MeasureGroup& mg) const
+{
+  SplineImuFitData d;
+  if (opts_.spline.imu_fit_w_acc > 0.0 || opts_.spline.imu_fit_w_gyr > 0.0)
+    d.samples = &mg.imu_samples_raw;
+  d.bias_acc = state_->biasAcc();
+  d.bias_gyr = state_->biasGyr();
+  d.gravity  = state_->gravity();
+  return d;
+}
+
 bool LioProc::redeskewFromSpline(MeasureGroup& mg)
 {
   if (!spline_ok_ || !opts_.spline.redeskew_each_iteration) return false;
@@ -444,6 +473,47 @@ bool LioProc::redeskewFromSpline(MeasureGroup& mg)
   if (ds_offsets_.size() != mg.points.size() + 1) return false;
 
   TimedScope ts(profiler_, "lio/spline/redeskew");
+
+  // (0) SHAPE, from the IMU, under the bias this iteration has arrived at.
+  //
+  // propagate() ran once, before the loop, with the pre-update bias, and is
+  // never re-run -- so without this the spline's shape is frozen there while
+  // every iteration moves the bias.  anchorTo() cannot repair it: a bias delta
+  // is a shape change (rotation drifting linearly in t, position
+  // quadratically) and anchorTo is a rigid transform.  propagate() does not
+  // touch the bias or gravity blocks, so state_propagat_ still holds exactly
+  // the values the stored poses were built with.
+  //
+  // The replay always starts from spline_poses0_, never from the previous
+  // replay, so the correction is applied once rather than compounded.  Note
+  // this moves the spline out from under the LiDAR residuals that step (1)
+  // below is about to be linearised at, by the size of the bias delta -- the
+  // reason reintegrate_min_db{a,g} exist.
+  if (opts_.spline.reintegrate_each_iteration && spline_poses0_.size() >= 2)
+  {
+    TimedScope ts_ri(profiler_, "lio/spline/reintegrate");
+    const V3D dba = state_->biasAcc() - state_propagat_.biasAcc();
+    const V3D dbg = state_->biasGyr() - state_propagat_.biasGyr();
+    const V3D dg  = state_->gravity() - state_propagat_.gravity();
+
+    if (reintegratePoses(spline_poses0_, dba, dbg, dg, state_propagat_.gravity(),
+                         opts_.spline.reintegrate_min_dba,
+                         opts_.spline.reintegrate_min_dbg,
+                         spline_poses_))
+    {
+      // Fit into a COPY and adopt only on success: fit() clears valid_ on
+      // entry, so a failed re-fit would leave the frame with no spline at all
+      // -- strictly worse than the slightly stale one it was replacing.
+      const SplineImuFitData ifd = splineImuFitData(mg);
+      ScanSpline trial = spline_;
+      if (trial.fit(spline_poses_, spline_poses_.front().t, mg.image.t,
+                    opts_.spline, &ifd))
+      {
+        spline_ = trial;
+        spline_refits_++;
+      }
+    }
+  }
 
   // (1) SHAPE, from the map.  Must run BEFORE anchorTo(), which moves every
   // point and would leave these residuals describing a spline that no longer
@@ -549,7 +619,8 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
       ofs << "scan_id," << adaptive_q_.csvHeader()
           << ",spline_ok,n_cp,fit_res_pos,fit_res_rot,fit_reg_frac,rot_chord_deg,"
              "fit_fail_count,frame_count,max_abs_acc,max_abs_gyr,"
-             "n_cp_req,rot_mode,refine_applied,refine_rejects,last_refine_step\n";
+             "n_cp_req,rot_mode,refine_applied,refine_rejects,last_refine_step,"
+             "refits\n";
       first = false;
     }
     const double t_abs = mg.image.t + data_queues_->start_time;
@@ -567,7 +638,8 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
         << (spline_ok_ ? (spline_.cumulative() ? "cumulative" : "tangent") : "-") << ','
         << (spline_ok_ ? spline_.refineApplied() : 0) << ','
         << (spline_ok_ ? spline_.refineRejects() : 0) << ','
-        << (spline_ok_ ? spline_.lastRefineStep() : 0.0)
+        << (spline_ok_ ? spline_.lastRefineStep() : 0.0) << ','
+        << spline_refits_
         << '\n';
   }
 }

@@ -101,3 +101,57 @@ to 9.4e-14 m in three steps; that an oversized step is rejected *whole* with the
 control points bit-unchanged; that the single-normal (corridor) case stays
 bounded in the unconstrained directions because of the prior; and that
 `lidar_refine_cp: false` is a hard no-op.
+
+## `test_ds_csr.cpp` — the indexed downsample must equal the plain one
+
+`voxelDownsampleIndexedCsr()` replaces `voxelDownsample()` on the path where
+the spline is active. If the two disagree by so much as a bit, turning the
+spline on changes the surviving point set for a reason that has nothing to do
+with the spline, and every spline-on/off comparison in the register becomes
+uninterpretable. The fixture asserts bit-identity in **both** `DsMode`s, same
+points in the same order, at three leaf sizes; that the CSR membership is a
+true partition of the input (no raw point claimed twice, none lost); and that
+re-averaging a cell's members reproduces its output point exactly, which is the
+operation `deskewPointsSplineCsr()` performs after re-placing them.
+
+## `test_spline_imu_fit.cpp` — re-integration, and the raw-IMU fit term
+
+Two mechanisms, each checked against the property that justifies it.
+
+**`reintegratePoses()`.** The pose sequence the spline is fitted to was
+dead-reckoned with the biases as they stood *before* this frame's update, and
+`ImuProc::propagate()` is never re-run inside the IEKF loop — so the spline's
+shape is frozen at the pre-update bias while every inner iteration moves it.
+`anchorTo()` cannot repair that: a bias delta produces a *shape* change
+(rotation drifting linearly in t, position quadratically) and `anchorTo` is a
+rigid 6-dof transform. The fixture integrates one stream twice, under a stale
+bias and under the true one, then replays the stale sequence with the delta and
+requires the result to equal direct integration under the true bias. It does,
+to `0.000e+00 m` and `8.7e-19 rad`.
+
+It also puts a number on what the staleness costs, which is the number to check
+before enabling this in a sweep: over a 100 ms scan with `dba ~ 7e-3 m/s²` and
+`dbg ~ 1.2e-3 rad/s`, the frozen shape is wrong by **3.2e-05 m and 1.1e-04
+rad**. Compare that against the spline's *own* representation error — 6.3e-3
+rad/s of ω error at n_cp=8 — before assuming the bias staleness is what binds.
+
+**`imu_fit_w_acc` / `imu_fit_w_gyr`.** Zero weight must be a hard no-op
+(asserted bit-identical to not passing IMU data at all), and non-zero weight
+must actually pull the spline onto the raw stream (asserted monotone in w on
+both channels).
+
+The third check is the one worth reading. Pulling the spline onto the raw IMU
+means it absorbs some of the noise AdaptiveQ is about to be asked to report, so
+`σ̂_a` must move **down** — measured here as 2.48e-2 → 2.15e-2 at w=10. The
+fixture asserts the *direction only*, deliberately: whether down is an
+improvement depends on which side the baseline sits, and that differs by
+fixture. `test_indirect` dead-reckons its poses from the same noisy IMU and
+lands ~15% low; this one integrates from a clean initial condition on a
+moving-axis rotation and lands high, because rotation representation error
+inflates the accel residual. Do not read "closer to truth" off this fixture as
+a general result.
+
+Note also how quickly the accel channel saturates: 4.25e-2 → 3.65e-2 at w=0.1,
+then 3.634e-2 and 3.633e-2 at w=1 and w=10. Eight control points cannot
+interpolate twenty-one IMU samples, so the DOF ratio caps how far the fit can
+chase the stream — which bounds the bias above, but does not remove it.

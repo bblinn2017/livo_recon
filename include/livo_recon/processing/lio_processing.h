@@ -173,6 +173,13 @@ public:
   // legacy one-shot deskew rather than to garbage.
   bool redeskewFromSpline(MeasureGroup& mg);
 
+  // Raw IMU + the CURRENT biases/gravity for the fit's optional acc/gyro term.
+  // The samples pointer is left null unless a weight is actually non-zero, so
+  // with the weights at their 0 default the fit never dereferences anything
+  // and is bit-identical to the pose-only one.  Needs imu/keep_raw_samples,
+  // the same prerequisite AdaptiveQ has; without it the term is skipped.
+  SplineImuFitData splineImuFitData(const MeasureGroup& mg) const;
+
   // Fit the spline, and afterwards measure the IMU residual against it and
   // hand the result to AdaptiveQ.  Split from deskewAndDownsample() so the
   // measurement happens AFTER the frame's IEKF has converged and the
@@ -255,6 +262,16 @@ private:
   // Scratch for the control-point refinement, reused across iterations and
   // frames so the per-iteration path allocates nothing.
   std::vector<SplineLidarObs> lidar_obs_;
+
+  // The pose sequence EXACTLY as ImuProc::propagate() produced it, kept only
+  // when spline.reintegrate_each_iteration is on.  Every replay starts from
+  // this, never from the previous replay: the bias delta is always measured
+  // against the propagation-time bias (state_propagat_, whose bias blocks
+  // propagate() never touches), so replaying a replay would apply the
+  // correction twice.
+  std::vector<Pose6D> spline_poses0_;
+  std::vector<Pose6D> spline_poses_;    // replay target, reused
+  int  spline_refits_ = 0;              // per frame, for spline_q.csv
   AdaptiveQ  adaptive_q_;
   bool       adaptive_q_primed_ = false;
   SplineImuResidualStats last_spline_stats_;

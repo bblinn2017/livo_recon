@@ -171,8 +171,80 @@ struct SplineOptions
   // the unrefined spline is cheap and the rejection is counted, not hidden.
   double lidar_refine_max_step = 0.10;
 
+  // ── Raw-IMU term in the FIT itself ──────────────────────────────────────
+  // Until now the acc/gyro residual was diagnostic only: the fit was pure
+  // least squares to the propagated POSES, and the residual was measured
+  // afterwards for AdaptiveQ.  These weights add the residual to the fit.
+  //
+  // Both are LINEAR in their control points at fixed rotation:
+  //     accel:  pddot(t) = sum_j ddb_j(u) cp_p[s+j] / delta^2
+  //             target   = R(t) (acc_raw - b_a) + g
+  //     gyro :  phidot(t) = sum_j db_j(u) cp_phi[s+j] / delta
+  //             target   = Jr(phi(t))^-1 (gyro_raw - b_g)
+  // so each contributes ordinary normal-equation rows.  The gyro target
+  // depends on phi, so it is relinearised imu_fit_iters times.
+  //
+  // WEIGHTS ARE DIMENSIONLESS AND TRACE-NORMALISED, the same idiom
+  // fit_regularization uses: the IMU block is scaled so that its normal-matrix
+  // trace equals w times the POSE block's trace.  w = 1 therefore means "the
+  // IMU term carries as much total weight as the whole pose sequence",
+  // independently of sample counts, n_cp and units.
+  //
+  // DEFAULT 0 (off), and that default is a judgement, not laziness.  Fitting
+  // to positions penalises the DOUBLE INTEGRAL of accel error, which is
+  // heavily low-pass -- the fit is nearly blind to the high-frequency accel
+  // noise that AdaptiveQ's sigma_a is trying to measure, which is exactly why
+  // sigma_a comes out ~15% low instead of collapsing.  Weighting the accel
+  // residual into the fit erodes that separation: the spline starts absorbing
+  // the very quantity it is about to be asked to report.  The DOF ratio
+  // bounds how far this can go (n_cp ~ 8 against ~21 samples cannot
+  // interpolate the IMU), but it does not remove the bias -- it caps it.
+  // Raise these deliberately, and read sigma_a_hat against a known truth when
+  // you do.
+  double imu_fit_w_acc = 0.0;
+  double imu_fit_w_gyr = 0.0;
+  int    imu_fit_iters = 2;
+
+  // ── Re-integration under the ESIKF's bias corrections ───────────────────
+  // The pose sequence the spline is fitted to was dead-reckoned by
+  // ImuProc::propagate() using the biases as they stood BEFORE this frame's
+  // update, and propagate() is never re-run inside the IEKF loop.  So without
+  // this the spline's SHAPE is frozen at the pre-update bias while every
+  // inner iteration moves that bias.  anchorTo() cannot repair it: a bias
+  // delta produces a shape change (rotation drifting linearly in t, position
+  // quadratically), and anchorTo is a rigid 6-dof transform.
+  //
+  // With this on, reintegratePoses() replays the stored pose recurrence under
+  // the CURRENT bias and gravity before each re-fit.  It needs no raw IMU
+  // samples: Pose6D already carries the per-step world accelerations and the
+  // bias-corrected mean body rate, from which the body-frame measurement is
+  // recoverable exactly.  Zero deltas short-circuit to an exact no-op.
+  bool   reintegrate_each_iteration = false;
+  // Skip the replay when the correction is smaller than this (rad/s and
+  // m/s^2 respectively).  The point is not to save the ~20 integration steps
+  // -- it is that a re-fit moves the spline out from under the LiDAR
+  // residuals the refinement was about to be linearised at, so it should
+  // happen only when it buys something.
+  double reintegrate_min_dbg = 1e-9;
+  double reintegrate_min_dba = 1e-9;
+
   // Per-scan CSV of the fit and the IMU residual (spline_q.csv).
   bool log_en = false;
+};
+
+// Raw IMU for the fit's optional acc/gyro term.  Separate from the pose
+// sequence because it is the UNAVERAGED, un-bias-corrected stream --
+// ImuProc::keep_raw_samples preserves exactly that as mg.imu_samples_raw.
+struct SplineImuFitData
+{
+  const std::vector<ImuSample>* samples = nullptr;
+  V3D bias_acc = V3D::Zero();
+  V3D bias_gyr = V3D::Zero();
+  V3D gravity  = V3D::Zero();
+
+  bool usable() const { return samples != nullptr && samples->size() >= 4; }
+
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
 
 // One LiDAR observation, reduced to what the control-point refinement needs.
@@ -192,8 +264,15 @@ struct SplineLidarObs
 class ScanSpline
 {
 public:
+  // `imu` is optional and only read when opts.imu_fit_w_acc/w_gyr > 0.
   bool fit(const std::vector<Pose6D>& poses, double t0, double t1,
-           const SplineOptions& opts);
+           const SplineOptions& opts, const SplineImuFitData* imu = nullptr);
+
+  // Per-FRAME reset of the refinement counters.  Deliberately NOT done inside
+  // fit(): with spline.reintegrate_each_iteration on, fit() runs once per IEKF
+  // iteration, and resetting there would make spline_q.csv's refine_applied /
+  // refine_rejects report only the last iteration instead of the frame.
+  void resetRefineStats() { refine_rejects_ = 0; refine_applied_ = 0; last_refine_step_ = 0.0; }
 
   bool valid() const { return valid_; }
   int  nControlPoints() const { return n_cp_; }
@@ -283,6 +362,34 @@ struct SplineImuResidualStats
   double max_abs_gyr = 0.0;
   bool   valid() const { return n >= 8; }
 };
+
+// Replay a stored pose recurrence under corrected biases and gravity.
+//
+// `in` is the sequence ImuProc::propagate() produced; Pose6D carries, per
+// step, the WORLD accelerations at the step's head and tail and the mean body
+// rate already corrected by the OLD gyro bias, which is enough to recover the
+// body-frame measurement exactly:
+//
+//     a_head_body = R_k^T (acc_head - g_old)          == acc_raw_head - ba_old
+//     a_tail_body = (R_k Exp(gyr_k, dt))^T (acc_tail - g_old)
+//
+// The recurrence is then re-run with (bias + d_bias) and (g_old + d_gravity),
+// starting from in.front()'s pose and velocity.  The initial condition is
+// deliberately NOT corrected: the ESIKF's correction is defined at the scan
+// END and is carried by anchorTo(), so correcting both ends would apply it
+// twice.  This function fixes the SHAPE only, which is the part anchorTo
+// cannot reach.
+//
+// Returns false and leaves `out` untouched when every delta is below its
+// threshold -- an exact no-op rather than a round-trip through R^T ... R that
+// would perturb the last bits for nothing.
+bool reintegratePoses(const std::vector<Pose6D>& in,
+                      const V3D& d_bias_acc,
+                      const V3D& d_bias_gyr,
+                      const V3D& d_gravity,
+                      const V3D& gravity_old,
+                      double min_dba, double min_dbg,
+                      std::vector<Pose6D>& out);
 
 SplineImuResidualStats computeSplineImuResidual(
     const ScanSpline& spline,

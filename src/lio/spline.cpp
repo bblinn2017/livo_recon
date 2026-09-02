@@ -88,12 +88,13 @@ void ScanSpline::cumBasisAt(double t, int& first_cp, Eigen::Vector3d& Bt,
 }
 
 bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
-                     const SplineOptions& opts)
+                     const SplineOptions& opts, const SplineImuFitData* imu)
 {
   valid_ = false;
-  refine_rejects_ = 0;
-  refine_applied_ = 0;
-  last_refine_step_ = 0.0;
+  // NOTE: the refinement counters are NOT reset here.  With
+  // spline.reintegrate_each_iteration on, fit() runs once per IEKF iteration,
+  // so resetting here would make spline_q.csv report the last iteration
+  // instead of the frame.  LioProc calls resetRefineStats() once per frame.
   if (poses.size() < 2) return false;
   if (!(t1 > t0)) return false;
 
@@ -190,6 +191,114 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   {
     cp_p_.col(i)   = Xp.row(i).transpose();
     cp_phi_.col(i) = Xr.row(i).transpose();
+  }
+
+  // ── optional raw-IMU term ────────────────────────────────────────────────
+  // Both weights default to 0, in which case not a single line below runs and
+  // the fit is bit-identical to the pose-only one.  valid_ is set here rather
+  // than at the end because the passes below evaluate the spline they are
+  // solving for (phiAt/rotAt refuse to answer while invalid), and the object
+  // is in fact a complete, usable fit at this point.
+  const bool use_acc = (imu != nullptr) && imu->usable() && opts.imu_fit_w_acc > 0.0;
+  const bool use_gyr = (imu != nullptr) && imu->usable() && opts.imu_fit_w_gyr > 0.0;
+
+  if (use_acc || use_gyr)
+  {
+    valid_ = true;
+
+    // GYRO first: the accel target needs R(t), so rotation must settle before
+    // position is re-solved.  The target Jr(phi)^-1 (gyro - b_g) depends on
+    // phi itself, hence the relinearisation loop; the accel target does not
+    // depend on cp_p_ at all, so it needs exactly one pass.
+    if (use_gyr)
+    {
+      const int iters = std::max(1, opts.imu_fit_iters);
+      for (int it = 0; it < iters; ++it)
+      {
+        Eigen::MatrixXd Hg = Eigen::MatrixXd::Zero(n_cp_, n_cp_);
+        Eigen::MatrixXd bg = Eigen::MatrixXd::Zero(n_cp_, 3);
+        Eigen::Vector4d bb, dbb, ddbb;
+        int s = 0;
+        int used = 0;
+
+        for (const auto& sm : *imu->samples)
+        {
+          if (sm.t < t0_ || sm.t > t1_) continue;
+          basisAt(sm.t, s, bb, dbb, ddbb);
+
+          const M3D J = Jr(phiAt(sm.t));
+          const Eigen::FullPivLU<M3D> lu(J);
+          if (!lu.isInvertible()) continue;
+          const V3D tgt = lu.solve(V3D(sm.gyro - imu->bias_gyr));
+          if (!tgt.allFinite()) continue;
+
+          for (int i = 0; i < 4; ++i)
+          {
+            const double ci = dbb[i] * inv_delta_;
+            for (int j = 0; j < 4; ++j)
+              Hg(s + i, s + j) += ci * (dbb[j] * inv_delta_);
+            bg.row(s + i) += ci * tgt.transpose();
+          }
+          ++used;
+        }
+
+        const double tg = Hg.trace();
+        if (used < 4 || !(tg > 0.0)) break;
+
+        const double scale = opts.imu_fit_w_gyr * data_trace / tg;
+        Eigen::MatrixXd A_r = AtA + scale * Hg;
+        Eigen::MatrixXd b_r = Atb_r + scale * bg;
+
+        Eigen::LDLT<Eigen::MatrixXd> ldlt_r(A_r);
+        if (ldlt_r.info() != Eigen::Success) break;
+        const Eigen::MatrixXd Xr2 = ldlt_r.solve(b_r);
+        if (!Xr2.allFinite()) break;
+        for (int i = 0; i < n_cp_; ++i) cp_phi_.col(i) = Xr2.row(i).transpose();
+      }
+    }
+
+    if (use_acc)
+    {
+      Eigen::MatrixXd Ha = Eigen::MatrixXd::Zero(n_cp_, n_cp_);
+      Eigen::MatrixXd ba = Eigen::MatrixXd::Zero(n_cp_, 3);
+      Eigen::Vector4d bb, dbb, ddbb;
+      int s = 0;
+      int used = 0;
+
+      for (const auto& sm : *imu->samples)
+      {
+        if (sm.t < t0_ || sm.t > t1_) continue;
+        basisAt(sm.t, s, bb, dbb, ddbb);
+
+        // World-frame specific force at this instant, from the CURRENT
+        // rotation spline.  Rotation is already final here.
+        const V3D tgt = rotAt(sm.t) * (sm.acc - imu->bias_acc) + imu->gravity;
+        if (!tgt.allFinite()) continue;
+
+        const double s2 = inv_delta_ * inv_delta_;
+        for (int i = 0; i < 4; ++i)
+        {
+          const double ci = ddbb[i] * s2;
+          for (int j = 0; j < 4; ++j)
+            Ha(s + i, s + j) += ci * (ddbb[j] * s2);
+          ba.row(s + i) += ci * tgt.transpose();
+        }
+        ++used;
+      }
+
+      const double ta = Ha.trace();
+      if (used >= 4 && ta > 0.0)
+      {
+        const double scale = opts.imu_fit_w_acc * data_trace / ta;
+        Eigen::MatrixXd A_p = AtA + scale * Ha;
+        Eigen::MatrixXd b_p = Atb_p + scale * ba;
+
+        Eigen::LDLT<Eigen::MatrixXd> ldlt_p(A_p);
+        const Eigen::MatrixXd Xp2 = ldlt_p.solve(b_p);
+        if (ldlt_p.info() == Eigen::Success && Xp2.allFinite())
+          for (int i = 0; i < n_cp_; ++i) cp_p_.col(i) = Xp2.row(i).transpose();
+      }
+    }
   }
 
   double sp = 0.0, sr = 0.0;
@@ -482,6 +591,68 @@ double ScanSpline::rotationChordDeg() const
   if (!valid_) return 0.0;
   const M3D dR = rotAt(t0_).transpose() * rotAt(t1_);
   return Log(dR).norm() * 180.0 / M_PI;
+}
+
+bool reintegratePoses(const std::vector<Pose6D>& in,
+                      const V3D& d_bias_acc,
+                      const V3D& d_bias_gyr,
+                      const V3D& d_gravity,
+                      const V3D& gravity_old,
+                      double min_dba, double min_dbg,
+                      std::vector<Pose6D>& out)
+{
+  if (in.size() < 2) return false;
+
+  // Exact no-op below threshold.  Not an optimisation: recovering the
+  // body-frame measurement runs the world acceleration back through R^T and
+  // then forward through R again, which is only equal to the original to
+  // within rounding.  Replaying for a zero correction would perturb the
+  // spline's last bits for nothing and break "adaptive off is bit-identical".
+  if (d_bias_acc.norm() < min_dba && d_bias_gyr.norm() < min_dbg &&
+      d_gravity.norm() < min_dba)
+    return false;
+
+  const V3D g_new = gravity_old + d_gravity;
+
+  out.clear();
+  out.reserve(in.size());
+
+  M3D R   = in.front().rot;
+  V3D pos = in.front().pos;
+  V3D vel = in.front().vel;
+
+  for (const auto& ps : in)
+  {
+    const double dt  = ps.dt;
+    const double dt2 = dt * dt;
+
+    // Recover the body-frame measurements the OLD integration used.  ps.gyr
+    // is angvel_avr, already corrected by the old gyro bias; ps.acc_head and
+    // ps.acc_tail are world accelerations built with the old accel bias and
+    // the old gravity, at the step's head and tail ROTATIONS respectively --
+    // the tail one uses R_k Exp(gyr_k, dt), which is why Expf_old is needed
+    // even though the new integration does not otherwise want it.
+    const M3D Expf_old = Exp(ps.gyr, dt);
+    const V3D a_head_b = ps.rot.transpose() * (ps.acc_head - gravity_old);
+    const V3D a_tail_b = (ps.rot * Expf_old).transpose() * (ps.acc_tail - gravity_old);
+
+    const V3D angvel_new = ps.gyr - d_bias_gyr;
+    const M3D Expf_new   = Exp(angvel_new, dt);
+
+    const V3D acc_wh = R * (a_head_b - d_bias_acc) + g_new;
+    const M3D R_next = R * Expf_new;
+    const V3D acc_wt = R_next * (a_tail_b - d_bias_acc) + g_new;
+    const V3D acc_avr_world = 0.5 * (acc_wh + acc_wt);
+
+    // Head-time state, matching ImuProc::propagate()'s storage convention.
+    out.push_back(Pose6D{ ps.t, acc_wh, acc_wt, angvel_new, vel, pos, R, dt });
+
+    pos = pos + vel * dt + 0.5 * acc_avr_world * dt2;
+    vel = vel + acc_avr_world * dt;
+    R   = R_next;
+  }
+
+  return true;
 }
 
 SplineImuResidualStats computeSplineImuResidual(
