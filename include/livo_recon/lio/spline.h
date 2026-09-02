@@ -312,6 +312,31 @@ struct SplineOptions
   double reintegrate_min_dba = 1e-9;
 
   // Per-scan CSV of the fit and the IMU residual (spline_q.csv).
+  // ── dumping the trajectory as a FUNCTION, for analysis only ──────────
+  //
+  // results_lio.txt records one pose per scan, so any comparison against a
+  // ground-truth timestamp interpolates the estimate across a ~0.1 s gap --
+  // and on a spline run that is throwing away the very thing the spline is:
+  // a queryable function of time.  "dense" evaluates posAt()/rotAt() on a
+  // fixed grid across each scan's own window and writes them, so an analysis
+  // can land on GT timestamps with interpolation error set by the grid rather
+  // than by the scan rate.
+  //
+  // Deliberately NOT a control-point dump.  Reconstructing the cumulative
+  // SO(3) blending in Python would be a second implementation of the exact
+  // Jacobian's own basis, to be kept in sync forever, and its bugs would read
+  // as trajectory error.  Evaluating the C++ we actually ship has no such
+  // failure mode.
+  //
+  // ANALYSIS ONLY.  This is not a scoring path: scores come from
+  // results_lio.txt as they always have, so nothing here can flatter a run.
+  // ~200 Hz over a 120 s sequence is ~24k rows, a couple of MB -- cheap
+  // enough to leave on for a diagnostic row and pointless for a sweep.
+  std::string traj_log_mode = "off";
+  static constexpr const char* TRAJ_LOG_MODES[] = { "off", "dense" };
+  bool trajLogOn() const { return traj_log_mode != "off"; }
+  double traj_log_hz = 200.0;
+
   bool log_en = false;
 };
 

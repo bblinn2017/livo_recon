@@ -188,6 +188,12 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
                      opts_.spline.reintegrate_min_dba, 1e-9);
 
   cfg.nested<bool>(sp, "spline/enable", "spline/log_en", opts_.spline.log_en, false);
+  // Analysis-only dense trajectory dump -- see SplineOptions::traj_log_mode.
+  cfg.nestedMode(sp, "spline/enable", "spline/trajectory_log/mode",
+                 opts_.spline.traj_log_mode, "off", { "off", "dense" });
+  cfg.nested<double>(sp && opts_.spline.trajLogOn(),
+                     "spline/trajectory_log/mode=dense",
+                     "spline/trajectory_log/hz", opts_.spline.traj_log_hz, 200.0);
   cfg.nested<bool>(sp, "spline/enable", "spline/keep_time_noise",
                    opts_.spline_keep_time_noise, false);
 
@@ -732,6 +738,33 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
   }
 
   if (opts_.spline.log_en || opts_.adaptive_q.log_en)
+  // Dense trajectory dump: the spline evaluated as the function it is, on a
+  // fixed grid across this scan's own window.  Analysis only (see
+  // SplineOptions::traj_log_mode); scores still come from results_lio.txt.
+  // Consecutive scans' windows abut, so the last sample of one and the first
+  // of the next also MEASURE the inter-scan discontinuity -- which is the
+  // honest check on how continuous this "continuous-time" trajectory is, and
+  // nothing has ever measured it.
+  if (spline_ok_ && opts_.spline.trajLogOn())
+  {
+    static bool traj_first = true;
+    std::ofstream tofs(debugLogPath("spline_traj.csv"),
+                       traj_first ? std::ios::trunc : std::ios::app);
+    if (traj_first) { tofs << "scan_id,t,px,py,pz,qx,qy,qz,qw\n"; traj_first = false; }
+    const double t_off = data_queues_->start_time;
+    const double hz = std::max(1.0, opts_.spline.traj_log_hz);
+    const double step = 1.0 / hz;
+    const double a = spline_.t0(), b = spline_.t1();
+    tofs << std::setprecision(12);
+    for (double tt = a; tt <= b + 1e-12; tt += step) {
+      const Eigen::Quaterniond q(spline_.rotAt(tt));
+      const V3D pp = spline_.posAt(tt);
+      tofs << voxel_map_->frame_idx_ << ',' << (tt + t_off) << ','
+           << pp.x() << ',' << pp.y() << ',' << pp.z() << ','
+           << q.x() << ',' << q.y() << ',' << q.z() << ',' << q.w() << '\n';
+    }
+  }
+
   {
     static bool first = true;
     std::ofstream ofs(debugLogPath("spline_q.csv"), first ? std::ios::trunc : std::ios::app);
