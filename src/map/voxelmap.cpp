@@ -56,8 +56,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "voxel_map/plane/log_debug_en", opts_->log_debug_en, false);
   paramWarn<bool>(pnh, "voxel_map/plane/log_variance_shares_en", opts_->log_variance_shares_en, false);
   paramWarn<int>(pnh, "voxel_map/search/neighborhood_size", opts_->neighborhood_size,   1);
-  paramWarn<double>(pnh, "voxel_map/plane/bin_size_fraction", opts_->bin_size_fraction, 0.2);
-  paramWarn<bool>(pnh, "voxel_map/plane/use_bins", opts_->use_bins, false);
   {
     // Modes go through ConfigResolver so an unrecognised value REFUSES rather
     // than falling through to whichever arm the if-chain happens to reach
@@ -96,10 +94,41 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     cfg.mode("voxel_map/plane/plane_fit_pose_cov_mode",
              opts_->plane_fit_pose_cov_mode, "combined",
              { "combined", "sensor_only" });
-    cfg.mode("voxel_map/plane/bin_weight_mode_fit", opts_->bin_weight_mode_fit,
-             "count", { "count", "uniform" });
-    cfg.mode("voxel_map/plane/bin_weight_mode_var", opts_->bin_weight_mode_var,
-             "count", { "count", "uniform" });
+    // ── binning (mode 2 of the three plane-confidence corrections) ───────
+    // Binning exists ONLY on the pca path.  VoxelNode::insertPoints()'s
+    // debiased branch calls VoxelPlane::addPoints() with the raw
+    // points_world and never touches bins_/buildBinReps(), so use_bins is
+    // read, validated, printed and then does NOTHING in debiased mode.
+    //
+    // That silence was not harmless.  N_acc_ counts every redundant return
+    // and plane_var_ scales as 1/N, so unbinned debiased is over-confident
+    // by the redundancy factor precisely where binning exists to prevent
+    // it -- and because the flag was inert rather than refused, EVERY
+    // pca-vs-debiased comparison this project has run is fit_mode (x)
+    // binning, with no way to tell after the fact which cells meant to bin.
+    // Refusing at startup makes the confound visible on the config that
+    // causes it instead of in a re-analysis two rounds later.
+    //
+    // Not "fixed" by teaching the debiased path to bin: binning is itself a
+    // decimation heuristic (a leaf-size proxy for redundancy) carrying three
+    // constants and two mode enums, and the replacement is a directional
+    // information model that measures redundancy from the geometry that
+    // caused it.  See claude/unified-plane-confidence.md.  Until that lands,
+    // an inert flag is a lie and a refusal is the truth.
+    const bool binning_available = (opts_->plane_fit_mode == "pca");
+    cfg.nested<bool>(binning_available,
+                     "voxel_map/plane/plane_fit_mode=pca  (binning is "
+                     "unimplemented on the debiased path)",
+                     "voxel_map/plane/use_bins", opts_->use_bins, false);
+    cfg.nested<double>(opts_->use_bins, "voxel_map/plane/use_bins=true",
+                       "voxel_map/plane/bin_size_fraction",
+                       opts_->bin_size_fraction, 0.2);
+    cfg.nestedMode(opts_->use_bins, "voxel_map/plane/use_bins=true",
+                   "voxel_map/plane/bin_weight_mode_fit",
+                   opts_->bin_weight_mode_fit, "count", { "count", "uniform" });
+    cfg.nestedMode(opts_->use_bins, "voxel_map/plane/use_bins=true",
+                   "voxel_map/plane/bin_weight_mode_var",
+                   opts_->bin_weight_mode_var, "count", { "count", "uniform" });
 
     // ── consistency logging tier ─────────────────────────────────────────
     // See VoxelOpts::log_consistency_mode. The two booleans this replaces

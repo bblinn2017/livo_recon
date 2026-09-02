@@ -301,6 +301,15 @@ struct VoxelOpts
   double bin_size_fraction = 0.2;
 
   // History (399-409): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-399
+  //
+  // pca ONLY.  VoxelNode::insertPoints()'s debiased branch hands the raw
+  // points_world straight to VoxelPlane::addPoints() and never reaches
+  // bins_/buildBinReps(), so this flag has no effect there.  It is nested
+  // under plane_fit_mode=pca in VoxelMap::loadParameters() and setting it on
+  // debiased REFUSES at startup rather than being silently ignored -- see
+  // the comment there for why that confound matters and what replaces
+  // binning.  bin_size_fraction and bin_weight_mode_fit/_var are in turn
+  // nested under this flag.
   bool use_bins = false;
 
   // History (412-425): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-412
