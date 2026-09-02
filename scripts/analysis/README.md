@@ -9,6 +9,19 @@ checked before it's pointed at real logs. `qsens.py` is the scalar
 correctness proof for the Q-by-gradient idea (see T0-E's card and note
 for why the real port used a finite-difference multi-run search instead).
 
+`sweep_scoring.py` is `consistency.py`'s statistics repackaged as a quiet,
+per-job data extractor rather than a human-readable report -- built for a
+sweep's score-then-delete pass (see the register's SP-4a"/4b" protocol
+card), which needs the same numbers (block-bootstrap NIS, lag-1 ACF/
+Ljung-Box, the plane-share-vs-full-S percentiles, occ_aniso/occ_cells
+quintile-mean NIS, the 1e-3-floor histogram) computed and retained per
+job, before that job's multi-GB `corr.csv` is deleted. It imports
+`block_bootstrap_ci`/`acf` from `consistency.py` directly rather than
+reimplementing them. `fast_ws/scripts/parallel/sp4_sweep_score_job.py`
+imports this module by path (it is not itself part of this git repo) --
+see that script's own comment for why the split is there: the sweep
+orchestration is disposable/session-specific, the statistics are not.
+
 ## Step 0 — validate the analyser before trusting a word it says
 
 ```
