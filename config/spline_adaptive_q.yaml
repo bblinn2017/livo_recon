@@ -150,6 +150,12 @@ voxel_map:
       # incidence rather than projecting to zero; k = 1 is identical to
       # sensor_range, so k is the ablation.  "constant" and "none" are the two
       # controls for queue row W-1.
+      # "legacy" is the fifth value and it is the REPRODUCIBILITY CONTROL,
+      # not a setting: the historical code had NO floor in the gate and 1e-3
+      # in the weight, so none of the four principled modes reproduces it --
+      # "constant" isolates the gate change, "none" isolates the weight
+      # change, and neither is the old pair.  V-2's byte-identity check had
+      # nothing to run against until this existed.  Do not ship it.
       mode: sensor_range
-      # constant: 1.0e-3      # live under mode: constant
+      # constant: 1.0e-3      # live under mode: constant OR legacy
       # incidence_k: 1.0      # live under mode: incidence

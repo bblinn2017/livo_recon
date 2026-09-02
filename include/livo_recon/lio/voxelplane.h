@@ -69,7 +69,13 @@ private:
   // Additive along-normal variance floor, m^2 -- see
   // VoxelOpts::weight_floor_mode.  The SAME value feeds gate()'s admission
   // threshold and computeResidual()'s res.sigma_squared; they used to differ.
-  double weightFloor(const V3D& body_dir, const V3D& body_normal) const;
+  // `in_gate` distinguishes the admission threshold from the weight the
+  // admitted correspondence is then given.  Every mode returns the same value
+  // for both EXCEPT "legacy", which reproduces the historical asymmetry (gate
+  // none, weight 1e-3) so that a byte-identity control against pre-5c93cc6
+  // code exists at all.
+  double weightFloor(const V3D& body_dir, const V3D& body_normal,
+                     bool in_gate) const;
 
   VoxelOptsPtr opts_;
 

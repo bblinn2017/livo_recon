@@ -294,7 +294,7 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
   // differ (the gate had none, the weight had a flat 1e-3), so the admission
   // threshold and the variance the admitted correspondence was then given
   // disagreed about S.
-  const double floor_term = weightFloor(body_dir, body_normal);
+  const double floor_term = weightFloor(body_dir, body_normal, /*in_gate=*/true);
   const double sigma_gate_squared = floor_term + sigma_diag_squared + plane_var_term;
   if (!std::isfinite(sigma_gate_squared) || sigma_gate_squared <= 0.0) return false;
 
@@ -303,9 +303,13 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
 
 // See VoxelOpts::weight_floor_mode for the derivation.  Returns the additive
 // along-normal variance term, in m^2.
-double VoxelPlane::weightFloor(const V3D& body_dir, const V3D& body_normal) const
+double VoxelPlane::weightFloor(const V3D& body_dir, const V3D& body_normal,
+                               bool in_gate) const
 {
   const std::string& m = opts_->weight_floor_mode;
+  // The historical asymmetry, reproduced exactly and only on request -- see
+  // VoxelOpts::weight_floor_mode's "legacy" note.
+  if (m == "legacy")   return in_gate ? 0.0 : opts_->weight_floor_constant;
   if (m == "none")     return 0.0;
   if (m == "constant") return opts_->weight_floor_constant;
 
@@ -342,7 +346,7 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
                               pt.body_point, body_normal,
                               r, sigma_diag_squared,
                               plane_var_term, J_nq, &is_candidate, &dropped_by_ablation);
-  const double floor_term = weightFloor(pt.body_point, body_normal);
+  const double floor_term = weightFloor(pt.body_point, body_normal, /*in_gate=*/false);
 
   if (opts_->log_consistency_corr_en && is_candidate && scan_id >= 0) {
     const bool cov = opts_->log_consistency_covariates_en;
@@ -397,7 +401,14 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
       // (unchanged, still measurement-noise-only, matching this codebase's
       // actual production weighting). point_cross_normal mirrors LioProc::
       // buildResiduals()'s own res.point_cross_normal formula exactly.
-      const V3D point_cross_normal = pt.body_point.cross(body_normal);
+      // Deliberately NOT written as pt.body_point.cross(body_normal), even though
+  // body_normal holds the same value.  Hoisting the product out of the
+  // expression can change whether the compiler contracts it into an FMA, and
+  // on this system a bit-level change is not harmless: T0-G measured up to
+  // 18.88% ATE movement from a semantically inert 0.1% nudge.  Keeping the
+  // original expression form leaves the "legacy" weight-floor mode a genuine
+  // byte-identity control instead of one confounded by a refactor.
+  const V3D point_cross_normal = pt.body_point.cross(pt.rot_transpose * plane_.normal);
       Eigen::Matrix<double, 1, 6> H_i;
       H_i << point_cross_normal.transpose(), plane_.normal.transpose();
       s_prior_pose = (H_i * pt.prior_cov_rp * H_i.transpose()).value();

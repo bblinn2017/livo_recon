@@ -361,9 +361,19 @@ struct VoxelOpts
   // sigma_diag_squared + plane_var_term with no floor while the weight was
   // 1e-3 + the same, so the admission threshold and the variance the admitted
   // correspondence was then given disagreed.
+  //   "legacy"        THE REPRODUCIBILITY CONTROL, and its absence was a
+  //                   defect.  The historical code did not use one floor: the
+  //                   gate had NONE and the weight had 1e-3.  The first four
+  //                   modes above all tie the two together, so none of them
+  //                   reproduces the pre-restructure behaviour and V-2's
+  //                   byte-identity check had nothing to run against --
+  //                   "constant" isolates the gate change and "none" isolates
+  //                   the weight change, and neither is the old pair.  This
+  //                   mode is that pair, provided ONLY so the control exists.
+  //                   It is not defensible as a setting; do not ship it.
   std::string weight_floor_mode = "sensor_range";
   static constexpr const char* WEIGHT_FLOOR_MODES[] = {
-      "sensor_range", "incidence", "constant", "none" };
+      "sensor_range", "incidence", "constant", "none", "legacy" };
   // (m^2) -- the historical literal, live only under "constant".
   double weight_floor_constant = 1e-3;
   // (m^2) -- sigma_r^2, mirrored from imu/sensor/range_err by LioProc so the

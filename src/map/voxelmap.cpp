@@ -77,8 +77,10 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     cfg.derived("voxel_map/plane/weight_floor/sigma_r2 (= imu/sensor/range_err^2)",
                 std::to_string(opts_->weight_sigma_r2));
     cfg.mode("voxel_map/plane/weight_floor/mode", opts_->weight_floor_mode,
-             "sensor_range", { "sensor_range", "incidence", "constant", "none" });
-    cfg.nested<double>(opts_->weight_floor_mode == "constant",
+             "sensor_range",
+             { "sensor_range", "incidence", "constant", "none", "legacy" });
+    cfg.nested<double>(opts_->weight_floor_mode == "constant" ||
+                           opts_->weight_floor_mode == "legacy",
                        "voxel_map/plane/weight_floor/mode=constant",
                        "voxel_map/plane/weight_floor/constant",
                        opts_->weight_floor_constant, 1e-3);
