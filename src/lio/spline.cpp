@@ -59,6 +59,21 @@ inline void cumBasisU(double u, Eigen::Vector3d& Bt, Eigen::Vector3d& dBt)
   dBt[2] = 0.5 * u2;
 }
 
+// Inverse SO(3) right Jacobian.  Jr(phi)^-1 = I + [phi]x/2 + c(theta) [phi]x^2
+// with c = 1/theta^2 - (1+cos theta)/(2 theta sin theta), which tends to 1/12.
+// The left inverse is its transpose: Jl(phi) = Jr(phi)^T, so Jl^-1 = (Jr^-1)^T.
+inline M3D JrInv(const V3D& phi)
+{
+  const double n = phi.norm();
+  M3D K; K << SKEW_SYM_MATRX(phi);
+  double c;
+  if (n < 1e-4)
+    c = 1.0 / 12.0 + n * n / 720.0;          // series; the closed form is 0/0 here
+  else
+    c = 1.0 / (n * n) - (1.0 + std::cos(n)) / (2.0 * n * std::sin(n));
+  return M3D::Identity() + 0.5 * K + c * K * K;
+}
+
 }  // namespace
 
 void ScanSpline::basisAt(double t, int& first_cp, Eigen::Vector4d& b,
@@ -353,41 +368,114 @@ bool ScanSpline::fitRotationCumulative(const std::vector<Pose6D>& poses, int gn_
   }
   if (static_cast<int>(ts.size()) < n_cp_ + 1) return false;
 
-  Eigen::Vector4d b, db, ddb;
+  // ── Gauss-Newton with the EXACT Jacobian of the cumulative product ───────
+  //
+  // R(u) = R_s A_1 A_2 A_3,  A_j = Exp(Btilde_j(u) d_j),  d_j = Log(R_{s+j-1}^T R_{s+j})
+  //
+  // Perturb control rotation s+k on the right, R_{s+k} <- R_{s+k} Exp(delta_k),
+  // and collect the induced right perturbation of R:  R <- R Exp(sum_k J_k delta_k).
+  // Each d_j depends on TWO control rotations, which is what the old
+  // first-order stand-in dropped:
+  //
+  //     dd_j/ddelta_{j}    =  Jr(d_j)^-1
+  //     dd_j/ddelta_{j-1}  = -Jl(d_j)^-1
+  //
+  // A right perturbation w_j of A_j moves through the trailing product as
+  // C_j^T w_j with C_j = A_{j+1}...A_3 (for SO(3), R^-1 Exp(w) R = Exp(R^T w)),
+  // and dA_j = A_j Exp(Btilde_j Jr(Btilde_j d_j) dd_j).  Writing
+  // T_j = C_j^T Btilde_j Jr(Btilde_j d_j):
+  //
+  //     J_0 = C_0^T        - T_1 Jl(d_1)^-1        C_0 = A_1 A_2 A_3
+  //     J_1 = T_1 Jr(d_1)^-1 - T_2 Jl(d_2)^-1
+  //     J_2 = T_2 Jr(d_2)^-1 - T_3 Jl(d_3)^-1
+  //     J_3 = T_3 Jr(d_3)^-1
+  //
+  // ANALYTIC CHECK, and it is the reason this can be trusted without a fixture:
+  // as every rotation increment goes to zero (A_j -> I, C_j -> I, all Jacobians
+  // -> I) the four blocks collapse to
+  //     (1 - Bt_1) I,  (Bt_1 - Bt_2) I,  (Bt_2 - Bt_3) I,  Bt_3 I
+  // and those are EXACTLY the ordinary cubic basis b_0..b_3 -- (1-u)^3/6,
+  // (3u^3-6u^2+4)/6, (-3u^3+3u^2+3u+1)/6, u^3/6 -- which is what the previous
+  // implementation used at every rotation magnitude.  So the old code was the
+  // correct zeroth-order limit of this one, and this one reduces to it exactly.
+  //
+  // The residual is r = Log((R Exp(eps))^T R_pose) ~= e - Jl(e)^-1 eps with
+  // e = Log(R^T R_pose), so each block is premultiplied by Jl(e)^-1.
+  //
+  // The system is 3*n_cp square (24x24 at n_cp=8) and banded -- the same shape
+  // and cost as refineWithLidar()'s.  The previous version solved an n_cp
+  // SCALAR system, which is what a Jacobian of b_j(u)*I permits and the exact
+  // one does not.
+  const int dim = 3 * n_cp_;
   for (int it = 0; it < std::max(0, gn_iters); ++it)
   {
-    // Normal equations in the ORDINARY basis: for small incremental
-    // rotations the derivative of Log(R_pose^T R_spline) with respect to a
-    // right perturbation of control rotation s+j is b_j(u) * I to first
-    // order.  The initialisation is already close (the tangent fit is
-    // accurate to ~1e-10 rad on benign motion), so first order converges in
-    // the two iterations the default asks for -- and the moving-axis test
-    // measures whether it actually did.
-    Eigen::MatrixXd H = Eigen::MatrixXd::Zero(n_cp_, n_cp_);
-    Eigen::MatrixXd g = Eigen::MatrixXd::Zero(n_cp_, 3);
-    int first_cp = 0;
+    Eigen::MatrixXd H = Eigen::MatrixXd::Zero(dim, dim);
+    Eigen::VectorXd g = Eigen::VectorXd::Zero(dim);
+    Eigen::Vector3d Bt, dBt;
+    int s = 0;
+    int used = 0;
 
     for (size_t k = 0; k < ts.size(); ++k)
     {
-      basisAt(ts[k], first_cp, b, db, ddb);
-      const V3D e = Log(rotAt(ts[k]).transpose() * Rs[k]);
-      for (int i = 0; i < 4; ++i)
+      cumBasisAt(ts[k], s, Bt, dBt);
+      if (s < 0 || s + 3 >= n_cp_) continue;
+
+      V3D d[3]; M3D Aj[3];
+      for (int j = 0; j < 3; ++j)
       {
-        for (int j = 0; j < 4; ++j) H(first_cp + i, first_cp + j) += b[i] * b[j];
-        g.row(first_cp + i) += b[i] * e.transpose();
+        d[j]  = Log(cp_R_[s + j].transpose() * cp_R_[s + j + 1]);
+        Aj[j] = Exp(V3D(Bt[j] * d[j]));
       }
+
+      const M3D R = cp_R_[s] * Aj[0] * Aj[1] * Aj[2];
+      const V3D e = Log(R.transpose() * Rs[k]);
+      if (!e.allFinite()) continue;
+
+      M3D C[3];                       // C[j] = product of the A's AFTER j
+      C[2] = M3D::Identity();
+      C[1] = Aj[2];
+      C[0] = Aj[1] * Aj[2];
+      const M3D C0 = Aj[0] * C[0];    // the whole product, for R_s
+
+      M3D T[3], JrI[3], JlI[3];
+      for (int j = 0; j < 3; ++j)
+      {
+        T[j]   = C[j].transpose() * (Bt[j] * Jr(V3D(Bt[j] * d[j])));
+        JrI[j] = JrInv(d[j]);
+        JlI[j] = JrI[j].transpose();
+      }
+
+      M3D J[4];
+      J[0] = C0.transpose() - T[0] * JlI[0];
+      J[1] = T[0] * JrI[0]  - T[1] * JlI[1];
+      J[2] = T[1] * JrI[1]  - T[2] * JlI[2];
+      J[3] = T[2] * JrI[2];
+
+      const M3D Le = JrInv(e).transpose();   // Jl(e)^-1
+      M3D M[4];
+      for (int a = 0; a < 4; ++a) M[a] = Le * J[a];
+
+      for (int a = 0; a < 4; ++a)
+      {
+        g.segment<3>(3 * (s + a)) += M[a].transpose() * e;
+        for (int bb = 0; bb < 4; ++bb)
+          H.block<3, 3>(3 * (s + a), 3 * (s + bb)) += M[a].transpose() * M[bb];
+      }
+      ++used;
     }
+    if (used < n_cp_) return false;
+
     // Light ridge: the outermost control points are supported by few samples.
-    const double ridge = 1e-9 * std::max(1.0, H.trace() / static_cast<double>(n_cp_));
-    for (int i = 0; i < n_cp_; ++i) H(i, i) += ridge;
+    const double ridge = 1e-9 * std::max(1.0, H.trace() / static_cast<double>(dim));
+    for (int i = 0; i < dim; ++i) H(i, i) += ridge;
 
     Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
     if (ldlt.info() != Eigen::Success) return false;
-    const Eigen::MatrixXd D = ldlt.solve(g);
+    const Eigen::VectorXd D = ldlt.solve(g);
     if (!D.allFinite()) return false;
 
     for (int i = 0; i < n_cp_; ++i)
-      cp_R_[i] = cp_R_[i] * Exp(V3D(D.row(i).transpose()));
+      cp_R_[i] = cp_R_[i] * Exp(V3D(D.segment<3>(3 * i)));
   }
 
   double sr = 0.0;

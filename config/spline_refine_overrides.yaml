@@ -2,12 +2,24 @@
 # check. Layer on top of config/spline_adaptive_q.yaml; only the differing keys
 # need to appear in a sweep cell.
 spline:
-  # "tangent" (default) | "cumulative". Tangent is the default because it is
-  # measurably better over a single scan -- see the table in lio/spline.h and
-  # scripts/test/test_spline_rotation.cpp. Cumulative is retained as a check on
-  # real bags, not as an improvement.
-  rot_mode: tangent
-  rot_fit_iters: 2
+  # "cumulative" (default) | "tangent".
+  #
+  # REVERSED 2026-09-02. Cumulative -- the form every published CT-LIO system
+  # uses -- is now the default, and tangent is the ablation arm. The earlier
+  # default rested on a synthetic fixture in which tangent was an exact linear
+  # least-squares solve while the cumulative arm was refined by Gauss-Newton
+  # with a first-order stand-in for its Jacobian: a correct implementation of
+  # the non-standard choice against a sloppy one of the standard choice. The
+  # Jacobian is now exact (Sommer's recurrence), so the comparison is fair and
+  # the burden of proof sits on the departure rather than on the convention.
+  #
+  # Whether tangent is worth keeping is queue item SP-R and is to be settled on
+  # real sequences, scored on sigma_hat_g, acf1_g and fit_res_rot -- NOT on a
+  # fixture, and NOT crossed through the grid.
+  rot_mode: cumulative
+  # Raised 2 -> 4 with the exact Jacobian; each iteration is one LDLT of a
+  # banded 3*n_cp system per frame. Lower it once SP-R has a number.
+  rot_fit_iters: 4
 
   # The control-point refinement. Previously declared, parsed, printed and
   # never read by any algorithm -- so SP-4a's on/off arm was bit-identical

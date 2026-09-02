@@ -122,8 +122,8 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "spline/fit_regularization",  opts_.spline.fit_regularization, 1e-6);
   paramWarn<double>(pnh, "spline/fit_reg_max_frac",    opts_.spline.fit_reg_max_frac, 0.05);
   paramWarn<bool>  (pnh, "spline/redeskew_each_iteration", opts_.spline.redeskew_each_iteration, true);
-  paramWarn<std::string>(pnh, "spline/rot_mode",       opts_.spline.rot_mode, std::string("tangent"));
-  paramWarn<int>   (pnh, "spline/rot_fit_iters",       opts_.spline.rot_fit_iters, 2);
+  paramWarn<std::string>(pnh, "spline/rot_mode",       opts_.spline.rot_mode, std::string("cumulative"));
+  paramWarn<int>   (pnh, "spline/rot_fit_iters",       opts_.spline.rot_fit_iters, 4);
   paramWarn<bool>  (pnh, "spline/lidar_refine_cp",     opts_.spline.lidar_refine_cp, false);
   paramWarn<double>(pnh, "spline/lidar_refine_damping",opts_.spline.lidar_refine_damping, 1e-2);
   paramWarn<double>(pnh, "spline/lidar_refine_prior_w",opts_.spline.lidar_refine_prior_w, 1.0);

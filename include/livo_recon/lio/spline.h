@@ -52,31 +52,36 @@
 // all three through R^T Rdot gives the exact body rate
 //     omega_body = (A_2 A_3)^T w_1 + A_3^T w_2 + w_3,
 //     w_j = (dBtilde_j/du) * (1/delta) * d_j.
-// Its fit is Gauss-Newton with a first-order Jacobian, initialised from the
-// tangent fit.
+// Its fit is Gauss-Newton with the EXACT Jacobian of that product (Sommer's
+// recurrence; see fitRotationCumulative()), initialised from the tangent fit.
 //
-// WHY TANGENT IS THE DEFAULT, measured on a moving-axis fixture
-// (R = Exp(e_z alpha(t)) Exp(e_x beta(t)), which has a genuinely rotating
-// axis and an exact closed-form omega), n_cp = 8, max error over the scan:
+// WHY CUMULATIVE IS THE DEFAULT, as of 2026-09-02 -- and this reverses the
+// previous default along with the reasoning that set it.
 //
-//    chord      tangent rot | cumulative rot     tangent omega | cumulative
-//     8.5 deg   1.24e-05    | 1.24e-05           6.05e-03      | 6.27e-03
-//    33.8 deg   7.17e-05    | 9.80e-05           2.94e-02      | 3.28e-02
-//   128.3 deg   1.09e-03    | 3.89e-03           4.54e-01      | 8.48e-01
-//   165.7 deg   7.58e-03    | 8.57e-02           5.50e+00      | 1.49e+01
+// The earlier default was "tangent", on a moving-axis synthetic fixture where
+// tangent came out ahead at large rotation.  That comparison was rigged, in a
+// way that took a second look to see: tangent is an EXACT linear least-squares
+// solve, while fitRotationCumulative() was refining by Gauss-Newton using the
+// ORDINARY basis b_j(u)*I as its Jacobian -- a first-order stand-in for the
+// true derivative of the cumulative product.  So a correct implementation of
+// the non-standard choice was being compared against a sloppy implementation
+// of the standard one, and the non-standard one was kept because it won.
 //
-// Cumulative is equal or WORSE at every magnitude, and it is fully converged
-// there -- rot_fit_iters 2, 4, 8, 16 and 32 agree to five digits, so this is
-// the fixed point of the approximate Jacobian and not an iteration shortfall.
-// Over ONE scan the chart never approaches its |phi| -> pi failure, so the
-// exactness of the linear fit dominates the manifold-correctness of the
-// parameterisation.  The literature's preference for cumulative is about
-// GLOBAL splines over long windows, where the chart genuinely breaks; that
-// argument does not transfer to a per-scan fit.
+// Two further facts, both from the same re-examination:
+//   - At the rotation a real scan contains they are EQUAL.  SP-4a measured max
+//     rot_chord_deg ~6 deg on eee_01; at 8.5 deg and n_cp=8 the two agree to
+//     three digits.  The gap only opens at rotations these bags do not reach.
+//   - The claim that cumulative was "fully converged -- rot_fit_iters 2, 4, 8,
+//     16 and 32 agree to five digits" was established at n_cp=16.  At the
+//     shipped n_cp=8 it fails above ~34 deg: most of the apparent tangent
+//     advantage at 128 and 166 deg was under-convergence of our own solver.
 //
-// "cumulative" is kept as a CHECK, not as an improvement: 166 deg is a
-// synthetic bound and real bags may surprise us, and having both makes the
-// question answerable on data rather than by assertion.
+// So the default is now the form every published CT-LIO system uses, the
+// Jacobian is exact, and the burden of proof sits where it belongs: on the
+// departure.  "tangent" is retained as the ablation arm, and whether it is
+// worth keeping is now an empirical question on real sequences (queue item
+// SP-R), not a synthetic one.  No synthetic number appears in this decision
+// any more except as the reason to stop trusting synthetic numbers here.
 // ---------------------------------------------------------------------------
 //
 // PARAMETERISATION.  Uniform cubic (order 4) B-spline over the scan window
@@ -103,10 +108,10 @@ struct SplineOptions
   // callers is skipped and behaviour is identical to the pre-change build.
   bool enable = false;
 
-  // "tangent" (default) | "cumulative" -- see the ROTATION block above for
-  // the measurement that picked the default.  Any value other than
-  // "cumulative" is treated as "tangent".
-  std::string rot_mode = "tangent";
+  // "cumulative" (default) | "tangent" -- see the ROTATION block above.  The
+  // default is the literature's form; "tangent" is the ablation arm.  Any
+  // value other than "cumulative" is treated as "tangent".
+  std::string rot_mode = "cumulative";
 
   // Number of control points for the scan window.  Minimum 4 (one cubic
   // segment).  8 over a 100 ms scan is a ~70 Hz effective control rate, in
@@ -132,9 +137,17 @@ struct SplineOptions
   double fit_reg_max_frac = 0.05;
 
   // Gauss-Newton refinements of the control ROTATIONS after the tangent-space
-  // initialisation, in "cumulative" mode only.  Converged at 2 (see the table
-  // above); 0 means "initialise from the tangent fit and stop".
-  int rot_fit_iters = 2;
+  // initialisation, in "cumulative" mode only.  0 means "initialise from the
+  // tangent fit and stop", which is NOT a usable spline -- the Greville
+  // re-encoding is lossy, so at least one refinement is required.
+  //
+  // Raised from 2 to 4 when the exact Jacobian landed.  The old default was
+  // set against the first-order Jacobian and was measured to be insufficient
+  // at n_cp=8 above ~34 deg of chord; an exact Jacobian should converge much
+  // faster, but that has not been measured on real data yet, and each
+  // iteration is one LDLT of a banded 3*n_cp system (24x24 at n_cp=8) per
+  // frame -- far cheaper than being wrong.  Lower it once SP-R has a number.
+  int rot_fit_iters = 4;
 
   // Re-run the deskew against the spline on every IEKF inner iteration, and
   // once more after the loop converges so the map is built from points
