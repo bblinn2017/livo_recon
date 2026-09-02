@@ -195,7 +195,12 @@ VoxelPlane::VoxelPlane(VoxelOptsPtr opts)
   }
 }
 
+// `body_dir` is the unit ray from the sensor to the point, in the SAME frame
+// pt.body_point is expressed in.  Used only by weight_floor_mode "incidence",
+// which needs the incidence angle; every other mode ignores it.  Pass a null
+// vector to fall back to the isotropic form.
 bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
+                      const V3D& body_dir, const V3D& body_normal,
                       double& r, double& sigma_diag_squared, double& plane_var_term,
                       Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate,
                       bool* dropped_by_ablation) const
@@ -283,10 +288,40 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
   if (sigma_diag_squared < 1e-6) sigma_diag_squared = 1e-6;
 
   plane_var_term = (J_nq * plane_var_ * J_nq.transpose()).value();
-  const double sigma_gate_squared = sigma_diag_squared + plane_var_term;
+
+  // ONE floor, used by the gate below AND by res.sigma_squared in
+  // computeResidual() -- see VoxelOpts::weight_floor_mode.  They used to
+  // differ (the gate had none, the weight had a flat 1e-3), so the admission
+  // threshold and the variance the admitted correspondence was then given
+  // disagreed about S.
+  const double floor_term = weightFloor(body_dir, body_normal);
+  const double sigma_gate_squared = floor_term + sigma_diag_squared + plane_var_term;
   if (!std::isfinite(sigma_gate_squared) || sigma_gate_squared <= 0.0) return false;
 
   return r * r <= opts_->sigma_num_squared * sigma_gate_squared;
+}
+
+// See VoxelOpts::weight_floor_mode for the derivation.  Returns the additive
+// along-normal variance term, in m^2.
+double VoxelPlane::weightFloor(const V3D& body_dir, const V3D& body_normal) const
+{
+  const std::string& m = opts_->weight_floor_mode;
+  if (m == "none")     return 0.0;
+  if (m == "constant") return opts_->weight_floor_constant;
+
+  const double sr2 = opts_->weight_sigma_r2;
+  if (m != "incidence") return sr2;                 // "sensor_range"
+
+  // sigma_r^2 (cos^2 theta + k sin^2 theta).  cos theta is the angle between
+  // the ray and the plane normal, both in the body frame.  If either vector
+  // is degenerate the geometry is unavailable and we fall back to the k = 1
+  // value, which is exactly "sensor_range" -- never to zero.
+  const double dn = body_dir.norm(), nn = body_normal.norm();
+  if (!(dn > 1e-9) || !(nn > 1e-9)) return sr2;
+  double c = std::abs(body_dir.dot(body_normal) / (dn * nn));
+  c = std::min(1.0, std::max(0.0, c));
+  const double c2 = c * c;
+  return sr2 * (c2 + opts_->weight_incidence_k * (1.0 - c2));
 }
 
 bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int scan_id) const
@@ -297,8 +332,17 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
   Eigen::Matrix<double, 1, 3> J_nq = Eigen::Matrix<double, 1, 3>::Zero();
   bool is_candidate = false;
   bool dropped_by_ablation = false;
-  const bool accepted = gate(pt.point, pt.sensor_cov, pt.pose_cov, r, sigma_diag_squared,
+  // Ray direction and plane normal in the body frame, for weight_floor_mode
+  // "incidence".  pt.body_point is the return in the body frame and the
+  // sensor origin is within centimetres of that frame's origin, so its
+  // direction is the ray direction to well within the angular resolution
+  // this is used at.  pt.rot_transpose is R_wb^T.
+  const V3D body_normal = pt.rot_transpose * plane_.normal;
+  const bool accepted = gate(pt.point, pt.sensor_cov, pt.pose_cov,
+                              pt.body_point, body_normal,
+                              r, sigma_diag_squared,
                               plane_var_term, J_nq, &is_candidate, &dropped_by_ablation);
+  const double floor_term = weightFloor(pt.body_point, body_normal);
 
   if (opts_->log_consistency_corr_en && is_candidate && scan_id >= 0) {
     const bool cov = opts_->log_consistency_covariates_en;
@@ -353,11 +397,11 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
       // (unchanged, still measurement-noise-only, matching this codebase's
       // actual production weighting). point_cross_normal mirrors LioProc::
       // buildResiduals()'s own res.point_cross_normal formula exactly.
-      const V3D point_cross_normal = pt.body_point.cross(pt.rot_transpose * plane_.normal);
+      const V3D point_cross_normal = pt.body_point.cross(body_normal);
       Eigen::Matrix<double, 1, 6> H_i;
       H_i << point_cross_normal.transpose(), plane_.normal.transpose();
       s_prior_pose = (H_i * pt.prior_cov_rp * H_i.transpose()).value();
-      S = 1e-3 + sigma_diag_squared + plane_var_term + s_prior_pose;
+      S = floor_term + sigma_diag_squared + plane_var_term + s_prior_pose;
     }
 
     // 14b: exact per-scan aggregates for EVERY candidate, regardless of the
@@ -390,7 +434,7 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
 
   res.r              = r;
   res.normal         = plane_.normal;
-  res.sigma_squared  = 1e-3 + sigma_diag_squared;
+  res.sigma_squared  = floor_term + sigma_diag_squared;
   res.plane_id       = this;
   res.plane_var_term = plane_var_term;
   if (opts_->log_variance_shares_en) debugLogVarianceShare(sigma_diag_squared, plane_var_term);

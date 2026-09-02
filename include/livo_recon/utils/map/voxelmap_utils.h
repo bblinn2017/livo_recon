@@ -314,6 +314,65 @@ struct VoxelOpts
 
   // History (459-476): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-459
   std::string plane_gate_mode = "disc";
+  static constexpr const char* PLANE_GATE_MODES[] = {
+      "disc", "ellipse", "ellipse_area_matched" };
+
+  // ── The residual-weight floor ───────────────────────────────────────────
+  // MODE: "sensor_range" (default) | "incidence" | "constant" | "none".
+  //
+  // WHAT WAS THERE BEFORE, AND WHY IT WAS WRONG.  The along-normal variance
+  // is computed from a real range/bearing model (getBodyCov(): sigma_r on the
+  // ray, R*sigma_a across it), and then a flat literal 1e-3 was added on top
+  // of it in TWO places in this file.  1e-3 is (3.2 cm)^2, it is in no
+  // datasheet, and whether it dominates is pure geometry:
+  //
+  //   near-normal incidence   n^T S n ~ sigma_r^2            = 2.5e-3
+  //   grazing at range R      n^T S n ~ R^2 sigma_a^2 sin^2  = 3e-4 at 5 m,
+  //                                                            1.1e-2 at 30 m
+  //
+  // so the constant dominates exactly the SHORT-RANGE, OBLIQUE returns.  That
+  // predicts the measured split with nothing else assumed -- 2-3% of
+  // correspondences floored on eee_01 (NTU-VIRAL, outdoor, long range) against
+  // 55-70% on exp05 (HILTI, indoor construction) -- which means that on HILTI
+  // the majority of the update was weighted by a constant, i.e. very nearly
+  // uniformly, and every plane-confidence mechanism that acts through the
+  // weight had almost nothing to act on.
+  //
+  // THE PHYSICS THE MODEL WAS MISSING.  The projection sigma_r^2 cos^2(theta)
+  // sends the range error to ZERO at grazing incidence, which is backwards: a
+  // tilted surface stretches the return pulse in time (dt = 2 rho tan(theta)/c
+  // over a footprint of radius rho), so range noise DEGRADES with incidence
+  // rather than projecting away.  Model that as sigma_r_eff^2(theta) =
+  // sigma_r^2 (cos^2 + k sin^2) along the normal.  At k = 1 it collapses to
+  // sigma_r^2 exactly -- a floor, but the SENSOR's own range variance rather
+  // than a literal, and per-dataset because imu/sensor/range_err already is.
+  //
+  //   "sensor_range"  floor at sigma_r^2 (= weight_sigma_r2).  The default:
+  //                   the constant, tuned by the physics instead of guessed.
+  //   "incidence"     no floor; add sigma_r^2 (cos^2 + k sin^2) - the k = 1
+  //                   case is identical to sensor_range, so k IS the ablation
+  //   "constant"      the historical flat weight_floor_constant.  Kept as the
+  //                   control arm for W-1, not because it is defensible
+  //   "none"          no floor at all -- the other control, and the only way
+  //                   to see what the floor was doing
+  //
+  // APPLIED IN BOTH THE GATE AND THE WEIGHT, which closes the bug-ledger row
+  // "gate and weight use different floors": gate() tested
+  // sigma_diag_squared + plane_var_term with no floor while the weight was
+  // 1e-3 + the same, so the admission threshold and the variance the admitted
+  // correspondence was then given disagreed.
+  std::string weight_floor_mode = "sensor_range";
+  static constexpr const char* WEIGHT_FLOOR_MODES[] = {
+      "sensor_range", "incidence", "constant", "none" };
+  // (m^2) -- the historical literal, live only under "constant".
+  double weight_floor_constant = 1e-3;
+  // (m^2) -- sigma_r^2, mirrored from imu/sensor/range_err by LioProc so the
+  // two never drift apart.  0.05 m -> 2.5e-3.
+  double weight_sigma_r2 = 2.5e-3;
+  // Incidence exponent; live only under "incidence".  1.0 reproduces
+  // "sensor_range" exactly, > 1 makes grazing returns progressively less
+  // trusted, which is the physical claim under test.
+  double weight_incidence_k = 1.0;
 
   // History (479-499): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-479
   std::string occ_aniso_drop_mode = "none";

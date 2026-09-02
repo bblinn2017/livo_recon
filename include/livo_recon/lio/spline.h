@@ -108,10 +108,16 @@ struct SplineOptions
   // callers is skipped and behaviour is identical to the pre-change build.
   bool enable = false;
 
-  // "cumulative" (default) | "tangent" -- see the ROTATION block above.  The
-  // default is the literature's form; "tangent" is the ablation arm.  Any
-  // value other than "cumulative" is treated as "tangent".
+  // MODE: "cumulative" (default) | "tangent" -- see the ROTATION block above.
+  // The default is the literature's form; "tangent" is the ablation arm.
+  //
+  // Validated at startup against ROT_MODES and the process REFUSES an
+  // unrecognised value.  It used to fall through to "tangent" for anything
+  // that was not exactly "cumulative", so a typo silently selected the
+  // ablation arm and every run in that cell was mislabelled.
   std::string rot_mode = "cumulative";
+  static constexpr const char* ROT_MODES[] = { "cumulative", "tangent" };
+  bool rotCumulative() const { return rot_mode == "cumulative"; }
 
   // Number of control points for the scan window.  Minimum 4 (one cubic
   // segment).  8 over a 100 ms scan is a ~70 Hz effective control rate, in
@@ -128,6 +134,17 @@ struct SplineOptions
   // to another.  control_point_hz is the physically comparable axis.
   double control_point_hz = 0.0;
   int    n_control_points_max = 32;
+
+  // MODE: "n" (default) | "hz" -- which of the two above is authoritative.
+  //
+  // These are MUTUALLY EXCLUSIVE parameterisations of one quantity, and they
+  // used to be resolved by precedence: control_point_hz won whenever it was
+  // > 0, and n_control_points was read otherwise.  A config that set both
+  // was legal, ran one of them, and said nothing.  Now the mode names which
+  // one is live and the resolver refuses the other if it was set explicitly.
+  std::string cp_mode = "n";
+  static constexpr const char* CP_MODES[] = { "n", "hz" };
+  bool cpFromHz() const { return cp_mode == "hz"; }
 
   // Tikhonov weight on the second difference of control points.  Keeps A^T A
   // conditioned when n_cp approaches the pose-sample count and damps ringing
@@ -152,7 +169,42 @@ struct SplineOptions
   // Re-run the deskew against the spline on every IEKF inner iteration, and
   // once more after the loop converges so the map is built from points
   // placed by the FINAL state rather than the second-to-last one.
-  bool redeskew_each_iteration = true;
+  // MODE: the per-iteration pipeline, as ONE enum rather than three booleans.
+  //
+  //   "off"                            legacy one-shot deskew; the spline is
+  //                                    fitted and used once per frame
+  //   "redeskew"                       re-place the kept points against the
+  //                                    re-anchored spline every IEKF iteration
+  //   "redeskew+refine"                ... and refine the position control
+  //                                    points against the LiDAR residuals
+  //   "redeskew+reintegrate"           ... and replay the pose sequence under
+  //                                    the iteration's corrected biases
+  //   "redeskew+refine+reintegrate"    both
+  //
+  // WHY THIS IS ONE KNOB AND NOT THREE.  The refinement and the
+  // re-integration are steps (1) and (0) INSIDE LioProc::redeskewFromSpline(),
+  // whose first statement is the re-deskew guard.  They are not peers of it:
+  // a refined or re-integrated spline reaches the filter only through the
+  // points the re-deskew places, so with the re-deskew off it is computed and
+  // never read.  As three booleans the 2x2x2 space had eight members and only
+  // FIVE distinct behaviours -- and SP-4a"/4b" spent half of a 276-job grid
+  // discovering that empirically, 32 cells per arm per sequence landing on
+  // ATE-identical duplicates.  Enumerating the five makes an inert cell
+  // unrepresentable rather than merely detectable.
+  //
+  // Validated at startup; the resolver refuses the sub-parameters of a step
+  // this mode does not include.
+  std::string per_iteration = "redeskew";
+  static constexpr const char* PER_ITER_MODES[] = {
+      "off", "redeskew", "redeskew+refine",
+      "redeskew+reintegrate", "redeskew+refine+reintegrate" };
+  bool redeskewOn() const { return per_iteration != "off"; }
+  bool refineOn() const
+  { return per_iteration == "redeskew+refine" ||
+           per_iteration == "redeskew+refine+reintegrate"; }
+  bool reintegrateOn() const
+  { return per_iteration == "redeskew+reintegrate" ||
+           per_iteration == "redeskew+refine+reintegrate"; }
 
   // ── LiDAR refinement of the control points ──────────────────────────────
   // Let each LiDAR return, at its own timestamp, pull the POSITION control
@@ -174,7 +226,14 @@ struct SplineOptions
   // exactly, so the two estimators never fight over the same quantity.
   // Rotation control points are NOT refined here -- they stay with the
   // IMU + ESIKF.
-  bool   lidar_refine_cp = false;
+  // No lidar_refine_cp boolean any more -- refineOn() is derived from
+  // per_iteration above.  The four scalars below are live only when it is
+  // true, and NONE of them has ever been varied: git log -S puts all four in
+  // 5dd6e6f, the commit that introduced the feature.  prior_w in particular
+  // is scaled by trace(H)/dim -- the mean diagonal of the data term itself --
+  // so 1.0 means the pull toward the IMU-only fit is the same order as the
+  // entire LiDAR information.  Queue row SP-P sweeps them; until it has,
+  // a null on this switch is not a statement about the mechanism.
   double lidar_refine_damping = 1e-2;    // Levenberg, relative to trace(H)/n
   double lidar_refine_prior_w = 1.0;     // pull toward the pre-refinement fit
   int    lidar_refine_iters = 1;
@@ -214,6 +273,17 @@ struct SplineOptions
   // interpolate the IMU), but it does not remove the bias -- it caps it.
   // Raise these deliberately, and read sigma_a_hat against a known truth when
   // you do.
+  // MODE: "off" (default) | "acc" | "gyr" | "both".  The two weights below
+  // are live only for the channels the mode names; imu_fit_iters is live
+  // only when the mode is not "off".  Previously the on/off state was
+  // implied by whether the weights happened to be > 0, so "off with a weight
+  // set" and "on with a weight of zero" were the same configuration.
+  std::string imu_fit_mode = "off";
+  static constexpr const char* IMU_FIT_MODES[] = { "off", "acc", "gyr", "both" };
+  bool imuFitAcc() const { return imu_fit_mode == "acc" || imu_fit_mode == "both"; }
+  bool imuFitGyr() const { return imu_fit_mode == "gyr" || imu_fit_mode == "both"; }
+  bool imuFitOn()  const { return imu_fit_mode != "off"; }
+
   double imu_fit_w_acc = 0.0;
   double imu_fit_w_gyr = 0.0;
   int    imu_fit_iters = 2;
@@ -232,7 +302,7 @@ struct SplineOptions
   // samples: Pose6D already carries the per-step world accelerations and the
   // bias-corrected mean body rate, from which the body-frame measurement is
   // recoverable exactly.  Zero deltas short-circuit to an exact no-op.
-  bool   reintegrate_each_iteration = false;
+  // No reintegrate_each_iteration boolean -- reintegrateOn(), above.
   // Skip the replay when the correction is smaller than this (rad/s and
   // m/s^2 respectively).  The point is not to save the ~20 integration steps
   // -- it is that a re-fit moves the spline out from under the LiDAR
@@ -285,7 +355,9 @@ public:
   // fit(): with spline.reintegrate_each_iteration on, fit() runs once per IEKF
   // iteration, and resetting there would make spline_q.csv's refine_applied /
   // refine_rejects report only the last iteration instead of the frame.
-  void resetRefineStats() { refine_rejects_ = 0; refine_applied_ = 0; last_refine_step_ = 0.0; }
+  void resetRefineStats()
+  { refine_rejects_ = 0; refine_applied_ = 0; last_refine_step_ = 0.0;
+    refine_dcp_max_ = 0.0; refine_dcp_rms_ = 0.0; }
 
   bool valid() const { return valid_; }
   int  nControlPoints() const { return n_cp_; }
@@ -337,6 +409,18 @@ public:
   int    refineRejects()  const { return refine_rejects_; }
   int    refineApplied()  const { return refine_applied_; }
 
+  // MAGNITUDE, not just acceptance.  refineApplied() counts Gauss-Newton
+  // iterations that were allowed through; lastRefineStep() is the LAST
+  // iteration's max step and is overwritten each time.  Neither answers "how
+  // far did the refinement actually move the trajectory", which is the only
+  // question that separates "ran and did nothing" from "ran and mattered" --
+  // and with lidar_refine_prior_w scaled to trace(H)/dim, a mechanism that is
+  // half prior by construction can report an acceptance on every frame while
+  // moving the control points by microns.  These are the NET displacement
+  // from the pre-refinement fit, accumulated across iterations, per frame.
+  double refineDcpMax() const { return refine_dcp_max_; }   // m
+  double refineDcpRms() const { return refine_dcp_rms_; }   // m
+
 private:
   bool   valid_ = false;
   bool   cumulative_ = true;
@@ -350,7 +434,13 @@ private:
   std::vector<M3D> cp_R_;                             // n_cp, cumulative mode
 
   double fit_res_pos_ = 0.0, fit_res_rot_ = 0.0, fit_reg_frac_ = 0.0;
+  // See refineDcpMax().  Called on every exit path of refineWithLidar()
+  // that may have touched cp_p_, including the reject paths.
+  void accumulateRefineDisplacement(
+      const Eigen::Matrix<double, 3, Eigen::Dynamic>& cp_prior);
+
   double last_refine_step_ = 0.0;
+  double refine_dcp_max_ = 0.0, refine_dcp_rms_ = 0.0;
   int    refine_rejects_ = 0, refine_applied_ = 0;
   int    n_cp_req_ = 0;
 

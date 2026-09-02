@@ -113,10 +113,10 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   if (poses.size() < 2) return false;
   if (!(t1 > t0)) return false;
 
-  cumulative_ = (opts.rot_mode != "tangent");
+  cumulative_ = opts.rotCumulative();
 
   int n_cp = opts.n_control_points;
-  if (opts.control_point_hz > 0.0)
+  if (opts.cpFromHz())
     n_cp = static_cast<int>(std::lround(opts.control_point_hz * (t1 - t0))) + 3;
   n_cp = std::max(4, std::min(n_cp, opts.n_control_points_max));
   n_cp_req_ = n_cp;
@@ -214,8 +214,8 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   // than at the end because the passes below evaluate the spline they are
   // solving for (phiAt/rotAt refuse to answer while invalid), and the object
   // is in fact a complete, usable fit at this point.
-  const bool use_acc = (imu != nullptr) && imu->usable() && opts.imu_fit_w_acc > 0.0;
-  const bool use_gyr = (imu != nullptr) && imu->usable() && opts.imu_fit_w_gyr > 0.0;
+  const bool use_acc = (imu != nullptr) && imu->usable() && opts.imuFitAcc();
+  const bool use_gyr = (imu != nullptr) && imu->usable() && opts.imuFitGyr();
 
   if (use_acc || use_gyr)
   {
@@ -597,7 +597,7 @@ void ScanSpline::anchorTo(double t_ref, const M3D& R_ref, const V3D& p_ref)
 bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
                                  const SplineOptions& opts)
 {
-  if (!valid_ || !opts.lidar_refine_cp) return false;
+  if (!valid_ || !opts.refineOn()) return false;
   if (static_cast<int>(obs.size()) < n_cp_) return false;
 
   const int dim = 3 * n_cp_;
@@ -633,7 +633,7 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
       }
       ++used;
     }
-    if (used < n_cp_) return any;
+    if (used < n_cp_) { accumulateRefineDisplacement(cp_prior); return any; }
 
     // Prior toward the pre-refinement (IMU-only) fit.  Without it the system
     // is rank-deficient in every direction the plane normals do not span --
@@ -653,9 +653,11 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
     for (int i = 0; i < dim; ++i) H(i, i) += lm;
 
     Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
-    if (ldlt.info() != Eigen::Success) { ++refine_rejects_; return any; }
+    if (ldlt.info() != Eigen::Success)
+    { ++refine_rejects_; accumulateRefineDisplacement(cp_prior); return any; }
     const Eigen::VectorXd step = -ldlt.solve(g);
-    if (!step.allFinite()) { ++refine_rejects_; return any; }
+    if (!step.allFinite())
+    { ++refine_rejects_; accumulateRefineDisplacement(cp_prior); return any; }
 
     double max_step = 0.0;
     for (int i = 0; i < n_cp_; ++i)
@@ -665,13 +667,37 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
     // Fail safe to the unrefined spline rather than applying a correction
     // this system's documented sensitivity cannot absorb.  Counted, not
     // hidden -- refineRejects() is logged per scan.
-    if (!(max_step <= opts.lidar_refine_max_step)) { ++refine_rejects_; return any; }
+    if (!(max_step <= opts.lidar_refine_max_step))
+    { ++refine_rejects_; accumulateRefineDisplacement(cp_prior); return any; }
 
     for (int i = 0; i < n_cp_; ++i) cp_p_.col(i) += step.segment<3>(3 * i);
     ++refine_applied_;
     any = true;
   }
+  accumulateRefineDisplacement(cp_prior);
   return any;
+}
+
+// NET displacement from the pre-refinement fit -- see refineDcpMax()'s doc
+// comment for why an acceptance count is not a measurement.  Called on every
+// exit path that may have modified cp_p_, and accumulated with std::max /
+// quadrature so a frame whose re-deskew runs several times reports the
+// largest and the aggregate, not the last.
+void ScanSpline::accumulateRefineDisplacement(
+    const Eigen::Matrix<double, 3, Eigen::Dynamic>& cp_prior)
+{
+  if (cp_prior.cols() != cp_p_.cols() || n_cp_ <= 0) return;
+  double sum_sq = 0.0, mx = 0.0;
+  for (int i = 0; i < n_cp_; ++i)
+  {
+    const double d = (cp_p_.col(i) - cp_prior.col(i)).norm();
+    if (!std::isfinite(d)) continue;
+    sum_sq += d * d;
+    mx = std::max(mx, d);
+  }
+  refine_dcp_max_ = std::max(refine_dcp_max_, mx);
+  const double rms = std::sqrt(sum_sq / static_cast<double>(n_cp_));
+  refine_dcp_rms_ = std::sqrt(refine_dcp_rms_ * refine_dcp_rms_ + rms * rms);
 }
 
 double ScanSpline::rotationChordDeg() const

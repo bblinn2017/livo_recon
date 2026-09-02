@@ -1,112 +1,155 @@
-# ============================================================================
-# Overrides for the scan-spline + live process-noise arms.
+# Scan-spline trajectory + live process-noise estimation.
 #
-# Pass on top of a dataset config, which is loaded first:
-#   roslaunch livo_recon livo_recon_ntu_viral.launch \
-#     overrides_file:=$(rospack find livo_recon)/config/spline_adaptive_q.yaml
+# STRUCTURE IS THE CONTRACT.  Every block below whose key set is nested is
+# nested because the code nests it: a key inside a scope whose mode does not
+# select it is not merely ignored, the node REFUSES to start.  Modes are
+# validated against a named set, so a typo fails rather than selecting an
+# ablation arm.  What the run prints at startup is the EFFECTIVE
+# configuration, which is the cell's real identity -- parse that, not this.
 #
-# The sweep harness generates per-cell copies of this file with the fields
-# below substituted; this checked-in version is the CENTRE CELL, i.e. the
-# configuration the plateau measurement in include/livo_recon/lio/
-# adaptive_q.h says to ship.
-#
-# Every switch here defaults to OFF in code.  With spline/enable false the
-# frame path is byte-identical to the pre-change build, so the a0 baseline
-# cell is the existing binary and does not need a separate build.
-# ============================================================================
+# See include/livo_recon/utils/log/config_resolve.h for why this shape exists
+# and what it cost to learn.
 
 spline:
-  # Master switch for the scan-spline trajectory.
+  # Master switch.  Everything below it, and the whole adaptive_q block, is
+  # dead without it -- the Q statistic IS the spline-vs-IMU residual.
   enable: true
 
-  # Control points over one scan window.  THE ablation knob.  8 sits in the
-  # middle of the measured plateau (4-10) where the IMU-noise estimate
-  # recovers 0.81-0.96 of truth with a white residual.  Above ~12 on a 0.1 s
-  # scan the second derivative starts chasing integrated-IMU noise and the
-  # estimate blows up (4.8x at 14, 13.4x at 18) -- ablate across that cliff
-  # deliberately, do not ship past it.
-  n_control_points: 8
+  control_points:
+    # MODE: "n" | "hz".  Mutually exclusive parameterisations of one quantity.
+    # Setting the key belonging to the other mode is an error, not a
+    # preference: precedence used to resolve this silently.
+    mode: n
+    # Live under mode: n.  8 over a 100 ms scan is a ~70 Hz effective control
+    # rate, the band CT-VoxelMap hand-sets per dataset (35-80 Hz).
+    #
+    # PROVENANCE, stated because it matters: 8 was chosen on a synthetic
+    # bench ("recovers 0.81-0.96 of truth", "4.8x at 14"), which standing
+    # rule 1 no longer admits as evidence.  It is not a validated default.
+    n: 8
+    # Live under mode: hz.  Prefer this whenever results are compared ACROSS
+    # sequences -- a fixed n is a different control rate on every bag.
+    # hz: 100.0
+    n_max: 32
 
-  # Alternative parameterisation: control points per second, converted
-  # against the actual scan duration.  0 = use n_control_points directly.
-  # 80 Hz over a 0.1 s scan is n_cp = 11, i.e. the top of the plateau.
-  control_point_hz: 0.0
-  n_control_points_max: 32
+  fit:
+    regularization: 1.0e-6
+    # Also from the synthetic bench; see n above.
+    reg_max_frac: 0.05
 
-  # Fit conditioning.  fit_reg_max_frac refuses the fit outright (falling
-  # back to the legacy one-shot deskew for that frame) if the regularizer is
-  # carrying more than this fraction of the normal matrix -- an over-smoothed
-  # spline would report a falsely small IMU noise.
-  fit_regularization: 1.0e-6
-  fit_reg_max_frac: 0.05
+    rotation:
+      # MODE: "cumulative" | "tangent".  Cumulative is the form every
+      # published CT-LIO system uses and is the default; tangent is the
+      # ablation arm.  An unrecognised value now REFUSES -- it used to fall
+      # through to tangent, so a typo silently selected the ablation.
+      mode: cumulative
+      # Live under mode: cumulative only.  Tangent is a single linear solve
+      # and has no iteration count.
+      iters: 4
 
-  # Re-deskew every IEKF inner iteration against the re-anchored spline.
-  # This is the mechanism's point.  Set false to separate "spline deskew"
-  # from "iterated deskew" as independent arms.
-  redeskew_each_iteration: true
+    imu_term:
+      # MODE: "off" | "acc" | "gyr" | "both".  The on/off state used to be
+      # implied by whether a weight happened to be > 0, so "off with a weight
+      # set" and "on with weight 0" were the same configuration.
+      #
+      # DEFAULT off, and that is a judgement: fitting to positions penalises
+      # the double integral of accel error, so the fit is nearly blind to the
+      # high-frequency accel noise adaptive_q is trying to measure.  Weighting
+      # the accel residual into the fit erodes that separation.
+      mode: off
+      # w_acc: 0.0
+      # w_gyr: 0.0
+      # iters: 2
 
-  # Refit the position control points against the current iteration's
-  # point-to-plane residuals, so a LiDAR return influences the control points
-  # in its own temporal neighbourhood rather than only through the rigid
-  # 6-dof state correction.  Its own arm; off in the centre cell.
-  lidar_refine_cp: false
-  lidar_refine_damping: 1.0e-2
-  lidar_refine_prior_w: 1.0
-  lidar_refine_iters: 1
+  # MODE: the per-iteration pipeline, as ONE key with five values.
+  #
+  #   off                            legacy one-shot deskew
+  #   redeskew                       re-place points every IEKF iteration
+  #   redeskew+refine                ... + LiDAR refinement of the position
+  #                                  control points
+  #   redeskew+reintegrate           ... + replay the poses under the
+  #                                  iteration's corrected biases
+  #   redeskew+refine+reintegrate    both
+  #
+  # These were three booleans until 2026-09-02.  Refinement and
+  # re-integration are steps INSIDE redeskewFromSpline() -- a refined spline
+  # reaches the filter only through the points the re-deskew places -- so the
+  # 2x2x2 space had eight members and five distinct behaviours, and a 276-job
+  # grid spent half its cells finding that out.  Sweep THIS key; an inert
+  # cell is now unrepresentable rather than merely detectable.
+  per_iteration: redeskew
 
-  # Keep the legacy total_dt^3 * var_acc inflation on each point's
-  # covariance.  OFF here on purpose: that term puts state->varAcc() -- the
-  # same variable cov_w's accelerometer block is built from -- inside the
-  # MEASUREMENT covariance, and leaving it on while adaptive_q measures and
-  # applies that quantity closes a loop through the measurement model.
+  # Live only when per_iteration includes +refine.
+  # refine:
+  #   NONE of these four has ever been varied: git log -S puts all of them in
+  #   5dd6e6f, the commit that introduced the feature.  prior_w is scaled by
+  #   trace(H)/dim -- the mean diagonal of the data term -- so 1.0 means the
+  #   pull toward the IMU-only fit is the same order as the entire LiDAR
+  #   information.  Queue row SP-P sweeps them.  Until it has, a null on this
+  #   switch is not a statement about the mechanism.
+  #   damping: 1.0e-2
+  #   prior_w: 1.0
+  #   iters: 1
+  #   max_step: 0.10
+
+  # Live only when per_iteration includes +reintegrate.
+  # reintegrate:
+  #   min_dbg: 1.0e-9
+  #   min_dba: 1.0e-9
+
+  # Keep the legacy total_dt^3 * var_acc inflation on each point's covariance.
+  # OFF on purpose: that term puts state->varAcc() -- the quantity adaptive_q
+  # is estimating -- inside the measurement covariance, which closes a loop.
   keep_time_noise: false
-
   log_en: true
 
+# Nested under spline/enable in the resolver, not merely warned about.
 adaptive_q:
   enable: true
-
-  # Bounded excursion: applied = nominal * 10^(beta * tanh(z)).
-  # 0.3 is +/- 2x.  This is a SAFETY parameter -- the reachable set is finite
-  # and enumerable so it can be swept offline and certified before it runs.
+  # Bounded excursion.  0.3 is +/- 2x; AI-IMU's own 3 (+/- 1000x) is far too
+  # wide given what the alpha ladders found.
   beta_acc: 0.3
   beta_gyr: 0.3
-
-  # Per-frame cap on the movement of z.  0.02 at ~10 Hz needs ~5 s to cross
-  # the band, so no single frame's measurement moves the filter far.
+  # Per-frame rate limit on z.  0.02 at 10 Hz needs ~34 frames past warmup to
+  # reach even a 1.5x excursion -- read the engagement report before calling
+  # this "adapted".
   z_rate_limit: 0.02
-
-  # Whiteness gate.  This is the anchor that actually binds: it is what
-  # catches an over-resolved spline whose second derivative has started
-  # chasing noise.  0.35 passes genuinely white residuals at n ~ 20 (where
-  # the ACF's own standard error is ~0.22) and catches the +0.31/-0.51 seen
-  # past the control-point cliff.
+  # Whiteness gate: refuse the measurement if |lag-1 ACF| exceeds this.
   acf1_max: 0.35
-
-  # Hard bounds relative to the YAML nominal, on top of beta.
-  max_ratio: 100.0
-  min_ratio: 0.01
-
-  # Use CalibProc's measured static-window variance as a hard lower bound.
-  # Always available now: calib publishes it via setNoiseFloor() on every
-  # run regardless of calib/use_calib_var, instead of computing and
-  # discarding it.  NOTE this is the PHYSICAL floor; the config's own sweep
-  # comment puts the gyro's EMPIRICAL stability floor around 90x the
-  # datasheet sigma, which is a different and much higher quantity --
-  # noise_floor_scale is where that gets expressed if it turns out to bind.
-  use_noise_floor: true
-  noise_floor_scale: 1.0
-
-  # Observe before acting.  AKF-LIO's published failure is a ~10 s transient
-  # during which its adaptation is actively harmful; 20 frames at 10 Hz is
-  # 2 s of pure observation before anything is applied.
   warmup_frames: 20
   ema: 0.9
+  bounds:
+    max_ratio: 100.0
+    min_ratio: 0.01
+  noise_floor:
+    # MODE: "allan" | "off".  "allan" bounds the applied variance below by the
+    # calibration window's own measured noise floor.
+    mode: allan
+    # Live under mode: allan.  1.0 is the raw physical floor.
+    scale: 1.0
   log_en: true
 
-# Leave the calibration's own value/floor split alone.  use_calib_var: true
-# would REPLACE the operating variance with the measured floor, which per the
-# sweep comment above would put the gyro deep inside the region that sweep
-# found catastrophic.  The floor is published regardless.
-calib:
-  use_calib_var: false
+voxel_map:
+  plane:
+    weight_floor:
+      # MODE: "sensor_range" | "incidence" | "constant" | "none".
+      #
+      # The along-normal residual variance is built from a real range/bearing
+      # model, and a flat literal 1e-3 = (3.2 cm)^2 used to be added on top of
+      # it.  Whether that dominated was pure geometry: it swamped short-range
+      # oblique returns, which is why 2-3% of correspondences were floored on
+      # eee_01 (outdoor, long range) against 55-70% on exp05 (indoor
+      # construction).  On HILTI the majority of the update was weighted by a
+      # constant, and every plane-confidence mechanism acting through the
+      # weight had almost nothing to act on.
+      #
+      # "sensor_range" (default) floors at sigma_r^2, mirrored from
+      # imu/sensor/range_err -- the constant, tuned by the physics rather than
+      # guessed, and per-dataset for free.  "incidence" replaces the floor
+      # with sigma_r^2 (cos^2 + k sin^2), modelling range noise DEGRADING with
+      # incidence rather than projecting to zero; k = 1 is identical to
+      # sensor_range, so k is the ablation.  "constant" and "none" are the two
+      # controls for queue row W-1.
+      mode: sensor_range
+      # constant: 1.0e-3      # live under mode: constant
+      # incidence_k: 1.0      # live under mode: incidence

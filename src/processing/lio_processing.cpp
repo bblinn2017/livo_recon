@@ -1,14 +1,17 @@
 #include "livo_recon/processing/lio_processing.h"
 #include "livo_recon/processing/imu_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
+#include "livo_recon/utils/log/config_resolve.h"
 #include "livo_recon/utils/log/consistency_log.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 #include "livo_recon/utils/algo/hashing.h"
 #include "livo_recon/utils/log/debug_log_dir.h"
+#include "livo_recon/utils/algo/math.h"
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/lio/lio_accumulator.h"
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <stdexcept>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -92,6 +95,12 @@ LioProc::LioProc(NodeContext& ctx)
 
 std::string LioProc::loadParameters(ros::NodeHandle& pnh)
 {
+  // One resolver for the whole function: modes validated against a named
+  // set, nested keys read only inside a live scope and REFUSED if set into a
+  // dead one, and the EFFECTIVE configuration returned rather than the
+  // requested one.  See config_resolve.h.
+  ConfigResolver cfg(pnh);
+
   paramWarn<int>(pnh, "lio/ekf/max_iterations",     opts_.max_iterations,  5);
   paramWarn<double>(pnh, "lio/ekf/min_norm_dtheta", opts_.min_norm_dtheta, 0.0);
   paramWarn<double>(pnh, "lio/ekf/min_norm_dt",     opts_.min_norm_dt,     0.0);
@@ -101,7 +110,6 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "lio/log_nll_en", opts_.log_nll_en, false);
   paramWarn<int>(pnh, "lio/dry_run_point_filter_num", opts_.dry_run_point_filter_num, 0);
   paramWarn<double>(pnh, "lio/ekf/density_sigma_ref", opts_.density_sigma_ref, 0.0);
-  paramWarn<std::string>(pnh, "lio/ekf/density_sigma_mode", opts_.density_sigma_mode, "linear");
   paramWarn<bool>(pnh, "cuda/enable",               cuda_enable_,          false);
 
   // History (134-136): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-134
@@ -112,89 +120,121 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "imu/sensor/angle_err_deg", angle_err_deg, 0.2);
   const double sin_angle_err = std::sin(std::max(1e-6, angle_err_deg * M_PI / 180.0));
   opts_.deskew.sigma_a2 = sin_angle_err * sin_angle_err;
-  paramWarn<std::string>(pnh, "imu/undistort/time_based_process_noise",
-                          opts_.deskew.time_based_process_noise, "var_acc");
   // ── scan spline ──────────────────────────────────────────────────────
-  paramWarn<bool>  (pnh, "spline/enable",              opts_.spline.enable, false);
-  paramWarn<int>   (pnh, "spline/n_control_points",    opts_.spline.n_control_points, 8);
-  paramWarn<double>(pnh, "spline/control_point_hz",    opts_.spline.control_point_hz, 0.0);
-  paramWarn<int>   (pnh, "spline/n_control_points_max",opts_.spline.n_control_points_max, 32);
-  paramWarn<double>(pnh, "spline/fit_regularization",  opts_.spline.fit_regularization, 1e-6);
-  paramWarn<double>(pnh, "spline/fit_reg_max_frac",    opts_.spline.fit_reg_max_frac, 0.05);
-  paramWarn<bool>  (pnh, "spline/redeskew_each_iteration", opts_.spline.redeskew_each_iteration, true);
-  paramWarn<std::string>(pnh, "spline/rot_mode",       opts_.spline.rot_mode, std::string("cumulative"));
-  paramWarn<int>   (pnh, "spline/rot_fit_iters",       opts_.spline.rot_fit_iters, 4);
-  paramWarn<bool>  (pnh, "spline/lidar_refine_cp",     opts_.spline.lidar_refine_cp, false);
-  paramWarn<double>(pnh, "spline/lidar_refine_damping",opts_.spline.lidar_refine_damping, 1e-2);
-  paramWarn<double>(pnh, "spline/lidar_refine_prior_w",opts_.spline.lidar_refine_prior_w, 1.0);
-  paramWarn<int>   (pnh, "spline/lidar_refine_iters",  opts_.spline.lidar_refine_iters, 1);
-  paramWarn<double>(pnh, "spline/lidar_refine_max_step",opts_.spline.lidar_refine_max_step, 0.10);
-  paramWarn<double>(pnh, "spline/imu_fit_w_acc",       opts_.spline.imu_fit_w_acc, 0.0);
-  paramWarn<double>(pnh, "spline/imu_fit_w_gyr",       opts_.spline.imu_fit_w_gyr, 0.0);
-  paramWarn<int>   (pnh, "spline/imu_fit_iters",       opts_.spline.imu_fit_iters, 2);
-  paramWarn<bool>  (pnh, "spline/reintegrate_each_iteration", opts_.spline.reintegrate_each_iteration, false);
-  paramWarn<double>(pnh, "spline/reintegrate_min_dbg", opts_.spline.reintegrate_min_dbg, 1e-9);
-  paramWarn<double>(pnh, "spline/reintegrate_min_dba", opts_.spline.reintegrate_min_dba, 1e-9);
-  paramWarn<bool>  (pnh, "spline/log_en",              opts_.spline.log_en, false);
-  paramWarn<bool>  (pnh, "spline/keep_time_noise",     opts_.spline_keep_time_noise, false);
+  // Everything from here down goes through ConfigResolver, not paramWarn:
+  // nested keys are read only inside a live scope and REFUSED if set into a
+  // dead one, modes are validated against a named set, and what gets printed
+  // is the effective configuration.  See config_resolve.h for why.
+  cfg.get<bool>("spline/enable", opts_.spline.enable, false);
+  const bool sp = opts_.spline.enable;
+
+  cfg.nestedMode(sp, "spline/enable", "spline/control_points/mode",
+                 opts_.spline.cp_mode, "n", { "n", "hz" });
+  cfg.nested<int>(sp && !opts_.spline.cpFromHz(), "spline/control_points/mode=n",
+                  "spline/control_points/n", opts_.spline.n_control_points, 8);
+  cfg.nested<double>(sp && opts_.spline.cpFromHz(), "spline/control_points/mode=hz",
+                     "spline/control_points/hz", opts_.spline.control_point_hz, 0.0);
+  cfg.nested<int>(sp, "spline/enable", "spline/control_points/n_max",
+                  opts_.spline.n_control_points_max, 32);
+
+  cfg.nested<double>(sp, "spline/enable", "spline/fit/regularization",
+                     opts_.spline.fit_regularization, 1e-6);
+  cfg.nested<double>(sp, "spline/enable", "spline/fit/reg_max_frac",
+                     opts_.spline.fit_reg_max_frac, 0.05);
+  cfg.nestedMode(sp, "spline/enable", "spline/fit/rotation/mode",
+                 opts_.spline.rot_mode, "cumulative", { "cumulative", "tangent" });
+  // A single linear solve under "tangent" -- the iteration count is not a
+  // parameter of that arm at all.
+  cfg.nested<int>(sp && opts_.spline.rotCumulative(),
+                  "spline/fit/rotation/mode=cumulative",
+                  "spline/fit/rotation/iters", opts_.spline.rot_fit_iters, 4);
+
+  cfg.nestedMode(sp, "spline/enable", "spline/fit/imu_term/mode",
+                 opts_.spline.imu_fit_mode, "off", { "off", "acc", "gyr", "both" });
+  cfg.nested<double>(sp && opts_.spline.imuFitAcc(), "spline/fit/imu_term/mode",
+                     "spline/fit/imu_term/w_acc", opts_.spline.imu_fit_w_acc, 0.0);
+  cfg.nested<double>(sp && opts_.spline.imuFitGyr(), "spline/fit/imu_term/mode",
+                     "spline/fit/imu_term/w_gyr", opts_.spline.imu_fit_w_gyr, 0.0);
+  cfg.nested<int>(sp && opts_.spline.imuFitOn(), "spline/fit/imu_term/mode",
+                  "spline/fit/imu_term/iters", opts_.spline.imu_fit_iters, 2);
+
+  // The per-iteration pipeline: ONE mode with five values, replacing the
+  // three booleans whose 2x2x2 space had only five distinct behaviours.  See
+  // SplineOptions::per_iteration.
+  cfg.nestedMode(sp, "spline/enable", "spline/per_iteration/mode",
+                 opts_.spline.per_iteration, "redeskew",
+                 { "off", "redeskew", "redeskew+refine",
+                   "redeskew+reintegrate", "redeskew+refine+reintegrate" });
+  const bool rf = sp && opts_.spline.refineOn();
+  const bool ri = sp && opts_.spline.reintegrateOn();
+
+  cfg.nested<double>(rf, "spline/per_iteration/mode (no +refine)",
+                     "spline/per_iteration/refine/damping",
+                     opts_.spline.lidar_refine_damping, 1e-2);
+  cfg.nested<double>(rf, "spline/per_iteration/mode (no +refine)",
+                     "spline/per_iteration/refine/prior_w",
+                     opts_.spline.lidar_refine_prior_w, 1.0);
+  cfg.nested<int>(rf, "spline/per_iteration/mode (no +refine)",
+                  "spline/per_iteration/refine/iters",
+                  opts_.spline.lidar_refine_iters, 1);
+  cfg.nested<double>(rf, "spline/per_iteration/mode (no +refine)",
+                     "spline/per_iteration/refine/max_step",
+                     opts_.spline.lidar_refine_max_step, 0.10);
+  cfg.nested<double>(ri, "spline/per_iteration/mode (no +reintegrate)",
+                     "spline/per_iteration/reintegrate/min_dbg",
+                     opts_.spline.reintegrate_min_dbg, 1e-9);
+  cfg.nested<double>(ri, "spline/per_iteration/mode (no +reintegrate)",
+                     "spline/per_iteration/reintegrate/min_dba",
+                     opts_.spline.reintegrate_min_dba, 1e-9);
+
+  cfg.nested<bool>(sp, "spline/enable", "spline/log_en", opts_.spline.log_en, false);
+  cfg.nested<bool>(sp, "spline/enable", "spline/keep_time_noise",
+                   opts_.spline_keep_time_noise, false);
 
   // ── live process-noise estimation ────────────────────────────────────
-  paramWarn<bool>  (pnh, "adaptive_q/enable",          opts_.adaptive_q.enable, false);
-  paramWarn<double>(pnh, "adaptive_q/beta_acc",        opts_.adaptive_q.beta_acc, 0.3);
-  paramWarn<double>(pnh, "adaptive_q/beta_gyr",        opts_.adaptive_q.beta_gyr, 0.3);
-  paramWarn<double>(pnh, "adaptive_q/z_rate_limit",    opts_.adaptive_q.z_rate_limit, 0.02);
-  paramWarn<double>(pnh, "adaptive_q/acf1_max",        opts_.adaptive_q.acf1_max, 0.35);
-  paramWarn<double>(pnh, "adaptive_q/max_ratio",       opts_.adaptive_q.max_ratio, 100.0);
-  paramWarn<double>(pnh, "adaptive_q/min_ratio",       opts_.adaptive_q.min_ratio, 0.01);
-  paramWarn<bool>  (pnh, "adaptive_q/use_noise_floor", opts_.adaptive_q.use_noise_floor, true);
-  paramWarn<double>(pnh, "adaptive_q/noise_floor_scale", opts_.adaptive_q.noise_floor_scale, 1.0);
-  paramWarn<int>   (pnh, "adaptive_q/warmup_frames",   opts_.adaptive_q.warmup_frames, 20);
-  paramWarn<double>(pnh, "adaptive_q/ema",             opts_.adaptive_q.ema, 0.9);
-  paramWarn<bool>  (pnh, "adaptive_q/log_en",          opts_.adaptive_q.log_en, false);
+  // The statistic IS the spline-vs-IMU residual, so this scope is nested
+  // under the spline rather than merely warned about.
+  cfg.nested<bool>(sp, "spline/enable", "adaptive_q/enable",
+                   opts_.adaptive_q.enable, false);
+  const bool aq = sp && opts_.adaptive_q.enable;
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/beta_acc", opts_.adaptive_q.beta_acc, 0.3);
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/beta_gyr", opts_.adaptive_q.beta_gyr, 0.3);
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/z_rate_limit", opts_.adaptive_q.z_rate_limit, 0.02);
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/acf1_max", opts_.adaptive_q.acf1_max, 0.35);
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/bounds/max_ratio", opts_.adaptive_q.max_ratio, 100.0);
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/bounds/min_ratio", opts_.adaptive_q.min_ratio, 0.01);
+  cfg.nested<int>(aq, "adaptive_q/enable", "adaptive_q/warmup_frames", opts_.adaptive_q.warmup_frames, 20);
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/ema", opts_.adaptive_q.ema, 0.9);
+  cfg.nestedMode(aq, "adaptive_q/enable", "adaptive_q/noise_floor/mode",
+                 adaptive_q_floor_mode_, "allan", { "allan", "off" });
+  opts_.adaptive_q.use_noise_floor = (adaptive_q_floor_mode_ == "allan");
+  cfg.nested<double>(aq && opts_.adaptive_q.use_noise_floor,
+                     "adaptive_q/noise_floor/mode=allan",
+                     "adaptive_q/noise_floor/scale", opts_.adaptive_q.noise_floor_scale, 1.0);
+  cfg.nested<bool>(aq, "adaptive_q/enable", "adaptive_q/log_en", opts_.adaptive_q.log_en, false);
   adaptive_q_.configure(opts_.adaptive_q);
 
-  // The spline residual needs the raw IMU stream, which ImuProc otherwise
-  // consumes and clears.  Refuse the combination rather than silently
-  // producing an empty residual and a Q estimate that never updates.
-  if (opts_.adaptive_q.enable && !opts_.spline.enable)
-    ROS_WARN("[lio] adaptive_q/enable is set but spline/enable is not -- the Q "
-             "estimate is read from the spline-vs-IMU residual, so it will "
-             "never update. Set spline/enable:=true.");
+  cfg.get<double>("imu/ds/ds_leaf_size", opts_.ds_leaf_size, 0.15);
+  cfg.mode("imu/ds/mode", opts_.ds_mode, "first", { "first", "average" });
+  cfg.mode("imu/undistort/time_based_process_noise",
+           opts_.deskew.time_based_process_noise, "var_acc",
+           { "none", "state", "var_acc" });
+  cfg.mode("lio/ekf/density_sigma_mode", opts_.density_sigma_mode, "linear",
+           { "linear", "sqrt", "quadratic" });
 
-  paramWarn<double>(pnh, "imu/ds/ds_leaf_size", opts_.ds_leaf_size, 0.15);
-  paramWarn<std::string>(pnh, "imu/ds/mode", opts_.ds_mode, "first");
-
-  std::ostringstream oss;
-  oss << "[params/lio]"
-      << "\n  log_consistency_scan_en:   " << (opts_.log_consistency_scan_en ? "true" : "false")
-      << "\n  log_nll_en:                " << (opts_.log_nll_en ? "true" : "false")
-      << "\n  ekf/max_iterations:        " << opts_.max_iterations
-      << "\n  ekf/min_norm_dtheta:       " << opts_.min_norm_dtheta
-      << "\n  ekf/min_norm_dt:           " << opts_.min_norm_dt
-      << "\n  ekf/min_diff_error:        " << opts_.min_diff_error
-      << "\n  ekf/density_sigma_ref:     " << opts_.density_sigma_ref
-      << "\n  ekf/density_sigma_mode:    " << opts_.density_sigma_mode
-      << "\n  deskew/sigma_r2:           " << opts_.deskew.sigma_r2
-      << "\n  deskew/sigma_a2:           " << opts_.deskew.sigma_a2
-      << "\n  deskew/time_based_process_noise: " << opts_.deskew.time_based_process_noise
-      << "\n  spline/enable:             " << (opts_.spline.enable ? "true" : "false")
-      << "\n  spline/n_control_points:   " << opts_.spline.n_control_points
-      << "\n  spline/control_point_hz:   " << opts_.spline.control_point_hz
-      << "\n  spline/redeskew_each_iter: " << (opts_.spline.redeskew_each_iteration ? "true" : "false")
-      << "\n  spline/rot_mode:           " << opts_.spline.rot_mode
-      << "\n  spline/lidar_refine_cp:    " << (opts_.spline.lidar_refine_cp ? "true" : "false")
-      << "\n  spline/imu_fit_w_acc:      " << opts_.spline.imu_fit_w_acc
-      << "\n  spline/imu_fit_w_gyr:      " << opts_.spline.imu_fit_w_gyr
-      << "\n  spline/reintegrate_each_i: " << (opts_.spline.reintegrate_each_iteration ? "true" : "false")
-      << "\n  spline/keep_time_noise:    " << (opts_.spline_keep_time_noise ? "true" : "false")
-      << "\n  adaptive_q/enable:         " << (opts_.adaptive_q.enable ? "true" : "false")
-      << "\n  adaptive_q/beta_acc:       " << opts_.adaptive_q.beta_acc
-      << "\n  adaptive_q/beta_gyr:       " << opts_.adaptive_q.beta_gyr
-      << "\n  adaptive_q/warmup_frames:  " << opts_.adaptive_q.warmup_frames
-      << "\n  ds/ds_leaf_size:           " << opts_.ds_leaf_size
-      << "\n  ds/mode:                   " << opts_.ds_mode
-      << "\n  cuda/enable:               " << (cuda_enable_ ? "true" : "false");
-  return oss.str();
+  // The EFFECTIVE configuration, not the requested one -- and a hard refusal
+  // if any key was set into a scope that cannot read it.  A sweep cell that
+  // cannot mean what it says fails here rather than producing a duplicate
+  // forty minutes later.
+  if (!cfg.ok())
+  {
+    ROS_FATAL_STREAM("\n" << cfg.report());
+    throw std::runtime_error(
+        "[config] refused: " + std::to_string(cfg.errors().size()) +
+        " option(s) set into a dead scope or outside their allowed set -- "
+        "see the [config/REFUSED] block above");
+  }
+  return cfg.report();
 }
 
 // Residual and EKF code
@@ -382,6 +422,10 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
   ds_offsets_.clear();
   ds_members_.clear();
   spline_refits_ = 0;
+  redeskew_calls_ = 0;
+  redeskew_dp_rms_ = 0.0;
+  reint_dp_max_ = 0.0;
+  reint_drot_deg_max_ = 0.0;
   spline_poses0_.clear();
   // Per-FRAME, not per-fit: fit() no longer resets these, because with
   // reintegrate_each_iteration on it runs once per IEKF iteration.
@@ -393,7 +437,7 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
     const SplineImuFitData ifd = splineImuFitData(mg);
     spline_ok_ = spline_.fit(mg.poses, mg.poses.front().t, mg.image.t, opts_.spline, &ifd);
     // Keep the pristine sequence only if something will replay it.
-    if (spline_ok_ && opts_.spline.reintegrate_each_iteration)
+    if (spline_ok_ && opts_.spline.reintegrateOn())
       spline_poses0_ = mg.poses;
     if (!spline_ok_)
     {
@@ -420,14 +464,14 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
     // the whole cell and the re-deskew re-averages it.  Output is bit-identical
     // to voxelDownsample() in the matching mode -- see
     // voxelDownsampleIndexedCsr()'s doc comment.
-    if (spline_ok_ && opts_.spline.redeskew_each_iteration)
+    if (spline_ok_ && opts_.spline.redeskewOn())
       voxelDownsampleIndexedCsr(deskewed, mg.points, ds_offsets_, ds_members_,
                                 PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
     else
       voxelDownsample(deskewed, mg.points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
   } else {
     mg.points = std::move(deskewed);
-    if (spline_ok_ && opts_.spline.redeskew_each_iteration) {
+    if (spline_ok_ && opts_.spline.redeskewOn()) {
       ds_members_.resize(mg.points.size());
       ds_offsets_.resize(mg.points.size() + 1);
       for (size_t i = 0; i < ds_members_.size(); ++i) {
@@ -458,7 +502,7 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
 SplineImuFitData LioProc::splineImuFitData(const MeasureGroup& mg) const
 {
   SplineImuFitData d;
-  if (opts_.spline.imu_fit_w_acc > 0.0 || opts_.spline.imu_fit_w_gyr > 0.0)
+  if (opts_.spline.imuFitOn())
     d.samples = &mg.imu_samples_raw;
   d.bias_acc = state_->biasAcc();
   d.bias_gyr = state_->biasGyr();
@@ -468,7 +512,7 @@ SplineImuFitData LioProc::splineImuFitData(const MeasureGroup& mg) const
 
 bool LioProc::redeskewFromSpline(MeasureGroup& mg)
 {
-  if (!spline_ok_ || !opts_.spline.redeskew_each_iteration) return false;
+  if (!spline_ok_ || !opts_.spline.redeskewOn()) return false;
   if (ds_offsets_.size() < 2) return false;
   if (ds_offsets_.size() != mg.points.size() + 1) return false;
 
@@ -489,7 +533,7 @@ bool LioProc::redeskewFromSpline(MeasureGroup& mg)
   // this moves the spline out from under the LiDAR residuals that step (1)
   // below is about to be linearised at, by the size of the bias delta -- the
   // reason reintegrate_min_db{a,g} exist.
-  if (opts_.spline.reintegrate_each_iteration && spline_poses0_.size() >= 2)
+  if (opts_.spline.reintegrateOn() && spline_poses0_.size() >= 2)
   {
     TimedScope ts_ri(profiler_, "lio/spline/reintegrate");
     const V3D dba = state_->biasAcc() - state_propagat_.biasAcc();
@@ -511,6 +555,21 @@ bool LioProc::redeskewFromSpline(MeasureGroup& mg)
       {
         spline_ = trial;
         spline_refits_++;
+        // MAGNITUDE, not just the refit count -- see the engagement counters
+        // in the header.  How far the replay actually moved the poses the
+        // spline is fitted to; a refit that moves them by nanometres is a
+        // refit that did nothing.
+        const size_t np = std::min(spline_poses0_.size(), spline_poses_.size());
+        for (size_t k = 0; k < np; ++k)
+        {
+          const double dp =
+              (spline_poses_[k].pos - spline_poses0_[k].pos).norm();
+          const double dr =
+              Log(spline_poses0_[k].rot.transpose() * spline_poses_[k].rot).norm()
+              * (180.0 / M_PI);
+          if (std::isfinite(dp)) reint_dp_max_ = std::max(reint_dp_max_, dp);
+          if (std::isfinite(dr)) reint_drot_deg_max_ = std::max(reint_drot_deg_max_, dr);
+        }
       }
     }
   }
@@ -518,7 +577,7 @@ bool LioProc::redeskewFromSpline(MeasureGroup& mg)
   // (1) SHAPE, from the map.  Must run BEFORE anchorTo(), which moves every
   // point and would leave these residuals describing a spline that no longer
   // exists.  See SplineOptions::lidar_refine_cp for the division of labour.
-  if (opts_.spline.lidar_refine_cp && !residuals_.empty())
+  if (opts_.spline.refineOn() && !residuals_.empty())
   {
     lidar_obs_.clear();
     lidar_obs_.reserve(residuals_.size());
@@ -555,9 +614,26 @@ bool LioProc::redeskewFromSpline(MeasureGroup& mg)
   // IMU-only propagation gave it.
   spline_.anchorTo(mg.image.t, state_->rot(), state_->pos());
 
+  // How far the re-deskew actually moved the points it re-placed.  This is
+  // the only quantity that says whether the per-iteration mechanism is doing
+  // anything at all, and nothing recorded it before.
+  redeskew_prev_ = mg.points;
   deskewPointsSplineCsr(state_, spline_, mg.image.t, mg.lidar_points,
                         ds_offsets_, ds_members_, opts_.deskew,
                         opts_.spline_keep_time_noise, mg.points);
+  ++redeskew_calls_;
+  if (redeskew_prev_.size() == mg.points.size() && !mg.points.empty())
+  {
+    double sum_sq = 0.0;
+    for (size_t k = 0; k < mg.points.size(); ++k)
+    {
+      const double d = (mg.points[k].point - redeskew_prev_[k].point).norm();
+      if (std::isfinite(d)) sum_sq += d * d;
+    }
+    redeskew_dp_rms_ = std::max(
+        redeskew_dp_rms_,
+        std::sqrt(sum_sq / static_cast<double>(mg.points.size())));
+  }
   return true;
 }
 
@@ -620,7 +696,8 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
           << ",spline_ok,n_cp,fit_res_pos,fit_res_rot,fit_reg_frac,rot_chord_deg,"
              "fit_fail_count,frame_count,max_abs_acc,max_abs_gyr,"
              "n_cp_req,rot_mode,refine_applied,refine_rejects,last_refine_step,"
-             "refits\n";
+             "refits,per_iteration,refine_dcp_max,refine_dcp_rms,"
+             "reint_dp_max,reint_drot_deg_max,redeskew_calls,redeskew_dp_rms\n";
       first = false;
     }
     const double t_abs = mg.image.t + data_queues_->start_time;
@@ -639,9 +716,114 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
         << (spline_ok_ ? spline_.refineApplied() : 0) << ','
         << (spline_ok_ ? spline_.refineRejects() : 0) << ','
         << (spline_ok_ ? spline_.lastRefineStep() : 0.0) << ','
-        << spline_refits_
+        << spline_refits_ << ','
+        // The engagement half: what each toggle was set to, and how far its
+        // mechanism actually moved things this frame.  A cell with
+        // per_iteration naming a step whose magnitude column is 0 across the
+        // whole run is an INERT cell, not a null result.
+        << opts_.spline.per_iteration << ','
+        << (spline_ok_ ? spline_.refineDcpMax() : 0.0) << ','
+        << (spline_ok_ ? spline_.refineDcpRms() : 0.0) << ','
+        << reint_dp_max_ << ',' << reint_drot_deg_max_ << ','
+        << redeskew_calls_ << ',' << redeskew_dp_rms_
         << '\n';
   }
+
+  // Run totals for the end-of-run engagement report.
+  ++run_frames_;
+  run_redeskew_calls_ += redeskew_calls_;
+  run_refits_ += spline_refits_;
+  run_redeskew_dp_max_ = std::max(run_redeskew_dp_max_, redeskew_dp_rms_);
+  run_reint_dp_max_ = std::max(run_reint_dp_max_, reint_dp_max_);
+  if (spline_ok_)
+  {
+    run_refine_applied_ += spline_.refineApplied();
+    run_refine_rejects_ += spline_.refineRejects();
+    run_refine_dcp_max_ = std::max(run_refine_dcp_max_, spline_.refineDcpMax());
+  }
+  if (opts_.adaptive_q.enable && adaptive_q_.active())
+  {
+    ++run_aq_ok_frames_;
+    const double aa = adaptive_q_.varAcc(), ag = adaptive_q_.varGyr();
+    if (run_aq_ok_frames_ == 1)
+    {
+      run_aq_applied_min_acc_ = run_aq_applied_max_acc_ = aa;
+      run_aq_applied_min_gyr_ = run_aq_applied_max_gyr_ = ag;
+    }
+    else
+    {
+      run_aq_applied_min_acc_ = std::min(run_aq_applied_min_acc_, aa);
+      run_aq_applied_max_acc_ = std::max(run_aq_applied_max_acc_, aa);
+      run_aq_applied_min_gyr_ = std::min(run_aq_applied_min_gyr_, ag);
+      run_aq_applied_max_gyr_ = std::max(run_aq_applied_max_gyr_, ag);
+    }
+  }
+}
+
+// ── Engagement report ──────────────────────────────────────────────────────
+// See the declaration in lio_processing.h.  One line per toggle; a flag that
+// was ON with a zero counter prints INERT.
+LioProc::~LioProc()
+{
+  if (!opts_.spline.enable) return;
+  const std::string rep = engagementReport();
+  ROS_WARN_STREAM("\n" << rep);
+  std::ofstream ofs(debugLogPath("engagement.txt"), std::ios::trunc);
+  if (ofs) ofs << rep << '\n';
+}
+
+std::string LioProc::engagementReport() const
+{
+  std::ostringstream o;
+  o << "[engagement]  did each flag actually do anything?  frames="
+    << run_frames_;
+
+  auto line = [&](const char* name, bool on, long count, const char* mag_label,
+                  double mag) {
+    o << "\n  " << name << ": " << (on ? "ON " : "off");
+    if (!on) return;
+    o << " count=" << count << ' ' << mag_label << '=' << mag;
+    if (count == 0)
+      o << "   <-- INERT: the flag is on and its mechanism never ran";
+    else if (!(mag > 0.0))
+      o << "   <-- INERT: the mechanism ran " << count
+        << " times and moved nothing";
+  };
+
+  o << "\n  spline/per_iteration = " << opts_.spline.per_iteration;
+  line("  redeskew          ", opts_.spline.redeskewOn(), run_redeskew_calls_,
+       "max_dp_rms_m", run_redeskew_dp_max_);
+  line("  refine            ", opts_.spline.refineOn(), run_refine_applied_,
+       "max_dcp_m", run_refine_dcp_max_);
+  if (opts_.spline.refineOn())
+    o << " rejects=" << run_refine_rejects_;
+  line("  reintegrate       ", opts_.spline.reintegrateOn(), run_refits_,
+       "max_dp_m", run_reint_dp_max_);
+
+  o << "\n  adaptive_q/enable = "
+    << (opts_.adaptive_q.enable ? "true" : "false");
+  if (opts_.adaptive_q.enable)
+  {
+    o << "\n    applied frames=" << run_aq_ok_frames_
+      << "  var_acc [" << run_aq_applied_min_acc_ << ", "
+      << run_aq_applied_max_acc_ << "]"
+      << "  var_gyr [" << run_aq_applied_min_gyr_ << ", "
+      << run_aq_applied_max_gyr_ << "]";
+    if (run_aq_ok_frames_ == 0)
+      o << "\n    <-- INERT: adaptive_q never left warmup/gating, so the "
+           "process noise was never touched";
+    else if (run_aq_applied_max_acc_ <= run_aq_applied_min_acc_ &&
+             run_aq_applied_max_gyr_ <= run_aq_applied_min_gyr_)
+      o << "\n    <-- INERT: the applied process noise never CHANGED, so "
+           "'engaged' here means 'reported healthy', not 'adapted'";
+  }
+
+  o << "\n  imu_fit/mode = " << opts_.spline.imu_fit_mode
+    << "\n  fit/rotation/mode = " << opts_.spline.rot_mode
+    << "\n  control_points/mode = " << opts_.spline.cp_mode;
+  o << "\n[engagement] a flag marked INERT above did not test anything; the "
+       "cell is invalid, not null.";
+  return o.str();
 }
 
 // See LioProcOptions::dry_run_point_filter_num's doc comment and this

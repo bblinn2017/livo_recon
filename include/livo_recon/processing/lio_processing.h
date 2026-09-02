@@ -153,6 +153,16 @@ public:
 
   std::string loadParameters(ros::NodeHandle& pnh);
 
+  // One line per toggle: what it was set to, how often its mechanism ran, and
+  // how far it moved things.  A flag that was ON with a zero counter prints
+  // INERT, which is the condition three separate batches had to discover the
+  // expensive way -- SP-4a spent 208 jobs on a switch that was parsed,
+  // printed and never read.  Written to engagement.txt in the debug log dir
+  // and to the log; the sweep scorer reads the INERT lines directly as
+  // validity failures rather than reconstructing them from CSV columns.
+  std::string engagementReport() const;
+  ~LioProc();
+
   // Stage 1 (see include/livo_recon/lio/deskew.h's module doc comment):
   // deskew + downsample, populating mg.points (PointXYZCov, for
   // buildResiduals()/VoxelMap::updateMap()). Called ONCE per frame, from
@@ -272,6 +282,37 @@ private:
   std::vector<Pose6D> spline_poses0_;
   std::vector<Pose6D> spline_poses_;    // replay target, reused
   int  spline_refits_ = 0;              // per frame, for spline_q.csv
+
+  // ── Engagement counters ─────────────────────────────────────────────────
+  // A flag that is on must increment something observable, and where it moves
+  // a quantity it must record how far -- an acceptance count alone cannot
+  // separate "ran and did nothing" from "ran and mattered".  These are the
+  // per-frame magnitudes that were missing when SP-4a"/4b" had to reconstruct
+  // its validity gates from two columns by hand.  Reset per frame; the _run_
+  // totals below are what the end-of-run INERT report reads.
+  int    redeskew_calls_ = 0;           // per frame
+  double redeskew_dp_rms_ = 0.0;        // m, RMS point move across a re-deskew
+  double reint_dp_max_ = 0.0;           // m, largest pose move from the replay
+  double reint_drot_deg_max_ = 0.0;     // deg, likewise
+  std::vector<PointXYZCov> redeskew_prev_;   // scratch, for the displacement
+
+  // Run totals, for the engagement report.  A flag that was on with a zero
+  // total here is an INERT line and, downstream, an invalid sweep cell.
+  long   run_redeskew_calls_ = 0;
+  long   run_refine_applied_ = 0;
+  long   run_refine_rejects_ = 0;
+  long   run_refits_ = 0;
+  double run_refine_dcp_max_ = 0.0;
+  double run_reint_dp_max_ = 0.0;
+  double run_redeskew_dp_max_ = 0.0;
+  long   run_aq_ok_frames_ = 0;
+  double run_aq_applied_min_acc_ = 0.0, run_aq_applied_max_acc_ = 0.0;
+  double run_aq_applied_min_gyr_ = 0.0, run_aq_applied_max_gyr_ = 0.0;
+  long   run_frames_ = 0;
+
+  // adaptive_q/noise_floor/mode, kept as a string so the resolver can
+  // validate it; AdaptiveQOptions::use_noise_floor is derived from it.
+  std::string adaptive_q_floor_mode_ = "allan";
   AdaptiveQ  adaptive_q_;
   bool       adaptive_q_primed_ = false;
   SplineImuResidualStats last_spline_stats_;

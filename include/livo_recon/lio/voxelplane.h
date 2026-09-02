@@ -61,9 +61,15 @@ private:
 
   // History (122-138): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-122
   bool gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
+            const V3D& body_dir, const V3D& body_normal,
             double& r, double& sigma_diag_squared, double& plane_var_term,
             Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate = nullptr,
             bool* dropped_by_ablation = nullptr) const;
+
+  // Additive along-normal variance floor, m^2 -- see
+  // VoxelOpts::weight_floor_mode.  The SAME value feeds gate()'s admission
+  // threshold and computeResidual()'s res.sigma_squared; they used to differ.
+  double weightFloor(const V3D& body_dir, const V3D& body_normal) const;
 
   VoxelOptsPtr opts_;
 

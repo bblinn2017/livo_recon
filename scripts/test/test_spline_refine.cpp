@@ -32,7 +32,7 @@ int main(){
   std::mt19937 rng(7); std::uniform_real_distribution<double> ut(t0,t1);
   std::vector<double> ts; for(int i=0;i<600;++i) ts.push_back(ut(rng));
 
-  SplineOptions ro=base; ro.lidar_refine_cp=true; ro.lidar_refine_prior_w=1e-6;
+  SplineOptions ro=base; ro.per_iteration="redeskew+refine"; ro.lidar_refine_prior_w=1e-6;
   ro.lidar_refine_damping=1e-6; ro.lidar_refine_iters=3; ro.lidar_refine_max_step=1.0;
 
   ScanSpline bent=truth;

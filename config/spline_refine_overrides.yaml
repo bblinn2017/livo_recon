@@ -1,69 +1,53 @@
-# Additional keys for the LiDAR control-point refinement and the rotation-mode
-# check. Layer on top of config/spline_adaptive_q.yaml; only the differing keys
-# need to appear in a sweep cell.
+# Overrides for the spline branch, layered on top of a dataset config.
+#
+# Restructured 2026-09-02 to the nested/mode shape -- see
+# config/spline_adaptive_q.yaml for the full commentary and
+# include/livo_recon/utils/log/config_resolve.h for the contract.  A key set
+# into a scope that cannot read it now REFUSES at startup instead of being
+# silently dropped.
+
 spline:
-  # "cumulative" (default) | "tangent".
-  #
-  # REVERSED 2026-09-02. Cumulative -- the form every published CT-LIO system
-  # uses -- is now the default, and tangent is the ablation arm. The earlier
-  # default rested on a synthetic fixture in which tangent was an exact linear
-  # least-squares solve while the cumulative arm was refined by Gauss-Newton
-  # with a first-order stand-in for its Jacobian: a correct implementation of
-  # the non-standard choice against a sloppy one of the standard choice. The
-  # Jacobian is now exact (Sommer's recurrence), so the comparison is fair and
-  # the burden of proof sits on the departure rather than on the convention.
-  #
-  # Whether tangent is worth keeping is queue item SP-R and is to be settled on
-  # real sequences, scored on sigma_hat_g, acf1_g and fit_res_rot -- NOT on a
-  # fixture, and NOT crossed through the grid.
-  rot_mode: cumulative
-  # Raised 2 -> 4 with the exact Jacobian; each iteration is one LDLT of a
-  # banded 3*n_cp system per frame. Lower it once SP-R has a number.
-  rot_fit_iters: 4
+  enable: true
 
-  # The control-point refinement. Previously declared, parsed, printed and
-  # never read by any algorithm -- so SP-4a's on/off arm was bit-identical
-  # because the code path did not exist, not because the geometry was inert.
-  lidar_refine_cp: false
-  lidar_refine_damping: 1.0e-2
-  lidar_refine_prior_w: 1.0
-  lidar_refine_iters: 1
-  # Reject the whole step if any control point would move more than this.
-  # Fails safe to the unrefined spline; the rejection is counted in
-  # spline_q.csv's refine_rejects rather than hidden.
-  lidar_refine_max_step: 0.10
+  fit:
+    rotation:
+      # REVERSED 2026-09-02.  Cumulative -- the form every published CT-LIO
+      # system uses -- is the default; tangent is the ablation arm.  The
+      # earlier default rested on a synthetic fixture in which tangent was an
+      # exact linear least-squares solve while the cumulative arm was refined
+      # by Gauss-Newton with a first-order stand-in for its Jacobian: a
+      # correct implementation of the non-standard choice against a sloppy one
+      # of the standard choice.  The Jacobian is now exact (Sommer's
+      # recurrence), so the burden of proof sits on the departure.
+      #
+      # SP-4a"/4b" then measured it on real data: cumulative beats tangent on
+      # BOTH arms on exp05, 0.277 vs 0.334 m debiased and 0.351 vs 0.428 m
+      # pca.  That is 17-20%, which sits AT T0-G's 18.88% error bar rather
+      # than clear of it -- consistent-direction evidence on two arms, not a
+      # measured margin.  Quote it that way.
+      mode: cumulative
+      # Raised 2 -> 4 with the exact Jacobian; each iteration is one LDLT of a
+      # banded 3*n_cp system per frame.
+      iters: 4
 
-  # ── Raw-IMU term in the fit ─────────────────────────────────────────────
-  # Trace-normalised, dimensionless: w = 1 means the IMU block carries as much
-  # total normal-matrix weight as the entire pose sequence. 0 = off, and the
-  # fit is then bit-identical to the pose-only one.
+  # See config/spline_adaptive_q.yaml.  The five values are the five distinct
+  # behaviours; the three-boolean form had eight configurations and three
+  # duplicates, which is what SP-4a"/4b" spent half its grid discovering.
   #
-  # Default 0 on purpose. Fitting to POSITIONS penalises the double integral
-  # of accel error, which is heavily low-pass, so the fit is nearly blind to
-  # the high-frequency accel noise AdaptiveQ's sigma_a is measuring. Weighting
-  # the accel residual into the fit erodes exactly that separation -- the
-  # spline starts absorbing the quantity it is about to report. The control
-  # point count bounds how far this can go (8 control points cannot
-  # interpolate 21 IMU samples) but does not remove the bias.
-  # scripts/test/test_spline_imu_fit.cpp measures the direction.
-  imu_fit_w_acc: 0.0
-  imu_fit_w_gyr: 0.0
-  # Relinearisation passes for the gyro rows only: their target is
-  # Jr(phi)^-1 (gyro - b_g), which depends on the phi being solved for. The
-  # accel target does not depend on the position control points, so it needs
-  # exactly one pass regardless.
-  imu_fit_iters: 2
+  # THE ABLATION AXIS for anything touching the per-iteration pipeline is this
+  # key, swept over its five values.  Do not reintroduce separate booleans.
+  per_iteration: redeskew
 
-  # ── Re-integration under the ESIKF's bias corrections ───────────────────
-  # propagate() runs once per frame with the PRE-update bias and is never
-  # re-run, so without this the spline's shape is frozen there while every
-  # inner iteration moves the bias. anchorTo() cannot repair it -- a bias
-  # delta is a shape change, anchorTo is a rigid transform.
-  #
-  # Measured cost of leaving it off, on a 100 ms scan with a plausible
-  # correction (dba ~ 7e-3 m/s^2, dbg ~ 1.2e-3 rad/s): 3.2e-05 m and 1.1e-04
-  # rad of shape error. Compare that against the spline's OWN representation
-  # error (6.3e-3 rad/s of omega error at n_cp=8) before assuming it binds.
-  reintegrate_each_iteration: false
-  reintegrate_min_dbg: 1.0e-9
-  reintegrate_min_dba: 1.0e-9
+  # Live only under +refine.  Unvaried since 5dd6e6f -- see SP-P.
+  # refine:
+  #   damping: 1.0e-2
+  #   prior_w: 1.0
+  #   iters: 1
+  #   max_step: 0.10
+
+  log_en: true
+
+voxel_map:
+  plane:
+    weight_floor:
+      mode: sensor_range

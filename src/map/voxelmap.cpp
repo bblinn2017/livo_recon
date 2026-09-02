@@ -1,6 +1,7 @@
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/lio/voxelplane.h"
 #include "livo_recon/utils/log/param_warn.h"
+#include "livo_recon/utils/log/config_resolve.h"
 #include "livo_recon/utils/log/debug_log_dir.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 
@@ -8,6 +9,7 @@
 #include <numeric>
 #include <random>
 #include <fstream>
+#include <stdexcept>
 
 namespace livo_recon
 {
@@ -54,14 +56,59 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "voxel_map/plane/log_debug_en", opts_->log_debug_en, false);
   paramWarn<bool>(pnh, "voxel_map/plane/log_variance_shares_en", opts_->log_variance_shares_en, false);
   paramWarn<int>(pnh, "voxel_map/search/neighborhood_size", opts_->neighborhood_size,   1);
-  paramWarn<std::string>(pnh, "voxel_map/plane/plane_fit_mode", opts_->plane_fit_mode, "pca");
-  paramWarn<std::string>(pnh, "voxel_map/plane/plane_fit_pose_cov_mode", opts_->plane_fit_pose_cov_mode, "combined");
-  paramWarn<std::string>(pnh, "voxel_map/plane/bin_weight_mode_fit", opts_->bin_weight_mode_fit, "count");
-  paramWarn<std::string>(pnh, "voxel_map/plane/bin_weight_mode_var", opts_->bin_weight_mode_var, "count");
   paramWarn<double>(pnh, "voxel_map/plane/bin_size_fraction", opts_->bin_size_fraction, 0.2);
   paramWarn<bool>(pnh, "voxel_map/plane/use_bins", opts_->use_bins, false);
-  paramWarn<std::string>(pnh, "voxel_map/plane/plane_gate_mode", opts_->plane_gate_mode, "disc");
-  paramWarn<std::string>(pnh, "voxel_map/plane/occ_aniso_drop_mode", opts_->occ_aniso_drop_mode, "none");
+  {
+    // Modes go through ConfigResolver so an unrecognised value REFUSES rather
+    // than falling through to whichever arm the if-chain happens to reach
+    // last, and so the sub-parameters of an unselected mode cannot be set
+    // silently.  See config_resolve.h.
+    ConfigResolver cfg(pnh);
+    cfg.mode("voxel_map/plane/plane_gate_mode", opts_->plane_gate_mode, "disc",
+             { "disc", "ellipse", "ellipse_area_matched" });
+
+    // ── residual-weight floor ────────────────────────────────────────────
+    // sigma_r2 is MIRRORED from imu/sensor/range_err rather than given its
+    // own key: the point of "sensor_range" is that the floor IS the sensor's
+    // range variance, and a second copy of that number would drift.
+    double range_err = 0.05;
+    paramWarn<double>(pnh, "imu/sensor/range_err", range_err, 0.05);
+    opts_->weight_sigma_r2 = range_err * range_err;
+    cfg.derived("voxel_map/plane/weight_floor/sigma_r2 (= imu/sensor/range_err^2)",
+                std::to_string(opts_->weight_sigma_r2));
+    cfg.mode("voxel_map/plane/weight_floor/mode", opts_->weight_floor_mode,
+             "sensor_range", { "sensor_range", "incidence", "constant", "none" });
+    cfg.nested<double>(opts_->weight_floor_mode == "constant",
+                       "voxel_map/plane/weight_floor/mode=constant",
+                       "voxel_map/plane/weight_floor/constant",
+                       opts_->weight_floor_constant, 1e-3);
+    cfg.nested<double>(opts_->weight_floor_mode == "incidence",
+                       "voxel_map/plane/weight_floor/mode=incidence",
+                       "voxel_map/plane/weight_floor/incidence_k",
+                       opts_->weight_incidence_k, 1.0);
+
+    cfg.mode("voxel_map/plane/occ_aniso_drop_mode", opts_->occ_aniso_drop_mode,
+             "none", { "none", "top", "random" });
+    cfg.mode("voxel_map/plane/plane_fit_mode", opts_->plane_fit_mode, "pca",
+             { "pca", "debiased" });
+    cfg.mode("voxel_map/plane/plane_fit_pose_cov_mode",
+             opts_->plane_fit_pose_cov_mode, "combined",
+             { "combined", "sensor_only" });
+    cfg.mode("voxel_map/plane/bin_weight_mode_fit", opts_->bin_weight_mode_fit,
+             "count", { "count", "uniform" });
+    cfg.mode("voxel_map/plane/bin_weight_mode_var", opts_->bin_weight_mode_var,
+             "count", { "count", "uniform" });
+
+    if (!cfg.ok())
+    {
+      ROS_FATAL_STREAM("\n" << cfg.report());
+      throw std::runtime_error(
+          "[config] refused: " + std::to_string(cfg.errors().size()) +
+          " voxel_map option(s) outside their allowed set or set into a dead "
+          "scope -- see the [config/REFUSED] block above");
+    }
+    ROS_INFO_STREAM("\n" << cfg.report());
+  }
   paramWarn<double>(pnh, "voxel_map/plane/occ_aniso_drop_threshold", opts_->occ_aniso_drop_threshold, -1.0);
   paramWarn<double>(pnh, "voxel_map/plane/occ_aniso_drop_fraction", opts_->occ_aniso_drop_fraction, 0.1);
   paramWarn<int>(pnh, "voxel_map/plane/occ_aniso_drop_seed", opts_->occ_aniso_drop_seed, 0);
@@ -94,6 +141,8 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/use_bins:                  " << (opts_->use_bins ? "true" : "false")
       << "\n  plane/log_variance_shares_en:    " << (opts_->log_variance_shares_en ? "true" : "false")
       << "\n  plane/plane_gate_mode:           " << opts_->plane_gate_mode
+      << "\n  plane/weight_floor/mode:         " << opts_->weight_floor_mode
+      << "\n  plane/weight_floor/sigma_r2:     " << opts_->weight_sigma_r2
       << "\n  plane/occ_aniso_drop_mode:       " << opts_->occ_aniso_drop_mode
       << "\n  plane/occ_aniso_drop_threshold:  " << opts_->occ_aniso_drop_threshold
       << "\n  plane/occ_aniso_drop_fraction:   " << opts_->occ_aniso_drop_fraction
