@@ -90,6 +90,9 @@ struct CorrInfoCols {
   double   n_raw = -1.0;         // raw return count, for sizing the correction
   double   rho = -1.0;           // intra-scan correlation used for the design effect
   int      frames = -1;          // distinct frames this plane was built from
+  double   floor_term = -1.0;    // weightFloor()'s own contribution to S, separable from sigma_diag_squared/plane_var_term
+  double   lambda1 = -1.0;       // second eigenvalue (with lambda0 already logged, completes I per plane)
+  double   lambda2 = -1.0;       // third eigenvalue
 };
 
 void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, double S,

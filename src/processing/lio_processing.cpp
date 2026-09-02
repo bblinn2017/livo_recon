@@ -866,12 +866,16 @@ std::string LioProc::engagementReport() const
   // The plane model is a VoxelMap-side flag, but its engagement belongs in
   // the same report -- a run that selected "information" and never built one
   // is an inert cell for exactly the same reason a spline flag with a zero
-  // counter is, and the scorer only reads this file.
+  // counter is, and the scorer only reads this file. voxel_map_ is a
+  // MapBackendPtr (voxel/PCA-debiased backend OR AkfMap) -- plane_var_mode/
+  // weight_floor_mode are VoxelOpts-only concepts AkfMap has no equivalent
+  // of, so this block only fires for the voxel backend.
+  if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get()))
   {
     const long info_fits = voxelPlaneInformationFitCount();
     o << "\n  voxel_map/plane/plane_var_mode = "
-      << voxel_map_->opts()->plane_var_mode;
-    if (voxel_map_->opts()->plane_var_mode == "information")
+      << vm->opts()->plane_var_mode;
+    if (vm->opts()->plane_var_mode == "information")
     {
       o << " count=" << info_fits;
       if (info_fits == 0)
@@ -879,7 +883,7 @@ std::string LioProc::engagementReport() const
              "was ever fitted under it";
     }
     o << "\n  voxel_map/plane/weight_floor/mode = "
-      << voxel_map_->opts()->weight_floor_mode;
+      << vm->opts()->weight_floor_mode;
   }
 
   o << "\n  imu_fit/mode = " << opts_.spline.imu_fit_mode
