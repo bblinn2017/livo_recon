@@ -96,7 +96,9 @@ imu:
     range_err: 0.02
     angle_err_deg: 0.15
   ds:
-    ds_leaf_size: 0.0
+    # Downsampling off. Written as the mode rather than as ds_leaf_size:
+    # 0.0, a sentinel that also left imu/ds/mode inert.
+    mode: "off"
 lio:
   ekf:
     max_iterations: 5

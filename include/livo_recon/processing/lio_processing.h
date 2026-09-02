@@ -108,7 +108,10 @@ struct LioProcOptions
   // separate woodbury_plane_correction option (per-plane Woodbury
   // marginalization) were also tried and removed -- see the historical
   // doc comment above for both.
-  std::string density_sigma_mode = "linear";
+  std::string density_sigma_mode = "off";
+  // The whole density mechanism is live only under a non-"off" mode; the
+  // scalar above is its sub-option rather than its hidden on/off switch.
+  bool densitySigmaOn() const { return density_sigma_mode != "off"; }
 
   // History (151-159): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-151
 
@@ -116,8 +119,14 @@ struct LioProcOptions
   DeskewOptions deskew;
 
   // History (168-172): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-168
+  // See VoxelOpts-style modes: "off" is a value of imu/ds/mode, not a magic
+  // ds_leaf_size of 0.0.  dsOn() is the single place the question is asked.
   double ds_leaf_size = 0.15;
   std::string ds_mode = "first";
+  // "off" is a value of the mode, so a run with downsampling disabled cannot
+  // also carry a mode nothing reads. The two call sites in
+  // deskewAndDownsample() ask this instead of testing ds_leaf_size > 0.
+  bool dsOn() const { return ds_mode != "off"; }
 
   // ── Scan-spline trajectory + live process-noise estimation ──────────────
   // See include/livo_recon/lio/spline.h and adaptive_q.h for the full

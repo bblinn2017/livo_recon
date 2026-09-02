@@ -110,7 +110,6 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "lio/log_consistency_scan_en", opts_.log_consistency_scan_en, false);
   paramWarn<bool>(pnh, "lio/log_nll_en", opts_.log_nll_en, false);
   paramWarn<int>(pnh, "lio/dry_run_point_filter_num", opts_.dry_run_point_filter_num, 0);
-  paramWarn<double>(pnh, "lio/ekf/density_sigma_ref", opts_.density_sigma_ref, 0.0);
   paramWarn<bool>(pnh, "cuda/enable",               cuda_enable_,          false);
 
   // History (134-136): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-134
@@ -215,13 +214,38 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(aq, "adaptive_q/enable", "adaptive_q/log_en", opts_.adaptive_q.log_en, false);
   adaptive_q_.configure(opts_.adaptive_q);
 
-  cfg.get<double>("imu/ds/ds_leaf_size", opts_.ds_leaf_size, 0.15);
-  cfg.mode("imu/ds/mode", opts_.ds_mode, "first", { "first", "average" });
+  // Downsampling is one axis with three states, not a mode plus a magic
+  // zero.  "ds_leaf_size = 0.0 means off" made imu/ds/mode silently INERT
+  // whenever downsampling was disabled -- and LD-1's R4 rung turns
+  // downsampling off deliberately, so that cell would have carried a mode
+  // setting nothing consumed.  Off is now a value of the mode, and the leaf
+  // size is a sub-option of it being on.
+  cfg.mode("imu/ds/mode", opts_.ds_mode, "first", { "off", "first", "average" });
+  cfg.nested<double>(opts_.dsOn(), "imu/ds/mode != off",
+                     "imu/ds/ds_leaf_size", opts_.ds_leaf_size, 0.15);
+  if (!opts_.dsOn()) opts_.ds_leaf_size = 0.0;
+  else if (!(opts_.ds_leaf_size > 0.0))
+    cfg.requireCombination(
+        "imu/ds/ds_leaf_size must be > 0 when imu/ds/mode is '" + opts_.ds_mode +
+        "' -- a zero leaf under an ON mode is the sentinel this mode set "
+        "exists to remove; write imu/ds/mode: off instead");
   cfg.mode("imu/undistort/time_based_process_noise",
            opts_.deskew.time_based_process_noise, "var_acc",
            { "none", "state", "var_acc" });
-  cfg.mode("lio/ekf/density_sigma_mode", opts_.density_sigma_mode, "linear",
-           { "linear", "sqrt", "quadratic" });
+  // Same defect, same fix.  density_sigma_mode was a validated enum whose
+  // entire mechanism is gated on density_sigma_ref > 0.0 -- so the mode was
+  // inert unless a DIFFERENT key was set, and that key used 0.0 as its own
+  // off switch.  No config in tree sets either, so the live behaviour is
+  // unchanged; what changes is that the dead state is now named.
+  cfg.mode("lio/ekf/density_sigma_mode", opts_.density_sigma_mode, "off",
+           { "off", "linear", "sqrt", "quadratic" });
+  cfg.nested<double>(opts_.densitySigmaOn(), "lio/ekf/density_sigma_mode != off",
+                     "lio/ekf/density_sigma_ref", opts_.density_sigma_ref, 0.0);
+  if (!opts_.densitySigmaOn()) opts_.density_sigma_ref = 0.0;
+  else if (!(opts_.density_sigma_ref > 0.0))
+    cfg.requireCombination(
+        "lio/ekf/density_sigma_ref must be > 0 when lio/ekf/density_sigma_mode "
+        "is '" + opts_.density_sigma_mode + "' -- otherwise the mode is inert");
 
   // Every spline/* and adaptive_q/* key is read by the resolver above and by
   // nothing else, so anything left over in those namespaces is a key nobody
@@ -365,7 +389,7 @@ double LioProc::estimateStateCorrection(
   if (residuals_.empty())
     return 0.0;
 
-  if (opts_.density_sigma_ref > 0.0) {
+  if (opts_.densitySigmaOn()) {
     const double x = residuals_.size() / opts_.density_sigma_ref;
     double scale = x;
     if (opts_.density_sigma_mode == "sqrt")           scale = std::sqrt(x);
@@ -403,7 +427,7 @@ bool LioProc::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, double& av
   }
   if (residuals_.empty()) return false;
 
-  if (opts_.density_sigma_ref > 0.0) {
+  if (opts_.densitySigmaOn()) {
     const double x = residuals_.size() / opts_.density_sigma_ref;
     double scale = x;
     if (opts_.density_sigma_mode == "sqrt")           scale = std::sqrt(x);
@@ -477,7 +501,7 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
   else
     deskewPoints(state_, mg.poses, mg.image.t, mg.lidar_points, opts_.deskew, deskewed);
 
-  if (opts_.ds_leaf_size > 0.0) {
+  if (opts_.dsOn()) {
     DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
     // Track which raw points each surviving output point was built from, so
     // the per-iteration re-deskew can re-place exactly this set from their raw
@@ -511,7 +535,7 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
   {
     std::vector<PointXYZCov> dry_run_deskewed;
     deskewPoints(state_, mg.poses, mg.image.t, mg.dry_run_lidar_points, opts_.deskew, dry_run_deskewed);
-    if (opts_.ds_leaf_size > 0.0) {
+    if (opts_.dsOn()) {
       DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
       voxelDownsample(dry_run_deskewed, mg.dry_run_points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
     } else {

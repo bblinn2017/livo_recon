@@ -667,8 +667,11 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   // The debiased path keeps these persistently as Scov_/Scov_sensor_; the
   // pca path has no persistent accumulator, so form them here.  Cheap, and
   // write-only unless plane_var_mode is "information".
-  const bool info_mode = (opts_->plane_var_mode == "information");
-  if (info_mode) {
+  // The two plane models are alternatives, so they are written as one
+  // branch.  An earlier revision of this threaded `!info_mode` through the
+  // Jacobian loop's own condition and through two later guards, which is
+  // three places to get wrong and a loop that reads as if it might run.
+  if (opts_->plane_var_mode == "information") {
     mean_cov_all_.setZero();
     mean_cov_sensor_.setZero();
     for (int i = 0; i < N; ++i) {
@@ -682,11 +685,11 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
     buildInformationCovariance(static_cast<double>(points_size_), mean_cov_all_,
                                mean_cov_sensor_, /*eig0_already_debiased=*/false);
     last_fit_j_ = use_weights ? N : 0;
-  }
+  } else {
 
   const double inv_N  = 1.0 / N;
 
-  for (int i = 0; !info_mode && i < N; ++i) {
+  for (int i = 0; i < N; ++i) {
     const auto& pt = points[i];
     const V3D z  = pt.point - plane_.center;
     const double a0 = plane_.normal.dot(z);
@@ -741,7 +744,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
     plane_var_.noalias() += Jmin * residual_cov * Jmin.transpose();
   }
 
-  if (!info_mode) last_fit_j_ = use_weights ? N : 0;
+  last_fit_j_ = use_weights ? N : 0;
 
   // T1: refitDebiased() rejects a fit whose eigengap denominators are within
   // eps of zero; this path had no such guard and would divide plane_var_ by
@@ -750,9 +753,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   // default (see the NOTE above -- this measurably changes PCA's own output
   // when on, which is the whole point of it being an ablatable switch now
   // instead of a permanent behavior change).
-  // Not applicable under the information model: it never forms an eigengap
-  // denominator, which is the whole reason this switch exists.
-  if (!info_mode && opts_->plane_var_denom_floor_en) {
+  if (opts_->plane_var_denom_floor_en) {
     const double eps_denom = std::max(1e-8, 0.1 * opts_->plane_threshold);
     if (std::fabs(denom1) < eps_denom || std::fabs(denom2) < eps_denom) {
       is_plane_ = false;
@@ -761,6 +762,8 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
       return;
     }
   }
+
+  }  // end eigengap branch
 
   if (opts_->log_variance_shares_en) {
     double n_eff = N;

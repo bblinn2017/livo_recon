@@ -104,6 +104,32 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
 
     cfg.mode("voxel_map/plane/occ_aniso_drop_mode", opts_->occ_aniso_drop_mode,
              "none", { "none", "top", "random" });
+    // T3-0e's own parameters, each live only under the arm that reads it:
+    // "top" thresholds on the anisotropy value, "random" draws a fraction at
+    // a recorded seed.  They were unconditional paramWarn reads, so a
+    // threshold set on the random arm (or a seed on the top arm) was
+    // accepted, printed, and consumed by nothing -- the shape of defect this
+    // register has now paid for four times.
+    const bool drop_top    = (opts_->occ_aniso_drop_mode == "top");
+    const bool drop_random = (opts_->occ_aniso_drop_mode == "random");
+    cfg.nested<double>(drop_top, "voxel_map/plane/occ_aniso_drop_mode=top",
+                       "voxel_map/plane/occ_aniso_drop_threshold",
+                       opts_->occ_aniso_drop_threshold, -1.0);
+    // Was declared, documented as "a deliberate, documented, logged choice",
+    // read by gate() -- and never loaded from the parameter server at all,
+    // so it could only ever hold its default. Unreachable options are worse
+    // than absent ones: this one silently decided the policy for planes with
+    // an undefined occ_aniso, which is precisely the population T3-0e's
+    // "top" arm is about.
+    cfg.nested<bool>(drop_top, "voxel_map/plane/occ_aniso_drop_mode=top",
+                     "voxel_map/plane/occ_aniso_undefined_as_top",
+                     opts_->occ_aniso_undefined_as_top, false);
+    cfg.nested<double>(drop_random, "voxel_map/plane/occ_aniso_drop_mode=random",
+                       "voxel_map/plane/occ_aniso_drop_fraction",
+                       opts_->occ_aniso_drop_fraction, 0.1);
+    cfg.nested<int>(drop_random, "voxel_map/plane/occ_aniso_drop_mode=random",
+                    "voxel_map/plane/occ_aniso_drop_seed",
+                    opts_->occ_aniso_drop_seed, 0);
     cfg.mode("voxel_map/plane/plane_fit_mode", opts_->plane_fit_mode, "pca",
              { "pca", "debiased" });
     // ── the plane covariance model ───────────────────────────────────────
@@ -210,9 +236,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     }
     ROS_INFO_STREAM("\n" << cfg.report());
   }
-  paramWarn<double>(pnh, "voxel_map/plane/occ_aniso_drop_threshold", opts_->occ_aniso_drop_threshold, -1.0);
-  paramWarn<double>(pnh, "voxel_map/plane/occ_aniso_drop_fraction", opts_->occ_aniso_drop_fraction, 0.1);
-  paramWarn<int>(pnh, "voxel_map/plane/occ_aniso_drop_seed", opts_->occ_aniso_drop_seed, 0);
   paramWarn<int>(pnh, "voxel_map/map/shuffle_insertion_seed", opts_->shuffle_insertion_seed, 0);
   paramWarn<bool>(pnh, "voxel_map/map/log_frame_stats_en", opts_->log_frame_stats_en, false);
 
@@ -240,6 +263,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/occ_aniso_drop_threshold:  " << opts_->occ_aniso_drop_threshold
       << "\n  plane/occ_aniso_drop_fraction:   " << opts_->occ_aniso_drop_fraction
       << "\n  plane/occ_aniso_drop_seed:       " << opts_->occ_aniso_drop_seed
+      << "\n  plane/occ_aniso_undefined_as_top: " << (opts_->occ_aniso_undefined_as_top ? "true" : "false")
       << "\n  plane/log_consistency_mode:      " << opts_->log_consistency_mode
       << "\n  plane/log_consistency_corr_stride: " << opts_->log_consistency_corr_stride
       << "\n  plane/plane_conf_redundancy_en:  " << (opts_->plane_conf_redundancy_en ? "true" : "false")
