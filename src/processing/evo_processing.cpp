@@ -377,7 +377,18 @@ EvoProc::StageMetrics EvoProc::logStage(const char* stage_name, const char* mode
 
   dbg << "  ATE=" << m.ate << "m";
   if (m.rte >= 0.0) dbg << "  RTE=" << m.rte << "m";
-  if (m.roe >= 0.0) dbg << "  ROE=" << m.roe << "deg";
+  // Say what the number is measured AGAINST, not just its name. Against a
+  // position-only ground truth (NTU VIRAL's laser tracker, HILTI's sparse
+  // checkpoints -- both carry an identity quaternion everywhere) ROE is the
+  // angular magnitude of the estimate's own rotation over rpe_delta_s, not
+  // an error. Every ROE ever quoted in this project's register was read as
+  // an error and computed against no reference; the metric name alone is
+  // what allowed that, so the reference travels with the value from here on.
+  if (m.roe >= 0.0)
+    dbg << "  ROE=" << m.roe << "deg"
+        << (gtOrientationMeaningful() ? "(vs GT orientation)"
+                                      : "(NO GT ORIENTATION -- self-rotation "
+                                        "magnitude, not an error)");
   if (m.are >= 0.0) dbg << "  ARE=" << m.are << "deg";
 
   // This frame's own aligned position error VECTOR (not just its scalar

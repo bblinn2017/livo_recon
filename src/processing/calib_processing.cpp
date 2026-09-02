@@ -1,4 +1,6 @@
 #include "livo_recon/processing/calib_processing.h"
+
+#include <stdexcept>
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/state/state.h"
 
@@ -13,6 +15,7 @@ CalibProc::CalibProc(NodeContext& ctx)
 std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
 {
   paramWarn<int>(pnh, "calib/num_samples",   opts_.num_samples,   200);
+  paramWarn<int>(pnh, "calib/stall_calls_max", opts_.stall_calls_max, 300);
   paramWarn<bool>(pnh, "calib/use_calib",     opts_.use_calib,     true);
   paramWarn<bool>(pnh, "calib/use_calib_var",  opts_.use_calib_var,  false);
   paramWarn<bool>(pnh, "calib/use_calib_bias", opts_.use_calib_bias, true);
@@ -23,6 +26,7 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
   std::ostringstream oss;
   oss << "[params/calib]"
       << "\n  num_samples:    " << opts_.num_samples
+      << "\n  stall_calls_max:" << opts_.stall_calls_max
       << "\n  use_calib:      " << (opts_.use_calib      ? "true" : "false")
       << "\n  use_calib_var:  " << (opts_.use_calib_var  ? "true" : "false")
       << "\n  use_calib_bias: " << (opts_.use_calib_bias ? "true" : "false");
@@ -71,6 +75,8 @@ bool CalibProc::collectSamples()
   while (calib_imu_samples.size() < static_cast<size_t>(opts_.num_samples) &&
          data_queues_->ready())
   {
+    ++calib_groups_seen_;
+    ++calib_images_consumed_;
     calib_last_img_ = data_queues_->popImage();
 
     points.clear();
@@ -97,7 +103,12 @@ bool CalibProc::collectSamples()
         std::make_move_iterator(points.end()));
 
     if (imu_samples.size() < 2)
+    {
+      // Counted, not silent -- this discard is the most likely reason the
+      // sample count never grows, and it was invisible.
+      ++calib_groups_short_imu_;
       continue;
+    }
     calib_imu_samples.insert(
         calib_imu_samples.end(),
         imu_samples.begin(),
@@ -160,7 +171,38 @@ std::string CalibProc::estimateFromBuffer()
   std::ostringstream oss;
   oss << "Calibrating IMU... " << calib_imu_samples.size() << " samples collected.";
   if (!collectSamples())
+  {
+    // No progress since the last call means the buffer is not filling, and
+    // repeating the same line forever is what made this look like a hang.
+    // Bound it and fail with the breakdown that says WHY -- see
+    // CalibProcOptions::stall_calls_max.
+    if (calib_imu_samples.size() == calib_last_count_)
+      ++calib_stall_calls_;
+    else
+      { calib_stall_calls_ = 0; calib_last_count_ = calib_imu_samples.size(); }
+
+    if (opts_.stall_calls_max > 0 && calib_stall_calls_ >= opts_.stall_calls_max)
+    {
+      std::ostringstream err;
+      err << "[calib] STALLED: " << calib_imu_samples.size() << "/"
+          << opts_.num_samples << " IMU samples after " << calib_stall_calls_
+          << " consecutive calls with zero growth. images_consumed="
+          << calib_images_consumed_
+          << "  groups_seen=" << calib_groups_seen_
+          << "  groups_dropped_for_fewer_than_2_imu=" << calib_groups_short_imu_
+          << ". If groups_dropped is close to groups_seen the IMU stream is "
+             "arriving slower than one sample per image window and no amount "
+             "of waiting will fix it; if groups_seen stopped growing the "
+             "queues went dry. Either way this is a failure, not a wait.";
+      ROS_FATAL_STREAM(err.str());
+      throw std::runtime_error(err.str());
+    }
+
+    oss << "  [stalled " << calib_stall_calls_ << "/" << opts_.stall_calls_max
+        << ", dropped " << calib_groups_short_imu_ << " of "
+        << calib_groups_seen_ << " groups for <2 IMU samples]";
     return oss.str();
+  }
 
   V3D acc_bias, gyro_bias, var_acc, var_gyr;
   computeBiasAndNoise(acc_bias, gyro_bias, var_acc, var_gyr);

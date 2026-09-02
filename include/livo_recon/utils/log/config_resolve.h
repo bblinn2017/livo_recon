@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <initializer_list>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -57,6 +58,7 @@ public:
   template <typename T>
   void get(const std::string& key, T& out, const T& def)
   {
+    claim(key);
     paramWarn<T>(pnh_, key, out, def);
     effective_.emplace_back(key, detail::paramWarnFormat(out));
   }
@@ -66,6 +68,7 @@ public:
   void mode(const std::string& key, std::string& out, const std::string& def,
             std::initializer_list<const char*> allowed)
   {
+    claim(key);
     paramWarn<std::string>(pnh_, key, out, def);
     if (!isAllowed(out, allowed))
     {
@@ -85,6 +88,7 @@ public:
               T& out, const T& def)
   {
     if (live) { get<T>(key, out, def); return; }
+    claim(key);
     out = def;
     if (pnh_.hasParam(key)) ignore(scope, key);
   }
@@ -95,6 +99,7 @@ public:
                   std::initializer_list<const char*> allowed)
   {
     if (live) { mode(key, out, def, allowed); return; }
+    claim(key);
     out = def;
     if (pnh_.hasParam(key)) ignore(scope, key);
   }
@@ -103,6 +108,52 @@ public:
   // from a rate, a floor converted from an error in metres, and so on).
   void derived(const std::string& label, const std::string& value)
   { effective_.emplace_back(label + "  [derived]", value); }
+
+  // -------------------------------------------------------------------------
+  // The other half of the contract, and its absence was a live defect.
+  //
+  // Everything above validates the keys this resolver READS.  Nothing
+  // validated a key the config SETS that no reader ever asks for -- and
+  // 5c93cc6 renamed every spline/* and adaptive_q/* key at once.  An override
+  // YAML still written against the old names (which is every cell the sweep
+  // runner generates) sets keys nobody consumes, and the run silently takes
+  // defaults.  paramWarn's "not found, falling back to default" line is the
+  // only trace, and it is a warning in a log nobody greps.  That is exactly
+  // the failure this file was written to eliminate, one level up.
+  //
+  // Call this AFTER every read, with the namespace prefixes this resolver
+  // owns COMPLETELY.  Do not pass a prefix whose keys are shared with a
+  // paramWarn() elsewhere: those keys are unclaimed here and would be
+  // reported as dead when they are merely read by someone else.
+  void refuseUnclaimed(std::initializer_list<const char*> prefixes)
+  {
+    std::vector<std::string> names;
+    if (!pnh_.getParamNames(names))
+    {
+      effective_.emplace_back("[config/unclaimed-scan]",
+                              "SKIPPED -- the parameter server would not "
+                              "enumerate; a stale key cannot be detected on "
+                              "this run");
+      return;
+    }
+    for (const char* pre : prefixes)
+    {
+      const std::string root = pnh_.resolveName(pre);
+      const std::string root_slash = root + "/";
+      for (const std::string& full : names)
+      {
+        if (full != root && full.rfind(root_slash, 0) != 0) continue;
+        if (claimed_.count(full) != 0) continue;
+        std::ostringstream oss;
+        oss << full << " is set but NO reader claims it. Either it is a key "
+               "renamed out from under this config, or a typo. Nothing would "
+               "consume it and the run would silently use the default -- "
+               "which is the failure this resolver exists to prevent, so it "
+               "is an error rather than a warning.";
+        errors_.push_back(oss.str());
+      }
+    }
+  }
 
   bool ok() const { return errors_.empty(); }
 
@@ -126,6 +177,8 @@ public:
   const std::vector<std::string>& errors() const { return errors_; }
 
 private:
+  void claim(const std::string& key) { claimed_.insert(pnh_.resolveName(key)); }
+
   void ignore(const std::string& scope, const std::string& key)
   {
     std::ostringstream oss;
@@ -156,6 +209,7 @@ private:
   ros::NodeHandle& pnh_;
   std::vector<std::pair<std::string, std::string>> effective_;
   std::vector<std::string> errors_;
+  std::set<std::string> claimed_;
 };
 
 }  // namespace livo_recon

@@ -222,6 +222,26 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   cfg.mode("lio/ekf/density_sigma_mode", opts_.density_sigma_mode, "linear",
            { "linear", "sqrt", "quadratic" });
 
+  // Every spline/* and adaptive_q/* key is read by the resolver above and by
+  // nothing else, so anything left over in those namespaces is a key nobody
+  // consumes -- a rename this config was never migrated through, or a typo.
+  // Deliberately NOT extended to voxel_map/: several of its keys are still
+  // read by paramWarn() in voxelmap.cpp, so they are unclaimed here and would
+  // be reported as dead when they are merely read elsewhere. Widen this only
+  // as those move onto a resolver.
+  cfg.refuseUnclaimed({ "spline", "adaptive_q" });
+
+  // The build's accumulation precision, recorded rather than assumed. The
+  // CUDA path returns float-precision HtH/Htz, so nll.txt is NOT comparable
+  // between a CPU and a GPU build -- an alpha ladder run half on each is a
+  // ladder with a step in it. The bug ledger's complaint was that this has to
+  // be pinned and is nowhere documented; documenting it in the run's own
+  // effective config is the cheap half of the fix.
+  cfg.derived("build/accumulation_precision",
+              cuda_enable_ ? "float (CUDA HtH/Htz) -- nll.txt NOT comparable "
+                             "with a CPU build"
+                           : "double (CPU HtH/Htz)");
+
   // The EFFECTIVE configuration, not the requested one -- and a hard refusal
   // if any key was set into a scope that cannot read it.  A sweep cell that
   // cannot mean what it says fails here rather than producing a duplicate
