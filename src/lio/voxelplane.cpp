@@ -348,8 +348,12 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
                               plane_var_term, J_nq, &is_candidate, &dropped_by_ablation);
   const double floor_term = weightFloor(pt.body_point, body_normal, /*in_gate=*/false);
 
-  if (opts_->log_consistency_corr_en && is_candidate && scan_id >= 0) {
-    const bool cov = opts_->log_consistency_covariates_en;
+  // Tier A (the per-scan accumulator below) is reachable on its own now.
+  // It used to sit inside a guard that also gated Tier B's ~1 GB/job of
+  // per-correspondence rows, so a sweep that could not afford Tier B lost
+  // the cheap level statistics with it. See VoxelOpts::log_consistency_mode.
+  if (opts_->logCorrScan() && is_candidate && scan_id >= 0) {
+    const bool cov = opts_->logCorrCovariates();
     double s_sensor = -1.0, s_tilt = -1.0, s_d = -1.0, s_pose = -1.0, aniso = -1.0, lambda0 = -1.0;
     double occ_aniso = -1.0;
     int n = -1, j = -1, occ_cells = -1;
@@ -431,13 +435,15 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
     // sample of the scan). DISTRIBUTIONS (percentiles, decile cuts) are
     // the only thing that needs individual rows -- level statistics come
     // from corr_scan.csv above and are unaffected by the stride.
-    static std::atomic<uint64_t> corr_row_counter{0};
-    const uint64_t k = corr_row_counter.fetch_add(1, std::memory_order_relaxed);
-    const int stride = std::max(1, opts_->log_consistency_corr_stride);
-    if ((k % static_cast<uint64_t>(stride)) == 0) {
-      debugLogConsistencyCorr(cov, scan_id, r, S, s_sensor, s_tilt, s_d, s_pose, n, j, aniso,
-                               accepted ? 0 : 1, s_prior_pose, lambda0, occ_aniso, occ_cells,
-                               dropped_by_ablation ? 1 : 0, occ_var_u, occ_var_v, plane_conf_factor);
+    if (opts_->logCorrRows()) {
+      static std::atomic<uint64_t> corr_row_counter{0};
+      const uint64_t k = corr_row_counter.fetch_add(1, std::memory_order_relaxed);
+      const int stride = std::max(1, opts_->log_consistency_corr_stride);
+      if ((k % static_cast<uint64_t>(stride)) == 0) {
+        debugLogConsistencyCorr(cov, scan_id, r, S, s_sensor, s_tilt, s_d, s_pose, n, j, aniso,
+                                 accepted ? 0 : 1, s_prior_pose, lambda0, occ_aniso, occ_cells,
+                                 dropped_by_ablation ? 1 : 0, occ_var_u, occ_var_v, plane_conf_factor);
+      }
     }
   }
 

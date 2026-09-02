@@ -17,7 +17,7 @@ public:
 
   // scan_id (default -1 -> no logging regardless of opts_ flags): the
   // calling frame's VoxelMap::frame_idx_, threaded down only for T0-D's
-  // corr.csv (see VoxelOpts::log_consistency_corr_en) -- not used for
+  // corr.csv (see VoxelOpts::log_consistency_mode) -- not used for
   // anything else. Callers outside the VoxelMap frame-processing path
   // (none today) can safely omit it.
   bool computeResidual(const WorldPointCov& pt, Residual& res, int scan_id = -1) const;
@@ -109,7 +109,7 @@ private:
   // weights (0 for an unweighted/unbinned fit, or for a refitDebiased()
   // fit -- debiased mode has no binning concept) -- stored so
   // computeResidual() can log it per-correspondence without recomputing
-  // (see VoxelOpts::log_consistency_covariates_en). Mirrors
+  // (see VoxelOpts::log_consistency_mode == "corr+covariates"). Mirrors
   // debugLogPlaneFitStats()'s own `j` local exactly, just persisted.
   int last_fit_j_ = 0;
 

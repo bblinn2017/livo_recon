@@ -1,8 +1,8 @@
 # T0-D/T0-E/T0-F analysis scripts
 
 `consistency.py` is the analyser: reads `corr.csv`/`scan.csv` (see
-`VoxelOpts::log_consistency_corr_en`/`log_consistency_covariates_en` and
-`LioProcOptions::log_consistency_scan_en`) and reports NIS calibration,
+`VoxelOpts::log_consistency_mode` and `LioProcOptions::log_consistency_scan_en`)
+and reports NIS calibration,
 whiteness, the variance budget, and NIS-vs-covariate structure. `synth.py`
 generates filter runs with *known* Q/R mis-tunings so the analyser can be
 checked before it's pointed at real logs. `qsens.py` is the scalar

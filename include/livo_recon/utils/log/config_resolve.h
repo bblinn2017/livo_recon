@@ -155,6 +155,22 @@ public:
     }
   }
 
+  // A key that was RENAMED rather than removed is the one case
+  // refuseUnclaimed() above cannot catch on its own: the old name lives in a
+  // namespace this resolver does not own completely (voxel_map/plane/* is
+  // still half paramWarn), so scanning the whole prefix would flag keys that
+  // other readers legitimately consume.  Name the retired key explicitly and
+  // say what replaced it, so a stale override YAML fails loudly with the
+  // migration in the error text instead of silently taking the default.
+  void refuseIfSet(const std::string& key, const std::string& advice)
+  {
+    if (!pnh_.hasParam(key)) return;
+    std::ostringstream oss;
+    oss << pnh_.resolveName(key) << " is set but has been RETIRED. " << advice;
+    errors_.push_back(oss.str());
+    claim(key);   // so refuseUnclaimed() does not also report it
+  }
+
   bool ok() const { return errors_.empty(); }
 
   std::string report() const

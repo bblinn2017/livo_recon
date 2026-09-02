@@ -101,6 +101,25 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     cfg.mode("voxel_map/plane/bin_weight_mode_var", opts_->bin_weight_mode_var,
              "count", { "count", "uniform" });
 
+    // ── consistency logging tier ─────────────────────────────────────────
+    // See VoxelOpts::log_consistency_mode. The two booleans this replaces
+    // made the cheap per-scan aggregate reachable only by also paying for
+    // the ~1 GB/job per-correspondence rows.
+    cfg.mode("voxel_map/plane/log_consistency_mode", opts_->log_consistency_mode,
+             "off", { "off", "scan", "corr", "corr+covariates" });
+    cfg.nested<int>(opts_->logCorrRows(),
+                    "voxel_map/plane/log_consistency_mode=corr|corr+covariates",
+                    "voxel_map/plane/log_consistency_corr_stride",
+                    opts_->log_consistency_corr_stride, 1);
+    cfg.refuseIfSet("voxel_map/plane/log_consistency_corr_en",
+                    "Use voxel_map/plane/log_consistency_mode instead: "
+                    "false -> 'off' (or 'scan' if you want the cheap per-scan "
+                    "aggregates, which this flag used to gate too), "
+                    "true -> 'corr'.");
+    cfg.refuseIfSet("voxel_map/plane/log_consistency_covariates_en",
+                    "Use voxel_map/plane/log_consistency_mode instead: "
+                    "true -> 'corr+covariates'.");
+
     if (!cfg.ok())
     {
       ROS_FATAL_STREAM("\n" << cfg.report());
@@ -114,9 +133,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "voxel_map/plane/occ_aniso_drop_threshold", opts_->occ_aniso_drop_threshold, -1.0);
   paramWarn<double>(pnh, "voxel_map/plane/occ_aniso_drop_fraction", opts_->occ_aniso_drop_fraction, 0.1);
   paramWarn<int>(pnh, "voxel_map/plane/occ_aniso_drop_seed", opts_->occ_aniso_drop_seed, 0);
-  paramWarn<bool>(pnh, "voxel_map/plane/log_consistency_corr_en", opts_->log_consistency_corr_en, false);
-  paramWarn<bool>(pnh, "voxel_map/plane/log_consistency_covariates_en", opts_->log_consistency_covariates_en, false);
-  paramWarn<int>(pnh, "voxel_map/plane/log_consistency_corr_stride", opts_->log_consistency_corr_stride, 1);
   paramWarn<bool>(pnh, "voxel_map/plane/plane_conf_redundancy_en", opts_->plane_conf_redundancy_en, false);
   paramWarn<double>(pnh, "voxel_map/plane/plane_conf_redundancy_cap", opts_->plane_conf_redundancy_cap, 16.0);
   paramWarn<bool>(pnh, "voxel_map/plane/plane_conf_coverage_en", opts_->plane_conf_coverage_en, false);
@@ -149,8 +165,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/occ_aniso_drop_threshold:  " << opts_->occ_aniso_drop_threshold
       << "\n  plane/occ_aniso_drop_fraction:   " << opts_->occ_aniso_drop_fraction
       << "\n  plane/occ_aniso_drop_seed:       " << opts_->occ_aniso_drop_seed
-      << "\n  plane/log_consistency_corr_en:   " << (opts_->log_consistency_corr_en ? "true" : "false")
-      << "\n  plane/log_consistency_covariates_en: " << (opts_->log_consistency_covariates_en ? "true" : "false")
+      << "\n  plane/log_consistency_mode:      " << opts_->log_consistency_mode
       << "\n  plane/log_consistency_corr_stride: " << opts_->log_consistency_corr_stride
       << "\n  plane/plane_conf_redundancy_en:  " << (opts_->plane_conf_redundancy_en ? "true" : "false")
       << "\n  plane/plane_conf_redundancy_cap: " << opts_->plane_conf_redundancy_cap

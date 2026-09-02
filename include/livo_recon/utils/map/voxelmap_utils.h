@@ -304,12 +304,38 @@ struct VoxelOpts
   bool use_bins = false;
 
   // History (412-425): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-412
-  bool log_consistency_corr_en = false;
-
   // History (428-445): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-428
-  bool log_consistency_covariates_en = false;
+  //
+  // The consistency log is a TIER LADDER, not two independent switches, and
+  // writing it as two booleans was a live defect.  corr_scan.csv (per-scan
+  // exact aggregates: mean NIS, accept fraction, dropped-by-ablation count)
+  // is cheap -- one accumulator update per candidate, one line per scan --
+  // and corr.csv (a full per-correspondence row) is not: it is ~1 GB/job and
+  // halves sweep throughput.  Both sat inside a single `if
+  // (log_consistency_corr_en)`, so the cheap per-scan aggregate was
+  // UNREACHABLE without paying for the expensive per-correspondence rows,
+  // and every sweep that turned Tier B off to make its throughput budget
+  // silently lost the level statistics too.  A boolean pair can also express
+  // nonsense (covariates on, corr off = inert), which the enum cannot.
+  //   off             -- nothing
+  //   scan            -- corr_scan.csv only (Tier A: cheap, safe in a sweep)
+  //   corr            -- Tier A + per-correspondence rows, no covariates
+  //   corr+covariates -- Tier A + rows carrying the plane/geometry covariates
+  std::string log_consistency_mode = "off";
+  static constexpr const char* LOG_CONSISTENCY_MODES[] = {
+      "off", "scan", "corr", "corr+covariates" };
+  // Tier A: the per-scan accumulator. Live in every mode but "off".
+  bool logCorrScan() const { return log_consistency_mode != "off"; }
+  // Tier B: individual corr.csv rows, subject to the stride below.
+  bool logCorrRows() const
+  { return log_consistency_mode == "corr" || log_consistency_mode == "corr+covariates"; }
+  // The covariate columns, which cost the plane-level geometry queries.
+  bool logCorrCovariates() const
+  { return log_consistency_mode == "corr+covariates"; }
 
   // History (448-456): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-448
+  // Tier B only: striding a log that is not being written is meaningless, and
+  // the per-scan aggregates above are deliberately NOT strided.
   int log_consistency_corr_stride = 1;
 
   // History (459-476): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-459
