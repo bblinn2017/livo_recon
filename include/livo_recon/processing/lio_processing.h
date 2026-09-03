@@ -305,6 +305,20 @@ private:
   double reint_drot_deg_max_ = 0.0;     // deg, likewise
   std::vector<PointXYZCov> redeskew_prev_;   // scratch, for the displacement
 
+  // P3(a).  How far the refit (refine+reintegrate+anchorTo, whatever subset
+  // is on) actually moved the trajectory itself, sampled on a fixed 32-point
+  // grid across the scan window -- refine_dcp_max/_rms are a control-point
+  // proxy for this, not the quantity itself. Reset per frame, max across
+  // this frame's iterations, same convention as redeskew_dp_rms_ above.
+  double refit_dtraj_rms_ = 0.0;   // m
+  double refit_dtraj_max_ = 0.0;   // m
+  double refit_drot_deg_  = 0.0;   // deg
+  // P3(b).  The IMU-residual variance the PRE-refit spline implies, so the
+  // delta against finalizeSplineAndQ()'s post-refit last_spline_stats_ (the
+  // existing cov_acc_meas/cov_gyr_meas columns) is readable at all.
+  double cov_acc_pre_ = 0.0;
+  double cov_gyr_pre_ = 0.0;
+
   // Run totals, for the engagement report.  A flag that was on with a zero
   // total here is an INERT line and, downstream, an invalid sweep cell.
   long   run_redeskew_calls_ = 0;
@@ -362,6 +376,11 @@ private:
   mutable double last_density_scale_ = 1.0;
 
   mutable EkfUpdate ekf_;
+
+  // P1.  trP_pos BEFORE this frame's update runs, captured at the top of
+  // processLIO() -- paired with the existing POST value (state_->cov() read
+  // later in the same call) to give the covariance delta.
+  double trP_pos_pre_ = -1.0;
 
   // Fixed IEKF prior (mean + covariance), snapshotted ONCE per frame (top
   // of processLIO()'s inner iteration loop, before any solveSystem()/

@@ -5,6 +5,7 @@
 #include "livo_recon/utils/algo/hashing.h"
 
 #include <atomic>
+#include <limits>
 #include <memory>
 #include <vector>
 #include <Eigen/Eigenvalues>
@@ -523,6 +524,17 @@ struct LioFrameDiag
   double h_pp_min_eig = -1.0; // min eigenvalue of HtH's position block
   double h_rr_min_eig = -1.0; // min eigenvalue of HtH's rotation block
   double sum_weight   = 0.0;  // total residual weight, i.e. how much information
+  // P1.  All from objects the update already holds; one 6x6 solve per frame.
+  double h_rr_trace   = 0.0;  // denominator for DIV_rot; trace(H_pp)==sum_weight already
+  double htz_rot_norm = 0.0;  // |Htz(0..2)| -- rotation drive
+  double htz_pos_norm = 0.0;  // |Htz(3..5)| -- position drive
+  double ask          = -1.0; // Htz^T HtH^-1 Htz : what the measurements alone would move
+  double got          = -1.0; // dx^T HtH dx     : what the filter actually applied
+  double refusal       = std::numeric_limits<double>::quiet_NaN();  // 1 - got/ask
+  int    iters        = 0;
+  double dx_rot_deg   = 0.0;
+  double dx_pos_mm    = 0.0;
+  double trP_pos_pre  = -1.0; // BEFORE the update -- turns a level into a delta
 };
 
 struct VoxelStats

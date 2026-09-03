@@ -24,11 +24,17 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
   std::ofstream ofs(debugLogPath("frame_stats.txt"), first_call ? std::ios::trunc : std::ios::app);
   if (first_call)
     ofs << "t,frame_idx,denom_rejected_count,max_plane_var_trace"
-           ",n_residuals,n_planes,h_pp_min_eig,h_rr_min_eig,sum_weight\n";
+           ",n_residuals,n_planes,h_pp_min_eig,h_rr_min_eig,sum_weight"
+           ",h_rr_trace,htz_rot_norm,htz_pos_norm,ask,got,refusal"
+           ",iters,dx_rot_deg,dx_pos_mm,trP_pos_pre\n";
   first_call = false;
   ofs << t_abs << "," << frame_idx << "," << denom_rejected_count << "," << max_plane_var_trace
       << "," << lio.n_residuals << "," << n_planes
-      << "," << lio.h_pp_min_eig << "," << lio.h_rr_min_eig << "," << lio.sum_weight << "\n";
+      << "," << lio.h_pp_min_eig << "," << lio.h_rr_min_eig << "," << lio.sum_weight
+      << "," << lio.h_rr_trace << "," << lio.htz_rot_norm << "," << lio.htz_pos_norm
+      << "," << lio.ask << "," << lio.got << "," << lio.refusal
+      << "," << lio.iters << "," << lio.dx_rot_deg << "," << lio.dx_pos_mm
+      << "," << lio.trP_pos_pre << "\n";
 }
 }  // namespace
 
@@ -139,7 +145,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     // instead of three bolted-on corrections.  Transitional: both modes
     // exist so the incumbent stays a representable control.
     cfg.mode("voxel_map/plane/plane_var_mode", opts_->plane_var_mode,
-             "eigengap", { "eigengap", "information" });
+             "eigengap", { "eigengap", "information", "information_directional" });
     // "roughness" returns VoxelPlane::roughness_, which only the information
     // model computes.  Pairing it with the eigengap model would floor every
     // residual at zero and read as a silent "none" -- refuse instead.  This
@@ -147,13 +153,39 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     // not where weight_floor/mode is loaded above, because plane_var_mode
     // is not yet read at that point in this function.
     if (opts_->weight_floor_mode == "roughness" &&
-        opts_->plane_var_mode != "information")
+        opts_->plane_var_mode != "information" &&
+        opts_->plane_var_mode != "information_directional")
     {
       cfg.requireCombination(
           "voxel_map/plane/weight_floor/mode = roughness requires "
           "voxel_map/plane/plane_var_mode = information -- only that model "
           "computes a per-plane roughness, and pairing them the other way "
           "would floor every residual at 0.0 and read as a silent 'none'");
+    }
+    // The reverse direction (2026-09-03, register-flagged gap): S always
+    // adds weightFloor()'s floor_term unconditionally (see the call site in
+    // voxelplane.cpp), regardless of plane_var_mode -- weightFloor() itself
+    // has no idea which variance model is active. Under the information
+    // model, sigma_bar2_/plane_var_ already fully accounts for the plane's
+    // variance (roughness included), so sensor_range/incidence/constant
+    // would silently ADD a second, redundant floor on top of it --
+    // double-counting exactly the way roughness-under-eigengap would read
+    // as a silent zero. weight_floor/mode must be roughness or none under
+    // information*; only "legacy" is exempt (an explicit reproducibility
+    // control, not a live model choice).
+    if ((opts_->plane_var_mode == "information" ||
+         opts_->plane_var_mode == "information_directional") &&
+        opts_->weight_floor_mode != "roughness" &&
+        opts_->weight_floor_mode != "none" &&
+        opts_->weight_floor_mode != "legacy")
+    {
+      cfg.requireCombination(
+          "voxel_map/plane/plane_var_mode = information* requires "
+          "voxel_map/plane/weight_floor/mode = roughness or none -- "
+          "sensor_range/incidence/constant would add a second, redundant "
+          "floor on top of a variance the information model already "
+          "accounts for in full, double-counting exactly the way "
+          "roughness-under-eigengap would silently zero every residual");
     }
     // The T8-b plane-confidence inflations and the eigengap denominator
     // floor are all corrections TO the eigengap model.  Under the

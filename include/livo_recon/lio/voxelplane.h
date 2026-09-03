@@ -32,6 +32,10 @@ public:
   const V3D& eigenValues() const { return eigen_values_; }
   const M3D& planeVar() const { return plane_var_; }
   float radius() const { return radius_; }
+  // P5.  1 = exact per-point directional weighting used this fit, 0 =
+  // equal-weight fallback (only meaningful under plane_var_mode =
+  // "information_directional"; always 0 otherwise).
+  int infoPath() const { return info_path_; }
 
   // History (36-65): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-36
   void update(const std::vector<PointXYZCov>& points, int total_count = -1,
@@ -145,6 +149,28 @@ private:
   // "information".
   M3D mean_cov_all_    = M3D::Zero();
   M3D mean_cov_sensor_ = M3D::Zero();
+
+  // P5.  Per-point directional weighted moments (plane_var_mode =
+  // "information_directional" only) -- the exact chart-space Fisher
+  // information from update()'s own point vector, in place of applying one
+  // isotropic sigma_bar^2 to every point regardless of the angle it was
+  // observed from. Sw is the weighted analogue of n_raw (a design-effect
+  // scale still applies on top, same as the equal-weight path); Swd/Swdd
+  // are the weighted first/second moments about plane_.center, in WORLD
+  // coordinates -- the chart (y_normal_/x_normal_) is applied only when
+  // buildInformationCovariance() projects these into H.
+  //
+  // update() has the point vector in hand and can form these exactly;
+  // refitDebiased() runs from unweighted persistent sums after the points
+  // are gone and cannot, so info_path_ says which path actually ran:
+  // 1 = exact (weighted moments used), 0 = equal-weight fallback (the
+  // existing diagonal closed form, unchanged). Logged so the two paths'
+  // disagreement -- what the equal-weight approximation costs -- is
+  // measurable rather than silently averaged away.
+  double Sw_    = 0.0;
+  V3D    Swd_   = V3D::Zero();
+  M3D    Swdd_  = M3D::Zero();
+  int    info_path_ = 0;
 
   // I = (N_eff/sigma_bar^2)*diag(lambda1, lambda2, 1); plane_var_ = I^-1.
   // Sets is_plane_ = false if the model cannot be formed.

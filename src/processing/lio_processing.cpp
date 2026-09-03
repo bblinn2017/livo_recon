@@ -12,6 +12,8 @@
 #include "livo_recon/lio/lio_accumulator.h"
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <stdexcept>
 #include <cstdlib>
 #include <fstream>
@@ -477,6 +479,9 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
   redeskew_dp_rms_ = 0.0;
   reint_dp_max_ = 0.0;
   reint_drot_deg_max_ = 0.0;
+  refit_dtraj_rms_ = 0.0;
+  refit_dtraj_max_ = 0.0;
+  refit_drot_deg_ = 0.0;
   spline_poses0_.clear();
   // Per-FRAME, not per-fit: fit() no longer resets these, because with
   // reintegrate_each_iteration on it runs once per IEKF iteration.
@@ -569,6 +574,30 @@ bool LioProc::redeskewFromSpline(MeasureGroup& mg)
 
   TimedScope ts(profiler_, "lio/spline/redeskew");
 
+  // P3(a).  Snapshot the trajectory on a fixed grid BEFORE refinement, and
+  // difference it after.  32 samples across [t0,t1] is well under a
+  // microsecond and answers the question refine_dcp_rms only proxies.
+  std::array<V3D, 32> pre_p;
+  std::array<M3D, 32> pre_R;
+  {
+    const double a0 = spline_.t0(), h0 = (spline_.t1() - a0) / 31.0;
+    for (int k = 0; k < 32; ++k) {
+      pre_p[k] = spline_.posAt(a0 + k * h0);
+      pre_R[k] = spline_.rotAt(a0 + k * h0);
+    }
+  }
+  // P3(b).  The IMU-residual variance the CURRENT spline implies, before the
+  // refit moves it.  computeSplineImuResidual() is the same function
+  // finalizeSplineAndQ() already calls on the post-refit spline; this is one
+  // extra call on the pre-refit spline.
+  const SplineImuResidualStats pre_stats =
+      !mg.imu_samples_raw.empty()
+          ? computeSplineImuResidual(spline_, mg.imu_samples_raw,
+                                     state_->biasAcc(), state_->biasGyr(),
+                                     state_->gravity())
+          : SplineImuResidualStats{};
+  if (pre_stats.valid()) { cov_acc_pre_ = pre_stats.cov_acc; cov_gyr_pre_ = pre_stats.cov_gyr; }
+
   // (0) SHAPE, from the IMU, under the bias this iteration has arrived at.
   //
   // propagate() ran once, before the loop, with the pre-update bias, and is
@@ -652,6 +681,29 @@ bool LioProc::redeskewFromSpline(MeasureGroup& mg)
       lidar_obs_.push_back(o);
     }
     spline_.refineWithLidar(lidar_obs_, opts_.spline);
+  }
+
+  // P3(a), continued.  Difference the same 32-point grid against the
+  // pre-refit snapshot above, BEFORE anchorTo() -- this is the refit's own
+  // effect on the trajectory. anchorTo() below is a separate, expected rigid
+  // correction from the IEKF and must not be folded into "how much did the
+  // refit change the trajectory", or L1 (redeskew only, no refine/
+  // reintegrate at all) would show a nonzero refit_dtraj_* purely from the
+  // pose correction every rung gets, contradicting the L0->L1 prediction
+  // that refit_dtraj_* == 0 there.
+  {
+    double s2 = 0.0, mx = 0.0, rmx = 0.0;
+    const double a1 = spline_.t0(), h1 = (spline_.t1() - a1) / 31.0;
+    for (int k = 0; k < 32; ++k) {
+      const double d = (spline_.posAt(a1 + k * h1) - pre_p[k]).norm();
+      s2 += d * d;  mx = std::max(mx, d);
+      const M3D dR = spline_.rotAt(a1 + k * h1) * pre_R[k].transpose();
+      rmx = std::max(rmx, std::acos(std::clamp((dR.trace() - 1.0) / 2.0, -1.0, 1.0))
+                          * (180.0 / M_PI));
+    }
+    refit_dtraj_rms_ = std::max(refit_dtraj_rms_, std::sqrt(s2 / 32.0));
+    refit_dtraj_max_ = std::max(refit_dtraj_max_, mx);
+    refit_drot_deg_  = std::max(refit_drot_deg_, rmx);
   }
 
   // (2) POSE, from the IEKF.
@@ -775,7 +827,8 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
              "fit_fail_count,frame_count,max_abs_acc,max_abs_gyr,"
              "n_cp_req,rot_mode,refine_applied,refine_rejects,last_refine_step,"
              "refits,per_iteration,refine_dcp_max,refine_dcp_rms,"
-             "reint_dp_max,reint_drot_deg_max,redeskew_calls,redeskew_dp_rms\n";
+             "reint_dp_max,reint_drot_deg_max,redeskew_calls,redeskew_dp_rms,"
+             "refit_dtraj_rms,refit_dtraj_max,refit_drot_deg,cov_acc_pre,cov_gyr_pre\n";
       first = false;
     }
     const double t_abs = mg.image.t + data_queues_->start_time;
@@ -803,7 +856,9 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
         << (spline_ok_ ? spline_.refineDcpMax() : 0.0) << ','
         << (spline_ok_ ? spline_.refineDcpRms() : 0.0) << ','
         << reint_dp_max_ << ',' << reint_drot_deg_max_ << ','
-        << redeskew_calls_ << ',' << redeskew_dp_rms_
+        << redeskew_calls_ << ',' << redeskew_dp_rms_ << ','
+        << refit_dtraj_rms_ << ',' << refit_dtraj_max_ << ',' << refit_drot_deg_ << ','
+        << cov_acc_pre_ << ',' << cov_gyr_pre_
         << '\n';
   }
 
@@ -908,7 +963,8 @@ std::string LioProc::engagementReport() const
     const long info_fits = voxelPlaneInformationFitCount();
     o << "\n  voxel_map/plane/plane_var_mode = "
       << vm->opts()->plane_var_mode;
-    if (vm->opts()->plane_var_mode == "information")
+    if (vm->opts()->plane_var_mode == "information" ||
+        vm->opts()->plane_var_mode == "information_directional")
     {
       o << " count=" << info_fits;
       if (info_fits == 0)
@@ -1132,6 +1188,11 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     // finishes and applyCovarianceUpdate() is called exactly once.
     prior_cov_ = state_->cov();
     state_propagat_ = *state_;
+    // P1.  Captured here, before this frame's update runs at all -- pairs
+    // with the POST value already computed further down (see that block's
+    // "const auto& P = state_->cov()") to give the covariance delta, i.e.
+    // how much this scan actually learned, which a level alone cannot.
+    trP_pos_pre_ = prior_cov_.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()).trace();
     bool any_solved = false;
 
     for (; iter < opts_.max_iterations; iter++) {
@@ -1273,8 +1334,11 @@ std::string LioProc::processLIO(MeasureGroup& mg)
         sum_acc   += (0.5 * (p.acc_head + p.acc_tail)).norm();
       }
       const double n_poses = std::max<size_t>(1, mg.poses.size());
+      const V3D& ba = state_->biasAcc();
+      const V3D& bg = state_->biasGyr();
       logConsistencyScan("lio", voxel_map_->frame_idx_, t_abs, dt, trP_pos, trP_vel, trP_att,
-                          sum_omega / n_poses, sum_acc / n_poses);
+                          sum_omega / n_poses, sum_acc / n_poses,
+                          ba.x(), ba.y(), ba.z(), bg.x(), bg.y(), bg.z());
     }
 
     std::ostringstream oss;
@@ -1298,10 +1362,49 @@ std::string LioProc::processLIO(MeasureGroup& mg)
         Eigen::SelfAdjointEigenSolver<M3D> es_pp(H_pp_d), es_rr(H_rr_d);
         diag.h_pp_min_eig = es_pp.eigenvalues()(0);
         diag.h_rr_min_eig = es_rr.eigenvalues()(0);
+        diag.h_rr_trace   = H_rr_d.trace();
         double sw = 0.0;
         for (const auto& r : residuals_) if (r.sigma_squared > 0.0) sw += 1.0 / r.sigma_squared;
         diag.sum_weight = sw;
+
+        // P1.  ask/got/refusal.  ekf_.HtH is 6x6 (rows 0-2 rot, 3-5 pos) and is
+        // singular whenever a direction is unconstrained, so solve in the
+        // eigenbasis and drop modes below a relative tolerance rather than
+        // inverting.  A dropped mode is a direction the scan did not constrain;
+        // it contributes nothing to either quantity, which is correct.
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es6(ekf_.HtH);
+        const auto& ev = es6.eigenvalues();
+        const double tol = 1e-12 * std::max(1.0, ev(5));
+        const Eigen::Matrix<double, 6, 1> z = es6.eigenvectors().transpose() * ekf_.Htz;
+        // Paired with THIS iteration's own dtheta/dt, not the frame's
+        // cumulative total_dtheta/total_dt -- ekf_.HtH/Htz are only ever the
+        // LAST relinearization (this diagnostic runs once, after the inner
+        // loop), and dtheta/dt is set from ekf_.dtheta/dt at that same last
+        // solveSystem() call (see the assignment right after it), so this is
+        // the correctly paired iteration. Pairing against the cumulative
+        // total instead double-counts every earlier iteration's own already-
+        // applied correction into "got", routinely pushing got > ask and
+        // refusal negative even on ordinary frames -- confirmed on the P1-P4
+        // smoke test (66% of frames outside [0,1] before this fix).
+        Eigen::Matrix<double, 6, 1> dxv;
+        dxv << dtheta, dt;
+        const Eigen::Matrix<double, 6, 1> y = es6.eigenvectors().transpose() * dxv;
+        double ask = 0.0, got = 0.0;
+        for (int i = 0; i < 6; ++i) if (ev(i) > tol) {
+          ask += z(i) * z(i) / ev(i);
+          got += ev(i) * y(i) * y(i);
+        }
+        diag.ask = ask;  diag.got = got;
+        diag.refusal = (ask > 0.0) ? (1.0 - got / ask)
+                                    : std::numeric_limits<double>::quiet_NaN();
+        diag.htz_rot_norm = ekf_.Htz.segment<3>(0).norm();
+        diag.htz_pos_norm = ekf_.Htz.segment<3>(3).norm();
+        diag.iters        = iter + 1;
+        diag.dx_rot_deg   = total_dtheta.norm() * (180.0 / M_PI);
+        diag.dx_pos_mm    = total_dt.norm() * 1000.0;
       }
+      // Captured at the TOP of processLIO(), before the update -- see note.
+      diag.trP_pos_pre = trP_pos_pre_;
       if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) vm->noteLioFrameDiag(diag);
     }
 

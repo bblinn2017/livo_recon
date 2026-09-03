@@ -93,6 +93,7 @@ struct CorrInfoCols {
   double   floor_term = -1.0;    // weightFloor()'s own contribution to S, separable from sigma_diag_squared/plane_var_term
   double   lambda1 = -1.0;       // second eigenvalue (with lambda0 already logged, completes I per plane)
   double   lambda2 = -1.0;       // third eigenvalue
+  int      info_path = -1;       // P5: 1=exact directional weighting, 0=equal-weight fallback, -1=n/a (not information_directional)
 };
 
 void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, double S,
@@ -116,7 +117,7 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
     // History (113-120): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-113
     if (with_covariates) ofs << ",S_sensor,S_plane_tilt,S_plane_d,S_pose,S_prior_pose,N,J,aniso,lambda0,occ_aniso,occ_cells,occ_var_u,occ_var_v,plane_conf_factor"
                              << ",a0,a1,plane_id,roughness,sigma_bar2,n_eff,n_raw,rho,frames"
-                             << ",floor_term,lambda1,lambda2";
+                             << ",floor_term,lambda1,lambda2,info_path";
     ofs << "\n";
   }
   first_call = false;
@@ -130,7 +131,8 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
         << "," << info.roughness << "," << info.sigma_bar2
         << "," << info.n_eff << "," << info.n_raw << "," << info.rho
         << "," << info.frames
-        << "," << info.floor_term << "," << info.lambda1 << "," << info.lambda2;
+        << "," << info.floor_term << "," << info.lambda1 << "," << info.lambda2
+        << "," << info.info_path;
   ofs << "\n";
 }
 
@@ -140,6 +142,21 @@ struct CorrScanAccum {
   long n_candidates = 0, n_accepted = 0, n_dropped = 0, n_nis_finite = 0;
   double sum_nis = 0.0, sum_nis2 = 0.0, sum_log_nis = 0.0, max_nis = 0.0;
   long n_share = 0; double sum_share = 0.0;
+  // P2.  The variance decomposition, retained per scan instead of only
+  // ever existing inside corr.csv's per-correspondence rows (0.7-1 GB/job,
+  // deleted after scoring). floor_share/sensor_share/plane_share =
+  // sum_{floor,sdiag,pvar}/sum_S answer "how much was each term ever
+  // contributing", which a batch's ATE alone cannot.
+  //
+  // sum_prior_pose added after the smoke test found the original 3-term
+  // decomposition summing to ~1.5% of sum_S, not 1: S actually has a FOURTH
+  // term (s_prior_pose, "H P- H^T", see its own comment at the call site)
+  // that the register's original P2 hunk didn't know about and doesn't sum
+  // to 1 without. This is exactly the "fourth term entering S" case P2's
+  // own verify text names as the most valuable possible outcome.
+  double sum_S = 0.0, sum_floor = 0.0, sum_sdiag = 0.0, sum_pvar = 0.0;
+  double sum_prior_pose = 0.0;
+  int    n_S   = 0;
 };
 std::mutex g_corr_scan_mtx;
 CorrScanAccum g_corr_scan;
@@ -152,20 +169,25 @@ void flushCorrScan(CorrScanAccum& a)
   if (first) {
     ofs.open(debugLogPath("corr_scan.csv"), std::ios::trunc);
     ofs << "scan_id,n_candidates,n_accepted,n_dropped,n_nis_finite,"
-           "sum_nis,sum_nis2,sum_log_nis,max_nis,n_share,sum_share\n";
+           "sum_nis,sum_nis2,sum_log_nis,max_nis,n_share,sum_share,"
+           "n_S,sum_S,sum_floor,sum_sdiag,sum_pvar,sum_prior_pose\n";
     first = false;
   }
   ofs << a.scan_id << ',' << a.n_candidates << ',' << a.n_accepted << ','
       << a.n_dropped << ',' << a.n_nis_finite << ',' << a.sum_nis << ','
       << a.sum_nis2 << ',' << a.sum_log_nis << ',' << a.max_nis << ','
-      << a.n_share << ',' << a.sum_share << '\n';
+      << a.n_share << ',' << a.sum_share << ','
+      << a.n_S << ',' << a.sum_S << ',' << a.sum_floor << ','
+      << a.sum_sdiag << ',' << a.sum_pvar << ',' << a.sum_prior_pose << '\n';
   a = CorrScanAccum{};
 }
 
 // Called for EVERY candidate, always, regardless of the corr.csv stride.
 // Cheap: a few adds under a lock, no I/O except once per scan.
 void debugAccumConsistencyCorr(int scan_id, double nu, double S, int gated,
-                               int dropped, double plane_share)
+                               int dropped, double plane_share,
+                               double floor_term, double sigma_diag_squared,
+                               double plane_var_term, double s_prior_pose)
 {
   std::lock_guard<std::mutex> lock(g_corr_scan_mtx);
   if (scan_id != g_corr_scan.scan_id) {
@@ -189,6 +211,11 @@ void debugAccumConsistencyCorr(int scan_id, double nu, double S, int gated,
     }
     if (plane_share >= 0.0 && std::isfinite(plane_share)) {
       a.n_share++; a.sum_share += plane_share;
+    }
+    if (S > 0.0 && std::isfinite(S)) {
+      a.n_S++;  a.sum_S += S;  a.sum_floor += floor_term;
+      a.sum_sdiag += sigma_diag_squared;  a.sum_pvar += plane_var_term;
+      a.sum_prior_pose += s_prior_pose;
     }
   }
 }
@@ -474,7 +501,9 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
     const double plane_share = (cov && S > 0.0 && s_tilt >= 0.0 && s_d >= 0.0)
         ? (s_tilt + s_d) / S : -1.0;
     debugAccumConsistencyCorr(scan_id, r, S, accepted ? 0 : 1,
-                              dropped_by_ablation ? 1 : 0, plane_share);
+                              dropped_by_ablation ? 1 : 0, plane_share,
+                              floor_term, sigma_diag_squared, plane_var_term,
+                              s_prior_pose);
 
     // 14c: full per-correspondence rows only every Nth candidate. The
     // stride is PRIME on purpose -- LiDAR returns arrive in ring/azimuth
@@ -505,6 +534,7 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
         info.n_raw      = info_n_raw_;
         info.rho        = info_rho_;
         info.frames     = distinct_frames_;
+        info.info_path  = (opts_->plane_var_mode == "information_directional") ? info_path_ : -1;
         // Without this, S is logged but the floor's share of it is not
         // separable -- so "does the roughness floor dominate?" (W-1's own
         // question, asked again of a different floor) is unanswerable from
@@ -683,15 +713,52 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   // branch.  An earlier revision of this threaded `!info_mode` through the
   // Jacobian loop's own condition and through two later guards, which is
   // three places to get wrong and a loop that reads as if it might run.
-  if (opts_->plane_var_mode == "information") {
+  if (opts_->plane_var_mode == "information" ||
+      opts_->plane_var_mode == "information_directional") {
     mean_cov_all_.setZero();
     mean_cov_sensor_.setZero();
+    // P5.  Weighted moment accumulators for the directional path, in WORLD
+    // coordinates so they are independent of the chart -- the chart
+    // (y_normal_/x_normal_) is applied only when buildInformationCovariance()
+    // projects these into H.
+    const bool directional = (opts_->plane_var_mode == "information_directional");
+    double Sw = 0.0; V3D Swd = V3D::Zero(); M3D Swdd = M3D::Zero();
+    const V3D& n = plane_.normal;
+    // Pass 1: mean covariances (as before).
     for (int i = 0; i < N; ++i) {
-      mean_cov_all_    += points[i].sensor_cov + points[i].pos_cov;
+      const M3D Ci = points[i].sensor_cov + points[i].pos_cov;
+      mean_cov_all_    += Ci;
       mean_cov_sensor_ += points[i].sensor_cov;
     }
     mean_cov_all_    /= N;
     mean_cov_sensor_ /= N;
+    // Correction (2026-09-03, register-flagged defect in the first draft of
+    // this hunk): lam0 here must be ROUGHNESS, not the raw smallest
+    // eigenvalue. On the pca arm eigen_values_(0) still contains the mean
+    // projected measurement noise (sigma_meas2), which n^T*Ci*n ALSO
+    // contributes per point below -- using raw eigen_values_(0) as lam0
+    // double-counts that noise and deflates every weight. roughness_ itself
+    // is computed inside buildInformationCovariance(), which runs AFTER
+    // this whole loop and has no points by then -- so it's recomputed here
+    // identically (same formula, pre-debiased path) rather than restructured
+    // into a third function, since N is small and this is O(1) extra work.
+    const double sigma_meas2 = std::max(0.0, n.dot(mean_cov_all_ * n));
+    const double lam0 = std::max(0.0, eigen_values_(0) - sigma_meas2);  // = roughness
+    // Pass 2: per-point directional weights, now that lam0 is correct.
+    for (int i = 0; i < N; ++i) {
+      if (!directional) break;
+      const M3D Ci = points[i].sensor_cov + points[i].pos_cov;
+      const double s2 = n.dot(Ci * n) + lam0;
+      if (!(s2 > 0.0) || !std::isfinite(s2)) continue;
+      const double w = 1.0 / s2;
+      const V3D d = points[i].point - plane_.center;
+      Sw += w;  Swd += w * d;  Swdd += w * d * d.transpose();
+    }
+    if (directional && Sw > 0.0) {
+      Sw_ = Sw; Swd_ = Swd; Swdd_ = Swdd; info_path_ = 1;  // 1 = exact
+    } else {
+      info_path_ = 0;  // 0 = equal-weight fallback
+    }
     // eig0 here is the RAW out-of-plane second moment -- the noise has not
     // been subtracted on this path, so buildInformationCovariance() does it.
     buildInformationCovariance(static_cast<double>(points_size_), mean_cov_all_,
@@ -927,7 +994,8 @@ void VoxelPlane::refitDebiased()
   // eig1/eig2 together, since the same noise floor gets subtracted from
   // all three), making a small denom1/denom2 far more common than in
   // plain PCA.
-  const bool info_mode = (opts_->plane_var_mode == "information");
+  const bool info_mode = (opts_->plane_var_mode == "information" ||
+                          opts_->plane_var_mode == "information_directional");
   const double eps_denom = std::max(1e-8, 0.1 * opts_->plane_threshold);
   // Under the information model there is no eigengap denominator to guard:
   // plane_var_ is assembled directly in the (theta1, theta2, d) chart and
@@ -957,6 +1025,15 @@ void VoxelPlane::refitDebiased()
   radius_       = (float)std::sqrt(eigen_values_(2));
 
   if (info_mode) {
+    // P5.  refitDebiased() runs from unweighted persistent sums after the
+    // points themselves are gone -- it can never populate the exact
+    // per-point weighted moments, so this is unconditionally the
+    // equal-weight fallback. Reset explicitly rather than leaving whatever
+    // update() set on an earlier fit of this same (persistent, reused)
+    // VoxelPlane instance -- otherwise buildInformationCovariance() could
+    // read a STALE info_path_==1 and use Sw_/Swd_/Swdd_ from a fit that is
+    // no longer this one.
+    info_path_ = 0;
     // Scov_ is the mean-scaled sum of combined per-point covariances and
     // Scov_sensor_ the independent (sensor-only) part -- exactly the split
     // buildInformationCovariance() needs, already accumulated by addPoints()
@@ -1101,6 +1178,38 @@ void VoxelPlane::buildInformationCovariance(double n_raw, const M3D& mean_cov_al
   const double m = n_raw / F;
   info_rho_ = (sigma_bar2_ > 0.0) ? std::min(1.0, sigma_pose2 / sigma_bar2_) : 0.0;
   info_n_eff_ = n_raw / std::max(1.0, 1.0 + (m - 1.0) * info_rho_);
+
+  // P5.  The exact directional path, when update() populated it on this
+  // fit (info_path_ == 1): the same design-effect discount the equal-weight
+  // path applies (n_raw/n_eff), but on the full weighted 3x3 moment instead
+  // of an isotropic sigma_bar2_ split diagonally by eigenvalue. Off-
+  // diagonals are the whole point -- a plane sampled unevenly in direction
+  // has real tilt/offset correlation the diagonal form cannot represent.
+  const double design_effect = n_raw / info_n_eff_;
+  if (info_path_ == 1) {
+    Eigen::Matrix<double, 3, 3> H;
+    const V3D& u = y_normal_;  const V3D& v = x_normal_;
+    H(0, 0) = u.dot(Swdd_ * u);  H(0, 1) = u.dot(Swdd_ * v);  H(0, 2) = u.dot(Swd_);
+    H(1, 0) = H(0, 1);           H(1, 1) = v.dot(Swdd_ * v);  H(1, 2) = v.dot(Swd_);
+    H(2, 0) = H(0, 2);           H(2, 1) = H(1, 2);           H(2, 2) = Sw_;
+    H /= design_effect;
+    // Guard exactly as the diagonal path does: refuse the plane if H is
+    // ill-conditioned (no support in one direction) or plane_var_ ends up
+    // non-finite -- an ill-conditioned H must not be admitted with a huge
+    // variance, it must be refused.
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3, 3>> es(H, Eigen::EigenvaluesOnly);
+    const auto& hev = es.eigenvalues();
+    const bool ill_conditioned = !(hev(0) > 0.0) || !std::isfinite(hev(0)) ||
+        (hev(2) / std::max(hev(0), 1e-300)) > 1e12;
+    if (ill_conditioned) {
+      is_plane_ = false;
+      return;
+    }
+    plane_var_ = H.inverse();
+    if (!plane_var_.allFinite()) { is_plane_ = false; return; }
+    g_info_fits.fetch_add(1, std::memory_order_relaxed);
+    return;
+  }
 
   const double l1 = std::max(eigen_values_(1), 1e-12);   // along y_normal_ -> theta1
   const double l2 = std::max(eigen_values_(2), 1e-12);   // along x_normal_ -> theta2

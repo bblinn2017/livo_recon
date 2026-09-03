@@ -10,7 +10,9 @@ void logConsistencyNll(const char* channel, double t_abs, double nll, int n_resi
                        double pivot_ratio, double kalman_gain_norm);
 void logConsistencyScan(const char* channel, int scan_id, double t, double dt,
                         double trP_pos, double trP_vel, double trP_att,
-                        double omega_norm, double acc_norm);
+                        double omega_norm, double acc_norm,
+                        double ba_x, double ba_y, double ba_z,
+                        double bg_x, double bg_y, double bg_z);
 // One row per visual residual, mirroring corr.csv's nu/S so the two channels
 // are scored by the same statistic rather than by two different ones.
 // VioAccumulator has no per-frame scan_id counter the way VoxelMap does (see
