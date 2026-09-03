@@ -210,9 +210,11 @@ def analyse(est_path, gt_path, gt_format, frame_correction, window, max_gap):
         res[f"{name}_p90"] = float(np.nanpercentile(e, 90))
         res[f"{name}_max"] = float(np.nanmax(e))
 
+    rot_error_series = None
     if gt_has_attitude(q_g[valid]):
         q_al = (R.from_matrix(Rm) * R.from_quat(q_i[valid])).as_quat()
         rd = rot_error_deg(q_al, q_g[valid])
+        rot_error_series = rd
         res["rot_ape_deg_rmse"] = float(np.sqrt(np.mean(rd ** 2)))
         res["rot_ape_deg_p90"] = float(np.percentile(rd, 90))
         res["rot_onset_t"], _ = detect_onset(t, rd, floor=0.5)
@@ -221,7 +223,13 @@ def analyse(est_path, gt_path, gt_format, frame_correction, window, max_gap):
         res["rot_note"] = ("GT quaternion is identity everywhere -- position-only "
                            "reference. Rotation error NOT reported; it would be the "
                            "estimate's own rotation magnitude.")
+    # T0-H1: the rotation-error time series (same t/valid indexing as
+    # e_global/e_prefix/e_window -- rd is computed over q_g[valid], t over
+    # the same matched samples), so a caller can put a rotation notch next
+    # to a position notch on the same x-axis. None (not a column) when GT
+    # has no licensed attitude -- see rot_note above.
     return res, dict(t=t, e_global=e_glob, e_prefix=e_pre, e_window=e_win,
+                     rot_error_deg=rot_error_series,
                      # ALIGNED, not raw: the two estimates live in their own
                      # arbitrary frames until Umeyama puts them in GT's, and
                      # differencing the raw ones measures the frame offset
@@ -308,6 +316,8 @@ def main():
         with open(a.out_prefix + "_summary.json", "w") as f:
             json.dump(summary, f, indent=2, default=str)
         cols = {k: curveA[k] for k in ("t", "e_global", "e_prefix", "e_window")}
+        if curveA.get("rot_error_deg") is not None:
+            cols["rot_error_deg"] = curveA["rot_error_deg"]
         cols.update(inst)
         keys = list(cols)
         with open(a.out_prefix + "_error.csv", "w") as f:
