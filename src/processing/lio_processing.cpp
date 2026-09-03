@@ -883,7 +883,6 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
                              V3D::Constant(adaptive_q_.varGyr()));
   }
 
-  if (opts_.spline.log_en || opts_.adaptive_q.log_en)
   // Dense trajectory dump: the spline evaluated as the function it is, on a
   // fixed grid across this scan's own window.  Analysis only (see
   // SplineOptions::traj_log_mode); scores still come from results_lio.txt.
@@ -891,6 +890,13 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
   // of the next also MEASURE the inter-scan discontinuity -- which is the
   // honest check on how continuous this "continuous-time" trajectory is, and
   // nothing has ever measured it.
+  //
+  // opts_.spline.trajLogOn() (traj_log_mode != "off") is already the real
+  // gate here; the outer log_en check this used to have was dangling (no
+  // braces) and bound only to this one inner if, not to the spline_q.csv
+  // block below -- braced explicitly so that's no longer ambiguous to read.
+  if (opts_.spline.log_en || opts_.adaptive_q.log_en)
+  {
   if (spline_ok_ && opts_.spline.trajLogOn())
   {
     static bool traj_first = true;
@@ -910,7 +916,15 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
            << q.x() << ',' << q.y() << ',' << q.z() << ',' << q.w() << '\n';
     }
   }
+  }
 
+  // spline_q.csv is written UNCONDITIONALLY, every scan, regardless of
+  // opts_.spline.log_en/opts_.adaptive_q.log_en -- deliberately, not an
+  // oversight (C-8): rule 8 already retains this file by name across every
+  // batch this project runs, and every AdaptiveQ/spline diagnostic reader
+  // (DX-2's SERIES blocks, C-7's time-axis join, D-1R) assumes it always
+  // exists. Gating it behind log_en would silently break all of them the
+  // moment log_en defaulted false, which it does.
   {
     static bool first = true;
     std::ofstream ofs(debugLogPath("spline_q.csv"), first ? std::ios::trunc : std::ios::app);
@@ -922,7 +936,8 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
              "n_cp_req,rot_mode,refine_applied,refine_rejects,last_refine_step,"
              "refits,per_iteration,refine_dcp_max,refine_dcp_rms,"
              "reint_dp_max,reint_drot_deg_max,redeskew_calls,redeskew_dp_rms,"
-             "refit_dtraj_rms,refit_dtraj_max,refit_drot_deg,cov_acc_pre,cov_gyr_pre\n";
+             "refit_dtraj_rms,refit_dtraj_max,refit_drot_deg,cov_acc_pre,cov_gyr_pre,"
+             "d_bias_acc_norm,d_bias_gyr_norm,d_gravity_norm\n";
       first = false;
     }
     const double t_abs = mg.image.t + data_queues_->start_time;
@@ -952,7 +967,16 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
         << reint_dp_max_ << ',' << reint_drot_deg_max_ << ','
         << redeskew_calls_ << ',' << redeskew_dp_rms_ << ','
         << refit_dtraj_rms_ << ',' << refit_dtraj_max_ << ',' << refit_drot_deg_ << ','
-        << cov_acc_pre_ << ',' << cov_gyr_pre_
+        << cov_acc_pre_ << ',' << cov_gyr_pre_ << ','
+        // DX-5: the joint imu_fit bias/gravity correction's own magnitude
+        // (SplineOptions::imu_fit_bias_prior_frac), so its cost/benefit can
+        // be read against the Allan-deviation noise floor directly, rather
+        // than only through ATE. Zero when imu_fit_mode is "off" or the
+        // channel wasn't usable this frame -- see ScanSpline's own doc
+        // comment on these getters.
+        << (spline_ok_ ? spline_.biasAccDelta().norm() : 0.0) << ','
+        << (spline_ok_ ? spline_.biasGyrDelta().norm() : 0.0) << ','
+        << (spline_ok_ ? spline_.gravityDelta().norm() : 0.0)
         << '\n';
   }
 
