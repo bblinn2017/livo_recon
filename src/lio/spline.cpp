@@ -9,6 +9,64 @@ namespace livo_recon
 namespace
 {
 
+// Boundary-freeze helpers (SplineOptions::boundary_anchor_mode).  Two
+// variants because the fit()/refineWithLidar()/fitRotationCumulative()
+// solves are two different KINDS of linear system:
+//
+//   "absolute" systems (fit()'s position/tangent-rotation/gyro/accel
+//   solves) solve DIRECTLY for the control point VALUES. Freezing here
+//   must (a) subtract the frozen columns' known contribution from the
+//   free rows' RHS -- otherwise the free solve silently assumes the
+//   frozen columns are still 0 -- then (b) decouple the frozen rows/cols
+//   and pin their RHS to the target, so solving gives exactly
+//   X[i]=target for i<n_frozen and the mathematically correct
+//   constrained value for i>=n_frozen.
+//
+//   "incremental" systems (refineWithLidar()'s Gauss-Newton step,
+//   fitRotationCumulative()'s Gauss-Newton step) solve for a STEP/
+//   increment applied on top of the CURRENT (already-frozen) values. The
+//   desired step for a frozen index is exactly zero, and forcing that
+//   makes the coupling term to the free rows vanish on its own -- no RHS
+//   adjustment needed, just decouple and zero.
+//
+// Both assume `target`/frozen rows are indices [0, n_frozen) of a 3-wide
+// (position/tangent-phi) or 3x3-block (LiDAR H, cumulative-rotation H)
+// system; n_frozen is 0, 1 or 3 (SplineOptions::nFrozenCp()).
+
+// A is n_cp x n_cp (one SHARED scalar matrix reused for all 3 spatial
+// dims -- fit()'s own AtA/Atb_p / Atb_r pattern), b is n_cp x 3.
+void freezeAbsoluteScalarSystem(Eigen::MatrixXd& A, Eigen::MatrixXd& b,
+                                int n_frozen, const V3D& target)
+{
+  if (n_frozen <= 0) return;
+  const int n = static_cast<int>(A.rows());
+  for (int i = n_frozen; i < n; ++i)
+    for (int j = 0; j < n_frozen; ++j)
+      b.row(i) -= A(i, j) * target.transpose();
+  for (int i = 0; i < n_frozen; ++i)
+  {
+    for (int j = 0; j < n; ++j) { A(i, j) = 0.0; A(j, i) = 0.0; }
+    A(i, i) = 1.0;
+    b.row(i) = target.transpose();
+  }
+}
+
+// H is 3*n_cp x 3*n_cp (full 3x3 coupling blocks -- refineWithLidar()'s/
+// fitRotationCumulative()'s own pattern), g is 3*n_cp. Increment/step
+// variant: forces the solved step to 0 for the frozen blocks.
+void freezeIncrementalBlockSystem(Eigen::MatrixXd& H, Eigen::VectorXd& g, int n_frozen)
+{
+  if (n_frozen <= 0) return;
+  const int dim = static_cast<int>(H.rows());
+  const int frozen_dim = 3 * n_frozen;
+  for (int i = 0; i < frozen_dim; ++i)
+  {
+    for (int j = 0; j < dim; ++j) { H(i, j) = 0.0; H(j, i) = 0.0; }
+    H(i, i) = 1.0;
+    g(i) = 0.0;
+  }
+}
+
 // Uniform cubic B-spline basis on u in [0,1) and its first two derivatives
 // WITH RESPECT TO u.  b sums to 1, db and ddb each sum to 0 -- which is what
 // makes the derivatives independent of a common offset of the control points.
@@ -193,11 +251,20 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   fit_reg_frac_ = (data_trace > 0.0) ? (reg_trace / (data_trace + reg_trace)) : 1.0;
   if (fit_reg_frac_ > opts.fit_reg_max_frac) return false;
 
-  Eigen::LDLT<Eigen::MatrixXd> ldlt(AtA);
-  if (ldlt.info() != Eigen::Success) return false;
+  // Boundary freeze (SplineOptions::boundary_anchor_mode).  Position and
+  // tangent-rotation need DIFFERENT frozen targets, so each gets its own
+  // copy of AtA -- n_frozen_cp_==0 (the default) makes both calls no-ops
+  // and this is bit-identical to the single shared ldlt(AtA) this replaces.
+  const V3D frozen_phi = (n_frozen_cp_ > 0) ? V3D(Log(R_anchor_T * frozen_rot_)) : V3D::Zero();
+  Eigen::MatrixXd AtA_p = AtA, AtA_r = AtA;
+  freezeAbsoluteScalarSystem(AtA_p, Atb_p, n_frozen_cp_, frozen_pos_);
+  freezeAbsoluteScalarSystem(AtA_r, Atb_r, n_frozen_cp_, frozen_phi);
 
-  const Eigen::MatrixXd Xp = ldlt.solve(Atb_p);
-  const Eigen::MatrixXd Xr = ldlt.solve(Atb_r);
+  Eigen::LDLT<Eigen::MatrixXd> ldlt_p(AtA_p), ldlt_r(AtA_r);
+  if (ldlt_p.info() != Eigen::Success || ldlt_r.info() != Eigen::Success) return false;
+
+  const Eigen::MatrixXd Xp = ldlt_p.solve(Atb_p);
+  const Eigen::MatrixXd Xr = ldlt_r.solve(Atb_r);
   if (!Xp.allFinite() || !Xr.allFinite()) return false;
 
   cp_p_.resize(3, n_cp_);
@@ -263,6 +330,7 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
         const double scale = opts.imu_fit_w_gyr * data_trace / tg;
         Eigen::MatrixXd A_r = AtA + scale * Hg;
         Eigen::MatrixXd b_r = Atb_r + scale * bg;
+        freezeAbsoluteScalarSystem(A_r, b_r, n_frozen_cp_, frozen_phi);
 
         Eigen::LDLT<Eigen::MatrixXd> ldlt_r(A_r);
         if (ldlt_r.info() != Eigen::Success) break;
@@ -307,6 +375,7 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
         const double scale = opts.imu_fit_w_acc * data_trace / ta;
         Eigen::MatrixXd A_p = AtA + scale * Ha;
         Eigen::MatrixXd b_p = Atb_p + scale * ba;
+        freezeAbsoluteScalarSystem(A_p, b_p, n_frozen_cp_, frozen_pos_);
 
         Eigen::LDLT<Eigen::MatrixXd> ldlt_p(A_p);
         const Eigen::MatrixXd Xp2 = ldlt_p.solve(b_p);
@@ -357,6 +426,12 @@ bool ScanSpline::fitRotationCumulative(const std::vector<Pose6D>& poses, int gn_
     const double tg = t0_ + (static_cast<double>(i) - 1.0) * delta_;
     cp_R_[i] = R_anchor_ * Exp(phiAt(tg));
   }
+  // Boundary freeze: the Greville seeding above is already approximately
+  // close (cp_phi_ was frozen by the caller before this ran), but not
+  // exactly -- overwrite directly so cp_R_[i] starts EXACT for i<n_frozen,
+  // and the GN loop below (via freezeIncrementalBlockSystem) never moves
+  // it away from this value.
+  for (int i = 0; i < n_frozen_cp_ && i < n_cp_; ++i) cp_R_[i] = frozen_rot_;
 
   std::vector<double> ts;  ts.reserve(poses.size());
   std::vector<M3D>    Rs;  Rs.reserve(poses.size());
@@ -468,6 +543,10 @@ bool ScanSpline::fitRotationCumulative(const std::vector<Pose6D>& poses, int gn_
     // Light ridge: the outermost control points are supported by few samples.
     const double ridge = 1e-9 * std::max(1.0, H.trace() / static_cast<double>(dim));
     for (int i = 0; i < dim; ++i) H(i, i) += ridge;
+
+    // Boundary freeze: force the solved STEP to 0 for i<n_frozen_cp_, so
+    // cp_R_[i] (already exactly frozen_rot_, set above) never moves.
+    freezeIncrementalBlockSystem(H, g, n_frozen_cp_);
 
     Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
     if (ldlt.info() != Eigen::Success) return false;
@@ -651,6 +730,10 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
     // Levenberg damping on top, relative to the same scale.
     const double lm = std::max(0.0, opts.lidar_refine_damping) * scale;
     for (int i = 0; i < dim; ++i) H(i, i) += lm;
+
+    // Boundary freeze: force the solved step to 0 for i<n_frozen_cp_ (cp_p_
+    // was already exactly frozen_pos_ from fit() -- this keeps it there).
+    freezeIncrementalBlockSystem(H, g, n_frozen_cp_);
 
     Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
     if (ldlt.info() != Eigen::Success)

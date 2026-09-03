@@ -338,6 +338,33 @@ struct SplineOptions
   double traj_log_hz = 200.0;
 
   bool log_en = false;
+
+  // ── Hard boundary constraint at t0 ───────────────────────────────────────
+  // "none" (default): current behaviour -- anchorTo() rigidly re-corrects
+  // the whole spline to match the IEKF's state at t1 every iteration.
+  // boundary_dpos (frame_stats.txt) measures a real, nonzero gap at t0
+  // under this mode: each scan's spline is an independent least-squares
+  // fit, and only ONE end (t1) is pinned, so nothing forces continuity
+  // with the PREVIOUS scan's own t1.
+  //
+  // "single_cp" / "exact": freeze this scan's boundary control point(s) to
+  // the PREVIOUS scan's own final (t1) pose BEFORE fit() runs (see
+  // ScanSpline::setFrozenBoundary()), instead of calling anchorTo() at
+  // all -- anchorTo() afterwards would rigidly move the whole spline again
+  // and both re-open the gap it just closed AND degrade the fit (see the
+  // frozen control points' own doc comment for the exact/non-exact
+  // distinction). t1 is then whatever the frozen-t0 fit+refine produces,
+  // written back into the IEKF state directly (the spline becomes
+  // authoritative for this frame's output pose, not just an internal
+  // deskewing aid) -- so this changes ATE, not just a diagnostic.
+  std::string boundary_anchor_mode = "exact";
+  static constexpr const char* BOUNDARY_ANCHOR_MODES[] = { "none", "single_cp", "exact" };
+  int nFrozenCp() const
+  {
+    if (boundary_anchor_mode == "single_cp") return 1;
+    if (boundary_anchor_mode == "exact") return 3;
+    return 0;
+  }
 };
 
 // Raw IMU for the fit's optional acc/gyro term.  Separate from the pose
@@ -383,6 +410,20 @@ public:
   void resetRefineStats()
   { refine_rejects_ = 0; refine_applied_ = 0; last_refine_step_ = 0.0;
     refine_dcp_max_ = 0.0; refine_dcp_rms_ = 0.0; }
+
+  // Freeze the first n control points (0=off, 1="single_cp", 3="exact" --
+  // see SplineOptions::boundary_anchor_mode) to a single repeated value
+  // (pos, rot) BEFORE fit() runs. n=3 repeats the value degree(=3) times,
+  // the standard "clamped B-spline" identity: since the basis weights at
+  // u=0 are [1/6, 4/6, 1/6, 0] and sum to 1, cp_0=cp_1=cp_2=X forces
+  // spline(t0)=X bit-exactly regardless of what any later control point
+  // does. n=1 (only cp_0=X) does NOT force this exactly -- cp_1/cp_2 still
+  // carry 5/6 of the weight and stay free -- it is deliberately the WEAKER
+  // ablation arm. Call before fit(); persists across fit()/
+  // refineWithLidar()/fitRotationCumulative() until cleared (n=0).
+  void setFrozenBoundary(int n_frozen, const V3D& pos0, const M3D& rot0)
+  { n_frozen_cp_ = n_frozen; frozen_pos_ = pos0; frozen_rot_ = rot0; }
+  int nFrozenCp() const { return n_frozen_cp_; }
 
   bool valid() const { return valid_; }
   int  nControlPoints() const { return n_cp_; }
@@ -447,6 +488,10 @@ public:
   double refineDcpRms() const { return refine_dcp_rms_; }   // m
 
 private:
+  int    n_frozen_cp_ = 0;
+  V3D    frozen_pos_  = V3D::Zero();
+  M3D    frozen_rot_  = M3D::Identity();
+
   bool   valid_ = false;
   bool   cumulative_ = true;
   int    n_cp_  = 0;

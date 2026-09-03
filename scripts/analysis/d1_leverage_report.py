@@ -46,7 +46,8 @@ import numpy as np
 import pandas as pd
 
 USECOLS = ["scan_id", "nu", "S", "gated", "dropped_by_ablation",
-           "S_sensor", "aniso", "occ_aniso", "a0", "a1", "plane_id", "roughness"]
+           "S_sensor", "aniso", "occ_aniso", "a0", "a1", "plane_id", "roughness",
+           "S_prior_pose"]
 GRAVITY_COLS = ["x_normal_x", "x_normal_y", "x_normal_z",
                 "y_normal_x", "y_normal_y", "y_normal_z"]
 WORLD_UP = np.array([0.0, 0.0, 1.0])   # vertical axis; gravity = [0,0,-9.81] in this codebase
@@ -157,7 +158,22 @@ def summarize_gravity_check(rows):
     }
 
 
-def run_one(corr_csv, job_id, gravity_check=False):
+def _cluster_ols(y, X_cols, X_names, clusters):
+    """Cluster-robust OLS. X_cols is a list of 1-D numpy arrays (already
+    log-transformed etc by the caller); returns coef/se/pvalue/r2 by name."""
+    import statsmodels.api as sm
+    X = sm.add_constant(np.column_stack(X_cols))
+    fit = sm.OLS(y, X).fit(cov_type="cluster", cov_kwds={"groups": clusters})
+    names = ["const"] + X_names
+    return {
+        "coef": dict(zip(names, fit.params.tolist())),
+        "se_cluster": dict(zip(names, fit.bse.tolist())),
+        "pvalue": dict(zip(names, fit.pvalues.tolist())),
+        "r_squared": float(fit.rsquared),
+    }
+
+
+def run_one(corr_csv, job_id, gravity_check=False, d1r=False):
     usecols = USECOLS + GRAVITY_COLS if gravity_check else USECOLS
     df = pd.read_csv(corr_csv, usecols=usecols)
     n_rows_total = len(df)
@@ -169,6 +185,13 @@ def run_one(corr_csv, job_id, gravity_check=False):
     df["leverage"] = build_leverage(df)
     df["nis"] = df["nu"] ** 2 / df["S"]
     df["d_center"] = np.sqrt(df["a0"] ** 2 + df["a1"] ** 2)
+    # D-1R.  S = floor_term + sigma_diag_squared + plane_var_term +
+    # s_prior_pose (voxelplane.cpp's own S formula) -- S_prior_pose is
+    # already its own logged column (P2), so S_est = S - S_prior_pose
+    # exactly, no need to reconstruct floor_term/sigma_diag_squared/
+    # plane_var_term individually.
+    df["S_est"] = df["S"] - df["S_prior_pose"]
+    df["nis_est"] = np.where(df["S_est"] > 0, df["nu"] ** 2 / df["S_est"], np.nan)
 
     mask = (
         (df["leverage"] > 0) & np.isfinite(df["leverage"])
@@ -185,19 +208,11 @@ def run_one(corr_csv, job_id, gravity_check=False):
         return {"job_id": job_id, "error": f"too few regressable rows ({n_rows_regressed}) or clusters ({n_clusters})",
                 "n_rows_total": n_rows_total, "n_rows_used_pre_leverage": n_rows_used_pre_leverage}
 
-    import statsmodels.api as sm
-    y = np.log(d["nis"].to_numpy())
-    X = np.column_stack([
-        np.log(d["leverage"].to_numpy()),
-        np.log(d["aniso"].to_numpy()),
-        np.log(d["occ_aniso"].to_numpy()),
-        np.log(d["d_center"].to_numpy()),
-    ])
-    X = sm.add_constant(X)
-    model = sm.OLS(y, X)
-    fit = model.fit(cov_type="cluster", cov_kwds={"groups": d["scan_id"].to_numpy()})
+    base_cols = [np.log(d["leverage"].to_numpy()), np.log(d["aniso"].to_numpy()),
+                 np.log(d["occ_aniso"].to_numpy()), np.log(d["d_center"].to_numpy())]
+    base_names = ["log_leverage", "log_aniso", "log_occ_aniso", "log_d_center"]
+    clusters = d["scan_id"].to_numpy()
 
-    names = ["const", "log_leverage", "log_aniso", "log_occ_aniso", "log_d_center"]
     result = {
         "job_id": job_id,
         "n_rows_total": n_rows_total,
@@ -205,11 +220,37 @@ def run_one(corr_csv, job_id, gravity_check=False):
         "n_rows_regressed": n_rows_regressed,
         "n_planes_used": int(n_planes_used),
         "n_clusters_scan_id": int(n_clusters),
-        "coef": dict(zip(names, fit.params.tolist())),
-        "se_cluster": dict(zip(names, fit.bse.tolist())),
-        "pvalue": dict(zip(names, fit.pvalues.tolist())),
-        "r_squared": float(fit.rsquared),
     }
+    result.update(_cluster_ols(np.log(d["nis"].to_numpy()), base_cols, base_names, clusters))
+
+    if d1r:
+        # D-1R.  D-1's own S (spec 1, above -- this IS the original
+        # regression) is confounded: S_prior_pose is 81-98% of S and grows
+        # with the SAME lever arm a(q) the leverage regressor is built
+        # from, so a positive log_leverage coefficient on spec 1 could be
+        # the confound, not real directional coverage. Specs 2/3 test that.
+        mask2 = mask & np.isfinite(df["nis_est"]) & (df["nis_est"] > 0) & (df["S_prior_pose"] > 0)
+        d2 = df[mask2]
+        result["d1r"] = {"n_rows_spec23": int(len(d2))}
+        if len(d2) >= 50 and d2["scan_id"].nunique() >= 5:
+            cols2 = [np.log(d2["leverage"].to_numpy()), np.log(d2["aniso"].to_numpy()),
+                     np.log(d2["occ_aniso"].to_numpy()), np.log(d2["d_center"].to_numpy())]
+            clusters2 = d2["scan_id"].to_numpy()
+            # spec 2: same covariates, S_est (excludes s_prior_pose) instead of S.
+            result["d1r"]["spec2_S_est"] = _cluster_ols(
+                np.log(d2["nis_est"].to_numpy()), cols2, base_names, clusters2)
+            # spec 3: spec 2 + log(S_prior_pose) as an explicit covariate,
+            # controlling for the shared lever-arm factor directly instead
+            # of just excluding its effect from the denominator.
+            cols3 = cols2 + [np.log(d2["S_prior_pose"].to_numpy())]
+            result["d1r"]["spec3_S_est_plus_prior_pose_covariate"] = _cluster_ols(
+                np.log(d2["nis_est"].to_numpy()), cols3, base_names + ["log_S_prior_pose"], clusters2)
+        else:
+            result["d1r"]["error"] = f"too few rows/clusters for specs 2/3 ({len(d2)} rows)"
+        result["d1r"]["note"] = ("age/fill covariates from P10 NOT yet included -- corr.csv only "
+                                  "has them aggregated per-scan (corr_scan.csv), not per-row; adding "
+                                  "per-row age/fill to corr.csv needs a rebuild, deferred while DX-2 "
+                                  "is actively dispatching (never rebuild mid-sweep).")
 
     if gravity_check:
         if not all(c in df.columns for c in GRAVITY_COLS):
@@ -231,8 +272,13 @@ def main():
     ap.add_argument("--gravity-check", action="store_true",
                      help="D-1's second falsifier -- meaningful on eee_01, needs corr.csv's "
                           "x_normal_/y_normal_ columns (added alongside a0/a1 for this).")
+    ap.add_argument("--d1r", action="store_true",
+                     help="D-1R: run the regression 3 ways (spec1=D-1's original S, "
+                          "spec2=S_est excluding s_prior_pose, spec3=spec2+log(s_prior_pose) "
+                          "as a covariate) to test whether D-1's positive log_leverage "
+                          "coefficient survives removing the S_prior_pose confound.")
     a = ap.parse_args()
-    result = run_one(a.corr_csv, a.job_id, gravity_check=a.gravity_check)
+    result = run_one(a.corr_csv, a.job_id, gravity_check=a.gravity_check, d1r=a.d1r)
     print(json.dumps(result))
 
 

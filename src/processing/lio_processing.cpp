@@ -189,6 +189,15 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
                      "spline/per_iteration/reintegrate/min_dba",
                      opts_.spline.reintegrate_min_dba, 1e-9);
 
+  // Hard t0 boundary constraint -- see SplineOptions::boundary_anchor_mode's
+  // own doc comment. Default "exact": boundary_dpos measured a real,
+  // nonzero scan-to-scan gap under the old always-"none" behavior (DV-1(b)),
+  // and freezing the boundary control points to the previous scan's own
+  // final pose closes it by construction rather than approximately.
+  cfg.nestedMode(sp, "spline/enable", "spline/boundary_anchor_mode",
+                 opts_.spline.boundary_anchor_mode, "exact",
+                 { "none", "single_cp", "exact" });
+
   cfg.nested<bool>(sp, "spline/enable", "spline/log_en", opts_.spline.log_en, false);
   // Analysis-only dense trajectory dump -- see SplineOptions::traj_log_mode.
   cfg.nestedMode(sp, "spline/enable", "spline/trajectory_log/mode",
@@ -491,6 +500,13 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
     TimedScope ts_fit(profiler_, "lio/spline/fit");
     spline_frame_count_++;
     const SplineImuFitData ifd = splineImuFitData(mg);
+    // Boundary freeze (SplineOptions::boundary_anchor_mode).  Only once a
+    // previous scan has actually left a boundary to freeze to -- the very
+    // first spline scan of a run has nothing to anchor against, so it
+    // always fits unconstrained (n_frozen=0) regardless of the mode.
+    spline_.setFrozenBoundary(
+        prev_scan_end_valid_ ? opts_.spline.nFrozenCp() : 0,
+        prev_scan_end_pos_, prev_scan_end_rot_);
     spline_ok_ = spline_.fit(mg.poses, mg.poses.front().t, mg.image.t, opts_.spline, &ifd);
     // Keep the pristine sequence only if something will replay it.
     if (spline_ok_ && opts_.spline.reintegrateOn())
@@ -715,7 +731,19 @@ bool LioProc::redeskewFromSpline(MeasureGroup& mg)
   // difference from the legacy one-shot deskew, where only the scan-end
   // pose is ever corrected and every earlier point keeps the pose the
   // IMU-only propagation gave it.
-  spline_.anchorTo(mg.image.t, state_->rot(), state_->pos());
+  //
+  // SKIPPED under boundary freezing (SplineOptions::boundary_anchor_mode
+  // != "none"): a rigid whole-spline correction here would move t0 away
+  // from the value fit()/refineWithLidar() were just constrained to leave
+  // untouched, undoing the freeze every single inner iteration and
+  // degrading the fit against its own residuals for nothing. With
+  // freezing active, the spline's placement comes ONLY from the frozen
+  // fit/refine; state_ is not synchronized to it at all -- state_'s own
+  // pose keeps coming exclusively from the IEKF's own point-to-plane
+  // correction (buildResiduals()/HtH/Htz/applyDelta), same as always.
+  // The spline here remains purely an internal deskewing aid.
+  if (spline_.nFrozenCp() == 0)
+    spline_.anchorTo(mg.image.t, state_->rot(), state_->pos());
 
   // How far the re-deskew actually moved the points it re-placed.  This is
   // the only quantity that says whether the per-iteration mechanism is doing
@@ -750,16 +778,36 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
   boundary_drot_deg_ = -1.0;
   if (spline_ok_)
   {
-    // Anchor to the CONVERGED state before measuring.  Measuring against
-    // the propagated-only spline would fold this frame's own correction
-    // error into a number we are about to call "IMU noise".
-    spline_.anchorTo(mg.image.t, state_->rot(), state_->pos());
+    if (spline_.nFrozenCp() == 0)
+    {
+      // Anchor to the CONVERGED state before measuring.  Measuring against
+      // the propagated-only spline would fold this frame's own correction
+      // error into a number we are about to call "IMU noise".
+      spline_.anchorTo(mg.image.t, state_->rot(), state_->pos());
+    }
+    // Boundary freeze active (nFrozenCp() > 0): t0 was already pinned
+    // exactly before fit()/refineWithLidar() ran (see setFrozenBoundary()'s
+    // own call site) -- anchorTo() here would rigidly move the whole spline
+    // again, re-opening the gap it was constrained to close, so it is
+    // skipped. state_ is NOT written back from the spline's own t1: state_
+    // is one continuously-propagated object across the whole run (never
+    // reconstructed per scan), so it was never actually discontinuous at
+    // scan boundaries in the first place -- only the spline's own
+    // independently-refit-per-scan shape was. state_'s pose/vel/bias/
+    // gravity continue to come exclusively from the IEKF's own
+    // covariance-consistent point-to-plane correction, exactly as when
+    // freezing is off. The spline here is purely an internal deskewing
+    // aid; freezing only makes ITS OWN boundary consistent, not a
+    // correction source for state_.
 
     // DX-2 preflight fix (boundary_dpos): THIS scan's own start (t0)
     // against the PREVIOUS scan's finalized end -- the two spline
     // evaluations this costs. Order matters: compare against the OLD
     // prev_scan_end_* before overwriting it with this scan's own end
-    // below.
+    // below. Under boundary freezing this MUST come back ~0 (float
+    // roundoff only): setFrozenBoundary() always freezes THIS scan's t0 to
+    // the exact prev_scan_end_* recorded below, so the invariant holds by
+    // construction regardless of what state_'s own value happens to be.
     if (prev_scan_end_valid_)
     {
       const V3D t0_pos = spline_.posAt(spline_.t0());
@@ -769,9 +817,11 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
       boundary_drot_deg_ = std::acos(std::clamp((dR.trace() - 1.0) / 2.0, -1.0, 1.0))
                           * (180.0 / M_PI);
     }
-    // This scan's own end (t1) is exactly the anchor point just applied
-    // above -- state_->rot()/state_->pos() at mg.image.t -- no extra
-    // spline evaluation needed for the outgoing half.
+    // This scan's own end, and the freeze target for the NEXT scan's t0:
+    // always state_'s own pose (never the spline's t1 directly). Under
+    // nFrozenCp()==0 these agree exactly (anchorTo() above just forced
+    // it); under freezing they need not agree exactly, and that's fine --
+    // the spline is not the source of truth for state_.
     prev_scan_end_pos_ = state_->pos();
     prev_scan_end_rot_ = state_->rot();
     prev_scan_end_valid_ = true;
