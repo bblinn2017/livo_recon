@@ -149,6 +149,22 @@ def score_corr_raw(corr_df):
         ok = finite_nis & np.isfinite(v)
         if ok.sum() < 50:
             continue
+
+        # C-4/CA-6 (2026-09-03): the quintile-mean-NIS binning below computes
+        # percentile bin EDGES internally and discards them, reporting only
+        # the binned NIS means -- so nothing here ever printed the actual
+        # threshold VALUE a "top decile" drop mode needs (T3-0e's
+        # occ_aniso_drop_threshold was instead a one-off constant computed
+        # by hand in a prior session and hardcoded into gen_t3_0e_manifest.py
+        # as OCC_ANISO_P90). Report the percentile values themselves --
+        # p50/p80/p90/p99 -- so any future "top X%" drop mode has its
+        # threshold computed here, not hand-derived and hardcoded again.
+        pcts = _pctl(v[ok], [50, 80, 90, 99])
+        out[f"{cov}_p50"] = pcts[50]
+        out[f"{cov}_p80"] = pcts[80]  # the top-quintile boundary itself
+        out[f"{cov}_p90"] = pcts[90]  # the top-decile boundary a "top 10%" drop mode needs
+        out[f"{cov}_p99"] = pcts[99]
+
         q = np.nanpercentile(v[ok], [0, 20, 40, 60, 80, 100])
         q = np.unique(q)
         if len(q) < 3:

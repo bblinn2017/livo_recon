@@ -380,21 +380,31 @@ def load_cell(run_dir, gt_path, gt_format, frame_correction, window=10.0, max_ga
                 ate_rmse=ate_rmse, diag=diag)
 
 
-def series_block(cell_data):
-    """Block 1: 40 equal-span medians per cell, ladder cells only."""
+def series_block(cell_data, fine_start_s=None):
+    """Block 1: 40 equal-span medians per cell, ladder cells only.
+
+    C-3 (2026-09-03): fine_start_s is opt-in, NOT a new default (register's
+    own wording -- "a flag, not a new default"). When set, PREPENDS
+    1-second-resolution buckets covering [t0, t0+fine_start_s) ahead of the
+    original 40 equal-span buckets, which still cover the full [t0, t1]
+    range exactly as before -- the coarse series is unchanged, this only
+    adds finer resolution where R-0 found the initialisation transient
+    lives (40 buckets over ~332s is 8.3s/bucket, entirely inside bucket 0).
+    Omitting fine_start_s (the default) reproduces the pre-C-3 output
+    exactly, row for row.
+    """
     rows = []
     for cell, d in cell_data.items():
         if cell not in LADDER_CELLS or d is None:
             continue
         t = d["t"]
         t0, t1 = t[0], t[-1]
-        edges = np.linspace(t0, t1, 41)
         gain_cum = np.nancumsum(np.nan_to_num(d["gain"], nan=0.0))
-        for k in range(40):
-            lo, hi = edges[k], edges[k + 1]
-            m = (t >= lo) & (t < hi if k < 39 else t <= hi)
+
+        def build_bucket(lo, hi, inclusive_hi):
+            m = (t >= lo) & (t <= hi if inclusive_hi else t < hi)
             if not m.any():
-                continue
+                return None
 
             def med(arr):
                 v = arr[m]
@@ -423,7 +433,7 @@ def series_block(cell_data):
                 v = v[np.isfinite(v)]
                 return float(np.mean(v)) if len(v) else float("nan")
 
-            rows.append(dict(
+            return dict(
                 cell=cell.upper(), t_s=float(t[m][len(t[m]) // 2] - t0),
                 e_glob=med(d["e_glob"]), e_glob_rms=rms(d["e_glob"]),
                 e_pre=med(d["e_pre"]), e_win=med(d["e_win"]),
@@ -450,7 +460,22 @@ def series_block(cell_data):
                 acf1_gyr=med(d["diag"].get("acf1_gyr", np.full(len(t), np.nan))),
                 active_frac=frac(d["diag"].get("active", np.full(len(t), np.nan))),
                 clamped_frac=frac(d["diag"].get("clamped", np.full(len(t), np.nan))),
-            ))
+            )
+
+        if fine_start_s:
+            n_fine = int(np.ceil(min(fine_start_s, t1 - t0)))
+            for k in range(n_fine):
+                lo, hi = t0 + k, min(t0 + k + 1, t1)
+                r = build_bucket(lo, hi, inclusive_hi=(hi >= t1))
+                if r is not None:
+                    rows.append(r)
+
+        edges = np.linspace(t0, t1, 41)
+        for k in range(40):
+            lo, hi = edges[k], edges[k + 1]
+            r = build_bucket(lo, hi, inclusive_hi=(k == 39))
+            if r is not None:
+                rows.append(r)
     return rows
 
 
@@ -785,7 +810,26 @@ def verify_block(cell_data, series, dispatched_cells):
           data was right. Reported honestly now: the raw sum, not an "error"
           that implies a check passed.
       (3) on a trajectory_mode: discrete cell, refit_dtraj_rms is 0 (there is
-          no spline to refit at all -- see DISCRETE_CELLS).
+          no spline to refit at all).
+
+          C-11 (2026-09-03): was gated on `cell in DISCRETE_CELLS`, a
+          hardcoded allowlist of DX1R's own four cell-name strings
+          ("l0"/"l0d"/"r_l0"/"n_l0"). Every OTHER batch's cell names (T3-0e's
+          "t30e_top_pca_exp04", N-SYS's "nsys_l0_e1_1", ...) never match
+          that list regardless of whether the cell actually ran discrete --
+          so emit_batch_blocks.py's generic verify_block() call always read
+          "nan" here for every batch except DX1R itself, which is exactly
+          the defect this register's C-11 row named ("a check that never
+          evaluates"). Fixed to be purely DATA-driven instead of name-driven:
+          refit_dtraj_rms being absent/all-NaN or uniformly < 1e-9 IS the
+          discrete-cell signature (no spline ran, or it ran and never
+          moved anything) regardless of what the cell is called, and a
+          genuinely nonzero refit_dtraj_rms means this cell is NOT behaving
+          like a discrete one, so the check does not apply to it (reported
+          as "n/a", not "nan" -- "nan" now means missing data specifically,
+          "n/a" means the check was evaluated and does not apply here).
+          DISCRETE_CELLS is no longer read by this function; kept only as
+          documentation of DX1R's own four discrete cell names elsewhere.
       (4) the row count this cell contributed to DX1R-SERIES (0 for any cell
           not in LADDER_CELLS -- SERIES is ladder-only by construction).
     """
@@ -803,14 +847,13 @@ def verify_block(cell_data, series, dispatched_cells):
         gain_cum = np.nancumsum(np.nan_to_num(gain, nan=0.0))
         gain_sum_m = float(gain_cum[-1]) if len(gain_cum) else float("nan")
 
-        if cell in DISCRETE_CELLS:
-            rd = d["diag"].get("refit_dtraj_rms")
-            if rd is None or not np.any(np.isfinite(rd)):
-                zero_ok = "1"  # no spline data at all on a discrete cell -- trivially satisfied
-            else:
-                zero_ok = "1" if np.nanmax(np.abs(rd)) < 1e-9 else "0"
+        rd = d["diag"].get("refit_dtraj_rms")
+        if rd is None or not np.any(np.isfinite(rd)):
+            zero_ok = "1"  # no spline activity recorded at all -- discrete-cell signature, trivially satisfied
+        elif np.nanmax(np.abs(rd)) < 1e-9:
+            zero_ok = "1"  # spline ran but never moved anything -- also discrete-like
         else:
-            zero_ok = "nan"  # check does not apply outside DISCRETE_CELLS
+            zero_ok = "n/a"  # genuinely nonzero refit -- this cell is not discrete, check does not apply
 
         n_series_rows = sum(1 for r in series if r["cell"] == cell.upper())
 
@@ -882,6 +925,12 @@ def main():
                     help="git rev-parse HEAD of the livo_recon build the cells actually RAN "
                          "on (not detectable from data -- must be supplied). Required with "
                          "--emit-blocks.")
+    ap.add_argument("--fine-start", type=float, default=None,
+                    help="C-3: opt-in only, no default. When set (seconds), prepends 1s-"
+                         "resolution [DX1R-SERIES] buckets covering the first N seconds of "
+                         "each ladder cell, ahead of the unchanged 40 coarse buckets -- "
+                         "the R-0-confirmed initialisation transient lives entirely inside "
+                         "the first coarse bucket at the default 40/~332s resolution.")
     a = ap.parse_args()
 
     if a.emit_blocks and not a.build_commit:
@@ -897,7 +946,7 @@ def main():
             print(f"WARNING: {cell} not loaded (missing odometry.txt or too few matched samples)",
                   file=sys.stderr)
 
-    series = series_block(cell_data)
+    series = series_block(cell_data, fine_start_s=a.fine_start)
     summary = summary_block(cell_data)
     pairs = pairs_block(cell_data)
 

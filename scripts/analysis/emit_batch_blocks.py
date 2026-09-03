@@ -243,10 +243,9 @@ def main():
                 run_dir = spec.split("=", 1)[1]
                 break
         r["ate_results_lio"] = dxr._results_lio_ate(run_dir) if cname else float("nan")
-        # DX-1R-VERIFY's check (3) is DISCRETE_CELLS-specific and does not
-        # apply outside that one batch's naming -- leave as the "nan" (not
-        # applicable) the generic verify_block already emits for anything
-        # not in dxr.DISCRETE_CELLS.
+        # C-11: check (3) is now data-driven (verify_block() reads
+        # refit_dtraj_rms directly, no cell-name allowlist), so it evaluates
+        # correctly here too -- nothing left to do in this generic wrapper.
 
     meta = dxr.meta_block(cell_data, a.batch_id, a.seq, a.build_commit, None, dispatched, run_dirs=run_dirs)
     meta = meta.replace("[DX1R-META v2]", f"[{name}-META v2]").replace("[/DX1R-META]", f"[/{name}-META]")
