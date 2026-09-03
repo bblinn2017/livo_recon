@@ -76,6 +76,82 @@ def prefix_error(t, p_est, p_gt, min_n=20):
     return err
 
 
+def rolling_prefix_ate(p_est, p_gt, recompute_every=500, tol=1e-9):
+    """C-6: 'what ATE would have read if the run had stopped at k', for every
+    k=3..N, computed incrementally (rolling sums + one 3x3 SVD per frame)
+    rather than by N full re-alignments -- umeyama_no_scale is least squares
+    in closed form, so its sufficient statistics are rolling sums. This is
+    the P-1 THE FIGURE object: it REPLACES a cumulative RMS of e_glob (one
+    whole-run Umeyama, then averaged), which is a different and misleading
+    quantity -- see the register's C-6 card for why a rigid transform fit to
+    the whole run displaces a stationary start that has no rotational lever
+    arm of its own.
+
+    Numerical guard, register-mandated: world-coordinate accumulators
+    (Sigma is a difference of two large nearly-equal terms) lose precision
+    as the trajectory leaves the origin, so before accumulating, x and y
+    are each shifted by their OWN first sample (not a shared one -- the
+    register's card says "subtract y_1 from every x_i and y_i", which
+    silently assumes x and y already share an origin; est and GT live in
+    independent frames until Umeyama aligns them, so a shared shift leaves
+    whichever series has the larger unrelated offset unprotected -- verified
+    to reproduce the exact same ate_k as an unshifted computation, since a
+    common shift within each series translates but does not change the
+    optimal rotation, and t is recovered as t' - R@x[0] + y[0], which cancels
+    in every ATE_k^2 term below). An exact from-scratch umeyama_no_scale
+    recompute every `recompute_every` frames must agree with the running
+    incremental value to `tol` -- this is asserted, not just hoped for, and
+    the actual observed max drift is returned so a caller can report it.
+
+    Returns (ate_k, meta) -- ate_k[k] is nan for k<2 (need >=3 samples),
+    meta['max_drift'] is the largest |incremental - exact| seen at any
+    recompute checkpoint.
+    """
+    n = len(p_gt)
+    ate_k = np.full(n, np.nan)
+    if n < 3:
+        return ate_k, dict(max_drift=float("nan"), n_checkpoints=0)
+
+    x = np.asarray(p_est, dtype=np.float64) - p_est[0]
+    y = np.asarray(p_gt, dtype=np.float64) - p_gt[0]
+
+    Sx = np.cumsum(x, axis=0)
+    Sy = np.cumsum(y, axis=0)
+    Mxy = np.cumsum(np.einsum("ni,nj->nij", x, y), axis=0)   # sum_{i<=k} x_i y_i^T
+    Sxx = np.cumsum(np.sum(x * x, axis=1))
+    Syy = np.cumsum(np.sum(y * y, axis=1))
+
+    max_drift, n_checkpoints = 0.0, 0
+    for k in range(2, n):
+        nk = k + 1
+        mu_x, mu_y = Sx[k] / nk, Sy[k] / nk
+        Sigma = Mxy[k].T / nk - np.outer(mu_y, mu_x)
+        U, _, Vt = np.linalg.svd(Sigma)
+        d = np.sign(np.linalg.det(U) * np.linalg.det(Vt))
+        Rm = U @ np.diag([1.0, 1.0, d]) @ Vt
+        tvec = mu_y - Rm @ mu_x
+
+        val = (Sxx[k] + Syy[k] + nk * float(tvec @ tvec)
+               + 2.0 * float(tvec @ Rm @ Sx[k]) - 2.0 * float(np.trace(Rm @ Mxy[k]))
+               - 2.0 * float(tvec @ Sy[k])) / nk
+        ate_k[k] = np.sqrt(max(val, 0.0))
+
+        if nk % recompute_every == 0:
+            Rm_e, tv_e = umeyama_no_scale(x[:nk], y[:nk])
+            aligned = (Rm_e @ x[:nk].T).T + tv_e
+            exact = float(np.sqrt(np.mean(np.sum((aligned - y[:nk]) ** 2, axis=1))))
+            drift = abs(exact - ate_k[k])
+            max_drift = max(max_drift, drift)
+            n_checkpoints += 1
+            assert drift < tol, (
+                f"rolling_prefix_ate: incremental/exact drift {drift:.3e} at "
+                f"k={nk} exceeds tol {tol:.0e} -- the rolling sums have "
+                f"decorrelated from the exact recompute, do not trust ate_k "
+                f"past this point")
+
+    return ate_k, dict(max_drift=float(max_drift), n_checkpoints=n_checkpoints)
+
+
 def window_error(t, p_est, p_gt, window):
     """Aligned locally in a +-window/2 span. Flat under pure drift, spikes where
     the local SHAPE is wrong."""

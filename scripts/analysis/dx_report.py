@@ -308,6 +308,14 @@ def load_cell(run_dir, gt_path, gt_format, frame_correction, window=10.0, max_ga
         diag["cov_gyr_post"] = _resample_at(sq["t_abs"], sq["cov_gyr_meas"], t)
         diag["refit_dtraj_rms"] = _resample_at(sq["t_abs"], sq["refit_dtraj_rms"], t)
         diag["refit_dtraj_max"] = _resample_at(sq["t_abs"], sq["refit_dtraj_max"], t)
+        # DX-5 (commit 43b598a): the fitted bias/gravity delta magnitude,
+        # never logged before this round -- 0 on every pre-43b598a spline_q.csv
+        # (column absent) and on any cell with imu_fit_mode=off (biasAccDelta()
+        # etc. return Zero() when the joint solve never ran).
+        if "d_bias_acc_norm" in sq:
+            diag["d_bias_acc_norm"] = _resample_at(sq["t_abs"], sq["d_bias_acc_norm"], t)
+            diag["d_bias_gyr_norm"] = _resample_at(sq["t_abs"], sq["d_bias_gyr_norm"], t)
+            diag["d_gravity_norm"] = _resample_at(sq["t_abs"], sq["d_gravity_norm"], t)
 
     diag["cov_acc"] = diag.get("cov_acc_post", np.full(len(t), np.nan))
     diag["cov_gyr"] = diag.get("cov_gyr_post", np.full(len(t), np.nan))
@@ -418,6 +426,12 @@ def summary_block(cell_data):
             vis_free_acc_frac=p50("vis_free_acc_frac"), vis_free_of_acc=p50("vis_free_of_acc"),
             age_free_p50=p50("age_free"), age_hit_p50=p50("age_hit"),
             fill_free_p50=p50("fill_free"), fill_hit_p50=p50("fill_hit"),
+            # DX-5: p50/p90 of the fitted bias/gravity delta magnitude
+            # (commit 43b598a) -- nan on any cell whose spline_q.csv predates
+            # that commit (column absent, diag key never set).
+            d_bias_acc_norm_p50=p50("d_bias_acc_norm"), d_bias_acc_norm_p90=p90("d_bias_acc_norm"),
+            d_bias_gyr_norm_p50=p50("d_bias_gyr_norm"), d_bias_gyr_norm_p90=p90("d_bias_gyr_norm"),
+            d_gravity_norm_p50=p50("d_gravity_norm"), d_gravity_norm_p90=p90("d_gravity_norm"),
         ))
     return rows
 
@@ -540,6 +554,8 @@ def emit_series(rows):
 def emit_summary(rows):
     # P10: bumped to v2 -- vis_free_acc_frac/vis_free_of_acc/age_{free,hit}_p50/
     # fill_{free,hit}_p50 appended, existing columns unchanged/unreordered.
+    # DX-5: bumped to v3 -- d_bias_acc_norm/d_bias_gyr_norm/d_gravity_norm
+    # p50/p90 appended (commit 43b598a), same "append at the end" convention.
     cols = ["cell", "ate", "e_pre_p50", "e_pre_p90", "e_win_p50", "gain_sum", "gain_neg_frac",
             "v_err_p50", "refusal_p50", "refusal_nan_frac", "div_pos_p50", "div_rot_p50", "nis_p50",
             "sdiag_share_p50", "pvar_share_p50", "floor_share_p50", "prior_pose_share_p50",
@@ -548,8 +564,10 @@ def emit_summary(rows):
             "boundary_dpos_p50", "boundary_dpos_p90", "vis_free_frac", "vis_unobs_frac",
             "vis_hit_thru_frac", "iters_p50", "trP_pos_drop_p50",
             "vis_free_acc_frac", "vis_free_of_acc", "age_free_p50", "age_hit_p50",
-            "fill_free_p50", "fill_hit_p50"]
-    out = ["[DX1R-SUMMARY v2]", ",".join(cols)]
+            "fill_free_p50", "fill_hit_p50",
+            "d_bias_acc_norm_p50", "d_bias_acc_norm_p90", "d_bias_gyr_norm_p50",
+            "d_bias_gyr_norm_p90", "d_gravity_norm_p50", "d_gravity_norm_p90"]
+    out = ["[DX1R-SUMMARY v3]", ",".join(cols)]
     for r in rows:
         def fmt(c):
             v = r[c]
