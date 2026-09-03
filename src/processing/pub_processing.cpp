@@ -42,7 +42,7 @@ std::string PubProc::loadParameters(ros::NodeHandle& pnh)
     const std::string pose_pair_path = opts_.output_path + "/pose_pair.csv";
     pose_pair_file_.open(pose_pair_path, std::ios::out | std::ios::trunc);
     if (pose_pair_file_.is_open())
-      pose_pair_file_ << "t,px,py,pz,qx,qy,qz,qw,"
+      pose_pair_file_ << "frame_idx,t,px,py,pz,qx,qy,qz,qw,"
                          "ppx,ppy,ppz,pqx,pqy,pqz,pqw,"
                          "vx,vy,vz,pvx,pvy,pvz\n";
     else
@@ -252,7 +252,14 @@ void PubProc::publishOdometry(const MeasureGroup& mg)
   // odometry.txt are looking at the same scan's same state.
   if (pose_pair_file_.is_open()) {
     const Eigen::Quaterniond pq(mg.prior_rot);
-    pose_pair_file_ << std::fixed << std::setprecision(9)
+    // frame_idx: same voxel_map_->frame_idx_ counter frame_stats.txt/
+    // scan.csv/corr_scan.csv/spline_q.csv already key their own scan_id
+    // column on -- lets dx_report.py join on an exact integer instead of
+    // float-timestamp matching (see the t-column precision issue that
+    // motivated this).
+    pose_pair_file_ << std::fixed
+        << voxel_map_->frame_idx_ << ","
+        << std::setprecision(9)
         << stamp.toSec() << ","
         << state_->pos().x() << "," << state_->pos().y() << "," << state_->pos().z() << ","
         << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << ","

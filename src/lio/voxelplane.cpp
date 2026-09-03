@@ -1298,17 +1298,21 @@ int VoxelPlane::classifyVisibility(const V3D& o_world, const V3D& p_world, doubl
   if (!is_plane_ || !occ_anchored_) return 2;  // unobserved: no chart yet
 
   const V3D ray = p_world - o_world;
-  const double denom = occ_anchor_normal_.dot(ray);
+  // Geometric ray-plane intersection uses THIS plane's own current fit
+  // (plane_.normal/plane_.d, with plane_.d = -normal.dot(center), i.e. the
+  // plane is {x : normal.dot(x) + d == 0}) consistently -- occ_anchor_normal_
+  // must never be paired with plane_.d, since occ_anchor_normal_ can lag
+  // plane_.normal by up to kResetCosThreshold between re-anchors and the two
+  // are not interchangeable in this formula. occ_anchor_{normal,x,y,center}_
+  // is reserved for the chart (u,v) projection below, never the crossing
+  // test itself. Root of normal.dot(o + t*ray) + d == 0 is
+  // t* = -(normal.dot(o) + d) / normal.dot(ray).
+  const double denom = plane_.normal.dot(ray);
   int vis_state = 2;  // default: unobserved
   if (std::abs(denom) > 1e-9) {
-    const double ts = (plane_.d - occ_anchor_normal_.dot(o_world)) / (-denom);
-    // ts is the fraction of (o->p) at which the ray crosses THIS plane's
-    // own surface (plane_.d/normal, not the occupancy anchor's slightly
-    // different normal from before the last re-anchor -- close enough that
-    // this is a non-issue in practice, since occ_anchor_normal_ only drifts
-    // past kResetCosThreshold before re-anchoring). ts in (0, 1-margin)
-    // means the ray reached the plane's own depth and kept going past it
-    // before terminating at p_world.
+    const double ts = -(plane_.normal.dot(o_world) + plane_.d) / denom;
+    // ts in (0, 1-margin) means the ray reached the plane's own depth and
+    // kept going past it before terminating at p_world.
     const double range = ray.norm();
     const double margin = (range > 0.0 && sigma_r > 0.0) ? (sigma_r / range) : 0.0;
     if (ts > 0.0 && ts < (1.0 - margin)) {

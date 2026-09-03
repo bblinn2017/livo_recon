@@ -9,6 +9,7 @@
 #include <numeric>
 #include <random>
 #include <fstream>
+#include <iomanip>
 #include <stdexcept>
 
 namespace livo_recon
@@ -28,7 +29,12 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            ",h_rr_trace,htz_rot_norm,htz_pos_norm,ask,got,refusal"
            ",iters,dx_rot_deg,dx_pos_mm,trP_pos_pre\n";
   first_call = false;
-  ofs << t_abs << "," << frame_idx << "," << denom_rejected_count << "," << max_plane_var_trace
+  // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
+  // (6 significant figures) collapses every frame in a run to the same
+  // printed value without an explicit precision. Matches the setprecision(9)
+  // convention already used by pose_pair.csv/spline_q.csv's own t columns.
+  ofs << std::fixed << std::setprecision(9) << t_abs << std::defaultfloat
+      << "," << frame_idx << "," << denom_rejected_count << "," << max_plane_var_trace
       << "," << lio.n_residuals << "," << n_planes
       << "," << lio.h_pp_min_eig << "," << lio.h_rr_min_eig << "," << lio.sum_weight
       << "," << lio.h_rr_trace << "," << lio.htz_rot_norm << "," << lio.htz_pos_norm
