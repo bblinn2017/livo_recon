@@ -122,9 +122,19 @@ def detect_onset(t, err, baseline_span=20.0, k=5.0, sustain=1.0, floor=0.02):
 
 
 def gt_has_attitude(q, tol=1e-6):
-    """True only if the GT quaternion is not identity everywhere. NTU-VIRAL and
-    HILTI control points both ship a dummy identity; a rotation error against
-    those is the estimate's own rotation magnitude, not an error."""
+    """True only if the GT quaternion is a valid, non-identity unit quaternion
+    everywhere. NTU-VIRAL and HILTI control points both ship a dummy identity,
+    and a rotation error against those is the estimate's own rotation
+    magnitude, not an error -- refused the same as identity below.
+
+    Some NTU-VIRAL sequences (confirmed: nya_01, nya_02) publish an all-zero
+    quaternion on /leica/pose/relative instead of identity -- a recording
+    artifact, not real attitude. load_ntu_csv's normalization guard (n==0 ->
+    1.0, to avoid a division-by-zero NaN) leaves a zero quaternion as
+    (0,0,0,0): still not unit-norm, so it must be refused here too, or
+    R.from_quat() raises on a zero-norm quaternion downstream."""
+    if np.any(np.abs(np.linalg.norm(q, axis=-1) - 1.0) > tol):
+        return False
     return bool(np.max(np.abs(q - np.array([0.0, 0.0, 0.0, 1.0]))) > tol)
 
 
