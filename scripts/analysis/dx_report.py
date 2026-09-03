@@ -41,7 +41,15 @@ sys.path.insert(0, _HERE)
 from traj_divergence import prefix_error, window_error, detect_onset  # noqa: E402
 
 LADDER_CELLS = ["l0", "l1", "l2", "l3", "l4", "l5", "l6",
-                "l0d", "l1d", "l2d", "l3d", "l4d", "l5d"]
+                "l0d", "l1d", "l2d", "l3d", "l4d"]
+# l5d dropped: P7 refuses debiased+information_directional as unreachable
+# at startup (see voxelplane.cpp/voxelmap.cpp), so no DX-1R dispatch ever
+# produces this cell -- it isn't just missing data, it structurally can't
+# exist. Was previously left in this list as a no-data placeholder
+# ("comes back None/skipped gracefully"), which silently inflated every
+# "want N" footer below (13 ladder cells * 40 = 520 vs the true 12*40=480,
+# 21 total cells vs the true 20, 13 pairs vs the true 11) -- fixed by
+# removing it here instead of padding the footer to match.
 ALL_CELLS = LADDER_CELLS + ["s1", "s2", "n_l0", "n_l2", "n_l5", "r_l0", "r_l2", "r_l5"]
 # S3 dropped per rule 28c -- it resolved to exactly L3, so it contributes
 # nothing Block 2/3 wouldn't already have from L3 itself.
@@ -56,9 +64,9 @@ ALL_CELLS = LADDER_CELLS + ["s1", "s2", "n_l0", "n_l2", "n_l5", "r_l0", "r_l2", 
 PAIRS = (list(zip(["l0", "l1", "l2", "l3", "l4"], ["l1", "l2", "l3", "l4", "l5"]))
          + [("l5", "l6")]
          + list(zip(["l0d", "l1d", "l2d", "l3d"], ["l1d", "l2d", "l3d", "l4d"]))
-         + [("l4d", "l5d")]
-         + [("l4", "l4d"), ("l5", "l5d")])
-assert len(PAIRS) == 13, len(PAIRS)
+         + [("l4", "l4d")])
+# l4d->l5d and l5->l5d dropped along with l5d itself (see LADDER_CELLS).
+assert len(PAIRS) == 11, len(PAIRS)
 
 DIAGNOSTICS = ["refusal", "div_pos", "div_rot", "nis", "sdiag_share", "pvar_share",
                "floor_share", "prior_pose_share", "n_res", "w_per_res", "cov_acc",
@@ -175,15 +183,29 @@ def load_cell(run_dir, gt_path, gt_format, frame_correction, window=10.0, max_ga
         diag["trP_drop"] = trP_pre - trP_post
 
     if cs is not None and "scan_id" in cs:
-        cs_t = fs["t"] if (fs is not None and "t" in fs and len(fs["t"]) == len(cs["scan_id"])) else None
-        if cs_t is None:
-            # corr_scan.csv has no its own t column (only scan_id) -- fall
-            # back to frame_stats.txt's t indexed by scan_id/frame_idx if the
-            # lengths line up 1:1 (both are one row per scan in this
-            # pipeline); otherwise these diagnostics come back NaN rather
-            # than guessing an alignment.
-            cs_t = None
-        if cs_t is not None:
+        # corr_scan.csv has no t column of its own (only scan_id) -- join it
+        # onto frame_stats.txt's t via an actual frame_idx/scan_id VALUE
+        # lookup, not a row-count coincidence. The two files are NOT
+        # guaranteed 1:1 in length (confirmed on the DX-1R rerun: some
+        # scans get logged to frame_stats.txt but never reach
+        # flushCorrScan(), e.g. a scan with no accepted correspondences) --
+        # the old length-match fallback silently produced NaN for every
+        # corr_scan-derived diagnostic whenever that happened, which is
+        # exactly what the t-column precision-loss bug was masking (every
+        # length compared equal-but-wrong before that fix, this compares
+        # equal-but-still-wrong after it). Missing scan_ids resolve to NaN
+        # here, not the whole diagnostic.
+        cs_t = None
+        if fs is not None and "t" in fs and "frame_idx" in fs:
+            idx_to_t = dict(zip(fs["frame_idx"], fs["t"]))
+            cs_t_raw = np.array([idx_to_t.get(sid, np.nan) for sid in cs["scan_id"]])
+            # _resample_at's searchsorted needs a strictly-sorted src_t --
+            # drop any scan_id that didn't resolve (NaN) rather than let it
+            # break the ordering assumption.
+            keep = ~np.isnan(cs_t_raw)
+            cs_t = cs_t_raw[keep]
+            cs = {k: v[keep] for k, v in cs.items()}
+        if cs_t is not None and len(cs_t) > 0:
             sum_S = cs["sum_S"]
             diag["sdiag_share"] = _resample_at(cs_t, np.where(sum_S > 0, cs["sum_sdiag"] / sum_S, np.nan), t)
             diag["pvar_share"] = _resample_at(cs_t, np.where(sum_S > 0, cs["sum_pvar"] / sum_S, np.nan), t)
@@ -471,8 +493,9 @@ def main():
     print()
     print(emit_pairs(pairs))
 
-    print(f"\n# row counts: series={len(series)} (want 520) "
-          f"summary={len(summary)} (want 21) pairs={len(pairs)} (want 17*13={17*len(PAIRS)})",
+    print(f"\n# row counts: series={len(series)} (want {40*len(LADDER_CELLS)}) "
+          f"summary={len(summary)} (want {len(ALL_CELLS)}) "
+          f"pairs={len(pairs)} (want 17*{len(PAIRS)}={17*len(PAIRS)})",
           file=sys.stderr)
 
 
