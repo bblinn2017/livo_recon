@@ -144,7 +144,12 @@ def load_cell(run_dir, gt_path, gt_format, frame_correction, window=10.0, max_ga
     t_e, p_e, q_e = load_tum(est_path)
     t_g, p_g, q_g = LOADERS[gt_format](gt_path)
     p_e, q_e = apply_frame_correction(p_e, q_e, frame_correction)
-    p_i, q_i, valid = resample(t_e, p_e, q_e, t_g, max_gap)
+    # V-3: linear (lerp), not the default pchip -- matches the live C++
+    # scorer's own interp mode exactly (EvoProc: lerp(position)/slerp
+    # (rotation), see evo_processing.cpp's "interp" comment). Quaternion
+    # interpolation is always Slerp regardless of this argument, already
+    # matching the live scorer's slerpRot -- only position differs.
+    p_i, q_i, valid = resample(t_e, p_e, q_e, t_g, max_gap, method="linear")
     t = t_g[valid]
     src, dst = p_i[valid], p_g[valid]
     if len(t) < 20:
