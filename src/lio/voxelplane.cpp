@@ -94,6 +94,7 @@ struct CorrInfoCols {
   double   lambda1 = -1.0;       // second eigenvalue (with lambda0 already logged, completes I per plane)
   double   lambda2 = -1.0;       // third eigenvalue
   int      info_path = -1;       // P5: 1=exact directional weighting, 0=equal-weight fallback, -1=n/a (not information_directional)
+  int      vis_state = -1;       // P6a: 0=hit, 1=known free, 2=unobserved, -1=not classified
 };
 
 void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, double S,
@@ -117,7 +118,7 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
     // History (113-120): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-113
     if (with_covariates) ofs << ",S_sensor,S_plane_tilt,S_plane_d,S_pose,S_prior_pose,N,J,aniso,lambda0,occ_aniso,occ_cells,occ_var_u,occ_var_v,plane_conf_factor"
                              << ",a0,a1,plane_id,roughness,sigma_bar2,n_eff,n_raw,rho,frames"
-                             << ",floor_term,lambda1,lambda2,info_path";
+                             << ",floor_term,lambda1,lambda2,info_path,vis_state";
     ofs << "\n";
   }
   first_call = false;
@@ -132,7 +133,7 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
         << "," << info.n_eff << "," << info.n_raw << "," << info.rho
         << "," << info.frames
         << "," << info.floor_term << "," << info.lambda1 << "," << info.lambda2
-        << "," << info.info_path;
+        << "," << info.info_path << "," << info.vis_state;
   ofs << "\n";
 }
 
@@ -157,6 +158,14 @@ struct CorrScanAccum {
   double sum_S = 0.0, sum_floor = 0.0, sum_sdiag = 0.0, sum_pvar = 0.0;
   double sum_prior_pose = 0.0;
   int    n_S   = 0;
+  // P6a.  Visibility classification counts among candidates -- the rate
+  // that decides whether P6b (act on it) is worth writing at all.
+  // classifyVisibility() returns 3 states (0=hit,1=free,2=unobserved),
+  // not 4 -- hit takes priority over thru at the point's own cell, so the
+  // "edge/thin/mixed pixel" hit&thru case the register's design sketch
+  // named is folded into hit here rather than tracked separately; the
+  // core decision (known-free rate among candidates) doesn't need it.
+  long n_vis_hit = 0, n_vis_free = 0, n_vis_unobs = 0;
 };
 std::mutex g_corr_scan_mtx;
 CorrScanAccum g_corr_scan;
@@ -170,7 +179,8 @@ void flushCorrScan(CorrScanAccum& a)
     ofs.open(debugLogPath("corr_scan.csv"), std::ios::trunc);
     ofs << "scan_id,n_candidates,n_accepted,n_dropped,n_nis_finite,"
            "sum_nis,sum_nis2,sum_log_nis,max_nis,n_share,sum_share,"
-           "n_S,sum_S,sum_floor,sum_sdiag,sum_pvar,sum_prior_pose\n";
+           "n_S,sum_S,sum_floor,sum_sdiag,sum_pvar,sum_prior_pose,"
+           "n_vis_hit,n_vis_free,n_vis_unobs\n";
     first = false;
   }
   ofs << a.scan_id << ',' << a.n_candidates << ',' << a.n_accepted << ','
@@ -178,7 +188,8 @@ void flushCorrScan(CorrScanAccum& a)
       << a.sum_nis2 << ',' << a.sum_log_nis << ',' << a.max_nis << ','
       << a.n_share << ',' << a.sum_share << ','
       << a.n_S << ',' << a.sum_S << ',' << a.sum_floor << ','
-      << a.sum_sdiag << ',' << a.sum_pvar << ',' << a.sum_prior_pose << '\n';
+      << a.sum_sdiag << ',' << a.sum_pvar << ',' << a.sum_prior_pose << ','
+      << a.n_vis_hit << ',' << a.n_vis_free << ',' << a.n_vis_unobs << '\n';
   a = CorrScanAccum{};
 }
 
@@ -187,7 +198,8 @@ void flushCorrScan(CorrScanAccum& a)
 void debugAccumConsistencyCorr(int scan_id, double nu, double S, int gated,
                                int dropped, double plane_share,
                                double floor_term, double sigma_diag_squared,
-                               double plane_var_term, double s_prior_pose)
+                               double plane_var_term, double s_prior_pose,
+                               int vis_state)
 {
   std::lock_guard<std::mutex> lock(g_corr_scan_mtx);
   if (scan_id != g_corr_scan.scan_id) {
@@ -196,6 +208,13 @@ void debugAccumConsistencyCorr(int scan_id, double nu, double S, int gated,
   }
   auto& a = g_corr_scan;
   a.n_candidates++;
+  // P6a: counted for every non-dropped candidate regardless of gate()'s own
+  // accept/reject -- visibility is about the ray, not the final residual.
+  if (!dropped) {
+    if (vis_state == 0) a.n_vis_hit++;
+    else if (vis_state == 1) a.n_vis_free++;
+    else if (vis_state == 2) a.n_vis_unobs++;
+  }
   if (dropped) { a.n_dropped++; return; }
   if (gated == 0) {
     a.n_accepted++;
@@ -423,6 +442,22 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
                               plane_var_term, J_nq, &is_candidate, &dropped_by_ablation);
   const double floor_term = weightFloor(pt.body_point, body_normal, /*in_gate=*/false);
 
+  // P6a.  MEASUREMENT ONLY -- classifies this candidate's ray against the
+  // occupancy chart; is_plane_/plane_var_/anything the state estimate reads
+  // is untouched. World-frame sensor origin reconstructed the same way the
+  // "incidence" weight-floor mode's own comment above already documents:
+  // pt.body_point is in the body frame whose origin is within centimetres
+  // of the sensor's, so o_world = p_world - R_wb*body_point. sigma_r uses
+  // the same range-noise floor weight_floor_mode=sensor_range already
+  // relies on (getBodyCov()'s own per-point sigma_r isn't threaded this far
+  // down; this is the same fixed value, not a new number).
+  res.vis_state = -1;  // -1 = not classified (not a candidate)
+  if (is_candidate) {
+    const V3D o_world = pt.point - pt.rot_transpose.transpose() * pt.body_point;
+    const double sigma_r = std::sqrt(opts_->weight_sigma_r2);
+    res.vis_state = classifyVisibility(o_world, pt.point, sigma_r);
+  }
+
   // Tier A (the per-scan accumulator below) is reachable on its own now.
   // It used to sit inside a guard that also gated Tier B's ~1 GB/job of
   // per-correspondence rows, so a sweep that could not afford Tier B lost
@@ -503,7 +538,7 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
     debugAccumConsistencyCorr(scan_id, r, S, accepted ? 0 : 1,
                               dropped_by_ablation ? 1 : 0, plane_share,
                               floor_term, sigma_diag_squared, plane_var_term,
-                              s_prior_pose);
+                              s_prior_pose, res.vis_state);
 
     // 14c: full per-correspondence rows only every Nth candidate. The
     // stride is PRIME on purpose -- LiDAR returns arrive in ring/azimuth
@@ -542,6 +577,7 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
         info.floor_term = floor_term;
         info.lambda1    = eigen_values_(1);
         info.lambda2    = eigen_values_(2);
+        info.vis_state  = res.vis_state;
       }
       debugLogConsistencyCorr(cov, scan_id, r, S, s_sensor, s_tilt, s_d, s_pose, n, j, aniso,
                                  accepted ? 0 : 1, s_prior_pose, lambda0, occ_aniso, occ_cells,
@@ -1236,6 +1272,7 @@ void VoxelPlane::updateOccupancy(const V3D& world_point)
     occ_anchor_y_normal_ = y_normal_;
     occ_anchor_center_   = plane_.center;
     occupancy_bitmask_   = 0;
+    occ_thru_bitmask_    = 0;  // P6a: reset alongside, same chart re-anchor
     occ_anchored_ = true;
   }
 
@@ -1247,6 +1284,58 @@ void VoxelPlane::updateOccupancy(const V3D& world_point)
   const int cv = static_cast<int>(std::floor(v / cell_size)) + 4;
   if (cu < 0 || cu >= 8 || cv < 0 || cv >= 8) return;  // outside the tracked window -- not an error, just untracked
   occupancy_bitmask_ |= (uint64_t(1) << (cu * 8 + cv));
+}
+
+// P6a.  Ray-plane intersection against THIS plane's own supporting surface,
+// then classified against the SAME occupancy chart updateOccupancy() uses
+// (occ_anchor_{normal,x_normal,y_normal,center}_), so a "known free" cell
+// here is directly comparable to a "hit" cell there. Not anchored until a
+// point has actually been recorded (occ_anchored_ true), matching
+// updateOccupancy()'s own convention -- an unanchored plane classifies
+// everything unobserved rather than guessing a chart.
+int VoxelPlane::classifyVisibility(const V3D& o_world, const V3D& p_world, double sigma_r) const
+{
+  if (!is_plane_ || !occ_anchored_) return 2;  // unobserved: no chart yet
+
+  const V3D ray = p_world - o_world;
+  const double denom = occ_anchor_normal_.dot(ray);
+  int vis_state = 2;  // default: unobserved
+  if (std::abs(denom) > 1e-9) {
+    const double ts = (plane_.d - occ_anchor_normal_.dot(o_world)) / (-denom);
+    // ts is the fraction of (o->p) at which the ray crosses THIS plane's
+    // own surface (plane_.d/normal, not the occupancy anchor's slightly
+    // different normal from before the last re-anchor -- close enough that
+    // this is a non-issue in practice, since occ_anchor_normal_ only drifts
+    // past kResetCosThreshold before re-anchoring). ts in (0, 1-margin)
+    // means the ray reached the plane's own depth and kept going past it
+    // before terminating at p_world.
+    const double range = ray.norm();
+    const double margin = (range > 0.0 && sigma_r > 0.0) ? (sigma_r / range) : 0.0;
+    if (ts > 0.0 && ts < (1.0 - margin)) {
+      const V3D cross_world = o_world + ts * ray;
+      const V3D d = cross_world - occ_anchor_center_;
+      const double cell_size = opts_->voxel_size / 8.0;
+      const int cu = static_cast<int>(std::floor(d.dot(occ_anchor_x_normal_) / cell_size)) + 4;
+      const int cv = static_cast<int>(std::floor(d.dot(occ_anchor_y_normal_) / cell_size)) + 4;
+      if (cu >= 0 && cu < 8 && cv >= 0 && cv < 8) {
+        occ_thru_bitmask_.fetch_or(uint64_t(1) << (cu * 8 + cv), std::memory_order_relaxed);
+        vis_state = 1;  // known free (pending the hit check below)
+      }
+    }
+  }
+  // hit dominates thru at the SAME cell the point itself lands in -- a
+  // point that returned here is not "crossed and kept going" regardless of
+  // what some other ray through this cell suggested.
+  {
+    const V3D d = p_world - occ_anchor_center_;
+    const double cell_size = opts_->voxel_size / 8.0;
+    const int cu = static_cast<int>(std::floor(d.dot(occ_anchor_x_normal_) / cell_size)) + 4;
+    const int cv = static_cast<int>(std::floor(d.dot(occ_anchor_y_normal_) / cell_size)) + 4;
+    if (cu >= 0 && cu < 8 && cv >= 0 && cv < 8 &&
+        (occupancy_bitmask_ & (uint64_t(1) << (cu * 8 + cv))))
+      vis_state = 0;  // hit
+  }
+  return vis_state;
 }
 
 // History (1041-1046): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-1041

@@ -43,6 +43,12 @@ struct Residual
   // only for a residual that hasn't been matched to a plane yet.
   const void* plane_id = nullptr;
 
+  // P6a.  This candidate's ray classified against its own plane's occupancy
+  // chart: 0=hit, 1=known free, 2=unobserved, -1=not classified (not a
+  // gate() candidate). Measurement only -- never read by anything that
+  // feeds the state estimate.
+  int vis_state = -1;
+
   // This plane's own fit-uncertainty contribution (n * plane_var * n),
   // added into sigma_squared by LioProc::buildResiduals().
   double plane_var_term = 0.0;

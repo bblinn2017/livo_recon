@@ -1,6 +1,7 @@
 #pragma once
 
 #include "livo_recon/utils/map/voxelmap_utils.h"
+#include <atomic>
 #include <cstdint>
 
 namespace livo_recon
@@ -196,7 +197,27 @@ private:
 
 
   // History (180-185): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-180
-  uint64_t occupancy_bitmask_ = 0;
+  uint64_t occupancy_bitmask_ = 0;      // a point RETURNED from this cell
+  // P6a.  A ray CROSSED this cell and kept going (positive evidence the
+  // surface is absent there), reset alongside occupancy_bitmask_ whenever
+  // the occupancy chart re-anchors -- see updateOccupancy(). Together the
+  // two bitmasks give three states per cell instead of two:
+  //   hit & !thru   surface observed here
+  //  !hit &  thru   KNOWN FREE
+  //  !hit & !thru   UNOBSERVED (honest ignorance -- "no bit" used to mean
+  //                 this AND known-free both, which is the category error
+  //                 this patch exists to fix)
+  //   hit &  thru   edge / thin surface / mixed pixel
+  // atomic: classifyVisibility() is called from computeResidual(), which
+  // T3-0d's comment documents runs inside LioProc::buildResiduals()'s OMP
+  // parallel loop -- unlike occupancy_bitmask_ (only ever mutated from the
+  // separate, sequential updateOccupancy() pass), concurrent candidates on
+  // this same plane can classify at the same time, so this needs fetch_or,
+  // not |=.
+  // mutable: written from classifyVisibility(), which computeResidual()
+  // (const) calls -- same reasoning as any other const-context accumulator
+  // in this codebase (e.g. the OMP-safe corr_scan accumulators elsewhere).
+  mutable std::atomic<uint64_t> occ_thru_bitmask_{0};
   V3D occ_anchor_normal_   = V3D::Zero();
   V3D occ_anchor_x_normal_ = V3D::Zero();
   V3D occ_anchor_y_normal_ = V3D::Zero();
@@ -224,6 +245,17 @@ private:
   void applyPlaneConfidence();
 
   void updateOccupancy(const V3D& world_point);
+
+  // P6a.  MEASUREMENT ONLY -- classifies one candidate's ray against this
+  // plane's own occupancy chart and sets occ_thru_bitmask_ if it crosses a
+  // KNOWN-FREE cell; never touches is_plane_/plane_var_/anything the state
+  // estimate reads. o_world/p_world are the sensor origin and the
+  // candidate point, both in world frame; sigma_r is the range noise at
+  // this point's range (getBodyCov()'s own sigma_r), used as the crossing
+  // margin so a return exactly at the surface doesn't misclassify from
+  // sensor noise alone. Returns 0=hit (this cell has a return), 1=known
+  // free (ray crossed and kept going), 2=unobserved (neither).
+  int classifyVisibility(const V3D& o_world, const V3D& p_world, double sigma_r) const;
 
 public:
   // a = lambda1(M_cov)/lambda2(M_cov) of the OCCUPIED cell centers (one

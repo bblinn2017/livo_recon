@@ -187,6 +187,29 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
           "accounts for in full, double-counting exactly the way "
           "roughness-under-eigengap would silently zero every residual");
     }
+    // P7 (2026-09-03).  debiased+information_directional cannot engage:
+    // refitDebiased() runs from persistent unweighted accumulators, after
+    // the points are gone, so the per-point weighted-H path (built in
+    // update(), which only the pca fit path calls with a point vector in
+    // hand) is structurally unreachable on the debiased arm. DX-1 found
+    // this the hard way -- L5d equalled L4d exactly, info_path was 100%
+    // fallback -- and rule 4b forbids a flag set true that increments
+    // nothing. Refuse rather than run it as a silent alias for
+    // debiased+information. The alternative (teaching refitDebiased() to
+    // retain enough state for the exact path) was considered and rejected:
+    // the per-point weights depend on the fitted normal, which isn't known
+    // until the fit runs, so they cannot be accumulated before it.
+    if (opts_->plane_fit_mode == "debiased" &&
+        opts_->plane_var_mode == "information_directional")
+    {
+      cfg.requireCombination(
+          "voxel_map/plane/plane_fit_mode = debiased with "
+          "voxel_map/plane/plane_var_mode = information_directional is "
+          "UNREACHABLE: the directional weighting needs update()'s point "
+          "vector and refitDebiased() never has it. Use plane_var_mode = "
+          "information (identical behaviour, honestly named) or "
+          "plane_fit_mode = pca with information_directional.");
+    }
     // The T8-b plane-confidence inflations and the eigengap denominator
     // floor are all corrections TO the eigengap model.  Under the
     // information model they are not merely unnecessary, they DOUBLE COUNT:
