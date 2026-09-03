@@ -113,7 +113,7 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
   }
 
   const bool was_init   = plane_ptr_->isInit();
-  const bool was_plane  = plane_ptr_->isPlane();
+  bool       was_plane  = plane_ptr_->isPlane();
   const bool debiased   = opts_->plane_fit_mode == "debiased";
 
   bool now_plane;
@@ -133,6 +133,29 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       // those points' sensor_cov for the debiasing correction.
       plane_ptr_->addPoints(points_world, -1, distinct_frames_, g_current_frame_idx >= 1);
       // History (135-153): see docs/livo_recon_changelog.md#src-lio-voxelnode.cpp-135
+      //
+      // n_planes accounting fix.  addPoints() (via refitDebiased()) can
+      // flip is_plane_ right above, but the two early returns just below
+      // can exit before the shared was_plane/now_plane bookkeeping at the
+      // bottom of this function ever runs -- so a voxel that becomes a
+      // plane during the bootstrap window (before isInit()/
+      // min_frames_to_init are satisfied) never got its stats_->planes
+      // increment counted, while its eventual LOSS of plane status still
+      // fired the decrement later, with no matching increment behind it.
+      // Confirmed this was the entire cause of stats_->planes (frame_
+      // stats.txt's n_planes) reading deeply negative on every debiased-
+      // arm DX-1R cell (down to -49204) -- residual generation itself
+      // gates on is_plane_ directly, not this counter, so this was a
+      // diagnostic-only bug, not a correctness one. Fixed by recording
+      // the transition immediately, using was_plane's value AT THIS
+      // POINT (updated in place) so the shared bookkeeping below sees no
+      // further transition to double-count.
+      {
+        const bool now_plane_immediate = plane_ptr_->isPlane();
+        if (!was_plane && now_plane_immediate)  stats_->planes.fetch_add(1, std::memory_order_relaxed);
+        if (was_plane  && !now_plane_immediate) stats_->planes.fetch_sub(1, std::memory_order_relaxed);
+        was_plane = now_plane_immediate;
+      }
       if (!plane_ptr_->isInit()) return;
       if (!was_init && g_current_frame_idx >= 1 &&
           distinct_frames_ < opts_->min_frames_to_init)
