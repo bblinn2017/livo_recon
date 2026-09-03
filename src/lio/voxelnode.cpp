@@ -131,7 +131,7 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       // scans from a STATIONARY sensor, same vantage point repeated -- see
       // VoxelPlane::addPoints()'s trust_sensor_noise docs); don't trust
       // those points' sensor_cov for the debiasing correction.
-      plane_ptr_->addPoints(points_world, -1, distinct_frames_, g_current_frame_idx >= 1);
+      plane_ptr_->addPoints(points_world, -1, distinct_frames_, g_current_frame_idx >= 1, g_current_frame_idx);
       // History (135-153): see docs/livo_recon_changelog.md#src-lio-voxelnode.cpp-135
       //
       // n_planes accounting fix.  addPoints() (via refitDebiased()) can
@@ -210,9 +210,9 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       std::vector<PointXYZCov> bin_reps;
       std::vector<double> fit_weights, var_weights;
       buildBinReps(bin_reps, fit_weights, var_weights);
-      plane_ptr_->update(bin_reps, total_count_, &fit_weights, nullptr, &var_weights);
+      plane_ptr_->update(bin_reps, total_count_, &fit_weights, nullptr, &var_weights, g_current_frame_idx);
     } else {
-      plane_ptr_->update(points_, -1, nullptr, &running_moments_);
+      plane_ptr_->update(points_, -1, nullptr, &running_moments_, nullptr, g_current_frame_idx);
     }
     update_count_ = 0;
     now_plane = plane_ptr_->isPlane();

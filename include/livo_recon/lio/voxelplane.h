@@ -39,14 +39,21 @@ public:
   int infoPath() const { return info_path_; }
 
   // History (36-65): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-36
+  // P10.  frame_idx (default -1 -> chart-age tracking skipped) is
+  // VoxelNode's own g_current_frame_idx, threaded down purely so
+  // updateOccupancy() can stamp occ_anchor_frame_ at (re)anchor time --
+  // see that member's own doc comment. Same threading convention as
+  // computeResidual()'s scan_id above.
   void update(const std::vector<PointXYZCov>& points, int total_count = -1,
               const std::vector<double>* weights = nullptr,
               const RunningMoments* running = nullptr,
-              const std::vector<double>* var_weights = nullptr);
+              const std::vector<double>* var_weights = nullptr,
+              int frame_idx = -1);
 
   // History (71-102): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-71
   void addPoints(const std::vector<PointXYZCov>& points, int total_count = -1,
-                 int distinct_frames = -1, bool trust_sensor_noise = true);
+                 int distinct_frames = -1, bool trust_sensor_noise = true,
+                 int frame_idx = -1);
 
 private:
   void refitDebiased();
@@ -223,6 +230,16 @@ private:
   V3D occ_anchor_y_normal_ = V3D::Zero();
   V3D occ_anchor_center_   = V3D::Zero();
   bool occ_anchored_ = false;
+  // P10.  The frame_idx (VoxelNode's g_current_frame_idx, threaded down
+  // through update()/addPoints()) at which the chart last (re)anchored --
+  // -1 if never anchored with a known frame_idx (frame_idx defaults to -1
+  // for any caller that doesn't thread it, in which case age is just not
+  // tracked rather than reporting a wrong number). classifyVisibility()'s
+  // caller computes age as (its own scan_id) - occ_anchor_frame_ -- how
+  // many frames this chart has survived, the mechanism P10 needs separated
+  // from the scene-geometry explanation for the pca/debiased known-free
+  // split.
+  int occ_anchor_frame_ = -1;
 
   // History (193-201): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-193
   double cached_occ_aniso_ = -2.0;
@@ -244,7 +261,7 @@ private:
   // the occupancy cache this fit just rebuilt.
   void applyPlaneConfidence();
 
-  void updateOccupancy(const V3D& world_point);
+  void updateOccupancy(const V3D& world_point, int frame_idx);
 
   // P6a.  MEASUREMENT ONLY -- classifies one candidate's ray against this
   // plane's own occupancy chart and sets occ_thru_bitmask_ if it crosses a
@@ -253,9 +270,36 @@ private:
   // candidate point, both in world frame; sigma_r is the range noise at
   // this point's range (getBodyCov()'s own sigma_r), used as the crossing
   // margin so a return exactly at the surface doesn't misclassify from
-  // sensor noise alone. Returns 0=hit (this cell has a return), 1=known
-  // free (ray crossed and kept going), 2=unobserved (neither).
-  int classifyVisibility(const V3D& o_world, const V3D& p_world, double sigma_r) const;
+  // sensor noise alone. scan_id is the calling frame's index (same value
+  // computeResidual() already threads for corr.csv logging), used only to
+  // compute VisResult::age below -- never for the classification itself.
+  //
+  // P10.  state stays 0=hit/1=free/2=unobserved (unchanged -- hit still
+  // overrides thru at the point's own cell, see occupancy_bitmask_'s doc
+  // comment), but the extra fields recover exactly what that override
+  // discards or never captured:
+  //   thru    true iff THIS candidate's own ray independently crossed a
+  //           known-free cell (ts in-range), recorded BEFORE the hit check
+  //           at the point's own cell can override state to 0 -- so
+  //           (state==0 && thru) is the hit&thru case the original
+  //           3-state design folded into plain "hit".
+  //   age     scan_id - occ_anchor_frame_ (frames since this chart's last
+  //           re-anchor), or -1 if occ_anchor_frame_ is unknown (frame_idx
+  //           was never threaded to updateOccupancy() for this plane, or
+  //           the chart was never anchored).
+  //   fill    cached_occ_cells_ at classification time -- how many of the
+  //           64 chart cells have ever recorded a hit (not recomputed
+  //           here, just read).
+  // Together these let P10 separate "the arm's known-free difference is a
+  // fact about the scene" from "...a fact about how long a chart lives."
+  struct VisResult {
+    int  state = 2;
+    bool thru  = false;
+    int  age   = -1;
+    int  fill  = 0;
+  };
+  VisResult classifyVisibility(const V3D& o_world, const V3D& p_world,
+                                double sigma_r, int scan_id) const;
 
 public:
   // a = lambda1(M_cov)/lambda2(M_cov) of the OCCUPIED cell centers (one

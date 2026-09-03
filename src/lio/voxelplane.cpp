@@ -179,6 +179,28 @@ struct CorrScanAccum {
   // named is folded into hit here rather than tracked separately; the
   // core decision (known-free rate among candidates) doesn't need it.
   long n_vis_hit = 0, n_vis_free = 0, n_vis_unobs = 0;
+  // P10.  n_vis_{hit,free,unobs} above count every CANDIDATE, accepted or
+  // not -- can't tell "the rate is low" from "the rate is low among what
+  // actually got used". The _acc counterparts count only accepted (!gated)
+  // candidates, answering the question P6b actually needs. sum_age/
+  // sum_fill let dx_report.py report chart persistence and chart fill
+  // separately from the scene-geometry explanation, without which "known-
+  // free reads 11-17%" cannot be told apart from "charts just live a long
+  // time" or "charts are mostly full anyway". n_vis_hit_thru is the hit&
+  // thru case P6a's own 3-state design folded into plain hit -- see
+  // VisResult::thru's doc comment.
+  long n_vis_hit_acc = 0, n_vis_free_acc = 0, n_vis_unobs_acc = 0;
+  // age is only meaningful when the chart has actually anchored
+  // (VisResult::age >= 0) -- summed separately with its own counts rather
+  // than reusing n_vis_{hit,free,unobs} as the denominator, since an
+  // unanchored candidate still gets a state (usually 2/unobserved) but
+  // contributes nothing to the age average.
+  double sum_age_hit = 0.0, sum_age_free = 0.0, sum_age_unobs = 0.0;
+  long   n_age_hit = 0, n_age_free = 0, n_age_unobs = 0;
+  // fill is defined (possibly 0) for every classified candidate, so it
+  // reuses n_vis_{hit,free,unobs} as its own denominator.
+  double sum_fill_hit = 0.0, sum_fill_free = 0.0, sum_fill_unobs = 0.0;
+  long n_vis_hit_thru = 0;
 };
 std::mutex g_corr_scan_mtx;
 CorrScanAccum g_corr_scan;
@@ -193,7 +215,12 @@ void flushCorrScan(CorrScanAccum& a)
     ofs << "scan_id,n_candidates,n_accepted,n_dropped,n_nis_finite,"
            "sum_nis,sum_nis2,sum_log_nis,max_nis,n_share,sum_share,"
            "n_S,sum_S,sum_floor,sum_sdiag,sum_pvar,sum_prior_pose,"
-           "n_vis_hit,n_vis_free,n_vis_unobs\n";
+           "n_vis_hit,n_vis_free,n_vis_unobs,"
+           // P10: appended, not interleaved, so every pre-existing column
+           // keeps its position for any reader still indexing by offset.
+           "n_vis_hit_acc,n_vis_free_acc,n_vis_unobs_acc,"
+           "sum_age_hit,n_age_hit,sum_age_free,n_age_free,sum_age_unobs,n_age_unobs,"
+           "sum_fill_hit,sum_fill_free,sum_fill_unobs,n_vis_hit_thru\n";
     first = false;
   }
   ofs << a.scan_id << ',' << a.n_candidates << ',' << a.n_accepted << ','
@@ -202,7 +229,13 @@ void flushCorrScan(CorrScanAccum& a)
       << a.n_share << ',' << a.sum_share << ','
       << a.n_S << ',' << a.sum_S << ',' << a.sum_floor << ','
       << a.sum_sdiag << ',' << a.sum_pvar << ',' << a.sum_prior_pose << ','
-      << a.n_vis_hit << ',' << a.n_vis_free << ',' << a.n_vis_unobs << '\n';
+      << a.n_vis_hit << ',' << a.n_vis_free << ',' << a.n_vis_unobs << ','
+      << a.n_vis_hit_acc << ',' << a.n_vis_free_acc << ',' << a.n_vis_unobs_acc << ','
+      << a.sum_age_hit << ',' << a.n_age_hit << ','
+      << a.sum_age_free << ',' << a.n_age_free << ','
+      << a.sum_age_unobs << ',' << a.n_age_unobs << ','
+      << a.sum_fill_hit << ',' << a.sum_fill_free << ',' << a.sum_fill_unobs << ','
+      << a.n_vis_hit_thru << '\n';
   a = CorrScanAccum{};
 }
 
@@ -212,7 +245,7 @@ void debugAccumConsistencyCorr(int scan_id, double nu, double S, int gated,
                                int dropped, double plane_share,
                                double floor_term, double sigma_diag_squared,
                                double plane_var_term, double s_prior_pose,
-                               int vis_state)
+                               int vis_state, bool vis_thru, int vis_age, int vis_fill)
 {
   std::lock_guard<std::mutex> lock(g_corr_scan_mtx);
   if (scan_id != g_corr_scan.scan_id) {
@@ -224,9 +257,31 @@ void debugAccumConsistencyCorr(int scan_id, double nu, double S, int gated,
   // P6a: counted for every non-dropped candidate regardless of gate()'s own
   // accept/reject -- visibility is about the ray, not the final residual.
   if (!dropped) {
-    if (vis_state == 0) a.n_vis_hit++;
-    else if (vis_state == 1) a.n_vis_free++;
-    else if (vis_state == 2) a.n_vis_unobs++;
+    // P10: age/fill are properties of the ray/chart, not of gate()'s own
+    // accept/reject, so they accumulate alongside the un-gated counts
+    // above -- only the _acc counts below are conditioned on acceptance.
+    if (vis_state == 0) {
+      a.n_vis_hit++;
+      a.sum_fill_hit += vis_fill;
+      if (vis_age >= 0) { a.sum_age_hit += vis_age; a.n_age_hit++; }
+      if (vis_thru) a.n_vis_hit_thru++;
+    } else if (vis_state == 1) {
+      a.n_vis_free++;
+      a.sum_fill_free += vis_fill;
+      if (vis_age >= 0) { a.sum_age_free += vis_age; a.n_age_free++; }
+    } else if (vis_state == 2) {
+      a.n_vis_unobs++;
+      a.sum_fill_unobs += vis_fill;
+      if (vis_age >= 0) { a.sum_age_unobs += vis_age; a.n_age_unobs++; }
+    }
+    // gated==0 means accepted (see the call site's accepted?0:1 convention
+    // below) -- the _acc counts are what P6b actually needs: the known-free
+    // rate among candidates that survived to be used, not the raw ray rate.
+    if (gated == 0) {
+      if (vis_state == 0) a.n_vis_hit_acc++;
+      else if (vis_state == 1) a.n_vis_free_acc++;
+      else if (vis_state == 2) a.n_vis_unobs_acc++;
+    }
   }
   if (dropped) { a.n_dropped++; return; }
   if (gated == 0) {
@@ -465,10 +520,12 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
   // relies on (getBodyCov()'s own per-point sigma_r isn't threaded this far
   // down; this is the same fixed value, not a new number).
   res.vis_state = -1;  // -1 = not classified (not a candidate)
+  VisResult vis;        // P10: default state=2/thru=false/age=-1/fill=0, matches "not classified"
   if (is_candidate) {
     const V3D o_world = pt.point - pt.rot_transpose.transpose() * pt.body_point;
     const double sigma_r = std::sqrt(opts_->weight_sigma_r2);
-    res.vis_state = classifyVisibility(o_world, pt.point, sigma_r);
+    vis = classifyVisibility(o_world, pt.point, sigma_r, scan_id);
+    res.vis_state = vis.state;
   }
 
   // Tier A (the per-scan accumulator below) is reachable on its own now.
@@ -551,7 +608,7 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
     debugAccumConsistencyCorr(scan_id, r, S, accepted ? 0 : 1,
                               dropped_by_ablation ? 1 : 0, plane_share,
                               floor_term, sigma_diag_squared, plane_var_term,
-                              s_prior_pose, res.vis_state);
+                              s_prior_pose, res.vis_state, vis.thru, vis.age, vis.fill);
 
     // 14c: full per-correspondence rows only every Nth candidate. The
     // stride is PRIME on purpose -- LiDAR returns arrive in ring/azimuth
@@ -626,7 +683,8 @@ bool VoxelPlane::getVizInfo(PlaneVizInfo& info) const
 void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
                         const std::vector<double>* weights_in,
                         const RunningMoments* running,
-                        const std::vector<double>* var_weights_in)
+                        const std::vector<double>* var_weights_in,
+                        int frame_idx)
 {
   plane_var_.setZero();
   covariance_.setZero();
@@ -909,7 +967,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   // tangent frame just fitted above. `points` may be bin representatives
   // rather than raw points (see `running`/use_weights above) -- fine for
   // occupancy purposes, a bin rep already represents one occupied region.
-  for (int i = 0; i < N; ++i) updateOccupancy(points[i].point);
+  for (int i = 0; i < N; ++i) updateOccupancy(points[i].point, frame_idx);
   recomputeOccupancyCache();
   applyPlaneConfidence();
   // Moved BELOW applyPlaneConfidence so frame_stats' max_plane_var_trace
@@ -920,7 +978,8 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
 }
 
 void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_count,
-                           int distinct_frames, bool trust_sensor_noise)
+                           int distinct_frames, bool trust_sensor_noise,
+                           int frame_idx)
 {
   for (const auto& pt : points) {
     const V3D& p = pt.point;
@@ -960,7 +1019,7 @@ void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_cou
   // itself no-ops until an anchor exists, so this is safe to call
   // unconditionally).
   if (is_plane_) {
-    for (const auto& pt : points) updateOccupancy(pt.point);
+    for (const auto& pt : points) updateOccupancy(pt.point, frame_idx);
     recomputeOccupancyCache();
     applyPlaneConfidence();
     // refitDebiased() already recorded the pre-inflation trace; this second
@@ -1276,7 +1335,7 @@ void VoxelPlane::buildInformationCovariance(double n_raw, const M3D& mean_cov_al
 }
 
 // History (1006-1016): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-1006
-void VoxelPlane::updateOccupancy(const V3D& world_point)
+void VoxelPlane::updateOccupancy(const V3D& world_point, int frame_idx)
 {
   if (!is_plane_) return;
 
@@ -1289,6 +1348,7 @@ void VoxelPlane::updateOccupancy(const V3D& world_point)
     occupancy_bitmask_   = 0;
     occ_thru_bitmask_    = 0;  // P6a: reset alongside, same chart re-anchor
     occ_anchored_ = true;
+    occ_anchor_frame_    = frame_idx;  // P10: -1 if the caller didn't thread one
   }
 
   const double cell_size = opts_->voxel_size / 8.0;
@@ -1308,9 +1368,10 @@ void VoxelPlane::updateOccupancy(const V3D& world_point)
 // point has actually been recorded (occ_anchored_ true), matching
 // updateOccupancy()'s own convention -- an unanchored plane classifies
 // everything unobserved rather than guessing a chart.
-int VoxelPlane::classifyVisibility(const V3D& o_world, const V3D& p_world, double sigma_r) const
+VoxelPlane::VisResult VoxelPlane::classifyVisibility(const V3D& o_world, const V3D& p_world,
+                                                       double sigma_r, int scan_id) const
 {
-  if (!is_plane_ || !occ_anchored_) return 2;  // unobserved: no chart yet
+  if (!is_plane_ || !occ_anchored_) return {};  // unobserved (state=2), no chart yet
 
   const V3D ray = p_world - o_world;
   // Geometric ray-plane intersection uses THIS plane's own current fit
@@ -1324,6 +1385,7 @@ int VoxelPlane::classifyVisibility(const V3D& o_world, const V3D& p_world, doubl
   // t* = -(normal.dot(o) + d) / normal.dot(ray).
   const double denom = plane_.normal.dot(ray);
   int vis_state = 2;  // default: unobserved
+  bool thru = false;  // P10: this ray's OWN crossing result, before the hit override below can discard it
   if (std::abs(denom) > 1e-9) {
     const double ts = -(plane_.normal.dot(o_world) + plane_.d) / denom;
     // ts in (0, 1-margin) means the ray reached the plane's own depth and
@@ -1339,12 +1401,14 @@ int VoxelPlane::classifyVisibility(const V3D& o_world, const V3D& p_world, doubl
       if (cu >= 0 && cu < 8 && cv >= 0 && cv < 8) {
         occ_thru_bitmask_.fetch_or(uint64_t(1) << (cu * 8 + cv), std::memory_order_relaxed);
         vis_state = 1;  // known free (pending the hit check below)
+        thru = true;
       }
     }
   }
   // hit dominates thru at the SAME cell the point itself lands in -- a
   // point that returned here is not "crossed and kept going" regardless of
-  // what some other ray through this cell suggested.
+  // what some other ray through this cell suggested. thru (above) already
+  // recorded the ray's own crossing before this can override vis_state.
   {
     const V3D d = p_world - occ_anchor_center_;
     const double cell_size = opts_->voxel_size / 8.0;
@@ -1354,7 +1418,13 @@ int VoxelPlane::classifyVisibility(const V3D& o_world, const V3D& p_world, doubl
         (occupancy_bitmask_ & (uint64_t(1) << (cu * 8 + cv))))
       vis_state = 0;  // hit
   }
-  return vis_state;
+
+  VisResult out;
+  out.state = vis_state;
+  out.thru  = thru;
+  out.age   = (occ_anchor_frame_ >= 0) ? (scan_id - occ_anchor_frame_) : -1;
+  out.fill  = cached_occ_cells_;
+  return out;
 }
 
 // History (1041-1046): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-1041
