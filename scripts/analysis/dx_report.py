@@ -107,9 +107,36 @@ def _resample_at(src_t, src_v, dst_t, max_gap=1.0):
     return out
 
 
-def load_cell(run_dir, gt_path, gt_format, frame_correction, window=10.0, max_gap=0.5):
+def load_cell(run_dir, gt_path, gt_format, frame_correction, window=10.0, max_gap=0.1):
     """One cell's full join: alignment, gain, and the per-scan diagnostics,
-    all resampled onto the GT time grid analyse() itself uses."""
+    all resampled onto the GT time grid analyse() itself uses.
+
+    V-3 (2026-09-03): max_gap here feeds resample()'s bracket-gap tolerance
+    (a direct `gap <= max_gap` check) for the SAME estimate-onto-GT
+    interpolation the live C++ scorer does (EvoProc's opts_.max_time_diff,
+    config key evo/max_time_diff, compiled default 0.05s) -- but the C++
+    path (and evo/fastlivo_evo.py's own lookup_est(), which mirrors it)
+    both gate on bracket_span <= 2.0*max_time_diff, i.e. the DOUBLED value,
+    not the raw one. max_gap here must therefore be 2*0.05 = 0.1, not
+    0.05 -- an off-by-factor-of-2 in an earlier pass at this same fix
+    caused every cell to come back "too few matched samples" (odometry.txt's
+    own ~83ms inter-frame spacing already exceeds a raw 0.05s tolerance).
+
+    This was 0.5 before -- 5x looser than the correct 0.1 -- which silently
+    matched ~3.5x more GT samples than the live scorer (n=6616 vs n=1868 on
+    dx1r_l5_eee_01) and was the ENTIRE explanation for every disagreement
+    V-3 found between results_lio.txt's ATE and this script's own `ate`
+    column (verified via an independent third re-score,
+    evo/fastlivo_evo.py's --incremental Kabsch path with --max-time-diff
+    0.05: n and ATE landed bit-identical to results_lio.txt at every point
+    along the progressive curve, not just the endpoint, on both a spline
+    cell (L5, was 5.5% off) and a discrete no-spline cell (L0, was 11.5%
+    off) once the tolerance matched). Fixed to 0.1 so this script's `ate`
+    column is the same statistic as the live scorer reports -- the R1
+    "determinism finding" (L1/L2/L3 missing their dx1 values by 16-21mm)
+    was very likely this same convention mismatch, not a real
+    non-determinism bug.
+    """
     est_path = os.path.join(run_dir, "odometry.txt")
     if not os.path.exists(est_path):
         return None
@@ -221,7 +248,31 @@ def load_cell(run_dir, gt_path, gt_format, frame_correction, window=10.0, max_ga
                 vtot = cs["n_vis_hit"] + cs["n_vis_free"] + cs["n_vis_unobs"]
                 diag["vis_free"] = _resample_at(cs_t, np.where(vtot > 0, cs["n_vis_free"] / vtot, np.nan), t)
                 diag["vis_unobs"] = _resample_at(cs_t, np.where(vtot > 0, cs["n_vis_unobs"] / vtot, np.nan), t)
-                diag["vis_hit_thru"] = np.full(len(t), np.nan)  # not tracked separately -- see P6a's own scoping note
+            # P10 (block v2).  n_vis_hit/free/unobs above count every
+            # candidate whose ray was classified, accepted or not -- can't
+            # separate "the arm's known-free difference is a fact about the
+            # scene" from "...a fact about how long a chart lives" without
+            # the accepted-only counts, chart age, and chart fill P10 adds.
+            if "n_vis_hit_thru" in cs:
+                diag["vis_hit_thru"] = _resample_at(
+                    cs_t, np.where(cs["n_vis_hit"] > 0, cs["n_vis_hit_thru"] / cs["n_vis_hit"], np.nan), t)
+            else:
+                diag["vis_hit_thru"] = np.full(len(t), np.nan)  # pre-P10 corr_scan.csv -- column doesn't exist
+            if "n_vis_free_acc" in cs:
+                vtot = cs["n_vis_hit"] + cs["n_vis_free"] + cs["n_vis_unobs"]
+                vtot_acc = cs["n_vis_hit_acc"] + cs["n_vis_free_acc"] + cs["n_vis_unobs_acc"]
+                diag["vis_free_acc_frac"] = _resample_at(
+                    cs_t, np.where(vtot > 0, cs["n_vis_free_acc"] / vtot, np.nan), t)
+                diag["vis_free_of_acc"] = _resample_at(
+                    cs_t, np.where(vtot_acc > 0, cs["n_vis_free_acc"] / vtot_acc, np.nan), t)
+                diag["age_free"] = _resample_at(
+                    cs_t, np.where(cs["n_age_free"] > 0, cs["sum_age_free"] / cs["n_age_free"], np.nan), t)
+                diag["age_hit"] = _resample_at(
+                    cs_t, np.where(cs["n_age_hit"] > 0, cs["sum_age_hit"] / cs["n_age_hit"], np.nan), t)
+                diag["fill_free"] = _resample_at(
+                    cs_t, np.where(cs["n_vis_free"] > 0, cs["sum_fill_free"] / cs["n_vis_free"], np.nan), t)
+                diag["fill_hit"] = _resample_at(
+                    cs_t, np.where(cs["n_vis_hit"] > 0, cs["sum_fill_hit"] / cs["n_vis_hit"], np.nan), t)
 
     if sc is not None and "t" in sc:
         diag["omega_norm"] = _resample_at(sc["t"], sc["omega_norm"], t)
@@ -277,6 +328,11 @@ def series_block(cell_data):
                 pvar_share=med(d["diag"].get("pvar_share", np.full(len(t), np.nan))),
                 floor_share=med(d["diag"].get("floor_share", np.full(len(t), np.nan))),
                 n_res=med(d["diag"].get("n_res", np.full(len(t), np.nan))),
+                # P10 (block v2)
+                vis_free=med(d["diag"].get("vis_free", np.full(len(t), np.nan))),
+                vis_free_acc_frac=med(d["diag"].get("vis_free_acc_frac", np.full(len(t), np.nan))),
+                age_free=med(d["diag"].get("age_free", np.full(len(t), np.nan))),
+                age_hit=med(d["diag"].get("age_hit", np.full(len(t), np.nan))),
             ))
     return rows
 
@@ -332,6 +388,13 @@ def summary_block(cell_data):
             vis_free_frac=p50("vis_free"), vis_unobs_frac=p50("vis_unobs"),
             vis_hit_thru_frac=p50("vis_hit_thru"),
             iters_p50=p50("iters"), trP_pos_drop_p50=p50("trP_drop"),
+            # P10 (block v2): accepted-only known-free rate ("the number
+            # that actually decides P6b"), plus chart age/fill so a known-
+            # free difference between arms can be told apart from a chart-
+            # persistence difference.
+            vis_free_acc_frac=p50("vis_free_acc_frac"), vis_free_of_acc=p50("vis_free_of_acc"),
+            age_free_p50=p50("age_free"), age_hit_p50=p50("age_hit"),
+            fill_free_p50=p50("fill_free"), fill_hit_p50=p50("fill_hit"),
         ))
     return rows
 
@@ -436,26 +499,34 @@ def _fint(v):
 
 
 def emit_series(rows):
-    out = ["[DX1R-SERIES v1]",
-           "cell,t_s,e_glob,e_pre,e_win,gain_cum,v_err,refusal,div_pos,nis,sdiag_share,pvar_share,floor_share,n_res"]
+    # P10: bumped to v2 -- vis_free/vis_free_acc_frac/age_free/age_hit
+    # appended, existing columns unchanged/unreordered.
+    out = ["[DX1R-SERIES v2]",
+           "cell,t_s,e_glob,e_pre,e_win,gain_cum,v_err,refusal,div_pos,nis,sdiag_share,pvar_share,floor_share,n_res,"
+           "vis_free,vis_free_acc_frac,age_free,age_hit"]
     for r in rows:
         out.append(f"{r['cell']},{r['t_s']:.3f},{_fnum(r['e_glob'],5)},{_fnum(r['e_pre'],5)},{_fnum(r['e_win'],5)},"
                    f"{_fnum(r['gain_cum'],5)},{_fnum(r['v_err'],4)},{_fnum(r['refusal'],3)},{_fnum(r['div_pos'],3)},"
                    f"{_fnum(r['nis'],3)},{_fnum(r['sdiag_share'],3)},{_fnum(r['pvar_share'],3)},{_fnum(r['floor_share'],3)},"
-                   f"{_fint(r['n_res'])}")
+                   f"{_fint(r['n_res'])},"
+                   f"{_fnum(r['vis_free'],4)},{_fnum(r['vis_free_acc_frac'],4)},{_fnum(r['age_free'],2)},{_fnum(r['age_hit'],2)}")
     out.append("[/DX1R-SERIES]")
     return "\n".join(out)
 
 
 def emit_summary(rows):
+    # P10: bumped to v2 -- vis_free_acc_frac/vis_free_of_acc/age_{free,hit}_p50/
+    # fill_{free,hit}_p50 appended, existing columns unchanged/unreordered.
     cols = ["cell", "ate", "e_pre_p50", "e_pre_p90", "e_win_p50", "gain_sum", "gain_neg_frac",
             "v_err_p50", "refusal_p50", "refusal_nan_frac", "div_pos_p50", "div_rot_p50", "nis_p50",
             "sdiag_share_p50", "pvar_share_p50", "floor_share_p50", "prior_pose_share_p50",
             "n_res_p50", "n_planes_p50", "w_per_res_p50", "cov_acc_pre_p50", "cov_acc_post_p50",
             "cov_gyr_pre_p50", "cov_gyr_post_p50", "refit_dtraj_rms_p50", "refit_dtraj_max",
             "boundary_dpos_p50", "boundary_dpos_p90", "vis_free_frac", "vis_unobs_frac",
-            "vis_hit_thru_frac", "iters_p50", "trP_pos_drop_p50"]
-    out = ["[DX1R-SUMMARY v1]", ",".join(cols)]
+            "vis_hit_thru_frac", "iters_p50", "trP_pos_drop_p50",
+            "vis_free_acc_frac", "vis_free_of_acc", "age_free_p50", "age_hit_p50",
+            "fill_free_p50", "fill_hit_p50"]
+    out = ["[DX1R-SUMMARY v2]", ",".join(cols)]
     for r in rows:
         def fmt(c):
             v = r[c]
