@@ -284,19 +284,32 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   const bool use_acc = (imu != nullptr) && imu->usable() && opts.imuFitAcc();
   const bool use_gyr = (imu != nullptr) && imu->usable() && opts.imuFitGyr();
 
+  bias_acc_delta_ = V3D::Zero();
+  bias_gyr_delta_ = V3D::Zero();
+  gravity_delta_  = V3D::Zero();
+
   if (use_acc || use_gyr)
   {
     valid_ = true;
 
     // GYRO first: the accel target needs R(t), so rotation must settle before
     // position is re-solved.  The target Jr(phi)^-1 (gyro - b_g) depends on
-    // phi itself, hence the relinearisation loop; the accel target does not
-    // depend on cp_p_ at all, so it needs exactly one pass.
+    // phi itself, hence the relinearisation loop.
+    //
+    // Each pass also re-solves bias_gyr_delta_ (see SplineOptions::
+    // imu_fit_bias_prior_frac): with cp_phi_ just re-fit against the
+    // CURRENT effective bias (imu->bias_gyr + bias_gyr_delta_), the
+    // residual between the fitted spline's own tangent-rate and the raw
+    // gyro target is linear in a further delta, so it gets its own small
+    // (3x3, bias-only) Gauss-Newton solve rather than being folded into
+    // the (n_cp x n_cp) control-point system above.
     if (use_gyr)
     {
       const int iters = std::max(1, opts.imu_fit_iters);
       for (int it = 0; it < iters; ++it)
       {
+        const V3D bias_gyr_eff = imu->bias_gyr + bias_gyr_delta_;
+
         Eigen::MatrixXd Hg = Eigen::MatrixXd::Zero(n_cp_, n_cp_);
         Eigen::MatrixXd bg = Eigen::MatrixXd::Zero(n_cp_, 3);
         Eigen::Vector4d bb, dbb, ddbb;
@@ -311,7 +324,7 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
           const M3D J = Jr(phiAt(sm.t));
           const Eigen::FullPivLU<M3D> lu(J);
           if (!lu.isInvertible()) continue;
-          const V3D tgt = lu.solve(V3D(sm.gyro - imu->bias_gyr));
+          const V3D tgt = lu.solve(V3D(sm.gyro - bias_gyr_eff));
           if (!tgt.allFinite()) continue;
 
           for (int i = 0; i < 4; ++i)
@@ -337,50 +350,122 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
         const Eigen::MatrixXd Xr2 = ldlt_r.solve(b_r);
         if (!Xr2.allFinite()) break;
         for (int i = 0; i < n_cp_; ++i) cp_phi_.col(i) = Xr2.row(i).transpose();
+
+        if (opts.imu_fit_bias_prior_frac >= 0.0)
+        {
+          // e0 = fitted_phidot - Jr(phi)^-1 (gyro - bias_gyr_eff); linear in
+          // a further delta db with de0/ddb = +Jr(phi)^-1, so
+          // (Jr^-1)^T Jr^-1 db = -(Jr^-1)^T e0, i.e. minimise ||e0 + Jr^-1
+          // db||^2 with a zero-mean ridge pulling db toward 0.
+          M3D H3 = M3D::Zero();
+          V3D g3 = V3D::Zero();
+          int used2 = 0;
+          for (const auto& sm : *imu->samples)
+          {
+            if (sm.t < t0_ || sm.t > t1_) continue;
+            const V3D phidot = phiDotAt(sm.t);
+            const M3D JrI = JrInv(phiAt(sm.t));
+            const V3D e0 = phidot - JrI * V3D(sm.gyro - bias_gyr_eff);
+            if (!e0.allFinite()) continue;
+            H3 += JrI.transpose() * JrI;
+            g3 += -(JrI.transpose() * e0);
+            ++used2;
+          }
+          if (used2 >= 4 && H3.trace() > 0.0)
+          {
+            H3 += (opts.imu_fit_bias_prior_frac * (H3.trace() / 3.0)) * M3D::Identity();
+            const V3D db = H3.ldlt().solve(g3);
+            if (db.allFinite()) bias_gyr_delta_ += db;
+          }
+        }
       }
     }
 
     if (use_acc)
     {
-      Eigen::MatrixXd Ha = Eigen::MatrixXd::Zero(n_cp_, n_cp_);
-      Eigen::MatrixXd ba = Eigen::MatrixXd::Zero(n_cp_, 3);
-      Eigen::Vector4d bb, dbb, ddbb;
-      int s = 0;
-      int used = 0;
-
-      for (const auto& sm : *imu->samples)
+      const int iters = std::max(1, opts.imu_fit_iters);
+      for (int it = 0; it < iters; ++it)
       {
-        if (sm.t < t0_ || sm.t > t1_) continue;
-        basisAt(sm.t, s, bb, dbb, ddbb);
+        const V3D bias_acc_eff = imu->bias_acc + bias_acc_delta_;
+        const V3D gravity_eff  = imu->gravity  + gravity_delta_;
 
-        // World-frame specific force at this instant, from the CURRENT
-        // rotation spline.  Rotation is already final here.
-        const V3D tgt = rotAt(sm.t) * (sm.acc - imu->bias_acc) + imu->gravity;
-        if (!tgt.allFinite()) continue;
+        Eigen::MatrixXd Ha = Eigen::MatrixXd::Zero(n_cp_, n_cp_);
+        Eigen::MatrixXd ba = Eigen::MatrixXd::Zero(n_cp_, 3);
+        Eigen::Vector4d bb, dbb, ddbb;
+        int s = 0;
+        int used = 0;
 
-        const double s2 = inv_delta_ * inv_delta_;
-        for (int i = 0; i < 4; ++i)
+        for (const auto& sm : *imu->samples)
         {
-          const double ci = ddbb[i] * s2;
-          for (int j = 0; j < 4; ++j)
-            Ha(s + i, s + j) += ci * (ddbb[j] * s2);
-          ba.row(s + i) += ci * tgt.transpose();
-        }
-        ++used;
-      }
+          if (sm.t < t0_ || sm.t > t1_) continue;
+          basisAt(sm.t, s, bb, dbb, ddbb);
 
-      const double ta = Ha.trace();
-      if (used >= 4 && ta > 0.0)
-      {
+          // World-frame specific force at this instant, from the CURRENT
+          // rotation spline.  Rotation is already final here.
+          const V3D tgt = rotAt(sm.t) * (sm.acc - bias_acc_eff) + gravity_eff;
+          if (!tgt.allFinite()) continue;
+
+          const double s2 = inv_delta_ * inv_delta_;
+          for (int i = 0; i < 4; ++i)
+          {
+            const double ci = ddbb[i] * s2;
+            for (int j = 0; j < 4; ++j)
+              Ha(s + i, s + j) += ci * (ddbb[j] * s2);
+            ba.row(s + i) += ci * tgt.transpose();
+          }
+          ++used;
+        }
+
+        const double ta = Ha.trace();
+        if (used < 4 || !(ta > 0.0)) break;
+
         const double scale = opts.imu_fit_w_acc * data_trace / ta;
         Eigen::MatrixXd A_p = AtA + scale * Ha;
         Eigen::MatrixXd b_p = Atb_p + scale * ba;
         freezeAbsoluteScalarSystem(A_p, b_p, n_frozen_cp_, frozen_pos_);
 
         Eigen::LDLT<Eigen::MatrixXd> ldlt_p(A_p);
+        if (ldlt_p.info() != Eigen::Success) break;
         const Eigen::MatrixXd Xp2 = ldlt_p.solve(b_p);
-        if (ldlt_p.info() == Eigen::Success && Xp2.allFinite())
-          for (int i = 0; i < n_cp_; ++i) cp_p_.col(i) = Xp2.row(i).transpose();
+        if (!Xp2.allFinite()) break;
+        for (int i = 0; i < n_cp_; ++i) cp_p_.col(i) = Xp2.row(i).transpose();
+
+        if (opts.imu_fit_bias_prior_frac >= 0.0)
+        {
+          // e0 = fitted_accel - [R(t)(acc-bias_acc_eff) + gravity_eff],
+          // linear in [dba; dg] with Jacobian [R(t), -I] (3x6): moving
+          // bias_acc up REDUCES the target by R(t), moving gravity up
+          // RAISES it by I, so d(target)/d[dba;dg] = [-R(t), I] and
+          // d(e0)/d[dba;dg] = [R(t), -I].
+          Eigen::Matrix<double, 6, 6> H6 = Eigen::Matrix<double, 6, 6>::Zero();
+          Eigen::Matrix<double, 6, 1> g6 = Eigen::Matrix<double, 6, 1>::Zero();
+          int used2 = 0;
+          for (const auto& sm : *imu->samples)
+          {
+            if (sm.t < t0_ || sm.t > t1_) continue;
+            const M3D R = rotAt(sm.t);
+            const V3D fitted = accAt(sm.t);
+            const V3D e0 = fitted - (R * (sm.acc - bias_acc_eff) + gravity_eff);
+            if (!e0.allFinite()) continue;
+            Eigen::Matrix<double, 3, 6> J;
+            J.block<3, 3>(0, 0) = R;
+            J.block<3, 3>(0, 3) = -M3D::Identity();
+            H6 += J.transpose() * J;
+            g6 += -(J.transpose() * e0);
+            ++used2;
+          }
+          if (used2 >= 4 && H6.trace() > 0.0)
+          {
+            H6 += (opts.imu_fit_bias_prior_frac * (H6.trace() / 6.0))
+                  * Eigen::Matrix<double, 6, 6>::Identity();
+            const Eigen::Matrix<double, 6, 1> d6 = H6.ldlt().solve(g6);
+            if (d6.allFinite())
+            {
+              bias_acc_delta_ += d6.head<3>();
+              gravity_delta_  += d6.tail<3>();
+            }
+          }
+        }
       }
     }
   }

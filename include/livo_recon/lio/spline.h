@@ -288,6 +288,40 @@ struct SplineOptions
   double imu_fit_w_gyr = 0.0;
   int    imu_fit_iters = 2;
 
+  // ── Joint bias_acc/bias_gyr/gravity correction, solved alongside the
+  //    control points ──────────────────────────────────────────────────
+  // SplineImuFitData::bias_acc/bias_gyr/gravity (set by the caller from
+  // state_propagat_, the bias/gravity this frame's IMU propagation
+  // actually started from -- see LioProc::splineImuFitData()) are treated
+  // as a FIXED BASELINE, not the final value: each imu_fit_iters pass,
+  // after cp_phi_/cp_p_ are (re)solved against the current baseline+delta,
+  // a small separate Gauss-Newton solve (3x3 for bias_gyr, 6x6 for
+  // [bias_acc, gravity] jointly, since the accel residual is linear in
+  // both together -- see fit()'s own derivation) finds the delta that
+  // best explains the remaining gap between raw IMU integration and the
+  // control points' own (LiDAR-informed) shape, with a Tikhonov prior
+  // pulling the delta toward 0 so a short/degenerate window can't produce
+  // a wild estimate. Deliberately anchored at the FRAME-START baseline,
+  // not the current-iteration state_ bias (which the IEKF's own point-to-
+  // plane correction is simultaneously moving this frame) -- correcting
+  // against a moving target would double-count whatever the IEKF's own
+  // correction already explains through its pose/bias covariance
+  // cross-terms.
+  //
+  // This delta is used ONLY inside the spline's own fit (better shape ->
+  // better deskewing -> better point-to-plane residuals), exactly like
+  // the plain fixed-bias imu_fit term it replaces -- it is NOT written
+  // back into state_'s own bias/gravity. That feedback loop already
+  // exists, just indirectly: the IEKF's own residual system estimates
+  // bias/gravity itself (see StateGroup::estBG()/estBA()/estGravity()),
+  // via the SAME joint covariance a spline-shape improvement's downstream
+  // effect on point-to-plane residuals also flows through.
+  //
+  // DEFAULT 0.1: the prior counts as 10% of the block's own data weight
+  // (same data-relative convention as fit_regularization/imu_fit_w_*).
+  // Untuned -- this is a new mechanism, not yet validated by ablation.
+  double imu_fit_bias_prior_frac = 0.1;
+
   // ── Re-integration under the ESIKF's bias corrections ───────────────────
   // The pose sequence the spline is fitted to was dead-reckoned by
   // ImuProc::propagate() using the biases as they stood BEFORE this frame's
@@ -348,15 +382,18 @@ struct SplineOptions
   // with the PREVIOUS scan's own t1.
   //
   // "single_cp" / "exact": freeze this scan's boundary control point(s) to
-  // the PREVIOUS scan's own final (t1) pose BEFORE fit() runs (see
+  // the PREVIOUS scan's own final pose BEFORE fit() runs (see
   // ScanSpline::setFrozenBoundary()), instead of calling anchorTo() at
   // all -- anchorTo() afterwards would rigidly move the whole spline again
   // and both re-open the gap it just closed AND degrade the fit (see the
   // frozen control points' own doc comment for the exact/non-exact
-  // distinction). t1 is then whatever the frozen-t0 fit+refine produces,
-  // written back into the IEKF state directly (the spline becomes
-  // authoritative for this frame's output pose, not just an internal
-  // deskewing aid) -- so this changes ATE, not just a diagnostic.
+  // distinction). state_ is NOT written back from the spline under this
+  // mode -- it is one continuously-propagated object across the whole
+  // run, never reconstructed per scan, so it was never actually
+  // discontinuous at scan boundaries in the first place. This mode makes
+  // the SPLINE's own boundary exact (a better internal deskewing
+  // reference); state_'s pose/vel/bias/gravity keep coming exclusively
+  // from the IEKF's own point-to-plane correction, unchanged.
   std::string boundary_anchor_mode = "exact";
   static constexpr const char* BOUNDARY_ANCHOR_MODES[] = { "none", "single_cp", "exact" };
   int nFrozenCp() const
@@ -487,6 +524,13 @@ public:
   double refineDcpMax() const { return refine_dcp_max_; }   // m
   double refineDcpRms() const { return refine_dcp_rms_; }   // m
 
+  // The joint imu_fit_bias_prior_frac correction found by this fit() call
+  // -- see SplineOptions::imu_fit_bias_prior_frac's doc comment. Zero when
+  // imu_fit_mode is "off" or the relevant channel wasn't usable.
+  V3D biasAccDelta() const { return bias_acc_delta_; }
+  V3D biasGyrDelta() const { return bias_gyr_delta_; }
+  V3D gravityDelta() const { return gravity_delta_; }
+
 private:
   int    n_frozen_cp_ = 0;
   V3D    frozen_pos_  = V3D::Zero();
@@ -504,6 +548,9 @@ private:
   std::vector<M3D> cp_R_;                             // n_cp, cumulative mode
 
   double fit_res_pos_ = 0.0, fit_res_rot_ = 0.0, fit_reg_frac_ = 0.0;
+  V3D    bias_acc_delta_ = V3D::Zero();
+  V3D    bias_gyr_delta_ = V3D::Zero();
+  V3D    gravity_delta_  = V3D::Zero();
   // See refineDcpMax().  Called on every exit path of refineWithLidar()
   // that may have touched cp_p_, including the reject paths.
   void accumulateRefineDisplacement(

@@ -159,6 +159,9 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
                      "spline/fit/imu_term/w_gyr", opts_.spline.imu_fit_w_gyr, 0.0);
   cfg.nested<int>(sp && opts_.spline.imuFitOn(), "spline/fit/imu_term/mode",
                   "spline/fit/imu_term/iters", opts_.spline.imu_fit_iters, 2);
+  cfg.nested<double>(sp && opts_.spline.imuFitOn(), "spline/fit/imu_term/mode",
+                     "spline/fit/imu_term/bias_prior_frac",
+                     opts_.spline.imu_fit_bias_prior_frac, 0.1);
 
   // The per-iteration pipeline: ONE mode with five values, replacing the
   // three booleans whose 2x2x2 space had only five distinct behaviours.  See
@@ -492,6 +495,11 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
   refit_dtraj_max_ = 0.0;
   refit_drot_deg_ = 0.0;
   spline_poses0_.clear();
+  // Captured HERE, before anything this frame can correct state_'s bias/
+  // gravity (the IEKF loop hasn't started) -- see the member doc comments.
+  spline_frame_bias_acc_ = state_->biasAcc();
+  spline_frame_bias_gyr_ = state_->biasGyr();
+  spline_frame_gravity_  = state_->gravity();
   // Per-FRAME, not per-fit: fit() no longer resets these, because with
   // reintegrate_each_iteration on it runs once per IEKF iteration.
   spline_.resetRefineStats();
@@ -576,9 +584,22 @@ SplineImuFitData LioProc::splineImuFitData(const MeasureGroup& mg) const
   SplineImuFitData d;
   if (opts_.spline.imuFitOn())
     d.samples = &mg.imu_samples_raw;
-  d.bias_acc = state_->biasAcc();
-  d.bias_gyr = state_->biasGyr();
-  d.gravity  = state_->gravity();
+  // Deliberately the FRAME-START bias/gravity (captured once in
+  // deskewAndDownsample(), before this frame's IEKF loop can move it), not
+  // state_->biasAcc()/biasGyr()/gravity() directly -- this function is
+  // called again from inside the per-iteration redeskew loop
+  // (redeskewFromSpline()), by which point state_'s own bias has already
+  // been nudged by however many IEKF iterations have run THIS frame.
+  // fit()'s joint bias/gravity correction (SplineOptions::
+  // imu_fit_bias_prior_frac) explains the gap between raw IMU integration
+  // and the LiDAR-fit control points as a correction to THIS fixed
+  // baseline -- correcting against the current, still-drifting iterate
+  // instead would double-count whatever the IEKF's own separate point-to-
+  // plane correction is simultaneously explaining through its own
+  // pose/bias covariance cross-terms.
+  d.bias_acc = spline_frame_bias_acc_;
+  d.bias_gyr = spline_frame_bias_gyr_;
+  d.gravity  = spline_frame_gravity_;
   return d;
 }
 

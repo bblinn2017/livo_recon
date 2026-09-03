@@ -292,6 +292,19 @@ private:
   std::vector<Pose6D> spline_poses_;    // replay target, reused
   int  spline_refits_ = 0;              // per frame, for spline_q.csv
 
+  // The bias/gravity THIS FRAME's IMU propagation actually started from,
+  // captured once at the top of deskewAndDownsample() (before the IEKF
+  // loop -- and therefore before anything corrects state_'s bias/gravity
+  // this frame) and read by every splineImuFitData() call for the rest of
+  // the frame. Same value state_propagat_'s bias/gravity blocks hold once
+  // the loop starts (propagate() never touches them either), captured
+  // earlier because deskewAndDownsample()'s own fit() call runs before
+  // state_propagat_ is assigned for this frame -- see splineImuFitData()'s
+  // doc comment for why using state_-> directly here would be wrong.
+  V3D spline_frame_bias_acc_ = V3D::Zero();
+  V3D spline_frame_bias_gyr_ = V3D::Zero();
+  V3D spline_frame_gravity_  = V3D::Zero();
+
   // ── Engagement counters ─────────────────────────────────────────────────
   // A flag that is on must increment something observable, and where it moves
   // a quantity it must record how far -- an acceptance count alone cannot
