@@ -348,9 +348,22 @@ def series_block(cell_data):
                 v = v[np.isfinite(v)]
                 return float(np.median(v)) if len(v) else float("nan")
 
+            def rms(arr):
+                # P-1 item 0 / P-2 item 1: a bucket median of e_glob discards
+                # the within-bucket spikes ATE is actually built from -- an
+                # RMS over these bucket RMS values reproduces harness ATE to
+                # 0.4-4.1% on dx1r's twelve cells (verified P-2, nineteenth
+                # round), where the median route ran 0.65-0.90x low on the
+                # well-behaved cells. Emitted alongside the median, not in
+                # place of it, per rule 5b.
+                v = arr[m]
+                v = v[np.isfinite(v)]
+                return float(np.sqrt(np.mean(v ** 2))) if len(v) else float("nan")
+
             rows.append(dict(
                 cell=cell.upper(), t_s=float(t[m][len(t[m]) // 2] - t0),
-                e_glob=med(d["e_glob"]), e_pre=med(d["e_pre"]), e_win=med(d["e_win"]),
+                e_glob=med(d["e_glob"]), e_glob_rms=rms(d["e_glob"]),
+                e_pre=med(d["e_pre"]), e_win=med(d["e_win"]),
                 gain_cum=float(gain_cum[m][-1]) if m.any() else float("nan"),
                 v_err=med(d["v_err"]), refusal=med(d["diag"].get("refusal", np.full(len(t), np.nan))),
                 div_pos=med(d["diag"].get("div_pos", np.full(len(t), np.nan))),
@@ -538,11 +551,14 @@ def _fint(v):
 def emit_series(rows):
     # P10: bumped to v2 -- vis_free/vis_free_acc_frac/age_free/age_hit
     # appended, existing columns unchanged/unreordered.
-    out = ["[DX1R-SERIES v2]",
-           "cell,t_s,e_glob,e_pre,e_win,gain_cum,v_err,refusal,div_pos,nis,sdiag_share,pvar_share,floor_share,n_res,"
+    # P-2 (nineteenth round): bumped to v3 -- e_glob_rms appended.  A bucket
+    # median discards the within-bucket spikes ATE is built from; e_glob_rms
+    # is the statistic that reconciles against harness ATE (P-1 item 0).
+    out = ["[DX1R-SERIES v3]",
+           "cell,t_s,e_glob,e_glob_rms,e_pre,e_win,gain_cum,v_err,refusal,div_pos,nis,sdiag_share,pvar_share,floor_share,n_res,"
            "vis_free,vis_free_acc_frac,age_free,age_hit"]
     for r in rows:
-        out.append(f"{r['cell']},{r['t_s']:.3f},{_fnum(r['e_glob'],5)},{_fnum(r['e_pre'],5)},{_fnum(r['e_win'],5)},"
+        out.append(f"{r['cell']},{r['t_s']:.3f},{_fnum(r['e_glob'],5)},{_fnum(r['e_glob_rms'],5)},{_fnum(r['e_pre'],5)},{_fnum(r['e_win'],5)},"
                    f"{_fnum(r['gain_cum'],5)},{_fnum(r['v_err'],4)},{_fnum(r['refusal'],3)},{_fnum(r['div_pos'],3)},"
                    f"{_fnum(r['nis'],3)},{_fnum(r['sdiag_share'],3)},{_fnum(r['pvar_share'],3)},{_fnum(r['floor_share'],3)},"
                    f"{_fint(r['n_res'])},"
