@@ -34,6 +34,20 @@ struct CombinedProcOptions
 
   // History (45-50): see docs/livo_recon_changelog.md#include-livo_recon-processing-combined_processing.h-45
   bool   log_consistency_en = false;
+
+  // SW-5 bug-ledger fix: CombinedProc's primary loop never calls
+  // LioProc::processLIO() (only accumulateForCombined()), so LioProc's own
+  // "lio/log_nll_en"-gated nll.txt write inside processLIO() never fires
+  // in combined mode -- a sweep config that sets lio/log_nll_en (the
+  // LIO-only convention every existing sweep script uses) produces a
+  // near-empty nll.txt with no warning. CombinedProc has its own
+  // logConsistencyNll() call, gated on log_consistency_en above, that
+  // already writes a per-channel ("lio"/"vio") row every frame from
+  // accumulateForCombined()'s own residual -- it was simply never wired to
+  // the flag any existing config actually sets. Read lio/log_nll_en here
+  // too and OR it into the same gate (loadParameters()) so an existing
+  // sweep config needs no change.
+  bool   log_nll_en_compat = false;
 };
 
 // Opt-in combined LIO+VIO EKF step. Each iteration: asks LioProc and

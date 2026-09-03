@@ -72,6 +72,11 @@ def series_block_generic(cell_data):
                 v = v[np.isfinite(v)]
                 return float(np.sqrt(np.mean(v ** 2))) if len(v) else float("nan")
 
+            def frac(arr):
+                v = arr[m]
+                v = v[np.isfinite(v)]
+                return float(np.mean(v)) if len(v) else float("nan")
+
             rows.append(dict(
                 cell=cell.upper(), t_s=float(t[m][len(t[m]) // 2] - t0),
                 # P-1 item 0: RMS shipped alongside the median -- a median
@@ -91,15 +96,28 @@ def series_block_generic(cell_data):
                 d_bias_acc_norm=med(d["diag"].get("d_bias_acc_norm", np.full(len(t), np.nan))),
                 d_bias_gyr_norm=med(d["diag"].get("d_bias_gyr_norm", np.full(len(t), np.nan))),
                 d_gravity_norm=med(d["diag"].get("d_gravity_norm", np.full(len(t), np.nan))),
+                # C-7 (nineteenth round): AdaptiveQ gate columns -- see
+                # dx_report.py's load_cell()/series_block() for why these
+                # (not cov_acc/cov_gyr) tell a live module from a disabled
+                # one.
+                z_acc=med(d["diag"].get("z_acc", np.full(len(t), np.nan))),
+                z_gyr=med(d["diag"].get("z_gyr", np.full(len(t), np.nan))),
+                acf1_acc=med(d["diag"].get("acf1_acc", np.full(len(t), np.nan))),
+                acf1_gyr=med(d["diag"].get("acf1_gyr", np.full(len(t), np.nan))),
+                active_frac=frac(d["diag"].get("active", np.full(len(t), np.nan))),
+                clamped_frac=frac(d["diag"].get("clamped", np.full(len(t), np.nan))),
             ))
     return rows
 
 
 def emit_series_generic(name, rows):
-    out = [f"[{name}-SERIES v1]",
+    # C-7 (nineteenth round): bumped to v2 -- z_acc/z_gyr/acf1_acc/acf1_gyr/
+    # active_frac/clamped_frac appended.
+    out = [f"[{name}-SERIES v2]",
            "cell,t_s,e_glob,e_glob_rms,e_pre,e_pre_rms,e_win,e_win_rms,gain_cum,v_err,"
            "refusal,div_pos,nis,n_res,cov_acc,cov_gyr,"
-           "d_bias_acc_norm,d_bias_gyr_norm,d_gravity_norm"]
+           "d_bias_acc_norm,d_bias_gyr_norm,d_gravity_norm,"
+           "z_acc,z_gyr,acf1_acc,acf1_gyr,active_frac,clamped_frac"]
     for r in rows:
         out.append(
             f"{r['cell']},{r['t_s']:.3f},{dxr._fnum(r['e_glob'],5)},{dxr._fnum(r['e_glob_rms'],5)},"
@@ -109,7 +127,9 @@ def emit_series_generic(name, rows):
             f"{dxr._fnum(r['refusal'],3)},{dxr._fnum(r['div_pos'],3)},{dxr._fnum(r['nis'],3)},"
             f"{dxr._fint(r['n_res'])},{dxr._fnum(r['cov_acc'],4)},{dxr._fnum(r['cov_gyr'],6)},"
             f"{dxr._fnum(r['d_bias_acc_norm'],6)},{dxr._fnum(r['d_bias_gyr_norm'],6)},"
-            f"{dxr._fnum(r['d_gravity_norm'],6)}")
+            f"{dxr._fnum(r['d_gravity_norm'],6)},"
+            f"{dxr._fnum(r['z_acc'],3)},{dxr._fnum(r['z_gyr'],3)},{dxr._fnum(r['acf1_acc'],3)},{dxr._fnum(r['acf1_gyr'],3)},"
+            f"{dxr._fnum(r['active_frac'],3)},{dxr._fnum(r['clamped_frac'],3)}")
     out.append(f"[/{name}-SERIES]")
     return "\n".join(out)
 
@@ -199,10 +219,11 @@ def main():
     a = ap.parse_args()
 
     name = a.batch_id.upper()
-    cell_data, dispatched = {}, []
+    cell_data, dispatched, run_dirs = {}, [], {}
     for spec in a.cell:
         cname, run_dir = spec.split("=", 1)
         dispatched.append(cname)
+        run_dirs[cname] = run_dir
         d = dxr.load_cell(run_dir, a.gt, a.gt_format, a.frame_correction)
         cell_data[cname] = d
         if d is None:
@@ -227,9 +248,9 @@ def main():
         # applicable) the generic verify_block already emits for anything
         # not in dxr.DISCRETE_CELLS.
 
-    meta = dxr.meta_block(cell_data, a.batch_id, a.seq, a.build_commit, None, dispatched)
-    meta = meta.replace("[DX1R-META v1]", f"[{name}-META v1]").replace("[/DX1R-META]", f"[/{name}-META]")
-    verify = dxr.emit_verify(verify_rows).replace("[DX1R-VERIFY v1]", f"[{name}-VERIFY v1]").replace(
+    meta = dxr.meta_block(cell_data, a.batch_id, a.seq, a.build_commit, None, dispatched, run_dirs=run_dirs)
+    meta = meta.replace("[DX1R-META v2]", f"[{name}-META v2]").replace("[/DX1R-META]", f"[/{name}-META]")
+    verify = dxr.emit_verify(verify_rows).replace("[DX1R-VERIFY v2]", f"[{name}-VERIFY v2]").replace(
         "[/DX1R-VERIFY]", f"[/{name}-VERIFY]")
 
     blocks = [meta, verify, emit_series_generic(name, series), emit_summary_generic(name, summary)]

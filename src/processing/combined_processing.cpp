@@ -24,6 +24,10 @@ std::string CombinedProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "combined/ekf/max_avg_error",   opts_.max_avg_error,   5.0);
   paramWarn<bool>(pnh, "combined/log_debug_en",       opts_.log_debug_en,   false);
   paramWarn<bool>(pnh, "combined/log_consistency_en", opts_.log_consistency_en, false);
+  // See CombinedProcOptions::log_nll_en_compat -- lio/log_nll_en is read
+  // here too so a sweep config using the LIO-only flag name still gets a
+  // populated nll.txt in combined mode.
+  paramWarn<bool>(pnh, "lio/log_nll_en",              opts_.log_nll_en_compat, false);
 
   std::ostringstream oss;
   oss << "[params/combined]"
@@ -33,7 +37,8 @@ std::string CombinedProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  ekf/min_norm_dt:    " << opts_.min_norm_dt
       << "\n  ekf/min_diff_error: " << opts_.min_diff_error
       << "\n  ekf/max_avg_error:  " << opts_.max_avg_error
-      << "\n  log_consistency_en: " << (opts_.log_consistency_en ? "true" : "false");
+      << "\n  log_consistency_en: " << (opts_.log_consistency_en ? "true" : "false")
+      << "\n  log_nll_en_compat: " << (opts_.log_nll_en_compat ? "true" : "false");
   return oss.str();
 }
 
@@ -117,7 +122,7 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProc& lio_proc, V
   if (any_solved)
     ekf_.applyCovarianceUpdate(state_, prior_cov_);
 
-  if (opts_.log_consistency_en) {
+  if (opts_.log_consistency_en || opts_.log_nll_en_compat) {
     // Both channels, same statistic, same frame. This is the measurement the
     // unification argument needs: if the two channels' NIS levels differ
     // materially at the same instant, they are calibrated inconsistently

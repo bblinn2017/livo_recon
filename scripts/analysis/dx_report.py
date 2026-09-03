@@ -195,6 +195,17 @@ def load_cell(run_dir, gt_path, gt_format, frame_correction, window=10.0, max_ga
     cs = _read_csv_dict(os.path.join(run_dir, "corr_scan.csv"))
     sc = _read_csv_dict(os.path.join(run_dir, "scan.csv"))
     sq = _read_csv_dict(os.path.join(run_dir, "spline_q.csv"))
+    # _read_csv_dict silently drops any column that doesn't parse as float
+    # (its own ValueError guard) -- spline_q.csv's "status" column is a
+    # string enum (ok/below_floor/warmup/no_window/not_white), so it needs
+    # its own pass to survive into sq for the active/clamped derivation
+    # below (C-7).
+    sq_status_path = os.path.join(run_dir, "spline_q.csv")
+    if sq is not None and os.path.exists(sq_status_path):
+        with open(sq_status_path) as _f:
+            _rows = list(csv.DictReader(_f))
+        if _rows and "status" in _rows[0]:
+            sq["status"] = np.array([r["status"] for r in _rows], dtype=object)
 
     diag = {}
     if fs is not None and "t" in fs:
@@ -316,6 +327,27 @@ def load_cell(run_dir, gt_path, gt_format, frame_correction, window=10.0, max_ga
             diag["d_bias_acc_norm"] = _resample_at(sq["t_abs"], sq["d_bias_acc_norm"], t)
             diag["d_bias_gyr_norm"] = _resample_at(sq["t_abs"], sq["d_bias_gyr_norm"], t)
             diag["d_gravity_norm"] = _resample_at(sq["t_abs"], sq["d_gravity_norm"], t)
+        # C-7 (second half): the AdaptiveQ GATE columns -- distinct from
+        # cov_*_pre/post above, which csvRow() writes from the raw residual
+        # whether or not update() ran (see Q-1b) and therefore cannot tell
+        # "flat because clamped" from "flat because nothing drives it".
+        # z_acc/z_gyr are the module's own whitened-innovation gate signal;
+        # acf1_acc/acf1_gyr its residual-autocorrelation whiteness check;
+        # status ("ok"/"below_floor"/"warmup"/"no_window"/"not_white")
+        # is the module's own per-frame verdict -- active means the EMA
+        # update actually ran and moved the applied value ("ok" only);
+        # clamped means it ran but the floor pinned the output
+        # ("below_floor") rather than nothing driving it at all (the other
+        # three statuses -- warmup/no_window/not_white -- are neither).
+        if "z_acc" in sq:
+            diag["z_acc"] = _resample_at(sq["t_abs"], sq["z_acc"], t)
+            diag["z_gyr"] = _resample_at(sq["t_abs"], sq["z_gyr"], t)
+            diag["acf1_acc"] = _resample_at(sq["t_abs"], sq["acf1_acc"], t)
+            diag["acf1_gyr"] = _resample_at(sq["t_abs"], sq["acf1_gyr"], t)
+        if "status" in sq:
+            status = np.asarray(sq["status"], dtype=object)
+            diag["active"] = _resample_at(sq["t_abs"], (status == "ok").astype(float), t)
+            diag["clamped"] = _resample_at(sq["t_abs"], (status == "below_floor").astype(float), t)
 
     diag["cov_acc"] = diag.get("cov_acc_post", np.full(len(t), np.nan))
     diag["cov_gyr"] = diag.get("cov_gyr_post", np.full(len(t), np.nan))
@@ -360,6 +392,16 @@ def series_block(cell_data):
                 v = v[np.isfinite(v)]
                 return float(np.sqrt(np.mean(v ** 2))) if len(v) else float("nan")
 
+            def frac(arr):
+                # C-7: active/clamped are 0/1 per-scan indicators -- a
+                # bucket's MEDIAN of a binary series just picks the
+                # majority state (or ties), losing exactly the "how much
+                # of this bucket" question the fraction is for. Mean, not
+                # med(), is the right reduction here.
+                v = arr[m]
+                v = v[np.isfinite(v)]
+                return float(np.mean(v)) if len(v) else float("nan")
+
             rows.append(dict(
                 cell=cell.upper(), t_s=float(t[m][len(t[m]) // 2] - t0),
                 e_glob=med(d["e_glob"]), e_glob_rms=rms(d["e_glob"]),
@@ -377,6 +419,16 @@ def series_block(cell_data):
                 vis_free_acc_frac=med(d["diag"].get("vis_free_acc_frac", np.full(len(t), np.nan))),
                 age_free=med(d["diag"].get("age_free", np.full(len(t), np.nan))),
                 age_hit=med(d["diag"].get("age_hit", np.full(len(t), np.nan))),
+                # C-7: AdaptiveQ gate columns -- see load_cell()'s own
+                # comment for why these, not cov_*_pre/post, are what
+                # separates "flat because clamped" from "flat because
+                # nothing drives it".
+                z_acc=med(d["diag"].get("z_acc", np.full(len(t), np.nan))),
+                z_gyr=med(d["diag"].get("z_gyr", np.full(len(t), np.nan))),
+                acf1_acc=med(d["diag"].get("acf1_acc", np.full(len(t), np.nan))),
+                acf1_gyr=med(d["diag"].get("acf1_gyr", np.full(len(t), np.nan))),
+                active_frac=frac(d["diag"].get("active", np.full(len(t), np.nan))),
+                clamped_frac=frac(d["diag"].get("clamped", np.full(len(t), np.nan))),
             ))
     return rows
 
@@ -554,15 +606,21 @@ def emit_series(rows):
     # P-2 (nineteenth round): bumped to v3 -- e_glob_rms appended.  A bucket
     # median discards the within-bucket spikes ATE is built from; e_glob_rms
     # is the statistic that reconciles against harness ATE (P-1 item 0).
-    out = ["[DX1R-SERIES v3]",
+    # C-7 (nineteenth round): bumped to v4 -- z_acc/z_gyr/acf1_acc/acf1_gyr/
+    # active_frac/clamped_frac appended -- the AdaptiveQ GATE columns, not
+    # yet present anywhere (cov_acc/cov_gyr landed already but cannot
+    # distinguish a live module from a disabled one -- see Q-1b).
+    out = ["[DX1R-SERIES v4]",
            "cell,t_s,e_glob,e_glob_rms,e_pre,e_win,gain_cum,v_err,refusal,div_pos,nis,sdiag_share,pvar_share,floor_share,n_res,"
-           "vis_free,vis_free_acc_frac,age_free,age_hit"]
+           "vis_free,vis_free_acc_frac,age_free,age_hit,z_acc,z_gyr,acf1_acc,acf1_gyr,active_frac,clamped_frac"]
     for r in rows:
         out.append(f"{r['cell']},{r['t_s']:.3f},{_fnum(r['e_glob'],5)},{_fnum(r['e_glob_rms'],5)},{_fnum(r['e_pre'],5)},{_fnum(r['e_win'],5)},"
                    f"{_fnum(r['gain_cum'],5)},{_fnum(r['v_err'],4)},{_fnum(r['refusal'],3)},{_fnum(r['div_pos'],3)},"
                    f"{_fnum(r['nis'],3)},{_fnum(r['sdiag_share'],3)},{_fnum(r['pvar_share'],3)},{_fnum(r['floor_share'],3)},"
                    f"{_fint(r['n_res'])},"
-                   f"{_fnum(r['vis_free'],4)},{_fnum(r['vis_free_acc_frac'],4)},{_fnum(r['age_free'],2)},{_fnum(r['age_hit'],2)}")
+                   f"{_fnum(r['vis_free'],4)},{_fnum(r['vis_free_acc_frac'],4)},{_fnum(r['age_free'],2)},{_fnum(r['age_hit'],2)},"
+                   f"{_fnum(r['z_acc'],3)},{_fnum(r['z_gyr'],3)},{_fnum(r['acf1_acc'],3)},{_fnum(r['acf1_gyr'],3)},"
+                   f"{_fnum(r['active_frac'],3)},{_fnum(r['clamped_frac'],3)}")
     out.append("[/DX1R-SERIES]")
     return "\n".join(out)
 
@@ -628,7 +686,32 @@ def _script_commit():
         return "unknown"
 
 
-def meta_block(cell_data, batch, seq, build_commit, batch_root, dispatched_cells):
+def _adaptive_q_echo(run_dir):
+    """C-10: no artifact in this project recorded which cells had AdaptiveQ
+    on -- its shipped default is false and eighteen rounds argued about
+    cov_acc/cov_gyr without it. Reads the retained config.yaml directly (the
+    only place the resolved value lives) rather than inferring it from
+    engagement.txt (which is absent whenever spline is off, per its own
+    nested-under-spline design -- see Q-1's card)."""
+    path = os.path.join(run_dir, "config.yaml")
+    if not os.path.exists(path):
+        return "enable=nan"
+    try:
+        import yaml
+        cfg = yaml.safe_load(open(path)) or {}
+    except Exception:
+        return "enable=nan(unparsable)"
+    aq = cfg.get("adaptive_q", {}) or {}
+    enable = aq.get("enable", False)  # shipped default
+    nf = aq.get("noise_floor", {}) or {}
+    return (f"enable={str(enable).lower()}"
+            f",noise_floor_mode={nf.get('mode', 'allan')}"
+            f",beta_acc={aq.get('beta_acc', 'default')}"
+            f",beta_gyr={aq.get('beta_gyr', 'default')}"
+            f",warmup_frames={aq.get('warmup_frames', 'default')}")
+
+
+def meta_block(cell_data, batch, seq, build_commit, batch_root, dispatched_cells, run_dirs=None):
     import datetime
     completed = [c for c in dispatched_cells if cell_data.get(c) is not None]
     failed = [c for c in dispatched_cells if cell_data.get(c) is None]
@@ -638,13 +721,28 @@ def meta_block(cell_data, batch, seq, build_commit, batch_root, dispatched_cells
         n = sum(1 for r in series if r["cell"] == cell.upper())
         if cell_data.get(cell) is not None and n < 40:
             short.append(f"{cell}(series={n}/40)")
-    out = ["[DX1R-META v1]",
+    # C-10: per-cell AdaptiveQ scope echo. run_dirs lets a caller (e.g.
+    # emit_batch_blocks.py) pass explicit NAME->run_dir pairs; falls back to
+    # dx_report.py's own batch-root/batch_cell_seq convention otherwise.
+    aq_lines = []
+    for cell in dispatched_cells:
+        if cell_data.get(cell) is None:
+            continue
+        if run_dirs and cell in run_dirs:
+            rd = run_dirs[cell]
+        elif batch_root:
+            rd = os.path.join(batch_root, f"{batch}_{cell}_{seq}")
+        else:
+            continue
+        aq_lines.append(f"adaptive_q[{cell}]: {_adaptive_q_echo(rd)}")
+    out = ["[DX1R-META v2]",
            f"batch={batch}", f"seq={seq}",
            f"commit={build_commit}", f"script_commit={_script_commit()}",
            f"date_utc={datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
            f"cells_dispatched={len(dispatched_cells)}  cells_completed={len(completed)}  cells_failed={len(failed)}",
            f"failed={','.join(failed) if failed else 'NONE'}",
            f"short_blocks={','.join(short) if short else 'NONE'}",
+           *aq_lines,
            "[/DX1R-META]"]
     return "\n".join(out)
 
@@ -653,9 +751,18 @@ def verify_block(cell_data, series, dispatched_cells):
     """The four checks, PER CELL, AS DATA -- see the register's DX-1R-D card,
     step 1's FILE LAYOUT for [DX1R-VERIFY v1]'s exact semantics:
       (1) e_glob's RMS over all scans must equal results_lio.txt's ATE to 4dp.
-      (2) gain_cum's final value plus the first scan's error equals the last
-          scan's prior error, to rounding (the telescoping identity):
-          gain_cum[-1] + e_glob[0] =~= e_prior[-1], where e_prior = gain + e_glob.
+      (2) gain_sum_m -- NOT a verified identity (C-11 fix, nineteenth round).
+          The original spec here claimed a telescoping identity
+          gain_cum[-1] + e_glob[0] =~= e_prior[-1] with e_prior := gain +
+          e_glob -- but gain[k] is a PER-SCAN counterfactual (this scan's
+          own prior error minus its own posterior error, both against GT at
+          the SAME instant), not a running trajectory quantity, so it does
+          not telescope: gain_cum[-1] sums ~4,000 per-scan terms (order
+          10^2-10^3) while e_prior[-1] is a single scan's value (order
+          10^-2), so the "error" was ALWAYS approximately gain_cum[-1]
+          itself and could not fail regardless of whether the underlying
+          data was right. Reported honestly now: the raw sum, not an "error"
+          that implies a check passed.
       (3) on a trajectory_mode: discrete cell, refit_dtraj_rms is 0 (there is
           no spline to refit at all -- see DISCRETE_CELLS).
       (4) the row count this cell contributed to DX1R-SERIES (0 for any cell
@@ -666,18 +773,14 @@ def verify_block(cell_data, series, dispatched_cells):
         d = cell_data.get(cell)
         if d is None:
             rows.append(dict(cell=cell.upper(), e_glob_rms=float("nan"), ate_results_lio=float("nan"),
-                              gain_telescope_err_m=float("nan"), refit_dtraj_zero_ok="nan", n_series_rows=0))
+                              gain_sum_m=float("nan"), refit_dtraj_zero_ok="nan", n_series_rows=0))
             continue
         e_glob = d["e_glob"]
         e_glob_rms = float(np.sqrt(np.mean(e_glob[np.isfinite(e_glob)] ** 2))) if np.any(np.isfinite(e_glob)) else float("nan")
 
         gain = d["gain"]
         gain_cum = np.nancumsum(np.nan_to_num(gain, nan=0.0))
-        e_prior = gain + e_glob  # gain := e_prior - e_glob, so e_prior := gain + e_glob
-        if len(gain_cum) and np.isfinite(e_glob[0]) and np.isfinite(e_prior[-1]):
-            telescope_err = abs(float(gain_cum[-1]) + float(e_glob[0]) - float(e_prior[-1]))
-        else:
-            telescope_err = float("nan")
+        gain_sum_m = float(gain_cum[-1]) if len(gain_cum) else float("nan")
 
         if cell in DISCRETE_CELLS:
             rd = d["diag"].get("refit_dtraj_rms")
@@ -694,7 +797,7 @@ def verify_block(cell_data, series, dispatched_cells):
             cell=cell.upper(),
             e_glob_rms=e_glob_rms,
             ate_results_lio=float("nan"),  # filled by caller (needs run_dir, not in cell_data)
-            gain_telescope_err_m=telescope_err,
+            gain_sum_m=gain_sum_m,
             refit_dtraj_zero_ok=zero_ok,
             n_series_rows=n_series_rows,
         ))
@@ -702,11 +805,13 @@ def verify_block(cell_data, series, dispatched_cells):
 
 
 def emit_verify(rows):
-    out = ["[DX1R-VERIFY v1]",
-           "cell,e_glob_rms,ate_results_lio,gain_telescope_err_m,refit_dtraj_zero_ok,n_series_rows"]
+    # C-11: bumped to v2 -- gain_telescope_err_m renamed gain_sum_m (it was
+    # never a verified identity, see verify_block()'s doc comment).
+    out = ["[DX1R-VERIFY v2]",
+           "cell,e_glob_rms,ate_results_lio,gain_sum_m,refit_dtraj_zero_ok,n_series_rows"]
     for r in rows:
         out.append(f"{r['cell']},{_fnum(r['e_glob_rms'],4)},{_fnum(r['ate_results_lio'],4)},"
-                   f"{_fnum(r['gain_telescope_err_m'],4)},{r['refit_dtraj_zero_ok']},{r['n_series_rows']}")
+                   f"{_fnum(r['gain_sum_m'],4)},{r['refit_dtraj_zero_ok']},{r['n_series_rows']}")
     out.append("[/DX1R-VERIFY]")
     return "\n".join(out)
 
