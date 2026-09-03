@@ -250,7 +250,7 @@ def main():
 
     meta = dxr.meta_block(cell_data, a.batch_id, a.seq, a.build_commit, None, dispatched, run_dirs=run_dirs)
     meta = meta.replace("[DX1R-META v2]", f"[{name}-META v2]").replace("[/DX1R-META]", f"[/{name}-META]")
-    verify = dxr.emit_verify(verify_rows).replace("[DX1R-VERIFY v2]", f"[{name}-VERIFY v2]").replace(
+    verify = dxr.emit_verify(verify_rows).replace("[DX1R-VERIFY v3]", f"[{name}-VERIFY v3]").replace(
         "[/DX1R-VERIFY]", f"[/{name}-VERIFY]")
 
     blocks = [meta, verify, emit_series_generic(name, series), emit_summary_generic(name, summary)]

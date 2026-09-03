@@ -73,6 +73,11 @@ assert len(PAIRS) == 11, len(PAIRS)
 # on these, since there is no spline to refit at all).
 DISCRETE_CELLS = {"l0", "l0d", "r_l0", "n_l0"}
 
+# C-12: gt_format values scored live via [evo/nearest] (EvoProc::process
+# EvoFileMode()) -- every HILTI sequence. "ntu_csv" (NTU_VIRAL, gt_source:
+# topic) is the only format scored via [evo/interp] and is NOT in this set.
+HILTI_FILE_MODE_FORMATS = {"tum", "hilti_sparse"}
+
 DIAGNOSTICS = ["refusal", "div_pos", "div_rot", "nis", "sdiag_share", "pvar_share",
                "floor_share", "prior_pose_share", "n_res", "w_per_res", "cov_acc",
                "cov_gyr", "refit_dtraj_rms", "boundary_dpos", "trP_drop", "gain", "v_err"]
@@ -148,12 +153,28 @@ def load_cell(run_dir, gt_path, gt_format, frame_correction, window=10.0, max_ga
     t_e, p_e, q_e = load_tum(est_path)
     t_g, p_g, q_g = LOADERS[gt_format](gt_path)
     p_e, q_e = apply_frame_correction(p_e, q_e, frame_correction)
-    # V-3: linear (lerp), not the default pchip -- matches the live C++
-    # scorer's own interp mode exactly (EvoProc: lerp(position)/slerp
-    # (rotation), see evo_processing.cpp's "interp" comment). Quaternion
-    # interpolation is always Slerp regardless of this argument, already
-    # matching the live scorer's slerpRot -- only position differs.
-    p_i, q_i, valid = resample(t_e, p_e, q_e, t_g, max_gap, method="linear")
+    # C-12 (2026-09-03): this call used to be a single linear/max_gap=0.1
+    # resample() for every gt_format, reproducing the live scorer's
+    # [evo/interp] convention (EvoProc::processEvoTopicMode(), NTU_VIRAL/
+    # ntu_csv only). But every HILTI sequence -- gt_format in {tum,
+    # hilti_sparse} -- is scored live via [evo/nearest]
+    # (EvoProc::processEvoFileMode(), nearest-raw-timestamp, gate on the
+    # RAW opts_.max_time_diff=0.05, not the doubled bracket-span value
+    # interp mode needs) -- see resample()'s method="nearest" docstring.
+    # Using interp/0.1 there was structurally the wrong statistic, not
+    # just a looser tolerance: every ATE this script has ever recomputed
+    # on a sequence other than eee_01/NTU_VIRAL used the wrong association
+    # mode. HILTI_FILE_MODE_FORMATS below is exactly the register's own
+    # "inferred from gt_format in {tum, hilti_sparse}" rule.
+    if gt_format in HILTI_FILE_MODE_FORMATS:
+        p_i, q_i, valid = resample(t_e, p_e, q_e, t_g, 0.05, method="nearest")
+    else:
+        # V-3: linear (lerp), not the default pchip -- matches the live C++
+        # scorer's own interp mode exactly (EvoProc: lerp(position)/slerp
+        # (rotation), see evo_processing.cpp's "interp" comment). Quaternion
+        # interpolation is always Slerp regardless of this argument, already
+        # matching the live scorer's slerpRot -- only position differs.
+        p_i, q_i, valid = resample(t_e, p_e, q_e, t_g, max_gap, method="linear")
     t = t_g[valid]
     src, dst = p_i[valid], p_g[valid]
     if len(t) < 20:
@@ -804,14 +825,39 @@ def verify_block(cell_data, series, dispatched_cells):
     return rows
 
 
+# C-12 part (1): the tolerance the register's own reconciliation work has
+# already established as normal agreement between this script's recomputed
+# e_glob_rms and results_lio.txt's ate_results_lio, post-V-3 -- P-2's
+# e_glob_rms fix reconciled the two to 0.4-4.1% on eee_01/NTU_VIRAL. Set
+# generously above that (10%) so this refuses genuine convention mismatches
+# (the kind C-12 part (2) fixes) without flagging normal cross-statistic
+# noise as a false refusal.
+ATE_PATH_AGREEMENT_TOL = 0.10
+
+
+def ate_paths_agree(e_glob_rms, ate_results_lio, tol=ATE_PATH_AGREEMENT_TOL):
+    """C-12 part (1): the VERIFY refusal the register's card asked for.
+    Returns "1"/"0"/"nan" (nan when either side is missing -- not a
+    disagreement, just unscoreable)."""
+    if not (np.isfinite(e_glob_rms) and np.isfinite(ate_results_lio)) or ate_results_lio == 0:
+        return "nan"
+    rel = abs(e_glob_rms - ate_results_lio) / abs(ate_results_lio)
+    return "1" if rel <= tol else "0"
+
+
 def emit_verify(rows):
-    # C-11: bumped to v2 -- gain_telescope_err_m renamed gain_sum_m (it was
-    # never a verified identity, see verify_block()'s doc comment).
-    out = ["[DX1R-VERIFY v2]",
-           "cell,e_glob_rms,ate_results_lio,gain_sum_m,refit_dtraj_zero_ok,n_series_rows"]
+    # C-12: bumped to v3 -- added ate_paths_agree, the refusal column part
+    # (1) of the card asked for (the two ATE paths -- this script's own
+    # e_glob_rms and results_lio.txt's ate_results_lio -- were printed
+    # side by side with nothing that actually flagged a disagreement).
+    # C-11 (v2): gain_telescope_err_m renamed gain_sum_m (it was never a
+    # verified identity, see verify_block()'s doc comment).
+    out = ["[DX1R-VERIFY v3]",
+           "cell,e_glob_rms,ate_results_lio,ate_paths_agree,gain_sum_m,refit_dtraj_zero_ok,n_series_rows"]
     for r in rows:
+        agree = r.get("ate_paths_agree", ate_paths_agree(r["e_glob_rms"], r["ate_results_lio"]))
         out.append(f"{r['cell']},{_fnum(r['e_glob_rms'],4)},{_fnum(r['ate_results_lio'],4)},"
-                   f"{_fnum(r['gain_sum_m'],4)},{r['refit_dtraj_zero_ok']},{r['n_series_rows']}")
+                   f"{agree},{_fnum(r['gain_sum_m'],4)},{r['refit_dtraj_zero_ok']},{r['n_series_rows']}")
     out.append("[/DX1R-VERIFY]")
     return "\n".join(out)
 
