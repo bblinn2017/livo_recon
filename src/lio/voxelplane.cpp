@@ -95,6 +95,16 @@ struct CorrInfoCols {
   double   lambda2 = -1.0;       // third eigenvalue
   int      info_path = -1;       // P5: 1=exact directional weighting, 0=equal-weight fallback, -1=n/a (not information_directional)
   int      vis_state = -1;       // P6a: 0=hit, 1=known free, 2=unobserved, -1=not classified
+  // D-1's second falsifier.  a0/a1 alone fix H's eigenvectors in the
+  // PLANE'S OWN (y_normal_, x_normal_) chart -- to compare them against
+  // gravity they need to be mapped back to world frame, which needs the
+  // chart basis itself. Logged per-row (not once per plane) because
+  // x_normal_/y_normal_ can rotate when the plane re-fits mid-run, and a0/a1
+  // are only meaningful against the SAME chart instant they were computed
+  // against -- reading the plane's current basis after the fact would mix
+  // frames across refits exactly the way P6a's bug did.
+  double   x_normal_x = 0.0, x_normal_y = 0.0, x_normal_z = 0.0;
+  double   y_normal_x = 0.0, y_normal_y = 0.0, y_normal_z = 0.0;
 };
 
 void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, double S,
@@ -118,7 +128,8 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
     // History (113-120): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-113
     if (with_covariates) ofs << ",S_sensor,S_plane_tilt,S_plane_d,S_pose,S_prior_pose,N,J,aniso,lambda0,occ_aniso,occ_cells,occ_var_u,occ_var_v,plane_conf_factor"
                              << ",a0,a1,plane_id,roughness,sigma_bar2,n_eff,n_raw,rho,frames"
-                             << ",floor_term,lambda1,lambda2,info_path,vis_state";
+                             << ",floor_term,lambda1,lambda2,info_path,vis_state"
+                             << ",x_normal_x,x_normal_y,x_normal_z,y_normal_x,y_normal_y,y_normal_z";
     ofs << "\n";
   }
   first_call = false;
@@ -133,7 +144,9 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
         << "," << info.n_eff << "," << info.n_raw << "," << info.rho
         << "," << info.frames
         << "," << info.floor_term << "," << info.lambda1 << "," << info.lambda2
-        << "," << info.info_path << "," << info.vis_state;
+        << "," << info.info_path << "," << info.vis_state
+        << "," << info.x_normal_x << "," << info.x_normal_y << "," << info.x_normal_z
+        << "," << info.y_normal_x << "," << info.y_normal_y << "," << info.y_normal_z;
   ofs << "\n";
 }
 
@@ -578,6 +591,8 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
         info.lambda1    = eigen_values_(1);
         info.lambda2    = eigen_values_(2);
         info.vis_state  = res.vis_state;
+        info.x_normal_x = x_normal_.x(); info.x_normal_y = x_normal_.y(); info.x_normal_z = x_normal_.z();
+        info.y_normal_x = y_normal_.x(); info.y_normal_y = y_normal_.y(); info.y_normal_z = y_normal_.z();
       }
       debugLogConsistencyCorr(cov, scan_id, r, S, s_sensor, s_tilt, s_d, s_pose, n, j, aniso,
                                  accepted ? 0 : 1, s_prior_pose, lambda0, occ_aniso, occ_cells,
