@@ -1,6 +1,7 @@
 #include "livo_recon/livo_recon_node.h"
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/utils/log/debug_log_dir.h"
+#include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/lio/voxelplane.h"
 
 #include <stdexcept>
@@ -30,13 +31,13 @@ void LivoReconNode::loadParameters()
   // at load/first-write time. Empty (default) preserves the old hardcoded
   // "/tmp/<name>.txt" behavior for ad hoc/manual runs.
   std::string debug_log_dir;
-  pnh_.param<std::string>("outputs/debug_log_dir", debug_log_dir, "");
+  paramWarn<std::string>(pnh_, "outputs/debug_log_dir", debug_log_dir, "");
   setDebugLogDir(debug_log_dir);
   ctx_.printer->print(PrintCategory::PARAMS,
       "[params/common]  debug_log_dir: " + (debug_log_dir.empty() ? std::string("(unset, using /tmp)") : debug_log_dir));
 
   std::string profiler_export;
-  pnh_.param<std::string>("outputs/profiler/export_path", profiler_export, "");
+  paramWarn<std::string>(pnh_, "outputs/profiler/export_path", profiler_export, "");
   ctx_.profiler->setExportPath(profiler_export);
 
   ctx_.printer->print(PrintCategory::PARAMS, ctx_.printer->loadParameters(pnh_));
@@ -79,6 +80,15 @@ void LivoReconNode::loadParameters()
   else
   {
     ctx_.printer->print(PrintCategory::PARAMS, "[params/tracker]  skipped (vio/enable=false)");
+    // checkAllParamsConsumed() below would otherwise flag every tracker/*
+    // key (and viz/uv_tracking, read inside Tracker::loadParameters()) as
+    // unconsumed whenever VIO+combined are both off -- they're validly SET
+    // (every dataset config sets them unconditionally) but validly UNREAD
+    // in this branch, not a config bug. "tracker" alone is enough: the
+    // ancestor-walk in checkAllParamsConsumed() matches any "tracker/..."
+    // leaf against this one prefix.
+    markParamConsumed("tracker");
+    markParamConsumed("viz/uv_tracking");
   }
 
   // pub_proc_ must come after state_->loadParameters so cameras.bin can use intrinsics
@@ -90,10 +100,10 @@ void LivoReconNode::loadParameters()
   ctx_.printer->print(PrintCategory::PARAMS, lio_proc_.loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, evo_proc_.loadParameters(pnh_));
 
-  pnh_.param<bool>("outputs/auto_terminate_on_idle", auto_terminate_on_idle_, false);
-  pnh_.param<double>("outputs/auto_terminate_idle_secs", auto_terminate_idle_secs_, 5.0);
+  paramWarn<bool>(pnh_, "outputs/auto_terminate_on_idle", auto_terminate_on_idle_, false);
+  paramWarn<double>(pnh_, "outputs/auto_terminate_idle_secs", auto_terminate_idle_secs_, 5.0);
 
-  pnh_.param<bool>("common/insert_map_after_lio", insert_map_after_lio_, false);
+  paramWarn<bool>(pnh_, "common/insert_map_after_lio", insert_map_after_lio_, false);
   ctx_.printer->print(PrintCategory::PARAMS,
       std::string("[params/common]  insert_map_after_lio: ") +
       (insert_map_after_lio_ ? "true" : "false"));
@@ -106,8 +116,8 @@ void LivoReconNode::loadParameters()
   // the node's PRIVATE namespace regardless of the "common/" key prefix,
   // so nh_.param() here would never see anything set via config/defaults/
   // common.yaml or a per-run overrides_file.
-  pnh_.param<std::string>("common/offline_bag_path", offline_bag_path_, "");
-  pnh_.param<double>("common/offline_duration_secs", offline_duration_secs_, -1.0);
+  paramWarn<std::string>(pnh_, "common/offline_bag_path", offline_bag_path_, "");
+  paramWarn<double>(pnh_, "common/offline_duration_secs", offline_duration_secs_, -1.0);
   if (!offline_bag_path_.empty() && !auto_terminate_on_idle_)
   {
     // Without a rosbag-play subprocess, nothing external ever signals
@@ -122,6 +132,14 @@ void LivoReconNode::loadParameters()
         "completion)");
     auto_terminate_on_idle_ = true;
   }
+
+  // Must run LAST, after every loadParameters() call above (and everything
+  // they call transitively) has had a chance to read its own keys -- see
+  // checkAllParamsConsumed()'s own doc comment. Catches a config override
+  // that was set but never read by anything (almost always a misspelled or
+  // wrong-nesting key that would otherwise silently no-op) before the run
+  // ever launches.
+  checkAllParamsConsumed(pnh_);
 }
 
 void LivoReconNode::estimateState(MeasureGroup& mg) {

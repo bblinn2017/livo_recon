@@ -14,7 +14,6 @@ cuda:
 viz:
   enable: true  # normally overridden by the launch file's viz/enable param, set directly from the rviz:= launch arg (see livo_recon_*.launch) -- this default only applies if that param load is bypassed, e.g. loading this file's params directly outside a launch file
   grid_map: false
-  grid_map_color_weight: 0.5  # 0=all grayscale, 1=all color tint
   plane_map: false
   uv_tracking: true  # publish rgb_img with arrows showing vio's tracked uv displacements
   ds:
@@ -134,7 +133,6 @@ imu:
 lio:
   ekf:
     max_iterations: 5
-    residual_weighting: "none"
 voxel_map:
   backend: "voxel"  # "voxel" (default, persistent per-voxel plane fits, VoxelMap) or
                     # "akf" (AKF-LIO-style raw-point Gaussian merge map, AkfMap) -- see
@@ -150,7 +148,6 @@ voxel_map:
     # than HILTI's own previously-tuned 0.35, which only got 15/16).
     voxel_size: 0.425
     max_layer: 2
-    decimate_points: false
   plane:
     plane_threshold: 2.5e-3
   points:

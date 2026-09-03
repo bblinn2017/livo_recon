@@ -208,6 +208,7 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
   paramWarn<std::string>(pnh, "camera/distortion_model", camera_.distortion_model, "plumb_bob");
 
   XmlRpc::XmlRpcValue dist;
+  markParamConsumed("camera/distortion_coeffs");
   if (pnh.getParam("camera/distortion_coeffs", dist) &&
       dist.getType() == XmlRpc::XmlRpcValue::TypeArray)
   {
