@@ -1193,6 +1193,13 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     // "const auto& P = state_->cov()") to give the covariance delta, i.e.
     // how much this scan actually learned, which a level alone cannot.
     trP_pos_pre_ = prior_cov_.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()).trace();
+    // P8.  state_propagat_ IS the propagated (pre-update) state at this
+    // exact point -- snapshot it into mg so PubProc::publishOdometry() can
+    // export it alongside the posterior pose, without processLIO() needing
+    // to know anything about odometry export itself.
+    mg.prior_pos = state_propagat_.pos();
+    mg.prior_rot = state_propagat_.rot();
+    mg.prior_vel = state_propagat_.vel();
     bool any_solved = false;
 
     for (; iter < opts_.max_iterations; iter++) {

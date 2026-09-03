@@ -37,6 +37,17 @@ std::string PubProc::loadParameters(ros::NodeHandle& pnh)
     if (!odom_file_.is_open())
       ROS_ERROR_STREAM("[output] failed to open odom export path '"
         << odom_path << "' — disabling odom export");
+    // P8.  Same gate, same directory, a NEW file -- odometry.txt itself is
+    // untouched.
+    const std::string pose_pair_path = opts_.output_path + "/pose_pair.csv";
+    pose_pair_file_.open(pose_pair_path, std::ios::out | std::ios::trunc);
+    if (pose_pair_file_.is_open())
+      pose_pair_file_ << "t,px,py,pz,qx,qy,qz,qw,"
+                         "ppx,ppy,ppz,pqx,pqy,pqz,pqw,"
+                         "vx,vy,vz,pvx,pvy,pvz\n";
+    else
+      ROS_ERROR_STREAM("[output] failed to open pose_pair export path '"
+        << pose_pair_path << "' — disabling pose_pair export");
   }
 
   if (!opts_.output_path.empty() && (opts_.export_pcd || opts_.export_images)) {
@@ -233,6 +244,23 @@ void PubProc::publishOdometry(const MeasureGroup& mg)
                << state_->pos().x() << " " << state_->pos().y() << " " << state_->pos().z() << " "
                << q.x() << " " << q.y() << " " << q.z() << " " << q.w() << "\n";
     odom_file_.flush();
+  }
+
+  // P8.  Posterior columns mirror odom_file_'s own row exactly (same
+  // source, same precision) -- see P8's own verify text: they must equal
+  // the .tum to full precision, which is the cross-check that this file and
+  // odometry.txt are looking at the same scan's same state.
+  if (pose_pair_file_.is_open()) {
+    const Eigen::Quaterniond pq(mg.prior_rot);
+    pose_pair_file_ << std::fixed << std::setprecision(9)
+        << stamp.toSec() << ","
+        << state_->pos().x() << "," << state_->pos().y() << "," << state_->pos().z() << ","
+        << q.x() << "," << q.y() << "," << q.z() << "," << q.w() << ","
+        << mg.prior_pos.x() << "," << mg.prior_pos.y() << "," << mg.prior_pos.z() << ","
+        << pq.x() << "," << pq.y() << "," << pq.z() << "," << pq.w() << ","
+        << state_->vel().x() << "," << state_->vel().y() << "," << state_->vel().z() << ","
+        << mg.prior_vel.x() << "," << mg.prior_vel.y() << "," << mg.prior_vel.z() << "\n";
+    pose_pair_file_.flush();
   }
 
   if (!opts_.viz_enable) return;
@@ -445,6 +473,7 @@ void PubProc::exportColmap()
   }
 
   if (odom_file_.is_open()) odom_file_.close();
+  if (pose_pair_file_.is_open()) pose_pair_file_.close();
 
   if (!opts_.export_pcd && !opts_.export_images) return;
   if (opts_.output_path.empty()) {

@@ -80,6 +80,10 @@ private:
   robin_hood::unordered_flat_set<VoxelKey, VoxelKeyHash> vis_ds_seen_;
 
   std::ofstream odom_file_;
+  // P8.  One extra file alongside odom_file_, opened/closed the same way,
+  // gated on the same outputs/odom/export flag -- the existing .tum stays
+  // byte-identical for every consumer that already parses it.
+  std::ofstream pose_pair_file_;
   std::ofstream points3d_file_;
   uint64_t      points3d_count_     = 0;
   std::ofstream images_file_;

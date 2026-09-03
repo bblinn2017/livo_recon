@@ -58,6 +58,17 @@ struct MeasureGroup
   V3D pos_after_vio = V3D::Zero();
   M3D rot_after_vio = M3D::Identity();
 
+  // P8.  The PROPAGATED (pre-update) state, snapshotted at the top of
+  // LioProc::processLIO() -- the same place trP_pos_pre_ (P1) already is --
+  // so gain(t) = |p_prior-gt| - |p_post-gt| becomes computable post-hoc:
+  // did this scan's LiDAR update move the estimate closer to or further
+  // from the truth, not just "what did the filter believe". Read by
+  // PubProc::publishOdometry() to write pose_pair.csv alongside the
+  // existing (unmodified) odometry.txt.
+  V3D prior_pos = V3D::Zero();
+  M3D prior_rot = M3D::Identity();
+  V3D prior_vel = V3D::Zero();
+
   // Visualization Outputs
   cv::Mat grid_vis_image;
   std::string evo_stats;  // latest "n=.. ATE=.. RTE=.. ROE=.." line, set by EvoProc::processEvo() -- empty until enough poses have been matched to align
