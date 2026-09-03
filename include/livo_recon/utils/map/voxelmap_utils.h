@@ -344,7 +344,6 @@ struct VoxelOpts
   // missing "legacy").  When INT-1/D-1 decide, the loser is deleted along
   // with plane_var_denom_floor_en and sensor_noise_floor_eig0.
   std::string plane_var_mode = "eigengap";
-  static constexpr const char* PLANE_VAR_MODES[] = { "eigengap", "information" };
 
   // History (399-409): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-399
   //

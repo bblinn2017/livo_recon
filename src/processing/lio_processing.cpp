@@ -1167,6 +1167,16 @@ void LioProc::runDryRunShadowPass(const MeasureGroup& mg)
 
 std::string LioProc::processLIO(MeasureGroup& mg)
 {
+  // P8.  Seed prior_* to the CURRENT (pre-frame) state before any early
+  // return below can skip the real snapshot further down. Without this, an
+  // early return (e.g. an empty map) leaves mg.prior_* at MeasureGroup's
+  // bare defaults (zero/identity) while publishOdometry() still writes a
+  // pose_pair.csv row unconditionally -- gain(t) on that row would read as
+  // a huge, meaningless jump instead of the true zero (no update happened).
+  mg.prior_pos = state_->pos();
+  mg.prior_rot = state_->rot();
+  mg.prior_vel = state_->vel();
+
   if (voxel_map_->isEmpty()) return {};
 
   if (voxel_map_->isEmpty()) return {};
