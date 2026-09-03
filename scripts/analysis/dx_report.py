@@ -68,6 +68,11 @@ PAIRS = (list(zip(["l0", "l1", "l2", "l3", "l4"], ["l1", "l2", "l3", "l4", "l5"]
 # l4d->l5d and l5->l5d dropped along with l5d itself (see LADDER_CELLS).
 assert len(PAIRS) == 11, len(PAIRS)
 
+# trajectory_mode: discrete cells (spline.enable=false in gen_dx1_manifest.py's
+# DISCRETE override) -- used by DX1R-VERIFY check 3 (refit_dtraj_rms must be 0
+# on these, since there is no spline to refit at all).
+DISCRETE_CELLS = {"l0", "l0d", "r_l0", "n_l0"}
+
 DIAGNOSTICS = ["refusal", "div_pos", "div_rot", "nis", "sdiag_share", "pvar_share",
                "floor_share", "prior_pose_share", "n_res", "w_per_res", "cov_acc",
                "cov_gyr", "refit_dtraj", "boundary_dpos", "trP_drop", "gain", "v_err"]
@@ -362,7 +367,10 @@ def _cluster_se(x, y, t, block_s=10.0):
 def _best_lag(x, y, max_lag=20):
     m = np.isfinite(x) & np.isfinite(y)
     if m.sum() < 10:
-        return 0, float("nan")
+        # Register rule: never use 0 as a stand-in for "could not compute" --
+        # 0 is also a legitimate answer (no lag), so the two must not be
+        # conflated. float("nan") for both signals "not computable" instead.
+        return float("nan"), float("nan")
     x, y = x[m], y[m]
     best_lag, best_r = 0, -2.0
     for lag in range(-max_lag, max_lag + 1):
@@ -417,14 +425,24 @@ def pairs_block(cell_data):
     return rows
 
 
+def _fnum(v, dp):
+    """Register rule: a value that could not be computed is the literal
+    token 'nan' -- never blank, never 0, never -1, never 'N/A'."""
+    return "nan" if not np.isfinite(v) else f"{v:.{dp}f}"
+
+
+def _fint(v):
+    return "nan" if not np.isfinite(v) else str(int(round(v)))
+
+
 def emit_series(rows):
     out = ["[DX1R-SERIES v1]",
            "cell,t_s,e_glob,e_pre,e_win,gain_cum,v_err,refusal,div_pos,nis,sdiag_share,pvar_share,floor_share,n_res"]
     for r in rows:
-        out.append(f"{r['cell']},{r['t_s']:.3f},{r['e_glob']:.5f},{r['e_pre']:.5f},{r['e_win']:.5f},"
-                   f"{r['gain_cum']:.5f},{r['v_err']:.4f},{r['refusal']:.3f},{r['div_pos']:.3f},"
-                   f"{r['nis']:.3f},{r['sdiag_share']:.3f},{r['pvar_share']:.3f},{r['floor_share']:.3f},"
-                   f"{int(r['n_res']) if np.isfinite(r['n_res']) else -1}")
+        out.append(f"{r['cell']},{r['t_s']:.3f},{_fnum(r['e_glob'],5)},{_fnum(r['e_pre'],5)},{_fnum(r['e_win'],5)},"
+                   f"{_fnum(r['gain_cum'],5)},{_fnum(r['v_err'],4)},{_fnum(r['refusal'],3)},{_fnum(r['div_pos'],3)},"
+                   f"{_fnum(r['nis'],3)},{_fnum(r['sdiag_share'],3)},{_fnum(r['pvar_share'],3)},{_fnum(r['floor_share'],3)},"
+                   f"{_fint(r['n_res'])}")
     out.append("[/DX1R-SERIES]")
     return "\n".join(out)
 
@@ -439,7 +457,12 @@ def emit_summary(rows):
             "vis_hit_thru_frac", "iters_p50", "trP_pos_drop_p50"]
     out = ["[DX1R-SUMMARY v1]", ",".join(cols)]
     for r in rows:
-        vals = [r["cell"]] + [f"{r[c]:.5g}" if isinstance(r[c], float) else str(r[c]) for c in cols[1:]]
+        def fmt(c):
+            v = r[c]
+            if isinstance(v, float):
+                return "nan" if not np.isfinite(v) else f"{v:.5g}"
+            return str(v)
+        vals = [r["cell"]] + [fmt(c) for c in cols[1:]]
         out.append(",".join(vals))
     out.append("[/DX1R-SUMMARY]")
     return "\n".join(out)
@@ -448,9 +471,115 @@ def emit_summary(rows):
 def emit_pairs(rows):
     out = ["[DX1R-PAIRS v1]", "pair,diagnostic,r,se_cluster,n_scans,best_lag_scans,r_at_best_lag"]
     for r in rows:
-        out.append(f"{r['pair']},{r['diagnostic']},{r['r']:.2f},{r['se_cluster']:.2f},"
-                   f"{r['n_scans']},{r['best_lag_scans']},{r['r_at_best_lag']:.2f}")
+        out.append(f"{r['pair']},{r['diagnostic']},{_fnum(r['r'],2)},{_fnum(r['se_cluster'],2)},"
+                   f"{r['n_scans']},{_fint(r['best_lag_scans'])},{_fnum(r['r_at_best_lag'],2)}")
     out.append("[/DX1R-PAIRS]")
+    return "\n".join(out)
+
+
+def _results_lio_ate(run_dir):
+    """Parse ATE=<x>m out of results_lio.txt's evo console line (ANSI codes
+    and all -- it's a raw redirected console log, not a clean data file)."""
+    import re
+    path = os.path.join(run_dir, "results_lio.txt")
+    if not os.path.exists(path):
+        return float("nan")
+    with open(path) as f:
+        text = f.read()
+    m = re.findall(r"ATE=([0-9.]+)m", text)
+    return float(m[-1]) if m else float("nan")
+
+
+def _script_commit():
+    import subprocess
+    try:
+        out = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=_HERE,
+                                       stderr=subprocess.DEVNULL)
+        return out.decode().strip()
+    except Exception:
+        return "unknown"
+
+
+def meta_block(cell_data, batch, seq, build_commit, batch_root, dispatched_cells):
+    import datetime
+    completed = [c for c in dispatched_cells if cell_data.get(c) is not None]
+    failed = [c for c in dispatched_cells if cell_data.get(c) is None]
+    series = series_block(cell_data)
+    short = []
+    for cell in LADDER_CELLS:
+        n = sum(1 for r in series if r["cell"] == cell.upper())
+        if cell_data.get(cell) is not None and n < 40:
+            short.append(f"{cell}(series={n}/40)")
+    out = ["[DX1R-META v1]",
+           f"batch={batch}", f"seq={seq}",
+           f"commit={build_commit}", f"script_commit={_script_commit()}",
+           f"date_utc={datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+           f"cells_dispatched={len(dispatched_cells)}  cells_completed={len(completed)}  cells_failed={len(failed)}",
+           f"failed={','.join(failed) if failed else 'NONE'}",
+           f"short_blocks={','.join(short) if short else 'NONE'}",
+           "[/DX1R-META]"]
+    return "\n".join(out)
+
+
+def verify_block(cell_data, series, dispatched_cells):
+    """The four checks, PER CELL, AS DATA -- see the register's DX-1R-D card,
+    step 1's FILE LAYOUT for [DX1R-VERIFY v1]'s exact semantics:
+      (1) e_glob's RMS over all scans must equal results_lio.txt's ATE to 4dp.
+      (2) gain_cum's final value plus the first scan's error equals the last
+          scan's prior error, to rounding (the telescoping identity):
+          gain_cum[-1] + e_glob[0] =~= e_prior[-1], where e_prior = gain + e_glob.
+      (3) on a trajectory_mode: discrete cell, refit_dtraj_rms is 0 (there is
+          no spline to refit at all -- see DISCRETE_CELLS).
+      (4) the row count this cell contributed to DX1R-SERIES (0 for any cell
+          not in LADDER_CELLS -- SERIES is ladder-only by construction).
+    """
+    rows = []
+    for cell in dispatched_cells:
+        d = cell_data.get(cell)
+        if d is None:
+            rows.append(dict(cell=cell.upper(), e_glob_rms=float("nan"), ate_results_lio=float("nan"),
+                              gain_telescope_err_m=float("nan"), refit_dtraj_zero_ok="nan", n_series_rows=0))
+            continue
+        e_glob = d["e_glob"]
+        e_glob_rms = float(np.sqrt(np.mean(e_glob[np.isfinite(e_glob)] ** 2))) if np.any(np.isfinite(e_glob)) else float("nan")
+
+        gain = d["gain"]
+        gain_cum = np.nancumsum(np.nan_to_num(gain, nan=0.0))
+        e_prior = gain + e_glob  # gain := e_prior - e_glob, so e_prior := gain + e_glob
+        if len(gain_cum) and np.isfinite(e_glob[0]) and np.isfinite(e_prior[-1]):
+            telescope_err = abs(float(gain_cum[-1]) + float(e_glob[0]) - float(e_prior[-1]))
+        else:
+            telescope_err = float("nan")
+
+        if cell in DISCRETE_CELLS:
+            rd = d["diag"].get("refit_dtraj_rms")
+            if rd is None or not np.any(np.isfinite(rd)):
+                zero_ok = "1"  # no spline data at all on a discrete cell -- trivially satisfied
+            else:
+                zero_ok = "1" if np.nanmax(np.abs(rd)) < 1e-9 else "0"
+        else:
+            zero_ok = "nan"  # check does not apply outside DISCRETE_CELLS
+
+        n_series_rows = sum(1 for r in series if r["cell"] == cell.upper())
+
+        rows.append(dict(
+            cell=cell.upper(),
+            e_glob_rms=e_glob_rms,
+            ate_results_lio=float("nan"),  # filled by caller (needs run_dir, not in cell_data)
+            gain_telescope_err_m=telescope_err,
+            refit_dtraj_zero_ok=zero_ok,
+            n_series_rows=n_series_rows,
+        ))
+    return rows
+
+
+def emit_verify(rows):
+    out = ["[DX1R-VERIFY v1]",
+           "cell,e_glob_rms,ate_results_lio,gain_telescope_err_m,refit_dtraj_zero_ok,n_series_rows"]
+    for r in rows:
+        out.append(f"{r['cell']},{_fnum(r['e_glob_rms'],4)},{_fnum(r['ate_results_lio'],4)},"
+                   f"{_fnum(r['gain_telescope_err_m'],4)},{r['refit_dtraj_zero_ok']},{r['n_series_rows']}")
+    out.append("[/DX1R-VERIFY]")
     return "\n".join(out)
 
 
@@ -464,12 +593,25 @@ def main():
                     choices=["none", "ntu_prism", "hilti_tip"])
     ap.add_argument("--out", required=True)
     ap.add_argument("--seq", default="eee_01")
+    ap.add_argument("--batch-id", default="dx1r",
+                    help="prefix for run dirs (dx1r_<cell>_<seq>) and DX1R-META's batch= field")
+    ap.add_argument("--emit-blocks", default=None,
+                    help="write all five blocks (META, VERIFY, SERIES, SUMMARY, PAIRS), "
+                         "in that order, nothing else, to this single path -- the register's "
+                         "docs/results/<BATCH-ID>.txt convention")
+    ap.add_argument("--build-commit", default=None,
+                    help="git rev-parse HEAD of the livo_recon build the cells actually RAN "
+                         "on (not detectable from data -- must be supplied). Required with "
+                         "--emit-blocks.")
     a = ap.parse_args()
+
+    if a.emit_blocks and not a.build_commit:
+        sys.exit("--emit-blocks requires --build-commit (the commit the cells ran on)")
 
     os.makedirs(a.out, exist_ok=True)
     cell_data = {}
     for cell in ALL_CELLS:
-        run_dir = os.path.join(a.batch_root, f"dx1r_{cell}_{a.seq}")
+        run_dir = os.path.join(a.batch_root, f"{a.batch_id}_{cell}_{a.seq}")
         d = load_cell(run_dir, a.gt, a.gt_format, a.frame_correction)
         cell_data[cell] = d
         if d is None:
@@ -497,6 +639,19 @@ def main():
           f"summary={len(summary)} (want {len(ALL_CELLS)}) "
           f"pairs={len(pairs)} (want 17*{len(PAIRS)}={17*len(PAIRS)})",
           file=sys.stderr)
+
+    if a.emit_blocks:
+        verify_rows = verify_block(cell_data, series, ALL_CELLS)
+        for r in verify_rows:
+            cell = r["cell"].lower()
+            run_dir = os.path.join(a.batch_root, f"{a.batch_id}_{cell}_{a.seq}")
+            r["ate_results_lio"] = _results_lio_ate(run_dir)
+        meta = meta_block(cell_data, a.batch_id, a.seq, a.build_commit, a.batch_root, ALL_CELLS)
+        blocks = [meta, emit_verify(verify_rows), emit_series(series),
+                  emit_summary(summary), emit_pairs(pairs)]
+        with open(a.emit_blocks, "w", newline="\n") as f:
+            f.write("\n".join(blocks) + "\n")
+        print(f"\n# wrote {a.emit_blocks}", file=sys.stderr)
 
 
 if __name__ == "__main__":
