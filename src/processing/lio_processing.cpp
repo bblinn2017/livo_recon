@@ -746,12 +746,35 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
 
   last_spline_stats_ = SplineImuResidualStats{};
 
+  boundary_dpos_ = -1.0;
+  boundary_drot_deg_ = -1.0;
   if (spline_ok_)
   {
     // Anchor to the CONVERGED state before measuring.  Measuring against
     // the propagated-only spline would fold this frame's own correction
     // error into a number we are about to call "IMU noise".
     spline_.anchorTo(mg.image.t, state_->rot(), state_->pos());
+
+    // DX-2 preflight fix (boundary_dpos): THIS scan's own start (t0)
+    // against the PREVIOUS scan's finalized end -- the two spline
+    // evaluations this costs. Order matters: compare against the OLD
+    // prev_scan_end_* before overwriting it with this scan's own end
+    // below.
+    if (prev_scan_end_valid_)
+    {
+      const V3D t0_pos = spline_.posAt(spline_.t0());
+      const M3D t0_rot = spline_.rotAt(spline_.t0());
+      boundary_dpos_ = (t0_pos - prev_scan_end_pos_).norm();
+      const M3D dR = t0_rot * prev_scan_end_rot_.transpose();
+      boundary_drot_deg_ = std::acos(std::clamp((dR.trace() - 1.0) / 2.0, -1.0, 1.0))
+                          * (180.0 / M_PI);
+    }
+    // This scan's own end (t1) is exactly the anchor point just applied
+    // above -- state_->rot()/state_->pos() at mg.image.t -- no extra
+    // spline evaluation needed for the outgoing half.
+    prev_scan_end_pos_ = state_->pos();
+    prev_scan_end_rot_ = state_->rot();
+    prev_scan_end_valid_ = true;
 
     if (!mg.imu_samples_raw.empty())
     {
@@ -1422,6 +1445,10 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       }
       // Captured at the TOP of processLIO(), before the update -- see note.
       diag.trP_pos_pre = trP_pos_pre_;
+      // Captured in finalizeSplineAndQ(), which already ran earlier this
+      // same processLIO() call (see that function's own doc comment).
+      diag.boundary_dpos     = boundary_dpos_;
+      diag.boundary_drot_deg = boundary_drot_deg_;
       if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) vm->noteLioFrameDiag(diag);
     }
 

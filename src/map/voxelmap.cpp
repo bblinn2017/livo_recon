@@ -27,7 +27,8 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
     ofs << "t,frame_idx,denom_rejected_count,max_plane_var_trace"
            ",n_residuals,n_planes,h_pp_min_eig,h_rr_min_eig,sum_weight"
            ",h_rr_trace,htz_rot_norm,htz_pos_norm,ask,got,refusal"
-           ",iters,dx_rot_deg,dx_pos_mm,trP_pos_pre\n";
+           ",iters,dx_rot_deg,dx_pos_mm,trP_pos_pre"
+           ",boundary_dpos,boundary_drot_deg\n";
   first_call = false;
   // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
   // (6 significant figures) collapses every frame in a run to the same
@@ -40,7 +41,8 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.h_rr_trace << "," << lio.htz_rot_norm << "," << lio.htz_pos_norm
       << "," << lio.ask << "," << lio.got << "," << lio.refusal
       << "," << lio.iters << "," << lio.dx_rot_deg << "," << lio.dx_pos_mm
-      << "," << lio.trP_pos_pre << "\n";
+      << "," << lio.trP_pos_pre
+      << "," << lio.boundary_dpos << "," << lio.boundary_drot_deg << "\n";
 }
 }  // namespace
 

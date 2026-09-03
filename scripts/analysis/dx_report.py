@@ -75,7 +75,11 @@ DISCRETE_CELLS = {"l0", "l0d", "r_l0", "n_l0"}
 
 DIAGNOSTICS = ["refusal", "div_pos", "div_rot", "nis", "sdiag_share", "pvar_share",
                "floor_share", "prior_pose_share", "n_res", "w_per_res", "cov_acc",
-               "cov_gyr", "refit_dtraj", "boundary_dpos", "trP_drop", "gain", "v_err"]
+               "cov_gyr", "refit_dtraj_rms", "boundary_dpos", "trP_drop", "gain", "v_err"]
+# DX-2 preflight fix: this was "refit_dtraj" (no "_rms" suffix), a name that
+# never existed as a diag dict key (only "refit_dtraj_rms"/"refit_dtraj_max"
+# do -- see load_cell()'s own assignment) -- d_refit_dtraj came back NaN on
+# every pair for exactly this reason, not the corr_scan join issue P10 fixed.
 assert len(DIAGNOSTICS) == 17, len(DIAGNOSTICS)
 
 
@@ -201,6 +205,26 @@ def load_cell(run_dir, gt_path, gt_format, frame_correction, window=10.0, max_ga
         diag["htz_pos_norm"] = _resample_at(fs["t"], fs["htz_pos_norm"], t)
         diag["iters"] = _resample_at(fs["t"], fs["iters"], t)
         trP_pre = _resample_at(fs["t"], fs["trP_pos_pre"], t)
+        # DX-2 preflight fix: trP_pos_drop_p50 was landing at exactly 0 on
+        # every DX-1R cell -- not an EKF/estimator finding, a join bug.
+        # GT is denser than frame_stats.txt's own scan rate (~20Hz vs
+        # ~10-12Hz), so multiple adjacent GT-grid samples resample to the
+        # SAME underlying scan; computing pre-post on the RESAMPLED
+        # (duplicated) series then diffs a value against itself over half
+        # the time, producing bit-identical zeros. Fixed by computing the
+        # pre->post delta on frame_stats.txt's own native per-scan grid
+        # FIRST, then resampling the already-computed delta series (safe
+        # to duplicate across nearby GT samples -- it's now a well-defined
+        # per-scan quantity, not a raw level that can self-cancel).
+        fs_trP_drop_native = fs["trP_pos_pre"][:-1] - fs["trP_pos_pre"][1:]
+        fs_trP_drop_native = np.append(fs_trP_drop_native, np.nan)  # last scan has no "next"
+        diag["trP_drop"] = _resample_at(fs["t"], fs_trP_drop_native, t)
+        # DX-2 preflight fix: boundary_dpos is now a real per-scan column
+        # (frame_stats.txt, -1 sentinel = unavailable -- first spline scan
+        # or spline disabled) instead of a hardcoded NaN placeholder.
+        if "boundary_dpos" in fs:
+            bd = np.where(fs["boundary_dpos"] >= 0, fs["boundary_dpos"], np.nan)
+            diag["boundary_dpos"] = _resample_at(fs["t"], bd, t)
         n_res = _resample_at(fs["t"], fs["n_residuals"], t)
         n_planes = _resample_at(fs["t"], fs["n_planes"], t)
         h_pp = _resample_at(fs["t"], fs["h_pp_min_eig"], t)
@@ -212,12 +236,6 @@ def load_cell(run_dir, gt_path, gt_format, frame_correction, window=10.0, max_ga
         diag["div_pos"] = np.where(sum_weight > 0, 3.0 * h_pp / sum_weight, np.nan)
         diag["div_rot"] = np.where(h_rr_trace > 0, 3.0 * h_rr / h_rr_trace, np.nan)
         diag["w_per_res"] = np.where(n_res > 0, sum_weight / n_res, np.nan)
-        # trP_pos_pre is on THIS scan's grid; the POST value is the next
-        # scan's own pre (state_->cov() carries forward), except for the
-        # very last scan -- shift by one to get pre->post.
-        trP_post = np.roll(trP_pre, -1)
-        trP_post[-1] = np.nan
-        diag["trP_drop"] = trP_pre - trP_post
 
     if cs is not None and "scan_id" in cs:
         # corr_scan.csv has no t column of its own (only scan_id) -- join it
@@ -293,7 +311,7 @@ def load_cell(run_dir, gt_path, gt_format, frame_correction, window=10.0, max_ga
 
     diag["cov_acc"] = diag.get("cov_acc_post", np.full(len(t), np.nan))
     diag["cov_gyr"] = diag.get("cov_gyr_post", np.full(len(t), np.nan))
-    diag["boundary_dpos"] = np.full(len(t), np.nan)  # needs spline_traj.csv's discontinuity() -- not joined here, see report note
+    diag.setdefault("boundary_dpos", np.full(len(t), np.nan))  # pre-DX-2 frame_stats.txt (no column)
     diag["gain"] = gain
     diag["v_err"] = v_err
 

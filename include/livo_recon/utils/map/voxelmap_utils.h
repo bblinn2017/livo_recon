@@ -540,6 +540,12 @@ struct LioFrameDiag
   double dx_rot_deg   = 0.0;
   double dx_pos_mm    = 0.0;
   double trP_pos_pre  = -1.0; // BEFORE the update -- turns a level into a delta
+  // DX-2 preflight fix.  THIS scan's spline-window start (t0) vs the
+  // PREVIOUS scan's finalized end (t1) -- the inter-scan discontinuity
+  // nothing had measured before. -1 if unavailable (first spline scan,
+  // spline disabled, or previous scan's spline failed).
+  double boundary_dpos     = -1.0;  // metres
+  double boundary_drot_deg = -1.0;  // degrees
 };
 
 struct VoxelStats

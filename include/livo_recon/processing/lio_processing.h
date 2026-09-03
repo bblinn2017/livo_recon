@@ -382,6 +382,24 @@ private:
   // later in the same call) to give the covariance delta.
   double trP_pos_pre_ = -1.0;
 
+  // DX-2 preflight fix (boundary_dpos).  Consecutive scans' spline windows
+  // abut in time, so the last (t1) sample of one scan's finalized spline
+  // and the first (t0) sample of the next MEASURE the inter-scan
+  // discontinuity -- nothing had ever computed this before (the dense
+  // trajLogOn() dump captures it implicitly but is off by default and
+  // costly; this is 2 spline evaluations per scan instead). Saved in
+  // finalizeSplineAndQ() right after that scan's own anchorTo() call, so
+  // t1's pose is exactly (mg.image.t, state_->rot(), state_->pos()) at
+  // that instant -- no extra evaluation needed for the outgoing half.
+  bool  prev_scan_end_valid_ = false;
+  V3D   prev_scan_end_pos_   = V3D::Zero();
+  M3D   prev_scan_end_rot_   = M3D::Identity();
+  // This scan's own boundary_dpos/drot (vs the PREVIOUS scan's end),
+  // -1 if unavailable (first spline scan, or previous scan's spline
+  // failed) -- read by debugLogFrameStats() the same frame it's computed.
+  double boundary_dpos_ = -1.0;
+  double boundary_drot_deg_ = -1.0;
+
   // Fixed IEKF prior (mean + covariance), snapshotted ONCE per frame (top
   // of processLIO()'s inner iteration loop, before any solveSystem()/
   // solveSystem_cuda() call) and reused, unchanged, by every one of that
