@@ -19,7 +19,8 @@ namespace
 {
 // History (17-24): see docs/livo_recon_changelog.md#src-map-voxelmap.cpp-17
 void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
-                        double max_plane_var_trace, const LioFrameDiag& lio, int n_planes)
+                        double max_plane_var_trace, const LioFrameDiag& lio, int n_planes,
+                        int n_voxels, int n_voxels_is_plane, int n_voxels_converged)
 {
   static bool first_call = true;
   std::ofstream ofs(debugLogPath("frame_stats.txt"), first_call ? std::ios::trunc : std::ios::app);
@@ -28,7 +29,17 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            ",n_residuals,n_planes,h_pp_min_eig,h_rr_min_eig,sum_weight"
            ",h_rr_trace,htz_rot_norm,htz_pos_norm,ask,got,refusal"
            ",iters,dx_rot_deg,dx_pos_mm,trP_pos_pre"
-           ",boundary_dpos,boundary_drot_deg\n";
+           ",boundary_dpos,boundary_drot_deg"
+           // P-C (BASE, 2026-09-03): a direct per-frame CENSUS of
+           // VoxelStats' live atomic counters -- n_planes above is a
+           // TRANSITION counter (increments/decrements on state change,
+           // known negative on the debiased path, see the bug ledger)
+           // while these are the counters' own current values, always
+           // non-negative by construction. n_voxels = stats_->total()
+           // (open+converged+disabled); n_voxels_is_plane = stats_->planes
+           // (non-disabled, non-parent nodes currently fitting a plane);
+           // n_voxels_converged = stats_->converged.
+           ",n_voxels,n_voxels_is_plane,n_voxels_converged\n";
   first_call = false;
   // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
   // (6 significant figures) collapses every frame in a run to the same
@@ -42,7 +53,8 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.ask << "," << lio.got << "," << lio.refusal
       << "," << lio.iters << "," << lio.dx_rot_deg << "," << lio.dx_pos_mm
       << "," << lio.trP_pos_pre
-      << "," << lio.boundary_dpos << "," << lio.boundary_drot_deg << "\n";
+      << "," << lio.boundary_dpos << "," << lio.boundary_drot_deg
+      << "," << n_voxels << "," << n_voxels_is_plane << "," << n_voxels_converged << "\n";
 }
 }  // namespace
 
@@ -485,7 +497,10 @@ void VoxelMap::updateMap(MeasureGroup& mg) {
     voxelPlaneFrameStatsRead(denom_rejected_count, max_plane_var_trace);
     debugLogFrameStats(mg.image.t + data_queues_->start_time, frame_idx_ - 1,
                         denom_rejected_count, max_plane_var_trace,
-                        lio_frame_diag_, stats_->planes.load(std::memory_order_relaxed));
+                        lio_frame_diag_, stats_->planes.load(std::memory_order_relaxed),
+                        stats_->total(),
+                        stats_->planes.load(std::memory_order_relaxed),
+                        stats_->converged.load(std::memory_order_relaxed));
   }
 }
 

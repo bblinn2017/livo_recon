@@ -299,6 +299,14 @@ def load_cell(run_dir, gt_path, gt_format, frame_correction, window=10.0, max_ga
             diag["floor_share"] = _resample_at(cs_t, np.where(sum_S > 0, cs["sum_floor"] / sum_S, np.nan), t)
             diag["prior_pose_share"] = _resample_at(cs_t, np.where(sum_S > 0, cs["sum_prior_pose"] / sum_S, np.nan), t)
             diag["nis"] = _resample_at(cs_t, np.where(cs["n_nis_finite"] > 0, cs["sum_nis"] / cs["n_nis_finite"], np.nan), t)
+            # P-B (BASE, 93de7ef's C++ side): nis_est = nu^2/(S - s_prior_pose),
+            # the one consistency statistic the test-bed constraint (S is
+            # 94-98% prior-pose term on eee_01) leaves usable. Absent (older
+            # corr_scan.csv without the P-B columns) resolves to all-NaN via
+            # the same .get() fallback every other diag field already uses.
+            if "n_nis_est_finite" in cs:
+                diag["nis_est"] = _resample_at(
+                    cs_t, np.where(cs["n_nis_est_finite"] > 0, cs["sum_nis_est"] / cs["n_nis_est_finite"], np.nan), t)
             if "n_vis_hit" in cs:
                 vtot = cs["n_vis_hit"] + cs["n_vis_free"] + cs["n_vis_unobs"]
                 diag["vis_free"] = _resample_at(cs_t, np.where(vtot > 0, cs["n_vis_free"] / vtot, np.nan), t)
@@ -441,6 +449,7 @@ def series_block(cell_data, fine_start_s=None):
                 v_err=med(d["v_err"]), refusal=med(d["diag"].get("refusal", np.full(len(t), np.nan))),
                 div_pos=med(d["diag"].get("div_pos", np.full(len(t), np.nan))),
                 nis=med(d["diag"].get("nis", np.full(len(t), np.nan))),
+                nis_est=med(d["diag"].get("nis_est", np.full(len(t), np.nan))),
                 sdiag_share=med(d["diag"].get("sdiag_share", np.full(len(t), np.nan))),
                 pvar_share=med(d["diag"].get("pvar_share", np.full(len(t), np.nan))),
                 floor_share=med(d["diag"].get("floor_share", np.full(len(t), np.nan))),
@@ -519,6 +528,7 @@ def summary_block(cell_data):
             v_err_p50=p50_arr(d["v_err"]),
             refusal_p50=p50("refusal"), refusal_nan_frac=frac_nan("refusal"),
             div_pos_p50=p50("div_pos"), div_rot_p50=p50("div_rot"), nis_p50=p50("nis"),
+            nis_est_p50=p50("nis_est"),
             sdiag_share_p50=p50("sdiag_share"), pvar_share_p50=p50("pvar_share"),
             floor_share_p50=p50("floor_share"), prior_pose_share_p50=p50("prior_pose_share"),
             n_res_p50=p50("n_res"), n_planes_p50=p50("n_planes"), w_per_res_p50=p50("w_per_res"),
@@ -599,11 +609,115 @@ def _best_lag(x, y, max_lag=20):
     return best_lag, (best_r if best_r > -2.0 else float("nan"))
 
 
-def pairs_block(cell_data):
-    """Block 3: pairwise attribution. d(t) = the per-scan INCREMENT of
-    delta_e(t) = e_pre^B(t) - e_pre^A(t), correlated against each
-    diagnostic's own per-scan delta (B-A)."""
+def _cluster_mean_ci(x, t, block_s=10.0):
+    """OFFSET (P-D, BASE, 2026-09-03): mean of x(t), cluster-robust 95% CI
+    by block_s-second blocks -- "how much did this term move, distinguish-
+    able from zero". Block-of-means SE, same clustering unit _cluster_se
+    already used, but on the RAW mean, not a standardized correlation."""
+    m = np.isfinite(x)
+    if m.sum() < 5:
+        return float("nan"), float("nan"), float("nan"), int(m.sum())
+    x, tt = x[m], t[m]
+    mean = float(np.mean(x))
+    blocks = np.floor((tt - tt[0]) / block_s).astype(int)
+    ubl = np.unique(blocks)
+    if len(ubl) < 2:
+        return mean, float("nan"), float("nan"), int(m.sum())
+    block_means = np.array([x[blocks == b].mean() for b in ubl])
+    se = float(np.std(block_means, ddof=1) / np.sqrt(len(ubl)))
+    ci95 = 1.96 * se
+    return mean, se, ci95, int(m.sum())
+
+
+def _cluster_ols(y, x, t, block_s=10.0):
+    """COUPLING (P-D): y = alpha + beta*x + eps, OLS WITH an intercept (the
+    current code's replaced statistic suppressed it -- see the register's
+    own note), cluster-robust SEs by block_s-second blocks (the standard
+    sandwich estimator: (X'X)^-1 [sum_g X_g' u_g u_g' X_g] (X'X)^-1).
+    alpha is the persistent (uniform) effect, beta the time-varying one."""
+    m = np.isfinite(x) & np.isfinite(y)
+    if m.sum() < 10:
+        return dict(alpha=float("nan"), alpha_se=float("nan"),
+                    beta=float("nan"), beta_se=float("nan"), n=int(m.sum()))
+    x, y, tt = x[m], y[m], t[m]
+    X = np.column_stack([np.ones(len(x)), x])
+    XtX = X.T @ X
+    try:
+        XtX_inv = np.linalg.inv(XtX)
+    except np.linalg.LinAlgError:
+        return dict(alpha=float("nan"), alpha_se=float("nan"),
+                    beta=float("nan"), beta_se=float("nan"), n=int(m.sum()))
+    beta_hat = XtX_inv @ X.T @ y
+    resid = y - X @ beta_hat
+    blocks = np.floor((tt - tt[0]) / block_s).astype(int)
+    ubl = np.unique(blocks)
+    if len(ubl) < 2:
+        return dict(alpha=float(beta_hat[0]), alpha_se=float("nan"),
+                    beta=float(beta_hat[1]), beta_se=float("nan"), n=int(m.sum()))
+    meat = np.zeros((2, 2))
+    for b in ubl:
+        Xg = X[blocks == b]
+        ug = resid[blocks == b]
+        s = Xg.T @ ug
+        meat += np.outer(s, s)
+    # small-cluster correction, standard practice (G/(G-1)):
+    G = len(ubl)
+    cov = (G / max(G - 1, 1)) * (XtX_inv @ meat @ XtX_inv)
+    se = np.sqrt(np.clip(np.diag(cov), 0.0, None))
+    return dict(alpha=float(beta_hat[0]), alpha_se=float(se[0]),
+               beta=float(beta_hat[1]), beta_se=float(se[1]), n=int(m.sum()))
+
+
+def _onset(delta_e, t, nudge_bar_m, A, B, ia, ib):
+    """ONSET (P-D): delta_e(t) as a LEVEL (not the flawed diff), plus the
+    first scan at which |delta_e| exceeds nudge_bar_m and STAYS above it
+    for the rest of the series -- transient excursions inside the bar do
+    not count as onset. Reported with B's own n_res/refusal/omega_norm at
+    that scan (B is the lever cell in the A->B pair convention)."""
+    if nudge_bar_m is None or not np.isfinite(nudge_bar_m):
+        return dict(onset_t_s=float("nan"), onset_idx=-1,
+                    onset_n_res=float("nan"), onset_refusal=float("nan"), onset_omega_norm=float("nan"))
+    ae = np.abs(delta_e)
+    above = np.isfinite(ae) & (ae > nudge_bar_m)
+    onset_idx = -1
+    for i in range(len(above)):
+        if above[i] and np.all(above[i:] | ~np.isfinite(ae[i:])):
+            # allow trailing NaN gaps but require every FINITE sample from
+            # here on to also be above the bar -- "stays above", not
+            # "happens to end above".
+            if np.all(ae[i:][np.isfinite(ae[i:])] > nudge_bar_m):
+                onset_idx = i
+                break
+    if onset_idx < 0:
+        return dict(onset_t_s=float("nan"), onset_idx=-1,
+                    onset_n_res=float("nan"), onset_refusal=float("nan"), onset_omega_norm=float("nan"))
+
+    def bget(key):
+        v = B["diag"].get(key)
+        return float(v[ib][onset_idx]) if v is not None and onset_idx < len(ib) else float("nan")
+
+    return dict(onset_t_s=float(t[onset_idx] - t[0]), onset_idx=onset_idx,
+               onset_n_res=bget("n_res"), onset_refusal=bget("refusal"),
+               onset_omega_norm=bget("omega_norm"))
+
+
+def pairs_block(cell_data, nudge_bars=None):
+    """Block 3: pairwise attribution. P-D (BASE, 2026-09-03) rewrite --
+    dx_report.py:556's original correlated d_t = diff(delta_e) (the
+    INCREMENT) against dx = xB - xA (the LEVEL). A config lever shifts a
+    diagnostic by a roughly PERSISTENT offset; a persistent offset has
+    near-zero variance in a first-difference, so corr(d_t, dx) -> 0 BY
+    CONSTRUCTION regardless of the truth -- the largest |r| across DX5's 90
+    rows was 0.12 on pairs whose ATE differs by 20mm. Replaced with three
+    numbers per (pair, diagnostic): OFFSET (mean of dx(t), cluster CI),
+    COUPLING (alpha, beta with cluster-robust SEs, intercept included this
+    time), plus one ONSET per pair (delta_e as a level, not per-diagnostic).
+
+    nudge_bars: optional {pair_key: bar_in_metres} for ONSET's threshold --
+    None (default) reports onset as not-computed rather than guessing a bar.
+    """
     rows = []
+    onsets = []
     for a_id, b_id in PAIRS:
         A, B = cell_data.get(a_id), cell_data.get(b_id)
         if A is None or B is None:
@@ -612,8 +726,12 @@ def pairs_block(cell_data):
         t, ia, ib = np.intersect1d(tA, tB, return_indices=True)
         if len(t) < 10:
             continue
+        pair_key = f"{a_id.upper()}->{b_id.upper()}"
         delta_e = B["e_pre"][ib] - A["e_pre"][ia]
         d_t = np.diff(delta_e, prepend=delta_e[0])
+
+        bar = (nudge_bars or {}).get(pair_key)
+        onsets.append(dict(pair=pair_key, **_onset(delta_e, t, bar, A, B, ia, ib)))
 
         def dget(cell, key, idx):
             v = cell["diag"].get(key)
@@ -623,17 +741,20 @@ def pairs_block(cell_data):
 
         for diag in DIAGNOSTICS:
             if diag == "gain":
-                xA, xB = dget(A, "gain", ia) if False else A["gain"][ia], B["gain"][ib]
+                xA, xB = A["gain"][ia], B["gain"][ib]
             elif diag == "v_err":
                 xA, xB = A["v_err"][ia], B["v_err"][ib]
             else:
                 xA, xB = dget(A, diag, ia), dget(B, diag, ib)
             dx = xB - xA
-            r, se, n = _cluster_se(d_t, dx, t)
-            lag, r_lag = _best_lag(d_t, dx)
-            rows.append(dict(pair=f"{a_id.upper()}->{b_id.upper()}", diagnostic=f"d_{diag}",
-                             r=r, se_cluster=se, n_scans=n, best_lag_scans=lag, r_at_best_lag=r_lag))
-    return rows
+            off_mean, off_se, off_ci95, off_n = _cluster_mean_ci(dx, t)
+            dx_centered = dx - (off_mean if np.isfinite(off_mean) else 0.0)
+            coup = _cluster_ols(d_t, dx_centered, t)
+            rows.append(dict(pair=pair_key, diagnostic=f"d_{diag}",
+                             offset_mean=off_mean, offset_se=off_se, offset_ci95=off_ci95, offset_n=off_n,
+                             alpha=coup["alpha"], alpha_se=coup["alpha_se"],
+                             beta=coup["beta"], beta_se=coup["beta_se"], n=coup["n"]))
+    return rows, onsets
 
 
 def _fnum(v, dp):
@@ -656,13 +777,17 @@ def emit_series(rows):
     # active_frac/clamped_frac appended -- the AdaptiveQ GATE columns, not
     # yet present anywhere (cov_acc/cov_gyr landed already but cannot
     # distinguish a live module from a disabled one -- see Q-1b).
-    out = ["[DX1R-SERIES v4]",
-           "cell,t_s,e_glob,e_glob_rms,e_pre,e_win,gain_cum,v_err,refusal,div_pos,nis,sdiag_share,pvar_share,floor_share,n_res,"
+    # P-B (BASE, 2026-09-03): bumped to v5 -- nis_est appended, beside nis,
+    # per the register's own wording ("emit nis_est in [*-SERIES] beside
+    # nis") -- the residual-level statistic the test-bed constraint leaves
+    # usable.
+    out = ["[DX1R-SERIES v5]",
+           "cell,t_s,e_glob,e_glob_rms,e_pre,e_win,gain_cum,v_err,refusal,div_pos,nis,nis_est,sdiag_share,pvar_share,floor_share,n_res,"
            "vis_free,vis_free_acc_frac,age_free,age_hit,z_acc,z_gyr,acf1_acc,acf1_gyr,active_frac,clamped_frac"]
     for r in rows:
         out.append(f"{r['cell']},{r['t_s']:.3f},{_fnum(r['e_glob'],5)},{_fnum(r['e_glob_rms'],5)},{_fnum(r['e_pre'],5)},{_fnum(r['e_win'],5)},"
                    f"{_fnum(r['gain_cum'],5)},{_fnum(r['v_err'],4)},{_fnum(r['refusal'],3)},{_fnum(r['div_pos'],3)},"
-                   f"{_fnum(r['nis'],3)},{_fnum(r['sdiag_share'],3)},{_fnum(r['pvar_share'],3)},{_fnum(r['floor_share'],3)},"
+                   f"{_fnum(r['nis'],3)},{_fnum(r['nis_est'],3)},{_fnum(r['sdiag_share'],3)},{_fnum(r['pvar_share'],3)},{_fnum(r['floor_share'],3)},"
                    f"{_fint(r['n_res'])},"
                    f"{_fnum(r['vis_free'],4)},{_fnum(r['vis_free_acc_frac'],4)},{_fnum(r['age_free'],2)},{_fnum(r['age_hit'],2)},"
                    f"{_fnum(r['z_acc'],3)},{_fnum(r['z_gyr'],3)},{_fnum(r['acf1_acc'],3)},{_fnum(r['acf1_gyr'],3)},"
@@ -676,8 +801,10 @@ def emit_summary(rows):
     # fill_{free,hit}_p50 appended, existing columns unchanged/unreordered.
     # DX-5: bumped to v3 -- d_bias_acc_norm/d_bias_gyr_norm/d_gravity_norm
     # p50/p90 appended (commit 43b598a), same "append at the end" convention.
+    # P-B (BASE, 2026-09-03): bumped to v4 -- nis_est_p50 appended.
     cols = ["cell", "ate", "e_pre_p50", "e_pre_p90", "e_win_p50", "gain_sum", "gain_neg_frac",
             "v_err_p50", "refusal_p50", "refusal_nan_frac", "div_pos_p50", "div_rot_p50", "nis_p50",
+            "nis_est_p50",
             "sdiag_share_p50", "pvar_share_p50", "floor_share_p50", "prior_pose_share_p50",
             "n_res_p50", "n_planes_p50", "w_per_res_p50", "cov_acc_pre_p50", "cov_acc_post_p50",
             "cov_gyr_pre_p50", "cov_gyr_post_p50", "refit_dtraj_rms_p50", "refit_dtraj_max",
@@ -687,7 +814,7 @@ def emit_summary(rows):
             "fill_free_p50", "fill_hit_p50",
             "d_bias_acc_norm_p50", "d_bias_acc_norm_p90", "d_bias_gyr_norm_p50",
             "d_bias_gyr_norm_p90", "d_gravity_norm_p50", "d_gravity_norm_p90"]
-    out = ["[DX1R-SUMMARY v3]", ",".join(cols)]
+    out = ["[DX1R-SUMMARY v4]", ",".join(cols)]
     for r in rows:
         def fmt(c):
             v = r[c]
@@ -700,12 +827,25 @@ def emit_summary(rows):
     return "\n".join(out)
 
 
-def emit_pairs(rows):
-    out = ["[DX1R-PAIRS v1]", "pair,diagnostic,r,se_cluster,n_scans,best_lag_scans,r_at_best_lag"]
+def emit_pairs(rows, onsets=None):
+    # P-D (BASE, 2026-09-03): v1's correlation statistic replaced with
+    # OFFSET (mean, cluster CI) and COUPLING (alpha, beta, cluster-robust
+    # SEs, WITH an intercept -- v1 suppressed it) -- see pairs_block()'s
+    # doc comment for why v1 was structurally unable to fire. ONSET is
+    # per-pair, not per-diagnostic, and gets its own block.
+    out = ["[DX1R-PAIRS v2]",
+           "pair,diagnostic,offset_mean,offset_se,offset_ci95,offset_n,alpha,alpha_se,beta,beta_se,n"]
     for r in rows:
-        out.append(f"{r['pair']},{r['diagnostic']},{_fnum(r['r'],2)},{_fnum(r['se_cluster'],2)},"
-                   f"{r['n_scans']},{_fint(r['best_lag_scans'])},{_fnum(r['r_at_best_lag'],2)}")
+        out.append(f"{r['pair']},{r['diagnostic']},{_fnum(r['offset_mean'],4)},{_fnum(r['offset_se'],4)},"
+                   f"{_fnum(r['offset_ci95'],4)},{r['offset_n']},{_fnum(r['alpha'],4)},{_fnum(r['alpha_se'],4)},"
+                   f"{_fnum(r['beta'],4)},{_fnum(r['beta_se'],4)},{r['n']}")
     out.append("[/DX1R-PAIRS]")
+    out.append("[DX1R-ONSET v1]")
+    out.append("pair,onset_t_s,onset_idx,onset_n_res,onset_refusal,onset_omega_norm")
+    for o in (onsets or []):
+        out.append(f"{o['pair']},{_fnum(o['onset_t_s'],3)},{o['onset_idx']},"
+                   f"{_fnum(o['onset_n_res'],1)},{_fnum(o['onset_refusal'],3)},{_fnum(o['onset_omega_norm'],4)}")
+    out.append("[/DX1R-ONSET]")
     return "\n".join(out)
 
 
@@ -757,6 +897,42 @@ def _adaptive_q_echo(run_dir):
             f",warmup_frames={aq.get('warmup_frames', 'default')}")
 
 
+def _config_effective_echo(run_dir):
+    """P-E (BASE, 2026-09-03): [config/effective] is printed to every cell's
+    OWN run.log already (ROS_INFO_STREAM in voxelmap.cpp/lio_processing.cpp
+    -- no C++ change needed), one full resolved-key dump per cell. It was
+    simply never folded into [BATCH-META], so rule 34d's diff of "what the
+    row asked for" against "what resolved" has never been run. Extracts the
+    block verbatim between its own start/end markers; single-lines it (one
+    manifest line per cell, matching _adaptive_q_echo's convention) rather
+    than emitting the full multi-line block, since [BATCH-META] is meant to
+    be scanned per cell, not read as a standalone document -- the full
+    block is still in run.log for anyone who needs to diff it key by key."""
+    path = os.path.join(run_dir, "run.log")
+    if not os.path.exists(path):
+        return "MISSING(no run.log)"
+    import re
+    with open(path, errors="replace") as f:
+        text = f.read()
+    # config_resolve.h's report() is called once PER RESOLVER INSTANCE
+    # (voxel_map/plane, lio, imu, spline, vio, combined, evo, ... each
+    # construct their own ConfigResolver), so run.log carries SEVERAL
+    # non-contiguous [config/effective] blocks, not one unified dump --
+    # findall, not search, or every scope but the first is silently
+    # dropped from the echo.
+    blocks = re.findall(r"\[config/effective\](.*?)(?=\n\[config/REFUSED\]|\n\S|\Z)", text, re.S)
+    if not blocks:
+        return "MISSING(no [config/effective] block in run.log)"
+    ansi_reset = re.compile(r"\x1b\[0m$")
+    lines = []
+    for b in blocks:
+        for ln in b.splitlines():
+            if "=" not in ln:
+                continue
+            lines.append(ansi_reset.sub("", ln.strip()).strip())
+    return ";".join(lines) if lines else "MISSING(blocks present but empty)"
+
+
 def meta_block(cell_data, batch, seq, build_commit, batch_root, dispatched_cells, run_dirs=None):
     import datetime
     completed = [c for c in dispatched_cells if cell_data.get(c) is not None]
@@ -781,7 +957,23 @@ def meta_block(cell_data, batch, seq, build_commit, batch_root, dispatched_cells
         else:
             continue
         aq_lines.append(f"adaptive_q[{cell}]: {_adaptive_q_echo(rd)}")
-    out = ["[DX1R-META v2]",
+
+    # P-E (BASE, 2026-09-03): [config/effective] per cell, not one per
+    # batch -- see _config_effective_echo()'s own doc comment. Same
+    # run_dirs/batch_root resolution as aq_lines above.
+    cfg_lines = []
+    for cell in dispatched_cells:
+        if cell_data.get(cell) is None:
+            continue
+        if run_dirs and cell in run_dirs:
+            rd = run_dirs[cell]
+        elif batch_root:
+            rd = os.path.join(batch_root, f"{batch}_{cell}_{seq}")
+        else:
+            continue
+        cfg_lines.append(f"config_effective[{cell}]: {_config_effective_echo(rd)}")
+
+    out = ["[DX1R-META v3]",
            f"batch={batch}", f"seq={seq}",
            f"commit={build_commit}", f"script_commit={_script_commit()}",
            f"date_utc={datetime.datetime.now(datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
@@ -789,6 +981,7 @@ def meta_block(cell_data, batch, seq, build_commit, batch_root, dispatched_cells
            f"failed={','.join(failed) if failed else 'NONE'}",
            f"short_blocks={','.join(short) if short else 'NONE'}",
            *aq_lines,
+           *cfg_lines,
            "[/DX1R-META]"]
     return "\n".join(out)
 
@@ -925,6 +1118,9 @@ def main():
                     help="git rev-parse HEAD of the livo_recon build the cells actually RAN "
                          "on (not detectable from data -- must be supplied). Required with "
                          "--emit-blocks.")
+    ap.add_argument("--nudge-bar-m", type=float, default=None,
+                    help="P-D: ONSET's threshold, in metres, applied to every PAIR. Omit to "
+                         "report onset as not-computed rather than guessing a bar.")
     ap.add_argument("--fine-start", type=float, default=None,
                     help="C-3: opt-in only, no default. When set (seconds), prepends 1s-"
                          "resolution [DX1R-SERIES] buckets covering the first N seconds of "
@@ -948,20 +1144,21 @@ def main():
 
     series = series_block(cell_data, fine_start_s=a.fine_start)
     summary = summary_block(cell_data)
-    pairs = pairs_block(cell_data)
+    nudge_bars = {f"{ap_.upper()}->{bp_.upper()}": a.nudge_bar_m for ap_, bp_ in PAIRS} if a.nudge_bar_m is not None else None
+    pairs, onsets = pairs_block(cell_data, nudge_bars)
 
     with open(os.path.join(a.out, "dx1r_series.txt"), "w") as f:
         f.write(emit_series(series) + "\n")
     with open(os.path.join(a.out, "dx1r_summary.txt"), "w") as f:
         f.write(emit_summary(summary) + "\n")
     with open(os.path.join(a.out, "dx1r_pairs.txt"), "w") as f:
-        f.write(emit_pairs(pairs) + "\n")
+        f.write(emit_pairs(pairs, onsets) + "\n")
 
     print(emit_series(series))
     print()
     print(emit_summary(summary))
     print()
-    print(emit_pairs(pairs))
+    print(emit_pairs(pairs, onsets))
 
     print(f"\n# row counts: series={len(series)} (want {40*len(LADDER_CELLS)}) "
           f"summary={len(summary)} (want {len(ALL_CELLS)}) "
@@ -976,7 +1173,7 @@ def main():
             r["ate_results_lio"] = _results_lio_ate(run_dir)
         meta = meta_block(cell_data, a.batch_id, a.seq, a.build_commit, a.batch_root, ALL_CELLS)
         blocks = [meta, emit_verify(verify_rows), emit_series(series),
-                  emit_summary(summary), emit_pairs(pairs)]
+                  emit_summary(summary), emit_pairs(pairs, onsets)]
         with open(a.emit_blocks, "w", newline="\n") as f:
             f.write("\n".join(blocks) + "\n")
         print(f"\n# wrote {a.emit_blocks}", file=sys.stderr)

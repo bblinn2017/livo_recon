@@ -138,6 +138,20 @@ def score_corr_raw(corr_df):
         out["plane_share_p90"] = p[90]
         out["plane_share_p99"] = p[99]
 
+    # --- P-C (BASE, 2026-09-03): lambda0 percentiles, "over the planes that
+    # produced residuals" per the register's own wording -- lambda0 is
+    # already a per-correspondence column here (voxelplane.cpp's covariates
+    # path), so this is the same population score_corr_raw() already reads,
+    # not a live per-frame census (that lives in frame_stats.txt's new
+    # n_voxels_* columns instead -- see debugLogFrameStats()). ---
+    if "lambda0" in d.columns:
+        lam = d["lambda0"].to_numpy(dtype=float)
+        lam = lam[np.isfinite(lam)]
+        if lam.size >= 50:
+            p = _pctl(lam, [50, 90])
+            out["lambda0_p50"] = p[50]
+            out["lambda0_p90"] = p[90]
+
     # --- 5. occ_aniso / occ_cells quintile-mean NIS (T8-0a-2's covariate) ---
     nu = d["nu"].to_numpy(dtype=float)
     nis = nu ** 2 / S

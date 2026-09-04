@@ -90,6 +90,7 @@ def series_block_generic(cell_data):
                 refusal=med(d["diag"].get("refusal", np.full(len(t), np.nan))),
                 div_pos=med(d["diag"].get("div_pos", np.full(len(t), np.nan))),
                 nis=med(d["diag"].get("nis", np.full(len(t), np.nan))),
+                nis_est=med(d["diag"].get("nis_est", np.full(len(t), np.nan))),
                 n_res=med(d["diag"].get("n_res", np.full(len(t), np.nan))),
                 cov_acc=med(d["diag"].get("cov_acc", np.full(len(t), np.nan))),
                 cov_gyr=med(d["diag"].get("cov_gyr", np.full(len(t), np.nan))),
@@ -113,9 +114,10 @@ def series_block_generic(cell_data):
 def emit_series_generic(name, rows):
     # C-7 (nineteenth round): bumped to v2 -- z_acc/z_gyr/acf1_acc/acf1_gyr/
     # active_frac/clamped_frac appended.
-    out = [f"[{name}-SERIES v2]",
+    # P-B (BASE, 2026-09-03): bumped to v3 -- nis_est appended beside nis.
+    out = [f"[{name}-SERIES v3]",
            "cell,t_s,e_glob,e_glob_rms,e_pre,e_pre_rms,e_win,e_win_rms,gain_cum,v_err,"
-           "refusal,div_pos,nis,n_res,cov_acc,cov_gyr,"
+           "refusal,div_pos,nis,nis_est,n_res,cov_acc,cov_gyr,"
            "d_bias_acc_norm,d_bias_gyr_norm,d_gravity_norm,"
            "z_acc,z_gyr,acf1_acc,acf1_gyr,active_frac,clamped_frac"]
     for r in rows:
@@ -124,7 +126,7 @@ def emit_series_generic(name, rows):
             f"{dxr._fnum(r['e_pre'],5)},{dxr._fnum(r['e_pre_rms'],5)},"
             f"{dxr._fnum(r['e_win'],5)},{dxr._fnum(r['e_win_rms'],5)},"
             f"{dxr._fnum(r['gain_cum'],5)},{dxr._fnum(r['v_err'],4)},"
-            f"{dxr._fnum(r['refusal'],3)},{dxr._fnum(r['div_pos'],3)},{dxr._fnum(r['nis'],3)},"
+            f"{dxr._fnum(r['refusal'],3)},{dxr._fnum(r['div_pos'],3)},{dxr._fnum(r['nis'],3)},{dxr._fnum(r['nis_est'],3)},"
             f"{dxr._fint(r['n_res'])},{dxr._fnum(r['cov_acc'],4)},{dxr._fnum(r['cov_gyr'],6)},"
             f"{dxr._fnum(r['d_bias_acc_norm'],6)},{dxr._fnum(r['d_bias_gyr_norm'],6)},"
             f"{dxr._fnum(r['d_gravity_norm'],6)},"
@@ -135,8 +137,14 @@ def emit_series_generic(name, rows):
 
 
 def emit_summary_generic(name, rows):
+    # P-B (BASE, 2026-09-03): nis_est_p50 appended -- this is a SEPARATE
+    # hardcoded column list from dx_report.py's emit_summary() (caught by
+    # the BASE-0 smoke test: summary_block()'s row dicts already carried
+    # nis_est_p50 since that function IS reused, but this emitter's own
+    # cols list silently dropped it from the header and the printed row).
     cols = ["cell", "ate", "e_pre_p50", "e_pre_p90", "e_win_p50", "gain_sum", "gain_neg_frac",
             "v_err_p50", "refusal_p50", "refusal_nan_frac", "div_pos_p50", "div_rot_p50", "nis_p50",
+            "nis_est_p50",
             "sdiag_share_p50", "pvar_share_p50", "floor_share_p50", "prior_pose_share_p50",
             "n_res_p50", "n_planes_p50", "w_per_res_p50", "cov_acc_pre_p50", "cov_acc_post_p50",
             "cov_gyr_pre_p50", "cov_gyr_post_p50", "refit_dtraj_rms_p50", "refit_dtraj_max",
@@ -146,7 +154,7 @@ def emit_summary_generic(name, rows):
             "fill_free_p50", "fill_hit_p50",
             "d_bias_acc_norm_p50", "d_bias_acc_norm_p90", "d_bias_gyr_norm_p50",
             "d_bias_gyr_norm_p90", "d_gravity_norm_p50", "d_gravity_norm_p90"]
-    out = [f"[{name}-SUMMARY v1]", ",".join(cols)]
+    out = [f"[{name}-SUMMARY v2]", ",".join(cols)]
     for r in rows:
         def fmt(c):
             v = r[c]
@@ -158,8 +166,13 @@ def emit_summary_generic(name, rows):
     return "\n".join(out)
 
 
-def pairs_block_generic(cell_data, pairs, diagnostics):
+def pairs_block_generic(cell_data, pairs, diagnostics, nudge_bars=None):
+    """P-D (BASE, 2026-09-03): reuses dx_report.py's OFFSET/COUPLING/ONSET
+    helpers directly rather than re-deriving the old (structurally broken)
+    correlation statistic a second time here -- see pairs_block()'s doc
+    comment for why v1 could not fire regardless of the truth."""
     rows = []
+    onsets = []
     for a_id, b_id in pairs:
         A, B = cell_data.get(a_id), cell_data.get(b_id)
         if A is None or B is None:
@@ -168,8 +181,12 @@ def pairs_block_generic(cell_data, pairs, diagnostics):
         t, ia, ib = np.intersect1d(tA, tB, return_indices=True)
         if len(t) < 10:
             continue
+        pair_key = f"{a_id.upper()}->{b_id.upper()}"
         delta_e = B["e_pre"][ib] - A["e_pre"][ia]
         d_t = np.diff(delta_e, prepend=delta_e[0])
+
+        bar = (nudge_bars or {}).get(pair_key)
+        onsets.append(dict(pair=pair_key, **dxr._onset(delta_e, t, bar, A, B, ia, ib)))
 
         def dget(cell, key, idx):
             v = cell["diag"].get(key)
@@ -185,19 +202,30 @@ def pairs_block_generic(cell_data, pairs, diagnostics):
             else:
                 xA, xB = dget(A, diag, ia), dget(B, diag, ib)
             dx = xB - xA
-            r, se, n = dxr._cluster_se(d_t, dx, t)
-            lag, r_lag = dxr._best_lag(d_t, dx)
-            rows.append(dict(pair=f"{a_id.upper()}->{b_id.upper()}", diagnostic=f"d_{diag}",
-                             r=r, se_cluster=se, n_scans=n, best_lag_scans=lag, r_at_best_lag=r_lag))
-    return rows
+            off_mean, off_se, off_ci95, off_n = dxr._cluster_mean_ci(dx, t)
+            dx_centered = dx - (off_mean if np.isfinite(off_mean) else 0.0)
+            coup = dxr._cluster_ols(d_t, dx_centered, t)
+            rows.append(dict(pair=pair_key, diagnostic=f"d_{diag}",
+                             offset_mean=off_mean, offset_se=off_se, offset_ci95=off_ci95, offset_n=off_n,
+                             alpha=coup["alpha"], alpha_se=coup["alpha_se"],
+                             beta=coup["beta"], beta_se=coup["beta_se"], n=coup["n"]))
+    return rows, onsets
 
 
-def emit_pairs_generic(name, rows):
-    out = [f"[{name}-PAIRS v1]", "pair,diagnostic,r,se_cluster,n_scans,best_lag_scans,r_at_best_lag"]
+def emit_pairs_generic(name, rows, onsets=None):
+    out = [f"[{name}-PAIRS v2]",
+           "pair,diagnostic,offset_mean,offset_se,offset_ci95,offset_n,alpha,alpha_se,beta,beta_se,n"]
     for r in rows:
-        out.append(f"{r['pair']},{r['diagnostic']},{dxr._fnum(r['r'],2)},{dxr._fnum(r['se_cluster'],2)},"
-                   f"{r['n_scans']},{dxr._fint(r['best_lag_scans'])},{dxr._fnum(r['r_at_best_lag'],2)}")
+        out.append(f"{r['pair']},{r['diagnostic']},{dxr._fnum(r['offset_mean'],4)},{dxr._fnum(r['offset_se'],4)},"
+                   f"{dxr._fnum(r['offset_ci95'],4)},{r['offset_n']},{dxr._fnum(r['alpha'],4)},{dxr._fnum(r['alpha_se'],4)},"
+                   f"{dxr._fnum(r['beta'],4)},{dxr._fnum(r['beta_se'],4)},{r['n']}")
     out.append(f"[/{name}-PAIRS]")
+    out.append(f"[{name}-ONSET v1]")
+    out.append("pair,onset_t_s,onset_idx,onset_n_res,onset_refusal,onset_omega_norm")
+    for o in (onsets or []):
+        out.append(f"{o['pair']},{dxr._fnum(o['onset_t_s'],3)},{o['onset_idx']},"
+                   f"{dxr._fnum(o['onset_n_res'],1)},{dxr._fnum(o['onset_refusal'],3)},{dxr._fnum(o['onset_omega_norm'],4)}")
+    out.append(f"[/{name}-ONSET]")
     return "\n".join(out)
 
 
@@ -208,6 +236,10 @@ def main():
                     help="repeatable: one cell's name and run_dir")
     ap.add_argument("--pair", action="append", default=[], metavar="A:B",
                     help="repeatable: a pair of --cell NAMEs for the PAIRS block")
+    ap.add_argument("--nudge-bar-m", type=float, default=None,
+                    help="P-D: ONSET's threshold, in metres, applied to every --pair. Omit to "
+                         "report onset as not-computed rather than guessing a bar (register rule: "
+                         "never invent a value for a missing input).")
     ap.add_argument("--gt", required=True)
     ap.add_argument("--gt-format", default="ntu_csv", choices=list(dxr.LOADERS))
     ap.add_argument("--frame-correction", default="ntu_prism",
@@ -232,7 +264,10 @@ def main():
     series = series_block_generic(cell_data)
     summary = dxr.summary_block(cell_data)
     pairs_list = [tuple(p.split(":", 1)) for p in a.pair]
-    pairs = pairs_block_generic(cell_data, pairs_list, GENERIC_DIAGNOSTICS) if pairs_list else []
+    nudge_bars = None
+    if a.nudge_bar_m is not None:
+        nudge_bars = {f"{ap.upper()}->{bp.upper()}": a.nudge_bar_m for ap, bp in pairs_list}
+    pairs, onsets = pairs_block_generic(cell_data, pairs_list, GENERIC_DIAGNOSTICS, nudge_bars) if pairs_list else ([], [])
 
     verify_rows = dxr.verify_block(cell_data, series, dispatched)
     for r in verify_rows:
@@ -248,13 +283,13 @@ def main():
         # correctly here too -- nothing left to do in this generic wrapper.
 
     meta = dxr.meta_block(cell_data, a.batch_id, a.seq, a.build_commit, None, dispatched, run_dirs=run_dirs)
-    meta = meta.replace("[DX1R-META v2]", f"[{name}-META v2]").replace("[/DX1R-META]", f"[/{name}-META]")
+    meta = meta.replace("[DX1R-META v3]", f"[{name}-META v3]").replace("[/DX1R-META]", f"[/{name}-META]")
     verify = dxr.emit_verify(verify_rows).replace("[DX1R-VERIFY v3]", f"[{name}-VERIFY v3]").replace(
         "[/DX1R-VERIFY]", f"[/{name}-VERIFY]")
 
     blocks = [meta, verify, emit_series_generic(name, series), emit_summary_generic(name, summary)]
     if pairs:
-        blocks.append(emit_pairs_generic(name, pairs))
+        blocks.append(emit_pairs_generic(name, pairs, onsets))
 
     text = "\n".join(blocks) + "\n"
     os.makedirs(os.path.dirname(a.out) or ".", exist_ok=True)

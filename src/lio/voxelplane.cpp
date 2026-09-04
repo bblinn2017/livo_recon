@@ -155,6 +155,15 @@ struct CorrScanAccum {
   int scan_id = -1;
   long n_candidates = 0, n_accepted = 0, n_dropped = 0, n_nis_finite = 0;
   double sum_nis = 0.0, sum_nis2 = 0.0, sum_log_nis = 0.0, max_nis = 0.0;
+  // P-B (BASE, 2026-09-03).  nis_est = nu^2 / S_est, S_est = S - s_prior_pose
+  // -- the one consistency statistic the test-bed constraint (eee_01's S is
+  // 94-98% prior-pose term) leaves usable, per d1_leverage_report.py:194's
+  // already-established formula. Computed per candidate, alongside nis
+  // above, from the SAME s_prior_pose already passed into this function --
+  // not reconstructed from the scan's mean S_prior_pose, which would be a
+  // different (and wrong) statistic.
+  long n_nis_est_finite = 0;
+  double sum_nis_est = 0.0, sum_nis_est2 = 0.0, max_nis_est = 0.0;
   long n_share = 0; double sum_share = 0.0;
   // P2.  The variance decomposition, retained per scan instead of only
   // ever existing inside corr.csv's per-correspondence rows (0.7-1 GB/job,
@@ -220,7 +229,9 @@ void flushCorrScan(CorrScanAccum& a)
            // keeps its position for any reader still indexing by offset.
            "n_vis_hit_acc,n_vis_free_acc,n_vis_unobs_acc,"
            "sum_age_hit,n_age_hit,sum_age_free,n_age_free,sum_age_unobs,n_age_unobs,"
-           "sum_fill_hit,sum_fill_free,sum_fill_unobs,n_vis_hit_thru\n";
+           "sum_fill_hit,sum_fill_free,sum_fill_unobs,n_vis_hit_thru,"
+           // P-B: appended at the end, same convention.
+           "n_nis_est_finite,sum_nis_est,sum_nis_est2,max_nis_est\n";
     first = false;
   }
   ofs << a.scan_id << ',' << a.n_candidates << ',' << a.n_accepted << ','
@@ -235,7 +246,9 @@ void flushCorrScan(CorrScanAccum& a)
       << a.sum_age_free << ',' << a.n_age_free << ','
       << a.sum_age_unobs << ',' << a.n_age_unobs << ','
       << a.sum_fill_hit << ',' << a.sum_fill_free << ',' << a.sum_fill_unobs << ','
-      << a.n_vis_hit_thru << '\n';
+      << a.n_vis_hit_thru << ','
+      << a.n_nis_est_finite << ',' << a.sum_nis_est << ','
+      << a.sum_nis_est2 << ',' << a.max_nis_est << '\n';
   a = CorrScanAccum{};
 }
 
@@ -294,6 +307,21 @@ void debugAccumConsistencyCorr(int scan_id, double nu, double S, int gated,
         a.sum_nis2 += nis * nis;
         a.sum_log_nis += std::log(nis);
         if (nis > a.max_nis) a.max_nis = nis;
+      }
+    }
+    // P-B: S_est = S - s_prior_pose, per candidate (matches
+    // d1_leverage_report.py:194 exactly) -- guarded the same way `nis`
+    // above is, on this candidate's own S_est, not the scan's mean.
+    if (std::isfinite(nu) && std::isfinite(S) && std::isfinite(s_prior_pose)) {
+      const double S_est = S - s_prior_pose;
+      if (S_est > 0.0) {
+        const double nis_est = nu * nu / S_est;
+        if (std::isfinite(nis_est) && nis_est > 0.0) {
+          a.n_nis_est_finite++;
+          a.sum_nis_est += nis_est;
+          a.sum_nis_est2 += nis_est * nis_est;
+          if (nis_est > a.max_nis_est) a.max_nis_est = nis_est;
+        }
       }
     }
     if (plane_share >= 0.0 && std::isfinite(plane_share)) {
