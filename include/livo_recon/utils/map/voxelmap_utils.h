@@ -546,6 +546,17 @@ struct LioFrameDiag
   // spline disabled, or previous scan's spline failed).
   double boundary_dpos     = -1.0;  // metres
   double boundary_drot_deg = -1.0;  // degrees
+  // P-F (BASE, 2026-09-04): L1 (DECIMATION) had no column at all -- n_residuals
+  // above is L2 (ASSOCIATION). n_points_after_pfn = mg.lidar_points.size() (post
+  // cbk/lidar/point_filter_num, pre imu/ds); n_points_after_ds = mg.points.size()
+  // (post imu/ds, the set buildResiduals() actually consumes). Both already
+  // computed by the time LioProc builds this struct -- no new counting logic,
+  // just capturing sizes that existed. n_points_raw (pre-point_filter_num) is
+  // NOT captured here -- would need a queue-level accumulator in DataQueues
+  // since mg.lidar_points can bundle multiple raw scans per frame; left for a
+  // later patch.
+  int n_points_after_pfn = -1;
+  int n_points_after_ds  = -1;
 };
 
 struct VoxelStats

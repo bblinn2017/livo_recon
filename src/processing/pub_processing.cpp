@@ -252,13 +252,20 @@ void PubProc::publishOdometry(const MeasureGroup& mg)
   // odometry.txt are looking at the same scan's same state.
   if (pose_pair_file_.is_open()) {
     const Eigen::Quaterniond pq(mg.prior_rot);
-    // frame_idx: same voxel_map_->frame_idx_ counter frame_stats.txt/
-    // scan.csv/corr_scan.csv/spline_q.csv already key their own scan_id
-    // column on -- lets dx_report.py join on an exact integer instead of
-    // float-timestamp matching (see the t-column precision issue that
-    // motivated this).
+    // frame_idx: P-G (BASE, 2026-09-04) -- this call happens in drainOnce()
+    // AFTER updateMaps() has already incremented voxel_map_->frame_idx_ (see
+    // livo_recon_node.cpp's drainOnce(): estimateState() -> updateMaps()
+    // [frame_idx_++] -> publishResults() [here]), while
+    // frame_stats.txt/scan.csv/corr_scan.csv/spline_q.csv all log the
+    // PRE-increment value (voxelmap.cpp's updateMap() calls
+    // debugLogFrameStats(..., frame_idx_ - 1, ...) at its own exit). Using
+    // the raw counter here was off by one against every other per-scan file
+    // for this scan, every run, since P8 -- joining pose_pair.csv to
+    // frame_stats.txt on frame_idx paired scan k's diagnostics with scan
+    // k-1's poses. Subtract 1 so this file's frame_idx means the same scan
+    // as the other four's.
     pose_pair_file_ << std::fixed
-        << voxel_map_->frame_idx_ << ","
+        << (voxel_map_->frame_idx_ - 1) << ","
         << std::setprecision(9)
         << stamp.toSec() << ","
         << state_->pos().x() << "," << state_->pos().y() << "," << state_->pos().z() << ","

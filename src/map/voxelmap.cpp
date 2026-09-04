@@ -30,6 +30,10 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            ",h_rr_trace,htz_rot_norm,htz_pos_norm,ask,got,refusal"
            ",iters,dx_rot_deg,dx_pos_mm,trP_pos_pre"
            ",boundary_dpos,boundary_drot_deg"
+           // P-F (BASE, 2026-09-04): L1 (DECIMATION) -- see LioFrameDiag's
+           // doc comment. n_points_raw is NOT here yet (needs a queue-level
+           // accumulator, not captured this pass).
+           ",n_points_after_pfn,n_points_after_ds"
            // P-C (BASE, 2026-09-03): a direct per-frame CENSUS of
            // VoxelStats' live atomic counters -- n_planes above is a
            // TRANSITION counter (increments/decrements on state change,
@@ -54,7 +58,8 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.iters << "," << lio.dx_rot_deg << "," << lio.dx_pos_mm
       << "," << lio.trP_pos_pre
       << "," << lio.boundary_dpos << "," << lio.boundary_drot_deg
-      << "," << n_voxels << "," << n_voxels_is_plane << "," << n_voxels_converged << "\n";
+      << "," << n_voxels << "," << n_voxels_is_plane << "," << n_voxels_converged
+      << "," << lio.n_points_after_pfn << "," << lio.n_points_after_ds << "\n";
 }
 }  // namespace
 

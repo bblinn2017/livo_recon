@@ -1491,6 +1491,8 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     {
       LioFrameDiag diag;
       diag.n_residuals = static_cast<int>(residuals_.size());
+      diag.n_points_after_pfn = static_cast<int>(mg.lidar_points.size());
+      diag.n_points_after_ds  = static_cast<int>(mg.points.size());
       if (!residuals_.empty()) {
         const M3D H_pp_d = ekf_.HtH.block<3, 3>(3, 3);
         const M3D H_rr_d = ekf_.HtH.block<3, 3>(0, 0);
