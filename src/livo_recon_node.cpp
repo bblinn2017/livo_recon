@@ -183,6 +183,14 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
     mg.pos_after_lio = mg.pos_after_vio = ctx_.state->pos();
     mg.rot_after_lio = mg.rot_after_vio = ctx_.state->rot();
     ctx_.printer->print(PrintCategory::LIO, combined_log);
+    // CQ-10: the line above is a no-op project-wide (every dataset config ships
+    // printer/lio/enable: false), so a REJECTED event -- the one thing on this
+    // line worth seeing regardless of throttle settings -- has never actually
+    // reached a console. Route it around the category gate unconditionally;
+    // the routine (non-rejected) per-frame line above still respects
+    // printer/lio/enable as before, unchanged.
+    if (combined_log.find("REJECTED") != std::string::npos)
+      ROS_WARN_STREAM(combined_log);
   }
   else
   {
