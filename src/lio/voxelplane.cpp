@@ -420,40 +420,9 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
   // History (288-295): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-288
   if (is_candidate) *is_candidate = true;
 
-  // T3-0e: drop this whole PLANE from the residual (not just this one
-  // correspondence -- the decision is per-plane, evaluated identically
-  // for every correspondence that hits it) if the coverage-anisotropy
-  // ablation says so. See VoxelOpts::occ_aniso_drop_mode's doc comment.
-  if (opts_->occ_aniso_drop_mode == "top") {
-    const double a = occupancyAnisotropy();
-    // Code-review fix: a<3 occupied cells) -> -1.0 sentinel, which used to
-    // silently survive "> threshold" (never true), systematically
-    // PROTECTING planes whose normals are still rotating/unstable -- the
-    // planes T3-0e most wants to be able to drop. Explicit policy instead:
-    // occ_aniso_undefined_as_top controls whether an undefined value
-    // counts as top-decile (drop) or not (keep); default false (keep,
-    // conservative) but now a deliberate, documented, logged choice, not
-    // an accident of the sentinel's sign.
-    const bool undefined = (a < 0.0);
-    if (undefined ? opts_->occ_aniso_undefined_as_top : (a > opts_->occ_aniso_drop_threshold)) {
-      if (dropped_by_ablation) *dropped_by_ablation = true;
-      return false;
-    }
-  } else if (opts_->occ_aniso_drop_mode == "random") {
-    // History (318-333): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-318
-    const bool eligible = opts_->occ_aniso_undefined_as_top
-                        || (occupancyAnisotropy() >= 0.0);
-    if (eligible) {
-      std::size_t h = std::hash<double>{}(occ_anchor_center_.x() * 1e6 + opts_->occ_aniso_drop_seed);
-      h ^= std::hash<double>{}(occ_anchor_center_.y() * 1e6 + opts_->occ_aniso_drop_seed * 2.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
-      h ^= std::hash<double>{}(occ_anchor_center_.z() * 1e6 + opts_->occ_aniso_drop_seed * 3.0) + 0x9e3779b9 + (h << 6) + (h >> 2);
-      const double u01 = static_cast<double>(h % 1000000ULL) / 1000000.0;
-      if (u01 < opts_->occ_aniso_drop_fraction) {
-        if (dropped_by_ablation) *dropped_by_ablation = true;
-        return false;
-      }
-    }
-  }
+  // History (296-329, removed 2026-09-04): see
+  // docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-296-removed -- T3-0e's
+  // occ_aniso_drop_mode "top"/"random" per-plane drop, deleted with CQ-6.
 
   J_nq(0, 0) = d_center.dot(y_normal_);
   J_nq(0, 1) = d_center.dot(x_normal_);
@@ -1502,95 +1471,13 @@ void VoxelPlane::recomputeOccupancyCache()
   cached_occ_aniso_ = lambda1 / std::max(lambda2, eps);
 }
 
-// History (1093-1105): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-1093
+// History (1093-1105, removed 2026-09-04): see
+// docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-1093-removed -- T8-b's
+// redundancy/coverage plane-confidence inflation, deleted with CQ-6.
+// plane_conf_factor stays as a read diagnostic column, now trivially 1.0.
 void VoxelPlane::applyPlaneConfidence()
 {
   last_plane_conf_factor_ = 1.0;
-  if (!is_plane_) return;
-  if (!opts_->plane_conf_redundancy_en && !opts_->plane_conf_coverage_en) return;
-
-  const double trace_before = plane_var_.trace();
-
-  // ---- redundancy -------------------------------------------------------
-  // plane_var_ ~ 1/N. The occupied-cell count is a density-INDEPENDENT
-  // measure of how much distinct surface the fit actually saw, so N/cells is
-  // the redundancy factor the debiased path never removes. Capped, because on
-  // a dense return this ratio is unbounded and an unbounded inflation would
-  // silently become a gate (every residual would pass sigma_num).
-  if (opts_->plane_conf_redundancy_en) {
-    const double n_raw = (last_fit_j_ > 0) ? static_cast<double>(last_fit_j_)
-                                           : static_cast<double>(points_size_);
-    if (cached_occ_cells_ >= 3 && n_raw > 0.0) {
-      double f = n_raw / static_cast<double>(cached_occ_cells_);
-      if (f < 1.0) f = 1.0;
-      // AUDIT A3: NOT comparable across arms. On the pca path (without
-      // use_bins, which defaults false) last_fit_j_ is 0 so n_raw falls
-      // through to points_size_, capped at max_points (~50). On the debiased
-      // path last_fit_j_ is N_acc_, uncapped and growing for the voxel's
-      // whole life. The inflation ratio therefore has a hard ceiling of
-      // ~max_points/64 on one arm and none on the other -- defensible as a
-      // MODEL (debiased really does accumulate unboundedly) but it means
-      // this factor is not comparable ACROSS arms. Compare within an arm
-      // only; plane_conf_factor is logged so the number is visible rather
-      // than hidden behind the cap.
-      if (f > opts_->plane_conf_redundancy_cap) f = opts_->plane_conf_redundancy_cap;
-      plane_var_ *= f;
-    }
-  }
-
-  // ---- coverage ---------------------------------------------------------
-  // plane_var_ is expressed over [theta1, theta2, d]. From gate():
-  //   J_nq(0) = d_center . y_normal_   -> component 0's lever arm is along v
-  //   J_nq(1) = d_center . x_normal_   -> component 1's lever arm is along u
-  // A tilt is poorly determined when the plane was sampled thinly along the
-  // direction that would have revealed it, so component 0 is inflated by how
-  // thin the footprint is along v, and component 1by how thin it is along u.
-  // Scaling as D * plane_var_ * D with D diagonal keeps the result symmetric
-  // and positive semi-definite, which a naive per-entry scaling would not.
-  //
-  // AUDIT A1: the bitmask's (u, v) axes are a SNAPSHOT of (x_normal_,
-  // y_normal_) taken at anchor time. Re-anchoring is triggered by normal
-  // rotation only (see updateOccupancy()), so the in-plane axes -- the
-  // eigenvectors of a 2x2 whose eigenvalues are nearly equal on a
-  // well-covered plane -- can rotate or swap freely while the normal never
-  // moves at all. Applying the term through a stale frame would attribute
-  // cached_occ_var_u_/v_ to the wrong tangent component and inflate the
-  // WELL-sampled axis instead of the thin one: not a weaker effect, a
-  // sign-inverted one, on exactly the isotropic planes where it should have
-  // been inert. Guard on the anchor frame still being aligned with the
-  // CURRENT fit's own tangent basis (same 10-degree threshold
-  // updateOccupancy() uses, for consistency) before trusting it.
-  constexpr double kFrameAlignThreshold = 0.9848;  // cos(10 deg)
-  const bool frame_fresh =
-      occ_anchored_ &&
-      std::fabs(occ_anchor_x_normal_.dot(x_normal_)) > kFrameAlignThreshold &&
-      std::fabs(occ_anchor_y_normal_.dot(y_normal_)) > kFrameAlignThreshold;
-  if (opts_->plane_conf_coverage_en && cached_occ_cells_ >= 3 && frame_fresh) {
-    constexpr double eps = 1e-12;
-    const double vu = std::max(cached_occ_var_u_, eps);
-    const double vv = std::max(cached_occ_var_v_, eps);
-    const double vref = std::max(vu, vv);
-    const double b = opts_->plane_conf_coverage_beta;
-    double f0 = std::pow(vref / vv, b);   // theta1: lever arm along v
-    double f1 = std::pow(vref / vu, b);   // theta2: lever arm along u
-    const double cap = opts_->plane_conf_coverage_cap;
-    if (!std::isfinite(f0) || f0 > cap) f0 = cap;
-    if (!std::isfinite(f1) || f1 > cap) f1 = cap;
-    if (f0 < 1.0) f0 = 1.0;
-    if (f1 < 1.0) f1 = 1.0;
-    V3D d(std::sqrt(f0), std::sqrt(f1), 1.0);
-    const M3D D = d.asDiagonal();
-    plane_var_ = D * plane_var_ * D;
-  }
-
-  if (!plane_var_.allFinite()) {
-    // An inflation that produced a non-finite covariance is a bug, not a
-    // result. Fail loudly rather than letting it reach the residual.
-    is_plane_ = false;
-    last_plane_conf_factor_ = 0.0;
-    return;
-  }
-  last_plane_conf_factor_ = (trace_before > 0.0) ? (plane_var_.trace() / trace_before) : 1.0;
 }
 
 }  // namespace livo_recon

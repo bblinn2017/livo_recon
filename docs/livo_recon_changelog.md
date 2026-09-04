@@ -1476,6 +1476,32 @@ Dated historical/narrative comments migrated out of source on 2026-09-01, per th
   // size (occupied 8x8 cells) and inflate by the ratio.
 ```
 
+### include/livo_recon/utils/map/voxelmap_utils.h:487-507 (removed 2026-09-04)
+
+<a id="include-livo_recon-utils-map-voxelmap_utils.h-487-removed"></a>
+
+CQ-6: deleted `occ_aniso_drop_{mode,threshold,fraction,seed}`, `occ_aniso_undefined_as_top`
+(the T3-0e "top"/"random" per-plane drop machinery documented above at
+[479-499](#include-livo_recon-utils-map-voxelmap_utils.h-479)/[505-516](#include-livo_recon-utils-map-voxelmap_utils.h-505)),
+and `plane_conf_redundancy_{en,cap}`/`plane_conf_coverage_{en,beta,cap}` (the T8-b
+redundancy/coverage inflation documented at
+[519-537](#include-livo_recon-utils-map-voxelmap_utils.h-519)). T10/P10's own retained
+data (72 T3-0e cells, the DX-2 P10 read) found none of these knobs earned their keep,
+and every one was dead-by-config: never set to a non-default value in any checked-in
+dataset config. `VoxelPlane::gate()`'s drop branches and `applyPlaneConfidence()`'s
+redundancy/coverage blocks were removed along with the options; `applyPlaneConfidence()`
+now unconditionally sets `last_plane_conf_factor_ = 1.0` (the function stays, since
+`plane_conf_factor` is still a read diagnostic column). `occupancyAnisotropy()` and the
+`occ_aniso` diagnostic column are UNCHANGED -- they still feed corr.csv independent of
+the drop logic that read them. `VoxelPlane::gate()`'s own radius gate (`max_radius`,
+the disc/ellipse admission criterion) was explicitly NOT touched -- it is set non-default
+in every dataset config and gates every point-to-plane residual project-wide, unlike the
+knobs above; conflating the two would have been a much larger, unauthorized behavior
+change to core residual acceptance. A visibility-based gate mode (P6b's actual design
+goal) is a NEW `plane_gate_mode` arm to add alongside `disc`/`ellipse_area_matched`, not
+implemented in this pass -- the concrete classification-to-rejection rule needs its own
+design writeup before it's safe to code.
+
 ### include/livo_recon/utils/map/voxelmap_utils.h:550-554
 
 <a id="include-livo_recon-utils-map-voxelmap_utils.h-550"></a>
@@ -1852,6 +1878,19 @@ Dated historical/narrative comments migrated out of source on 2026-09-01, per th
     // setting of occ_aniso_undefined_as_top rather than only under one.
 ```
 
+### src/lio/voxelplane.cpp:296-329 (removed 2026-09-04)
+
+<a id="src-lio-voxelplane.cpp-296-removed"></a>
+
+CQ-6: deleted the `occ_aniso_drop_mode == "top"`/`"random"` per-plane drop blocks
+documented above at [259](#src-lio-voxelplane.cpp-259)/[288](#src-lio-voxelplane.cpp-288)/[318](#src-lio-voxelplane.cpp-318),
+along with `occ_aniso_undefined_as_top`. See
+[voxelmap_utils.h:487-507](#include-livo_recon-utils-map-voxelmap_utils.h-487-removed)
+for the full rationale. `dropped_by_ablation` stays a valid output parameter of
+`gate()` (still written by nothing now, so it always reads false/0 in corr.csv --
+an honest reflection of the feature being gone, not a dangling reference).
+`occupancyAnisotropy()`/the `occ_aniso` diagnostic column are UNCHANGED.
+
 ### src/lio/voxelplane.cpp:403-409
 
 <a id="src-lio-voxelplane.cpp-403"></a>
@@ -2022,6 +2061,16 @@ Dated historical/narrative comments migrated out of source on 2026-09-01, per th
 // A switch that could change which planes exist would not be ablatable.
 ```
 
+
+### src/lio/voxelplane.cpp:1093-1105 (removed 2026-09-04)
+
+<a id="src-lio-voxelplane.cpp-1093-removed"></a>
+
+CQ-6: deleted `applyPlaneConfidence()`'s redundancy/coverage bodies documented
+above -- see
+[voxelmap_utils.h:487-507](#include-livo_recon-utils-map-voxelmap_utils.h-487-removed)
+for the full rationale. The function is kept (callers/`plane_conf_factor` still
+expect it) but now unconditionally sets `last_plane_conf_factor_ = 1.0`.
 
 ## src/livo_recon_node.cpp
 

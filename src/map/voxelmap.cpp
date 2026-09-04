@@ -132,34 +132,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
                        "voxel_map/plane/weight_floor/incidence_k",
                        opts_->weight_incidence_k, 1.0);
 
-    cfg.mode("voxel_map/plane/occ_aniso_drop_mode", opts_->occ_aniso_drop_mode,
-             "none", { "none", "top", "random" });
-    // T3-0e's own parameters, each live only under the arm that reads it:
-    // "top" thresholds on the anisotropy value, "random" draws a fraction at
-    // a recorded seed.  They were unconditional paramWarn reads, so a
-    // threshold set on the random arm (or a seed on the top arm) was
-    // accepted, printed, and consumed by nothing -- the shape of defect this
-    // register has now paid for four times.
-    const bool drop_top    = (opts_->occ_aniso_drop_mode == "top");
-    const bool drop_random = (opts_->occ_aniso_drop_mode == "random");
-    cfg.nested<double>(drop_top, "voxel_map/plane/occ_aniso_drop_mode=top",
-                       "voxel_map/plane/occ_aniso_drop_threshold",
-                       opts_->occ_aniso_drop_threshold, -1.0);
-    // Was declared, documented as "a deliberate, documented, logged choice",
-    // read by gate() -- and never loaded from the parameter server at all,
-    // so it could only ever hold its default. Unreachable options are worse
-    // than absent ones: this one silently decided the policy for planes with
-    // an undefined occ_aniso, which is precisely the population T3-0e's
-    // "top" arm is about.
-    cfg.nested<bool>(drop_top, "voxel_map/plane/occ_aniso_drop_mode=top",
-                     "voxel_map/plane/occ_aniso_undefined_as_top",
-                     opts_->occ_aniso_undefined_as_top, false);
-    cfg.nested<double>(drop_random, "voxel_map/plane/occ_aniso_drop_mode=random",
-                       "voxel_map/plane/occ_aniso_drop_fraction",
-                       opts_->occ_aniso_drop_fraction, 0.1);
-    cfg.nested<int>(drop_random, "voxel_map/plane/occ_aniso_drop_mode=random",
-                    "voxel_map/plane/occ_aniso_drop_seed",
-                    opts_->occ_aniso_drop_seed, 0);
     cfg.mode("voxel_map/plane/plane_fit_mode", opts_->plane_fit_mode, "pca",
              { "pca", "debiased" });
     // ── the plane covariance model ───────────────────────────────────────
@@ -244,22 +216,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     // report it as the new model's behaviour, so they are nested off.
     const bool eigengap = (opts_->plane_var_mode == "eigengap");
     const char* kEigScope = "voxel_map/plane/plane_var_mode=eigengap";
-    cfg.nested<bool>(eigengap, kEigScope, "voxel_map/plane/plane_conf_redundancy_en",
-                     opts_->plane_conf_redundancy_en, false);
-    cfg.nested<double>(opts_->plane_conf_redundancy_en,
-                       "voxel_map/plane/plane_conf_redundancy_en=true",
-                       "voxel_map/plane/plane_conf_redundancy_cap",
-                       opts_->plane_conf_redundancy_cap, 16.0);
-    cfg.nested<bool>(eigengap, kEigScope, "voxel_map/plane/plane_conf_coverage_en",
-                     opts_->plane_conf_coverage_en, false);
-    cfg.nested<double>(opts_->plane_conf_coverage_en,
-                       "voxel_map/plane/plane_conf_coverage_en=true",
-                       "voxel_map/plane/plane_conf_coverage_beta",
-                       opts_->plane_conf_coverage_beta, 1.0);
-    cfg.nested<double>(opts_->plane_conf_coverage_en,
-                       "voxel_map/plane/plane_conf_coverage_en=true",
-                       "voxel_map/plane/plane_conf_coverage_cap",
-                       opts_->plane_conf_coverage_cap, 100.0);
     cfg.nested<bool>(eigengap, kEigScope, "voxel_map/plane/plane_var_denom_floor_en",
                      opts_->plane_var_denom_floor_en, false);
     cfg.mode("voxel_map/plane/plane_fit_pose_cov_mode",
@@ -353,18 +309,8 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/plane_gate_mode:           " << opts_->plane_gate_mode
       << "\n  plane/weight_floor/mode:         " << opts_->weight_floor_mode
       << "\n  plane/weight_floor/sigma_r2:     " << opts_->weight_sigma_r2
-      << "\n  plane/occ_aniso_drop_mode:       " << opts_->occ_aniso_drop_mode
-      << "\n  plane/occ_aniso_drop_threshold:  " << opts_->occ_aniso_drop_threshold
-      << "\n  plane/occ_aniso_drop_fraction:   " << opts_->occ_aniso_drop_fraction
-      << "\n  plane/occ_aniso_drop_seed:       " << opts_->occ_aniso_drop_seed
-      << "\n  plane/occ_aniso_undefined_as_top: " << (opts_->occ_aniso_undefined_as_top ? "true" : "false")
       << "\n  plane/log_consistency_mode:      " << opts_->log_consistency_mode
       << "\n  plane/log_consistency_corr_stride: " << opts_->log_consistency_corr_stride
-      << "\n  plane/plane_conf_redundancy_en:  " << (opts_->plane_conf_redundancy_en ? "true" : "false")
-      << "\n  plane/plane_conf_redundancy_cap: " << opts_->plane_conf_redundancy_cap
-      << "\n  plane/plane_conf_coverage_en:    " << (opts_->plane_conf_coverage_en ? "true" : "false")
-      << "\n  plane/plane_conf_coverage_beta:  " << opts_->plane_conf_coverage_beta
-      << "\n  plane/plane_conf_coverage_cap:   " << opts_->plane_conf_coverage_cap
       << "\n  plane/plane_var_denom_floor_en:  " << (opts_->plane_var_denom_floor_en ? "true" : "false")
       << "\n  map/shuffle_insertion_seed:      " << opts_->shuffle_insertion_seed
       << "\n  map/log_frame_stats_en:          " << (opts_->log_frame_stats_en ? "true" : "false")

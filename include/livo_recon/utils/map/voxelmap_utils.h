@@ -484,27 +484,7 @@ struct VoxelOpts
   // trusted, which is the physical claim under test.
   double weight_incidence_k = 1.0;
 
-  // History (479-499): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-479
-  std::string occ_aniso_drop_mode = "none";
-  double occ_aniso_drop_threshold = -1.0;
-  double occ_aniso_drop_fraction = 0.1;
-  int occ_aniso_drop_seed = 0;
-
-  // History (505-516): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-505
-  bool occ_aniso_undefined_as_top = false;
-
-  // History (519-537): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-519
-  bool   plane_conf_redundancy_en  = false;
-  double plane_conf_redundancy_cap = 16.0;  // hard ceiling on the inflation ratio
-
-  // coverage: inflate each TANGENT axis of plane_var_ by how thinly the
-  // plane was sampled along that axis's lever arm. Uses the occupancy
-  // bitmask's per-axis second moments, which are density-independent by
-  // construction -- that is the whole reason to read coverage off the
-  // bitmask rather than off the scatter eigenvalues.
-  bool   plane_conf_coverage_en   = false;
-  double plane_conf_coverage_beta = 1.0;    // 0 = identity, 1 = full ratio
-  double plane_conf_coverage_cap  = 100.0;  // ceiling on either axis factor
+  // History (479-507, removal): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-487-removed
 
   // History (550-554): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-550
   bool plane_var_denom_floor_en = false;
