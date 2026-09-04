@@ -1500,7 +1500,12 @@ PLANNING_QUEUES = ("results", "errors")
 #: the five columns every code/task row carries, in order
 ITEM_COLUMNS = ("id", "what", "blocked by", "needs bryce", "delivers")
 
-WITHDRAWN_RE = re.compile(r"\bWITHDRAWN\b", re.I)
+# The withdrawal banner is a STATE, and the protocol says it BEGINS the item body:
+#   "WITHDRAWN <date> -- <why>".  Matching the bare word anywhere in the cell made
+#   any item whose prose said "the hypothesis is withdrawn" read as retracted --
+#   which is exactly what TQ-1 did on its first modification.  Anchored, and case
+#   sensitive: the banner is written in caps, ordinary prose is not.
+WITHDRAWN_RE = re.compile(r"^\s*WITHDRAWN\b")
 
 
 class ProtocolError(Exception):
@@ -1575,7 +1580,7 @@ def queue_items(doc: Doc, queue: str) -> list[Item]:
         out.append(Item(
             qid=qid, what=c[1], blocked_by=c[2],
             needs_bryce=nb.startswith("y"), delivers=c[4],
-            withdrawn=bool(WITHDRAWN_RE.search(c[1])),
+            withdrawn=bool(WITHDRAWN_RE.match(c[1])),
         ))
     return out
 
