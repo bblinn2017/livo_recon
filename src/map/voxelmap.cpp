@@ -58,8 +58,8 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.iters << "," << lio.dx_rot_deg << "," << lio.dx_pos_mm
       << "," << lio.trP_pos_pre
       << "," << lio.boundary_dpos << "," << lio.boundary_drot_deg
-      << "," << n_voxels << "," << n_voxels_is_plane << "," << n_voxels_converged
-      << "," << lio.n_points_after_pfn << "," << lio.n_points_after_ds << "\n";
+      << "," << lio.n_points_after_pfn << "," << lio.n_points_after_ds
+      << "," << n_voxels << "," << n_voxels_is_plane << "," << n_voxels_converged << "\n";
 }
 }  // namespace
 
