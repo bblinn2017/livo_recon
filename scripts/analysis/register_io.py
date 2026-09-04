@@ -605,6 +605,14 @@ class Doc:
 
     # Short names for the tables this workflow edits, matched against caption text.
     TABLE_ALIASES = {
+        # The split (2026-09-04): the single register became two inboxes, and the
+        # four queues below are the protocol's own state.  "queue" is kept as an
+        # alias for the OLD register's combined table so archived documents still
+        # address; new work uses "task"/"code"/"results"/"errors".
+        "task": "task queue",
+        "code": "code queue",
+        "results": "results queue",
+        "errors": "errors queue",
         "queue": "the queue",
         "push": "push list",
         "claims": "open claims and their readouts",
@@ -1220,6 +1228,7 @@ def validate(doc: Doc, compaction: bool = True, strict: bool = False) -> list[Fi
     out += check_pairs_blocks(doc)
     out += check_scalar_series(doc)
     out += check_references(doc)
+    out += check_queue_schema(doc)
     if compaction:
         out += check_compaction(doc)
     if not doc.roundtrip_ok():
@@ -1445,6 +1454,263 @@ def structural_diff(old: Doc, new: Doc) -> list[str]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# The split protocol (2026-09-04): two inboxes, four queues, one owner per op
+# ---------------------------------------------------------------------------
+#
+# Bryce split the single Register into a CODING AGENT INBOX (code queue + task
+# queue) and a PLANNING AGENT INBOX (results queue + errors queue), with a
+# permission matrix that is the whole point:
+#
+#                     CODE QUEUE    TASK QUEUE    RESULTS      ERRORS
+#   planning          add, modify   add, modify   delete       delete
+#   coding            delete        delete        add          add
+#
+# Planning cannot delete a queued item; coding cannot add one.  Every function
+# below that mutates a document takes an explicit ``role`` and refuses the
+# operations that role may not perform.  That is the same design the rest of
+# this module uses for edit ordering: make the mistake unrepresentable rather
+# than documenting it.
+#
+# The state machine has two ILLEGAL states, and ``audit()`` is what finds them:
+#   task present AND a results entry  -> a result was filed and the task was not
+#                                        deleted, so the cells will run twice
+#   task absent AND no results entry  -> a task left the queue having produced
+#                                        nothing.  This is the one that loses
+#                                        work silently, and it is exactly what
+#                                        the single-document register could not
+#                                        detect.
+# The invariant that makes those two exhaustive: NOTHING LEAVES THE TASK QUEUE
+# WITHOUT A RESULTS ENTRY -- not a failure (which keeps the task and files an
+# error), not a withdrawal (which files a one-line results entry).
+
+CODING, PLANNING = "coding", "planning"
+
+#: queue -> (role that may add/modify, role that may delete)
+QUEUE_OWNERS = {
+    "code":    (PLANNING, CODING),
+    "task":    (PLANNING, CODING),
+    "results": (CODING, PLANNING),
+    "errors":  (CODING, PLANNING),
+}
+
+CODING_QUEUES = ("code", "task")
+PLANNING_QUEUES = ("results", "errors")
+
+#: the five columns every code/task row carries, in order
+ITEM_COLUMNS = ("id", "what", "blocked by", "needs bryce", "delivers")
+
+WITHDRAWN_RE = re.compile(r"\bWITHDRAWN\b", re.I)
+
+
+class ProtocolError(Exception):
+    """An operation the acting role is not permitted to perform."""
+
+
+def _require(role: str, queue: str, op: str) -> None:
+    """Refuse an operation the permission matrix does not grant.
+
+    ``op`` is "write" (add or modify) or "delete".
+    """
+    if queue not in QUEUE_OWNERS:
+        raise KeyError(f"unknown queue {queue!r}; have {sorted(QUEUE_OWNERS)}")
+    if role not in (CODING, PLANNING):
+        raise ProtocolError(f"unknown role {role!r}; use {CODING!r} or {PLANNING!r}")
+    writer, deleter = QUEUE_OWNERS[queue]
+    allowed = writer if op == "write" else deleter
+    if role != allowed:
+        other = "add to" if op == "write" else "delete from"
+        raise ProtocolError(
+            f"the {role} agent may not {other} the {queue} queue -- that is the "
+            f"{allowed} agent's operation. "
+            + ("A task that should not run is WITHDRAWN, not deleted (rewrite its "
+               "body; the coding agent then deletes it and files the withdrawal in "
+               "RESULTS)."
+               if role == PLANNING and op == "delete" else
+               "Work that needs queueing goes in the ERRORS queue as reasoned text; "
+               "the planning agent adds the item."
+               if role == CODING and op == "write" else "")
+        )
+
+
+@dataclass
+class Item:
+    """One row of a code or task queue, parsed against ITEM_COLUMNS."""
+    qid: str
+    what: str
+    blocked_by: str
+    needs_bryce: bool
+    delivers: str
+    withdrawn: bool = False
+
+    @property
+    def blocked(self) -> bool:
+        b = self.blocked_by.strip()
+        return bool(b) and b not in {"--", "\u2014", "-", ""}
+
+    @property
+    def runnable(self) -> bool:
+        return not self.blocked and not self.needs_bryce and not self.withdrawn
+
+
+def _cells(doc: Doc, tr: Node) -> list[str]:
+    return [strip_tags(td.inner(doc.src)).strip() for td in tr.find("td", deep=False)]
+
+
+def queue_items(doc: Doc, queue: str) -> list[Item]:
+    """Parse a code/task queue into Items.  Placeholder rows (a single spanning
+    cell saying the queue is empty) are skipped."""
+    if queue not in ("code", "task"):
+        raise KeyError("queue_items() reads the code and task queues; results and "
+                       "errors are free-form entries, use queue_ids()")
+    out = []
+    for tr in doc.rows(queue):
+        c = _cells(doc, tr)
+        if len(c) < len(ITEM_COLUMNS):
+            continue  # placeholder / empty-queue row
+        qid = norm_id(c[0])
+        if not qid or qid in {"\u2014", "--", "-"}:
+            continue
+        nb = c[3].strip().lower()
+        out.append(Item(
+            qid=qid, what=c[1], blocked_by=c[2],
+            needs_bryce=nb.startswith("y"), delivers=c[4],
+            withdrawn=bool(WITHDRAWN_RE.search(c[1])),
+        ))
+    return out
+
+
+def queue_ids(doc: Doc, queue: str) -> list[str]:
+    """Every item id present in a queue, including results/errors entries (which
+    are keyed by the TASK id they close)."""
+    out = []
+    for tr in doc.rows(queue):
+        rid = norm_id(doc.row_id(tr))
+        if rid and rid not in {"\u2014", "--", "-"}:
+            out.append(rid)
+    return out
+
+
+def check_queue_schema(doc: Doc) -> list[Finding]:
+    """The item schema, as a validator.  Every code/task row carries the five
+    columns; ids are unique and well-formed; blocked-by references resolve."""
+    fs: list[Finding] = []
+    seen: dict[str, str] = {}
+    for queue, prefix in (("code", "CQ-"), ("task", "TQ-")):
+        try:
+            items = queue_items(doc, queue)
+        except KeyError:
+            continue  # this document does not carry that queue
+        if not items:
+            fs.append(Finding("warn", "queue-schema",
+                f"{queue} queue has no parseable items"))
+        for it in items:
+            if not it.qid.upper().startswith(prefix):
+                fs.append(Finding("warn", "queue-schema",
+                    f"{queue} item {it.qid!r} does not use the {prefix}n id form"))
+            if it.qid in seen:
+                fs.append(Finding("error", "queue-schema",
+                    f"duplicate item id {it.qid!r} (also in {seen[it.qid]} queue)"))
+            seen[it.qid] = queue
+            if not it.delivers.strip() or it.delivers.strip() in {"--", "\u2014"}:
+                fs.append(Finding("error", "queue-schema",
+                    f"{it.qid} has no DELIVERS block -- validity is then a judgement "
+                    f"call, which is what the schema exists to remove"))
+    known = set(seen)
+    for queue in ("code", "task"):
+        try:
+            items = queue_items(doc, queue)
+        except KeyError:
+            continue
+        for it in items:
+            for ref in re.findall(r"\b([CT]Q-\d+)\b", it.blocked_by.replace("\u2011", "-")):
+                if ref not in known:
+                    fs.append(Finding("error", "queue-schema",
+                        f"{it.qid} is blocked by {ref}, which is not in either queue"))
+    return fs
+
+
+def audit(coding: Doc, planning: Doc) -> list[Finding]:
+    """The protocol's own audit: the two illegal states, plus what is runnable.
+
+    Returns Findings; an empty list means the two documents are consistent.
+    """
+    fs: list[Finding] = []
+    fs += check_queue_schema(coding)
+
+    task_ids = set(queue_ids(coding, "task"))
+    code_ids = set(queue_ids(coding, "code"))
+    # An item is "queued" if it is in EITHER queue.  Both are worked by the coding
+    # agent and both file into results/errors, so an errors entry for a CODE item
+    # is answered by that item staying in the CODE queue.  Checking only the task
+    # queue reported the very first real errors entry (CQ-1) as an illegal state --
+    # a false positive found on this function's first contact with live data.
+    queued_ids = task_ids | code_ids
+    result_ids = set(queue_ids(planning, "results"))
+    error_ids = set(queue_ids(planning, "errors"))
+
+    for rid in sorted(queued_ids & result_ids):
+        which = "task" if rid in task_ids else "code"
+        fs.append(Finding("error", "illegal-state",
+            f"{rid} is in the {which} queue AND has a results entry -- a result was "
+            f"filed and the item was not deleted, so that work will be repeated"))
+    for rid in sorted(error_ids - queued_ids):
+        fs.append(Finding("error", "illegal-state",
+            f"{rid} has an errors entry but is in NEITHER queue -- a failed item "
+            f"must stay queued; that is the whole point of filing the error"))
+    return fs
+
+
+def runnable(coding: Doc) -> tuple[list[Item], list[Item]]:
+    """(code items, task items) that would run right now, in dispatch order.
+
+    The code queue has strict priority: while any code item is runnable, no task
+    item dispatches.  A blocked or NEEDS BRYCE code item does not freeze the task
+    queue -- it is skipped, and any task that truly depends on it names it.
+    """
+    code = [i for i in queue_items(coding, "code") if i.runnable]
+    task = [i for i in queue_items(coding, "task") if i.runnable]
+    return code, (task if not code else [])
+
+
+def withdraw(doc: Doc, qid: str, reason: str, role: str = PLANNING,
+             queue: str = "task") -> None:
+    """Retract an item the planning agent may not delete.
+
+    Prepends the WITHDRAWN banner to the item's ``what`` cell.  The coding agent's
+    action is then to delete it WITHOUT running it and file a one-line results
+    entry, so the "nothing leaves without a results entry" invariant holds and the
+    retraction is in the record rather than being an absence someone has to notice.
+    """
+    _require(role, queue, "write")
+    tr = doc.row(queue, qid)
+    cells = list(tr.find("td", deep=False))
+    if len(cells) < 2:
+        raise ValueError(f"{qid}: row has no 'what' cell to rewrite")
+    what = cells[1]
+    banner = (f'<b>WITHDRAWN {_today()} &mdash; {_html.escape(reason)}</b> '
+              f'<em>DO NOT RUN. Delete this item and file the withdrawal in RESULTS.</em> ')
+    doc.stage(what.inner_start, what.inner_start, banner, why=f"withdraw {qid}")
+
+
+def add_item(doc: Doc, queue: str, row_html: str, role: str = PLANNING,
+             **kw) -> None:
+    """Add a row to a queue, subject to the permission matrix."""
+    _require(role, queue, "write")
+    add_row(doc, queue, row_html, **kw)
+
+
+def delete_item(doc: Doc, queue: str, qid: str, role: str) -> None:
+    """Delete a row from a queue, subject to the permission matrix."""
+    _require(role, queue, "delete")
+    remove_row(doc, queue, qid)
+
+
+def _today() -> str:
+    import datetime as _dt
+    return _dt.date.today().isoformat()
+
+
 def report(doc: Doc) -> str:
     lines = [f"{doc.path}", f"  {len(doc.src):,} bytes, {doc.src.count(chr(10))+1:,} lines"]
     secs = [t for t, _ in doc.sections() if t]
@@ -1581,6 +1847,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--block", action="append", required=True, help="file containing one block")
     p.add_argument("-o", "--out", required=True)
 
+    p = sub.add_parser("queues", help="audit the split protocol: illegal states, what runs next")
+    p.add_argument("--coding", required=True, help="coding agent inbox")
+    p.add_argument("--planning", required=True, help="planning agent inbox")
+
+    p = f(sub.add_parser("withdraw", help="retract a task the planning agent may not delete"))
+    p.add_argument("--id", required=True)
+    p.add_argument("--reason", required=True)
+    p.add_argument("--queue", default="task", choices=["task", "code"])
+    p.add_argument("--as", dest="role", default=PLANNING, choices=[CODING, PLANNING])
+    p.add_argument("-o", required=True)
+
+    p = f(sub.add_parser("additem", help="add a queue row, subject to the permission matrix"))
+    p.add_argument("--queue", required=True, choices=sorted(QUEUE_OWNERS))
+    p.add_argument("--html"); p.add_argument("--html-file")
+    p.add_argument("--at", default="bottom", choices=["top", "bottom"])
+    p.add_argument("--as", dest="role", default=PLANNING, choices=[CODING, PLANNING])
+    p.add_argument("-o", required=True)
+
+    p = f(sub.add_parser("rmitem", help="delete a queue row, subject to the permission matrix"))
+    p.add_argument("--queue", required=True, choices=sorted(QUEUE_OWNERS))
+    p.add_argument("--id", required=True)
+    p.add_argument("--as", dest="role", required=True, choices=[CODING, PLANNING])
+    p.add_argument("-o", required=True)
+
     p = sub.add_parser("self-check", help="round-trip identity plus validation")
     p.add_argument("files", nargs="+")
 
@@ -1702,6 +1992,61 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _write(a.out, d.apply())
         return 0
 
+    if a.cmd == "queues":
+        cd, pl = Doc.load(a.coding), Doc.load(a.planning)
+        fs = audit(cd, pl)
+        code, task = runnable(cd)
+        print(f"coding  : {a.coding}")
+        print(f"planning: {a.planning}")
+        print()
+        if fs:
+            print("PROTOCOL FINDINGS")
+            for x in fs:
+                print("  " + str(x))
+        else:
+            print("PROTOCOL  clean -- no illegal states, schema intact")
+        print()
+        print("RUNS NEXT (code queue has strict priority)")
+        if code:
+            for i in code:
+                print(f"  CODE  {i.qid:6s} {i.what[:78]}")
+            print("  -- task queue is gated until the code queue is clear")
+        elif task:
+            for i in task:
+                print(f"  TASK  {i.qid:6s} {i.what[:78]}")
+        else:
+            print("  nothing -- every item is blocked, withdrawn, or NEEDS BRYCE")
+        print()
+        print("HELD")
+        for q in ("code", "task"):
+            for i in queue_items(cd, q):
+                if i.runnable:
+                    continue
+                why = ("WITHDRAWN" if i.withdrawn else
+                       "NEEDS BRYCE" if i.needs_bryce else
+                       f"blocked: {i.blocked_by[:52]}")
+                print(f"  {i.qid:6s} {why}")
+        return 1 if any(x.level == "error" for x in fs) else 0
+
+    if a.cmd == "withdraw":
+        d = Doc.load(a.file)
+        withdraw(d, a.id, a.reason, role=a.role, queue=a.queue)
+        _write(a.o, d.apply())
+        print(f"withdrew {a.id}; the coding agent deletes it and files the withdrawal in RESULTS")
+        return 0
+
+    if a.cmd == "additem":
+        d = Doc.load(a.file)
+        add_item(d, a.queue, _read_arg(a.html, a.html_file), role=a.role, at=a.at)
+        _write(a.o, d.apply())
+        return 0
+
+    if a.cmd == "rmitem":
+        d = Doc.load(a.file)
+        delete_item(d, a.queue, a.id, role=a.role)
+        _write(a.o, d.apply())
+        return 0
+
     if a.cmd == "self-check":
         rc = 0
         for path in a.files:
@@ -1763,4 +2108,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except BrokenPipeError:  # `register_io.py queues ... | head` is a normal thing to do
+        import os as _os
+        _os.dup2(_os.open(_os.devnull, _os.O_WRONLY), sys.stdout.fileno())
+        raise SystemExit(0)
