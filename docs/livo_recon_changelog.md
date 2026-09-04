@@ -2170,6 +2170,44 @@ expect it) but now unconditionally sets `last_plane_conf_factor_ = 1.0`.
   // time the loop ends.
 ```
 
+### src/processing/combined_processing.cpp:138-152 (CQ-11, 2026-09-04)
+
+<a id="src-processing-combined_processing.cpp-138"></a>
+
+```
+  // CQ-11: last_avg_err_vio is the PRE-update residual of the last ACCEPTED
+  // iteration -- it measures how good the state was going INTO that
+  // iteration's applyMeanUpdate() call, never the state that update actually
+  // produced. The loop always exits (max_iter, norm_converged, or
+  // no_residuals) right after that final applyMeanUpdate(), with no further
+  // iteration to re-measure it -- so a last update that overshoots or
+  // diverges is invisible to a guard reading last_avg_err_vio. Re-evaluate
+  // the TRUE post-update residual against the state actually committed by
+  // the loop before gating on it.
+```
+
+Root cause: the frame-level rejection guard (`vio_avg_error > max_avg_error`)
+compared against `last_avg_err_vio`, which is set (line 90, pre-fix numbering)
+only when an iteration's own PRE-update residual improved on the running
+best -- i.e. it reflects the quality of the state the iteration STARTED
+from, not the state `applyMeanUpdate()` (line 111) actually produced that
+same iteration. Every loop exit happens immediately after the final
+`applyMeanUpdate()` call with no subsequent iteration to re-measure its
+result, so a last update that overshoots or diverges was structurally
+invisible to the guard -- confirmed but left unfixed pending a design
+decision, since correcting it changes which frames get rolled back
+(a behavior change, not a pure bug fix). Decided 2026-09-04: reject the
+whole frame (not just the offending IEKF iteration) whenever the TRUE
+post-loop residual is bad, rather than a finer per-iteration rollback --
+simpler to reason about, and consistent with the existing whole-frame
+LIO-only fallback this guard already triggers. Fix: after the loop, if
+`vio_ever_contributed`, call `vio_proc.accumulateForCombined()` once more
+(read-only, no `applyMeanUpdate()`) against the state the loop actually
+committed, and gate rejection on that fresh value instead of the stale
+`last_avg_err_vio`. `logConsistencyNll("rollback", ...)` and the printed
+`REJECTED(vio_avg_error=...)` summary were updated to report the same
+corrected value.
+
 
 ## src/processing/imu_processing.cpp
 

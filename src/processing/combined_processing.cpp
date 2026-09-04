@@ -135,8 +135,18 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProc& lio_proc, V
                       ekf_.pivotRatio(), ekf_.kalmanGainNorm());
   }
 
+  // History (138-152): see docs/livo_recon_changelog.md#src-processing-combined_processing.cpp-138
+  float final_avg_err_vio = last_avg_err_vio;
+  if (vio_ever_contributed)
+  {
+    EkfUpdate final_vio_part;
+    float re_avg_err_vio = 0.0f;
+    if (vio_proc.accumulateForCombined(mg, final_vio_part, re_avg_err_vio))
+      final_avg_err_vio = re_avg_err_vio;
+  }
+
   bool rejected = false;
-  if (vio_ever_contributed && last_avg_err_vio > static_cast<float>(opts_.max_avg_error))
+  if (vio_ever_contributed && final_avg_err_vio > static_cast<float>(opts_.max_avg_error))
   {
     // Can't decompose the joint solve after the fact to keep just LIO's
     // share (HtH_lio/HtH_vio were already summed before the one solve) --
@@ -144,7 +154,7 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProc& lio_proc, V
     // and re-run LIO alone, unmodified, as the fallback.
     *state_ = state_before_frame;
     if (opts_.log_consistency_en)
-      logConsistencyNll("rollback", mg.image.t, last_avg_err_vio, 0, 0.0, 0.0);
+      logConsistencyNll("rollback", mg.image.t, final_avg_err_vio, 0, 0.0, 0.0);
     lio_proc.processLIO(mg);
     rejected = true;
   }
@@ -157,7 +167,7 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProc& lio_proc, V
   oss << "[combined/ekf] iters=" << iter << "  stop=" << stop
       << "  vio_contributed=" << (vio_ever_contributed ? 1 : 0);
   if (rejected)
-    oss << "  REJECTED(vio_avg_error=" << last_avg_err_vio << " > " << opts_.max_avg_error << ", ran LIO-only fallback)";
+    oss << "  REJECTED(vio_avg_error=" << final_avg_err_vio << " > " << opts_.max_avg_error << ", ran LIO-only fallback)";
   return oss.str();
 }
 
