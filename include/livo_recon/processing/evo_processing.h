@@ -461,7 +461,8 @@ private:
   // placeholder in that case. Shared by commitMatch()'s nearest/interp
   // passes so neither duplicates this formatting.
   static std::string formatModeStats(const char* mode_name, const StageMetrics& vio, size_t n,
-                                     double rpe_delta_s, std::string& last_stats_slot);
+                                     double rpe_delta_s, bool gt_orientation_meaningful,
+                                     std::string& last_stats_slot);
 
   size_t       next_gt_idx_ = 0;      // see processEvoFileMode()/processEvoTopicMode()
   BracketCache bracket_cache_;        // see BracketCache

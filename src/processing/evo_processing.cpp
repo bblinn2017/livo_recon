@@ -407,7 +407,8 @@ EvoProc::StageMetrics EvoProc::logStage(const char* stage_name, const char* mode
 }
 
 std::string EvoProc::formatModeStats(const char* mode_name, const StageMetrics& vio, size_t n,
-                                     double rpe_delta_s, std::string& last_stats_slot)
+                                     double rpe_delta_s, bool gt_orientation_meaningful,
+                                     std::string& last_stats_slot)
 {
   if (vio.ate < 0.0)
   {
@@ -422,6 +423,15 @@ std::string EvoProc::formatModeStats(const char* mode_name, const StageMetrics& 
   if (vio.rte >= 0.0) oss << "  RTE=" << vio.rte << "m@" << rpe_delta_s << "s";
   if (vio.roe >= 0.0) oss << "  ROE=" << vio.roe << "deg@" << rpe_delta_s << "s";
   if (vio.are >= 0.0) oss << "  ARE=" << vio.are << "deg";
+  // CQ-13: carry the rotation-reference source into this line too (the "dbg"
+  // per-frame stream already does, above) -- APPENDED at the very end, never
+  // inserted between existing fields, so every regex/substring consumer of
+  // this line (dispatch_queue.sh's ATE=\K[0-9.]+, analyze_hth_collapse.py,
+  // this file's own ATE_LINE_RE retry logic) keeps matching unchanged.
+  if (vio.roe >= 0.0)
+    oss << "  " << (gt_orientation_meaningful ? "(ROE vs GT orientation)"
+                                               : "(ROE: NO GT ORIENTATION -- "
+                                                 "self-rotation magnitude, not an error)");
 
   // Wide enough for the largest values actually seen in practice (a
   // diverged run's ATE can reach 6 figures) without a column overflowing
@@ -476,7 +486,8 @@ std::string EvoProc::commitMatch(MeasureGroup* mg, double t_abs,
     // refinement step, per explicit instruction ("use the vio ate for
     // right now"). imu/lio's own independently-aligned numbers are in
     // /tmp/evo.txt only.
-    return formatModeStats(mode_name, vio, vio_vec.size(), opts_.rpe_delta_s, last_stats_slot);
+    return formatModeStats(mode_name, vio, vio_vec.size(), opts_.rpe_delta_s,
+                           gtOrientationMeaningful(), last_stats_slot);
   };
 
   std::ostringstream combined;
