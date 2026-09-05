@@ -56,7 +56,7 @@ spline:
       # the double integral of accel error, so the fit is nearly blind to the
       # high-frequency accel noise adaptive_q is trying to measure.  Weighting
       # the accel residual into the fit erodes that separation.
-      mode: off
+      mode: "off"
       # w_acc: 0.0
       # w_gyr: 0.0
       # iters: 2
