@@ -2208,6 +2208,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             checks.append(("overlap-refused", overlap_refused,
                            "overlapping staged edits raise instead of eating each other"))
 
+            # WELL-FORMEDNESS, and this one is here because its absence shipped a
+            # corruption.  A queue row was deleted by LINE INDEX; the row's opening
+            # <tr> lived on one line and its body on the next thirteen, so the delete
+            # took the opener and orphaned the body -- seven <p> blocks and a stray
+            # </td></tr> left loose inside <tbody>.  check_balance and check_structure
+            # BOTH caught it, naming the exact line.  Neither ran, because the publish
+            # path is `self-check` plus `queues`, and neither of those called validate().
+            # The instrument existed and was not on the path that is actually walked --
+            # the same shape as a check disabled in every shipped config.  It is on the
+            # path now.
+            structural = [f for f in (check_balance(d.src) + check_structure(d))
+                          if f.level == "error"]
+            checks.append(("well-formed", not structural,
+                           "no unbalanced or stray structural tags"
+                           + ("" if not structural
+                              else " -- " + "; ".join(f.message for f in structural[:4]))))
+
             print(f"{path}: {len(d.nodes)} elements, {len(d.blocks())} blocks, "
                   f"{len(d.cards())} cards")
             for name, ok, why in checks:
