@@ -1635,6 +1635,116 @@ def check_queue_schema(doc: Doc) -> list[Finding]:
     return fs
 
 
+# --- the DELIVERS checklist, enforced ---------------------------------------
+#
+# The protocol already said a filing carries "the DELIVERS checklist, each item
+# marked present".  It was not followed on TQ-4's first filing -- not by a scoping
+# decision, but because the checklist was never consulted: the entry reported
+# operational completion (cells reached DONE, bugs fixed) and nobody read the
+# DELIVERS list item by item before filing.  Restating the requirement in prose is
+# not a fix for a requirement that was already in prose, so it is made mechanical
+# here.
+#
+#   DELIVERS items are NUMBERED  "(1) ... (2) ..."  in the item body.
+#   A filing carries a [DELIVERS-CHECK] block, one line per number:
+#       [DELIVERS-CHECK]
+#       (1) PRESENT
+#       (2) MISSING    -- <why, in the errors-queue vocabulary>
+#       (3) IMPOSSIBLE -- <why; rule 5c, a genuinely unobtainable item>
+#   Any MISSING makes the filing an ERRORS entry.  That is "PARTIAL is not a third
+#   outcome" as an executable check rather than a sentence.
+
+_DELIVERS_NUM_RE = re.compile(r"\((\d{1,2})\)")
+_DCHECK_RE = re.compile(
+    r"\[DELIVERS-CHECK\](.*?)(?=\[[A-Z][A-Z0-9-]*\]|\Z)", re.S)
+_DCHECK_LINE_RE = re.compile(
+    r"\((\d{1,2})\)\s*(PRESENT|MISSING|IMPOSSIBLE)\b")
+
+
+def delivers_item_numbers(text: str) -> list[int]:
+    """The numbered items in a DELIVERS cell, in order, deduplicated.
+
+    Numbering must start at (1) and be contiguous; a gap means the writer edited
+    the list and left it inconsistent, which is exactly the state that makes an
+    item-by-item check unverifiable.
+    """
+    nums = []
+    for m in _DELIVERS_NUM_RE.finditer(text):
+        n = int(m.group(1))
+        if n not in nums:
+            nums.append(n)
+    return sorted(nums)
+
+
+def check_delivers_coverage(coding: Doc, planning: Doc) -> list[Finding]:
+    """Every filing answers its task's DELIVERS list, item by item, by number.
+
+    Only checkable while the task is still queued -- i.e. always for an ERRORS
+    entry, and for a RESULTS entry only if the deletion has not happened yet.  A
+    RESULTS entry whose task is already gone is checked for SELF-consistency: the
+    block must exist and its numbering must be contiguous from (1).
+    """
+    fs: list[Finding] = []
+    spec: dict[str, list[int]] = {}
+    for queue in ("code", "task"):
+        try:
+            items = queue_items(coding, queue)
+        except KeyError:
+            continue
+        for it in items:
+            nums = delivers_item_numbers(it.delivers)
+            if nums:
+                spec[it.qid] = nums
+                if nums != list(range(1, len(nums) + 1)):
+                    fs.append(Finding("warn", "delivers-check",
+                        f"{it.qid}'s DELIVERS numbering is not contiguous from (1): "
+                        f"{nums} -- an item-by-item filing cannot be verified against it"))
+
+    for queue in ("results", "errors"):
+        try:
+            rows = planning.rows(queue)
+        except KeyError:
+            continue
+        for tr in rows:
+            rid = norm_id(planning.row_id(tr))
+            if not rid or rid in {"—", "--", "-"}:
+                continue
+            body = tr.inner(planning.src)
+            m = _DCHECK_RE.search(body)
+            if not m:
+                # The check activates per ITEM, not per document: it fires only for a
+                # task whose DELIVERS is numbered, i.e. written under this convention.
+                # Entries filed against unnumbered (pre-convention) items are left
+                # alone rather than retroactively flagged -- a checker that starts by
+                # reporting every historical row is one people learn to scroll past.
+                if rid in spec:
+                    fs.append(Finding("error", "delivers-check",
+                        f"{rid}'s {queue} entry carries no [DELIVERS-CHECK] block -- "
+                        f"the filing does not say, item by item, what was delivered"))
+                continue
+            verdicts = {int(a): b for a, b in _DCHECK_LINE_RE.findall(m.group(1))}
+            want = spec.get(rid)
+            if want is None:
+                want = sorted(verdicts)
+                if want and want != list(range(1, len(want) + 1)):
+                    fs.append(Finding("warn", "delivers-check",
+                        f"{rid}'s {queue} entry numbers its checklist {want}, not "
+                        f"contiguous from (1), and its task is no longer queued to "
+                        f"check against"))
+            missing = [n for n in want if n not in verdicts]
+            if missing:
+                fs.append(Finding("error", "delivers-check",
+                    f"{rid}'s {queue} entry does not answer DELIVERS item(s) "
+                    f"{missing} -- unanswered is not the same as delivered"))
+            unmet = [n for n, v in sorted(verdicts.items()) if v == "MISSING"]
+            if unmet and queue == "results":
+                fs.append(Finding("error", "delivers-check",
+                    f"{rid} filed to RESULTS with DELIVERS item(s) {unmet} marked "
+                    f"MISSING -- that is an ERRORS entry; partial is not a third "
+                    f"outcome"))
+    return fs
+
+
 def audit(coding: Doc, planning: Doc) -> list[Finding]:
     """The protocol's own audit: the two illegal states, plus what is runnable.
 
@@ -1642,6 +1752,7 @@ def audit(coding: Doc, planning: Doc) -> list[Finding]:
     """
     fs: list[Finding] = []
     fs += check_queue_schema(coding)
+    fs += check_delivers_coverage(coding, planning)
 
     task_ids = set(queue_ids(coding, "task"))
     code_ids = set(queue_ids(coding, "code"))
