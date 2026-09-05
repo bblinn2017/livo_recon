@@ -1132,6 +1132,37 @@ def main():
     if a.emit_blocks and not a.build_commit:
         sys.exit("--emit-blocks requires --build-commit (the commit the cells ran on)")
 
+    # CQ-16 (2026-09-05): a dv1b invocation of this script scored exp04
+    # (a dense-GT "_imu.txt" sequence, already in the IMU/body frame) with
+    # --frame-correction hilti_tip -- the pole-tip lever arm meant for
+    # HILTI's SPARSE checkpoint files, mirroring gen_jobs.py's own
+    # _DENSE_GT_OVERRIDE distinction but not actually consulting it. That
+    # one wrong flag produced a 21.4% ATE-path disagreement on the pca arm
+    # (0.2116m vs the live scorer's 0.1743m; --frame-correction none
+    # reproduces 0.1743m exactly) -- root-caused by re-running load_cell()
+    # locally with each of the three choices and reproducing the recorded
+    # 0.2116m bit-for-bit under hilti_tip, ruling out membership/alignment
+    # differences (both verified identical to the live C++ scorer's own
+    # streaming bracket algorithm). Debiased's ATE happened to be far less
+    # sensitive to the same wrong flag (0.4418m vs the correct 0.4429m,
+    # 0.25%) purely because its rotation profile lets the fixed lever-arm
+    # shift be mostly absorbed by the global Umeyama fit -- "closes to
+    # within 0.25%" was never evidence the flag was right, only that this
+    # arm's trajectory happened to be forgiving. Refuse rather than warn:
+    # a "logging only" quantity is exactly the class of quiet default this
+    # project keeps re-discovering after the fact (rule 26 item 4's own
+    # vocabulary), and --frame-correction none must be passed explicitly.
+    _DENSE_GT_SEQUENCES = {"exp04", "exp04_construction_upper_level",
+                           "exp05", "exp05_construction_upper_level_2",
+                           "exp06", "exp06_construction_upper_level_3"}
+    if any(a.seq == s or a.seq.startswith(s) for s in _DENSE_GT_SEQUENCES) \
+            and a.frame_correction != "none":
+        sys.exit(f"--seq {a.seq!r} is a dense-GT sequence (already in the "
+                 f"IMU/body frame, gen_jobs.py's own _DENSE_GT_OVERRIDE) -- "
+                 f"it takes NO lever-arm correction. Pass --frame-correction "
+                 f"none, not {a.frame_correction!r} (see CQ-16's root-cause "
+                 f"of the 21.4% exp04/pca ATE-path disagreement).")
+
     os.makedirs(a.out, exist_ok=True)
     cell_data = {}
     for cell in ALL_CELLS:
