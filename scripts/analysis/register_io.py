@@ -57,7 +57,23 @@ CLI
     register_io.py inject    FILE --after-card ID --caption TEXT --block FILE... -o OUT
     register_io.py self-check FILE [FILE...]
 
+    register_io.py totext    FILE [--kind queues|archive] [--tables code,task]
+                             [--ids CQ-14,TQ-4] [--fields what,blocked] [-o OUT]
+    register_io.py fromtext  FILE --text EDITED.rio [--only] [--allow-delete]
+                             [--as planning|coding] [--dry-run] -o OUT
+
 Every subcommand that writes takes an explicit ``-o``; nothing is edited in place.
+
+THE TEXT VIEW, IN ONE PARAGRAPH
+-------------------------------
+``totext`` projects the editable units -- queue rows, the Archive's condensed entries --
+into a compact line format; ``fromtext`` reads an edited one back.  It is not a
+converter: ``fromtext`` re-dumps the SOURCE document, compares unit by unit, and splices
+only what changed, so anything you did not touch comes back byte-identical and rule 12
+is preserved by construction rather than by care.  Measured on the live documents,
+``--tables code,task`` is the coding inbox at 11x smaller, ``--fields what,blocked,bryce``
+at 22x, and one item at 74x.  See section 8b for the fidelity contract and for why the
+format deliberately keeps inline HTML instead of inventing a marker language.
 """
 
 from __future__ import annotations
@@ -75,9 +91,11 @@ from html.parser import HTMLParser
 from typing import Callable, Iterable, Iterator, Optional, Sequence
 
 __all__ = [
-    "Doc", "Node", "Block", "Finding",
+    "Doc", "Node", "Block", "Finding", "Unit",
     "norm_id", "esc_id", "strip_tags", "body_of",
     "validate", "structural_diff", "emit_block",
+    "units", "to_text", "from_text", "parse_text", "text_roundtrip_ok",
+    "html_to_text", "text_to_html", "entities_to_text", "text_to_entities",
 ]
 
 # --------------------------------------------------------------------------------------
@@ -1848,6 +1866,599 @@ def report(doc: Doc) -> str:
 
 
 # --------------------------------------------------------------------------------------
+# 8b.  TEXT VIEW -- a compact line format for reading and editing, spliced back byte-exact
+# --------------------------------------------------------------------------------------
+#
+# WHY THIS EXISTS
+# ---------------
+# These documents are 85-380 KB of HTML and the part anyone actually edits -- the queue
+# rows, the Archive's condensed entries -- is 4-10% of that.  Reading a whole inbox to
+# change one BLOCKED BY cell costs two orders of magnitude more than the change does.
+# ``to_text()`` projects just the editable units into a line format; ``from_text()``
+# reads that back and stages the edits.
+#
+# THE FIDELITY CONTRACT, AND IT IS THE WHOLE DESIGN
+# -------------------------------------------------
+# This module's central invariant (see DESIGN, top of file) is that it never
+# re-serializes.  A text view that parsed the document and printed it back would
+# reformat every untouched line -- rule 12 violated in a way no diff review would catch.
+# So ``from_text()`` does NOT rebuild the document from the text.  It re-dumps the
+# SOURCE document, compares unit by unit, and stages a splice ONLY where the text
+# actually changed:
+#
+#     unit you did not touch   ->  byte-identical.  Never rendered, never parsed back.
+#     unit you edited          ->  rendered from the text, by the policy below.
+#     unit you deleted         ->  the element is cut.
+#     unit you added           ->  rendered and inserted where its key says.
+#
+# The round trip is therefore exact by construction for everything left alone, and the
+# rendering policy only ever has to be right about text a human just wrote.
+# ``text_roundtrip_ok()`` asserts the no-edit case directly, and ``self-check`` runs it.
+#
+# WHAT THE TEXT FORM KEEPS, AND WHAT IT DROPS
+# --------------------------------------------
+# KEEPS inline HTML verbatim -- ``<b>``, ``<code>``, ``<span class="id">``.  An earlier
+# draft mapped those onto lightweight markers (``*bold*``, ``_em_``, backticks) and that
+# is a trap in this corpus specifically: ``_`` is in half the identifiers this project
+# names (``n_points_after_pfn``), ``*`` is in its globs (``plane_conf_*``), and
+# backticks would collide with the fences.  A marker language that corrupts
+# ``occ_aniso_drop_{mode,threshold}`` to save four characters is not a trade worth
+# making, and the win is elsewhere anyway: SELECTING the units drops ~90% of the coding
+# inbox before a single tag is touched.
+#
+# DROPS the table scaffolding, the stylesheet, the protocol prose and the reference
+# sections -- none of which an edit has ever needed.
+#
+# UNESCAPES the typographic entities and only those.  ``&#8209;`` appears 1,425 times
+# across the three live documents and ``&mdash;`` 572; as characters they are shorter
+# AND readable.  ``&lt;``, ``&gt;`` and ``&amp;`` are deliberately NOT unescaped: the
+# text form carries raw tags, so an unescaped ``<`` could not be told from the start of
+# one.  That single exclusion is what makes the format unambiguous.
+
+_TEXT_VERSION = 1
+
+# Typographic entities: unescaped on dump, restored on render.  Where several spellings
+# share a character (``&apos;``/``&#x27;``) the first listed is the canonical reverse;
+# that canonicalisation only ever touches a unit somebody just edited.
+_ENT_TEXT = {
+    "&#8209;": "‑", "&mdash;": "—", "&ndash;": "–",
+    "&nbsp;": " ", "&thinsp;": " ", "&apos;": "'", "&#x27;": "'",
+    "&quot;": '"', "&ldquo;": "“", "&rdquo;": "”",
+    "&lsquo;": "‘", "&rsquo;": "’", "&#8217;": "’",
+    "&middot;": "·", "&times;": "×", "&minus;": "−",
+    "&rarr;": "→", "&larr;": "←", "&harr;": "↔",
+    "&hellip;": "…", "&sect;": "§", "&deg;": "°",
+    "&plusmn;": "±", "&le;": "≤", "&ge;": "≥", "&ne;": "≠",
+    "&asymp;": "≈", "&prop;": "∝", "&radic;": "√",
+    "&otimes;": "⊗", "&isin;": "∈", "&#8810;": "≪",
+    "&sup1;": "¹", "&sup2;": "²", "&sup3;": "³",
+    "&frac12;": "½", "&alpha;": "α", "&beta;": "β",
+    "&epsilon;": "ε", "&theta;": "θ", "&kappa;": "κ",
+    "&lambda;": "λ", "&mu;": "μ", "&nu;": "ν", "&rho;": "ρ",
+    "&sigma;": "σ", "&psi;": "ψ", "&Delta;": "Δ",
+    "&Sigma;": "Σ", "&#770;": "̂", "&#7488;": "ᵀ",
+    "&#7522;": "ᵢ", "&#8315;": "⁻", "&#8309;": "⁵",
+    "&#8320;": "₀", "&#8321;": "₁", "&#8322;": "₂",
+    "&#8332;": "₌", "&#8342;": "ₖ", "&#8459;": "ℋ",
+    "&#8531;": "⅓", "&#8242;": "′", "&#8243;": "″",
+}
+_ENT_HTML: dict = {}
+for _e, _c in _ENT_TEXT.items():
+    _ENT_HTML.setdefault(_c, _e)
+_ENT_RE = re.compile("|".join(re.escape(e) for e in _ENT_TEXT))
+_ENT_CHARS = re.compile("[" + "".join(re.escape(c) for c in _ENT_HTML) + "]")
+
+
+_TAG_RE = re.compile(r"<[^>]*>")
+
+
+def _outside_tags(s: str, fn) -> str:
+    """Apply ``fn`` to the text between tags and to nothing inside one.
+
+    This is not fastidiousness, it is a bug that shipped in the first draft: ``&quot;``
+    was in the entity map, so ``<span class="id">`` round-tripped to
+    ``<span class=&quot;id&quot;>`` and the attribute was destroyed.  Entity translation
+    is a statement about CONTENT; a tag's interior is markup and is never touched.
+    """
+    out, last = [], 0
+    for m in _TAG_RE.finditer(s):
+        out.append(fn(s[last:m.start()]))
+        out.append(m.group(0))
+        last = m.end()
+    out.append(fn(s[last:]))
+    return "".join(out)
+
+
+def entities_to_text(s: str) -> str:
+    """Typographic entities -> characters, in content only.  ``&lt;``/``&gt;``/``&amp;``
+    are never translated: the text form carries raw tags, so an unescaped ``<`` could
+    not be told from the start of one."""
+    return _outside_tags(s, lambda t: _ENT_RE.sub(lambda m: _ENT_TEXT[m.group(0)], t))
+
+
+def text_to_entities(s: str) -> str:
+    """The inverse, canonical where a character has more than one spelling."""
+    return _outside_tags(s, lambda t: _ENT_CHARS.sub(lambda m: _ENT_HTML[m.group(0)], t))
+
+
+# ``div.knobs`` and ``pre`` carry pre-formatted payload -- config blocks, data blocks,
+# ASCII tables.  Fencing them keeps their whitespace exactly and stops anything inside
+# being read as markup.
+_FENCE = "```"
+_TAG_OPEN_RE = re.compile(r"<(pre|div)\b([^>]*)>", re.I)
+
+
+def _fence_kind(tag: str, attrs: str) -> Optional[str]:
+    if tag.lower() == "pre":
+        return "pre"
+    if tag.lower() == "div" and "knobs" in attrs:
+        return "knobs"
+    return None
+
+
+def _balanced_end(src: str, start: int, tag: str) -> int:
+    """Offset just past the ``</tag>`` closing the ``<tag>`` that opens at ``start``."""
+    op = re.compile(r"<%s\b" % tag, re.I)
+    cl = re.compile(r"</%s\s*>" % tag, re.I)
+    depth, i, n = 0, start, len(src)
+    while i < n:
+        mo, mc = op.search(src, i), cl.search(src, i)
+        if mc is None:
+            return n
+        if mo is not None and mo.start() < mc.start():
+            depth += 1
+            i = mo.end()
+            continue
+        depth -= 1
+        i = mc.end()
+        if depth == 0:
+            return i
+    return n
+
+
+def html_to_text(inner: str) -> str:
+    """One element's inner HTML -> text form: entities relaxed, knobs/pre fenced.
+
+    Everything else passes through verbatim, tags included -- see the section header
+    for why this deliberately does not invent a marker language.
+    """
+    out, i, n = [], 0, len(inner)
+    while i < n:
+        m = _TAG_OPEN_RE.search(inner, i)
+        if not m:
+            out.append(entities_to_text(inner[i:]))
+            break
+        kind = _fence_kind(m.group(1), m.group(2))
+        if kind is None:
+            out.append(entities_to_text(inner[i:m.end()]))
+            i = m.end()
+            continue
+        end = _balanced_end(inner, m.start(), m.group(1))
+        close = inner.rfind("<", m.end(), end)
+        body = inner[m.end():close if close > 0 else end]
+        out.append(entities_to_text(inner[i:m.start()]))
+        out.append("\n" + _FENCE + kind + "\n"
+                   + entities_to_text(body).strip("\n") + "\n" + _FENCE + "\n")
+        i = end
+    txt = re.sub(r"[ \t]+\n", "\n", "".join(out))
+    return txt.strip()
+
+
+def text_to_html(txt: str) -> str:
+    """Inverse of :func:`html_to_text`, applied only to a unit somebody edited."""
+    parts, buf, fence, fbuf = [], [], None, []
+    for line in txt.split("\n"):
+        if line.startswith(_FENCE):
+            if fence is None:
+                if buf:
+                    parts.append(("text", "\n".join(buf)))
+                    buf = []
+                fence, fbuf = (line[len(_FENCE):].strip() or "knobs"), []
+            else:
+                parts.append(("fence", fence, "\n".join(fbuf)))
+                fence, fbuf = None, []
+            continue
+        (fbuf if fence is not None else buf).append(line)
+    if fence is not None:
+        parts.append(("fence", fence, "\n".join(fbuf)))
+    if buf:
+        parts.append(("text", "\n".join(buf)))
+
+    out = []
+    for p in parts:
+        if p[0] == "text":
+            t = text_to_entities(p[1]).strip()
+            if t:
+                out.append(t)
+        else:
+            body = text_to_entities(p[2]).strip("\n")
+            out.append("<pre>" + body + "</pre>" if p[1] == "pre"
+                       else '<div class="knobs">' + body + "</div>")
+    return "".join(out).strip()
+
+
+# ---------------------------------------------------------------- units
+
+@dataclass
+class Unit:
+    """One addressable, editable slice of a document.
+
+    ``key`` is stable and is what the text form is keyed on.  ``node`` is the element
+    it came from -- kept rather than a bare span so edits go through ``stage_replace``/
+    ``stage_cut``, which already know how to take an element's indentation with it.
+    ``node`` is ``None`` for a unit that exists only in the text and must be inserted.
+    """
+    key: str
+    kind: str                        # "item" | "row" | "entry" | "head" | "meta"
+    fields: dict
+    node: Optional[Node] = None
+
+
+_QUEUES = ("code", "task", "results", "errors")
+# Other row tables worth editing through the text form.  They are NOT protocol queues:
+# the permission matrix says nothing about them, so ``_queue_of`` deliberately does not
+# claim them and no ``_require`` gate fires on a change to one.
+_EXTRA_TABLES = ("predictions", "claims", "bugs", "push", "constraints", "handoff")
+_ITEM_FIELDS = ("what", "blocked", "bryce", "delivers")
+_ROW_FIELDS = ("task", "delivered", "where")
+
+
+def _uniq(seen: set, key: str) -> str:
+    """Keys must address one element each.  Ids DO repeat -- two ``div.meta`` before the
+    first heading, one card id used by several rounds -- so a repeat gets a ``~n``
+    suffix rather than silently shadowing the element it collides with."""
+    if key not in seen:
+        seen.add(key)
+        return key
+    k = 2
+    while f"{key}~{k}" in seen:
+        k += 1
+    seen.add(f"{key}~{k}")
+    return f"{key}~{k}"
+
+
+def _has_table(doc: "Doc", key: str) -> bool:
+    try:
+        doc.table(key)
+        return True
+    except KeyError:
+        return False
+
+
+def _row_units(doc: "Doc", queue: str, seen: Optional[set] = None) -> list:
+    """Every real row of one queue, as units.  A placeholder row -- the single spanning
+    cell that says the queue is empty -- is deliberately NOT a unit: it is prose about
+    the queue rather than an item, and making it editable here would let a careless
+    round trip delete the note along with the last row."""
+    out, seen = [], (set() if seen is None else seen)
+    if not _has_table(doc, queue):
+        return out
+    for tr in doc.rows(queue):
+        tds = list(tr.find("td", deep=False))
+        rid = norm_id(doc.row_id(tr))
+        if not rid or rid in {"\u2014", "--", "-"} or len(tds) < 2:
+            continue
+        names = _ITEM_FIELDS if queue in ("code", "task") else _ROW_FIELDS
+        vals = [html_to_text(td.inner(doc.src)) for td in tds[1:]]
+        fields = {n: (vals[i] if i < len(vals) else "") for i, n in enumerate(names)}
+        for j in range(len(names), len(vals)):        # a wider row keeps its extra cells
+            fields[f"col{j + 1}"] = vals[j]
+        out.append(Unit(_uniq(seen, f"{queue}/{rid}"),
+                        "item" if queue in ("code", "task") else "row", fields, tr))
+    return out
+
+
+_ARCHIVE_MARK_RE = re.compile(r"<i>([RNWE])</i>", re.I)
+
+
+def _archive_units(doc: "Doc") -> list:
+    """The condensed Archive's own schema -- ``h2`` a round, ``div.meta`` its preamble,
+    ``div.e`` a card.  An element matching none of those is simply not projected: it
+    stays in the document and the text form never mentions it, which is the safe way to
+    be wrong about a shape this parser does not know."""
+    out, sec_i, cur, seen = [], 0, "0", set()  # noqa: E501
+    for n in sorted(doc.find(), key=lambda x: x.start):
+        if n.tag == "h2":
+            sec_i += 1
+            cur = str(sec_i)
+            out.append(Unit(_uniq(seen, f"sec/{cur}"), "head",
+                            {"h2": html_to_text(n.inner(doc.src))}, n))
+        elif n.tag == "div" and n.has_class("meta"):
+            out.append(Unit(_uniq(seen, f"sec/{cur}/meta"), "meta",
+                            {"meta": html_to_text(n.inner(doc.src))}, n))
+        elif n.tag == "div" and n.has_class("e"):
+            inner = n.inner(doc.src)
+            b = re.search(r"<b>(.*?)</b>", inner, re.S)
+            eid = norm_id(strip_tags(b.group(1))) if b else ""
+            # keys address elements, so an id has to be one path segment and short
+            # enough to type: a prose id-cell ("A bare YAML off/on/yes/no override
+            # silently becomes a boolean") is squeezed to a slug and truncated, and
+            # _uniq settles any collision that squeezing creates.
+            eid = re.sub(r"[^\w.+-]+", "_", eid.strip())[:44].strip("_") \
+                or f"e{len(out)}"
+            m = _ARCHIVE_MARK_RE.search(inner)
+            head, body = (inner[:m.start()], inner[m.start():]) if m else (inner, "")
+            out.append(Unit(_uniq(seen, f"sec/{cur}/e/{eid}"), "entry",
+                            {"head": html_to_text(head), "body": html_to_text(body)}, n))
+    return out
+
+
+def units(doc: "Doc", kind: str = "auto") -> list:
+    """Every editable unit, in document order.
+
+    ``kind`` is ``queues`` (an inbox), ``archive``, or ``auto``, which decides by asking
+    the document which tables it has -- so a caller never has to know which file it is
+    holding.
+    """
+    if kind == "auto":
+        kind = "queues" if any(_has_table(doc, q) for q in _QUEUES) else "archive"
+    if kind == "queues":
+        out, seen = [], set()
+        for q in _QUEUES + _EXTRA_TABLES:
+            out.extend(_row_units(doc, q, seen))
+        return out
+    if kind == "archive":
+        return _archive_units(doc)
+    raise KeyError(f"kind must be queues|archive|auto, not {kind!r}")
+
+
+# ---------------------------------------------------------------- dump / load
+
+_TEXT_HEAD = """\
+#rio {ver} kind={kind} units={n}
+#src {src}
+# '[' at column 0 opens a unit, '.' opens a field; a value runs to the next such line.
+# ``` fences a verbatim block and its whitespace is preserved exactly.
+# A content line that must begin with [ . ` or \\ is written with a leading backslash.
+# Inline HTML is kept as-is on purpose (see the module's TEXT VIEW section).  Typographic
+# entities are relaxed to characters and restored on the way back; &lt; &gt; &amp; stay.
+# EDIT VALUES ONLY.  A unit you leave alone is spliced back byte-identical; one you edit
+# is re-rendered; one you delete is cut (needs --allow-delete); one you add is inserted
+# after the unit above it.
+"""
+
+
+def _esc_line(line: str) -> str:
+    return "\\" + line if line[:1] in ("[", ".", "`", "\\") else line
+
+
+def _unesc_line(line: str) -> str:
+    return line[1:] if line[:1] == "\\" else line
+
+
+def to_text(doc: "Doc", kind: str = "auto", ids: Optional[Sequence[str]] = None,
+            fields: Optional[Sequence[str]] = None,
+            tables: Optional[Sequence[str]] = None) -> str:
+    """Project a document's editable units into the text form.
+
+    Three filters, and they exist because the whole point is not paying for what you are
+    not editing.  ``tables`` keeps only named row tables (``code,task`` is the coding
+    inbox at 11x rather than 5x).  ``ids`` keeps named units, matching the key's last
+    segment too, so ``CQ-14`` finds ``code/CQ-14``.  ``fields`` keeps named fields, for
+    when an index is wanted and the bodies are noise.
+
+    **A filtered dump is read-only by construction**: ``from_text`` refuses a text whose
+    unit set does not cover the document, unless deletion is explicitly allowed, so a
+    partial view cannot be mistaken for a whole one on the way back.  To edit through a
+    filter, filter and then pass ``--allow-delete``-free ``--only``, which restricts the
+    comparison to the units the text actually carries.
+    """
+    us = units(doc, kind)
+    if tables:
+        keep = {t.strip() for t in tables}
+        us = [u for u in us if (_table_of(u.key) or "") in keep]
+        if not us:
+            raise KeyError(f"no units in table(s) {sorted(keep)}")
+    if ids:
+        want = {_fold(i) for i in ids}
+        us = [u for u in us if _fold(u.key) in want
+              or _fold(u.key.rsplit("/", 1)[-1]) in want]
+        if not us:
+            raise KeyError(f"no unit matches {list(ids)}")
+    k = kind if kind != "auto" else \
+        ("queues" if us and us[0].kind in ("item", "row") else "archive")
+    lines = [_TEXT_HEAD.format(ver=_TEXT_VERSION, kind=k, n=len(us), src=doc.path)]
+    if tables or ids or fields:
+        lines.append("#partial "
+                     + " ".join(filter(None, [
+                         "tables=" + ",".join(tables) if tables else "",
+                         "ids=" + ",".join(ids) if ids else "",
+                         "fields=" + ",".join(fields) if fields else ""]))
+                     + "\n# PARTIAL VIEW -- from_text needs --only to read this back.\n")
+    for u in us:
+        lines.append(f"[{u.key}]")
+        for name, val in u.fields.items():
+            if fields and name not in fields:
+                continue
+            lines.append(f".{name}")
+            lines.extend(_esc_line(x) for x in val.split("\n"))
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def parse_text(text: str) -> tuple:
+    """Text form -> (header dict, ordered [(key, {field: value})])."""
+    head, out, key, field, buf = {}, [], None, None, []
+
+    def close():
+        if key is not None and field is not None:
+            out[-1][1][field] = "\n".join(buf).strip("\n")
+        buf.clear()
+
+    for raw in text.split("\n"):
+        if key is None and raw.startswith("#"):
+            m = re.match(r"#rio\s+(\d+)\s+kind=(\S+)", raw)
+            if m:
+                head["version"], head["kind"] = int(m.group(1)), m.group(2)
+            m = re.match(r"#src\s+(.*)", raw)
+            if m:
+                head["src"] = m.group(1).strip()
+            continue
+        if raw.startswith("[") and raw.rstrip().endswith("]"):
+            close()
+            key, field = raw.strip()[1:-1].strip(), None
+            out.append((key, {}))
+            continue
+        if raw.startswith(".") and key is not None:
+            close()
+            field = raw[1:].strip()
+            out[-1][1][field] = ""
+            continue
+        if field is not None:
+            buf.append(_unesc_line(raw))
+    close()
+    return head, out
+
+
+def _queue_of(key: str) -> Optional[str]:
+    """The protocol queue a key belongs to, or None.  Only the four real queues answer
+    here: the permission matrix governs those and nothing else, and a helper that
+    claimed the prediction ledger too would be inventing a rule."""
+    top = key.split("/")[0].split("~")[0]
+    return top if top in _QUEUES else None
+
+
+def _table_of(key: str) -> Optional[str]:
+    top = key.split("/")[0].split("~")[0]
+    return top if top in _QUEUES + _EXTRA_TABLES else None
+
+
+def _base_key(key: str) -> str:
+    """A key with its ``~n`` disambiguator removed.
+
+    ``_uniq`` appends ``~2`` when two elements would otherwise share a key, and the
+    first draft of ``_render_unit`` dispatched on ``key.endswith("/meta")`` -- so
+    ``sec/0/meta~2`` fell through every branch to the ``<h2>`` fallback and rendered an
+    EMPTY heading, silently discarding the element.  The stress pass over all 318 units
+    caught it on exactly the two units that collide.  Dispatch on the base key, and
+    refuse below rather than emit an empty element, so the next shape this does not know
+    fails loudly instead of deleting something.
+    """
+    return re.sub(r"~\d+$", "", key)
+
+
+def _render_unit(key: str, fields: dict) -> str:
+    """Text fields -> the document's own HTML shape for that unit."""
+    key = _base_key(key)
+    q = _table_of(key)
+    if q:
+        names = list(_ITEM_FIELDS if q in ("code", "task") else _ROW_FIELDS)
+        names += sorted(n for n in fields if n not in names)
+        rid = key.rsplit("/", 1)[-1].split("~")[0]
+        cells = "".join("<td>" + text_to_html(fields.get(n, "")) + "</td>"
+                        for n in names)
+        return '<tr><td class="id-cell">' + esc_id(rid) + "</td>" + cells + "</tr>"
+    if "/e/" in key:
+        if "head" not in fields:
+            raise KeyError(f"{key}: an entry needs a .head field")
+        return ("<div class=e>" + text_to_html(fields["head"])
+                + text_to_html(fields.get("body", "")) + "</div>")
+    if key.endswith("/meta"):
+        if "meta" not in fields:
+            raise KeyError(f"{key}: a meta unit needs a .meta field")
+        return "<div class=meta>" + text_to_html(fields["meta"]) + "</div>"
+    if re.fullmatch(r"sec/\d+", key):
+        if "h2" not in fields:
+            raise KeyError(f"{key}: a section head needs an .h2 field")
+        return "<h2>" + text_to_html(fields["h2"]) + "</h2>"
+    raise KeyError(f"cannot render {key!r}: no shape is defined for it. Adding one means "
+                   "teaching _archive_units and _render_unit the same shape, in that "
+                   "order -- never rendering a guess.")
+
+
+def from_text(doc: "Doc", text: str, kind: str = "auto", role: str = PLANNING,
+              allow_delete: bool = False, only: bool = False) -> list:
+    """Stage the edits the text describes.  Returns ``[(key, action)]``.
+
+    Nothing is applied here -- the caller runs ``doc.apply()`` -- so a refusal anywhere
+    leaves the document untouched.  **The permission matrix applies**: writing a queue
+    row goes through ``_require(role, queue, "write")`` and deleting one through
+    ``"delete"``, exactly as ``add_item``/``delete_item`` do, so the text form cannot be
+    used to get around the protocol the rest of this module enforces.
+
+    Deletion needs ``allow_delete`` because a file truncated in transit is
+    indistinguishable from one that means "remove the rest".  ``only`` narrows the
+    comparison to the units the text carries, which is how a filtered dump is written
+    back: without it a partial view would read as a wholesale deletion, and that
+    asymmetry is deliberate -- the dangerous direction needs the explicit flag.
+    """
+    if only and allow_delete:
+        raise ValueError(
+            "only= and allow_delete= are mutually exclusive: a partial view cannot "
+            "express a deletion, because the units it omits are the ones it is not "
+            "talking about.  Delete with rmitem, or dump the whole table.")
+    _head, edits = parse_text(text)
+    have = {u.key: u for u in units(doc, kind)}
+    if only:
+        keys = {k for k, _ in edits}
+        have = {k: v for k, v in have.items() if k in keys}
+    seen, actions, prev = set(), [], None
+
+    for key, fields in edits:
+        u = have.get(key)
+        if u is None:
+            q = _table_of(key)
+            if not q:
+                raise KeyError(f"cannot create {key!r}: new units are supported for row "
+                               "tables only, where the table says unambiguously where a "
+                               "row goes")
+            if _queue_of(key):
+                _require(role, q, "write")
+            row = _render_unit(key, fields)
+            if prev and _table_of(prev) == q:
+                add_row(doc, q, row, after=prev.rsplit("/", 1)[-1])
+            else:
+                add_row(doc, q, row, at="bottom")
+            actions.append((key, "added"))
+            prev = key
+            continue
+        seen.add(key)
+        prev = key
+        unknown = [n for n in fields if n not in u.fields]
+        if unknown:
+            raise KeyError(f"{key}: unknown field(s) {unknown}; it has {list(u.fields)}")
+        changed = sorted(n for n, v in fields.items()
+                         if v.strip() != u.fields[n].strip())
+        if not changed:
+            continue
+        if _queue_of(key):
+            _require(role, _queue_of(key), "write")
+        merged = dict(u.fields)
+        merged.update(fields)
+        doc.stage_replace(u.node, _render_unit(key, merged),
+                          why=f"text: edit {key} ({', '.join(changed)})")
+        actions.append((key, "edited:" + ",".join(changed)))
+
+    added = {k for k, a in actions if a == "added"}
+    missing = [k for k in have if k not in seen and k not in added]
+    if missing:
+        if not allow_delete:
+            raise ValueError(
+                f"{len(missing)} unit(s) are in the document and absent from the text "
+                f"({', '.join(missing[:4])}{'...' if len(missing) > 4 else ''}). "
+                "Pass --allow-delete if that is deliberate -- a file truncated in "
+                "transit looks exactly like this.")
+        for k in missing:
+            q = _queue_of(k)
+            if q:
+                _require(role, q, "delete")
+            doc.stage_cut(have[k].node, why=f"text: delete {k}")
+            actions.append((k, "deleted"))
+    return actions
+
+
+def text_roundtrip_ok(doc: "Doc", kind: str = "auto") -> bool:
+    """Dump, read back unedited, and require the document out byte-identical.
+
+    The fidelity contract as an assertion rather than a promise: if projecting and
+    re-reading ever moves a byte, every edit made through the text form is suspect.
+    """
+    probe = Doc(doc.src, doc.path)
+    acts = from_text(probe, to_text(doc, kind), kind)
+    return not acts and probe.apply() == doc.src
+
+
+# --------------------------------------------------------------------------------------
 # 9.  CLI
 # --------------------------------------------------------------------------------------
 
@@ -1986,6 +2597,26 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     p.add_argument("--id", required=True)
     p.add_argument("--as", dest="role", required=True, choices=[CODING, PLANNING])
     p.add_argument("-o", required=True)
+
+    p = f(sub.add_parser("totext", help="project the editable units into the text form"))
+    p.add_argument("--kind", default="auto", choices=["auto", "queues", "archive"])
+    p.add_argument("--tables", help="comma-separated row tables to keep "
+                                    "(code,task,results,errors,predictions,claims,...)")
+    p.add_argument("--ids", help="comma-separated unit keys or bare ids")
+    p.add_argument("--fields", help="comma-separated field names to keep")
+    p.add_argument("-o", "--out", help="write here instead of stdout")
+
+    p = f(sub.add_parser("fromtext", help="read an edited text form back and splice it"))
+    p.add_argument("--text", required=True, help="the edited .rio file")
+    p.add_argument("--kind", default="auto", choices=["auto", "queues", "archive"])
+    p.add_argument("--as", dest="role", default=PLANNING, choices=[PLANNING, CODING])
+    p.add_argument("--only", action="store_true",
+                   help="compare only the units the text carries -- required when the "
+                        "text came from a filtered dump")
+    p.add_argument("--allow-delete", action="store_true",
+                   help="units absent from the text are cut (whole dumps only)")
+    p.add_argument("--dry-run", action="store_true", help="report the edits, write nothing")
+    p.add_argument("-o", "--out", required=False)
 
     p = sub.add_parser("self-check", help="round-trip identity plus validation")
     p.add_argument("files", nargs="+")
@@ -2163,6 +2794,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _write(a.o, d.apply())
         return 0
 
+    if a.cmd == "totext":
+        d = Doc.load(a.file)
+        txt = to_text(d, a.kind,
+                      ids=[x for x in (a.ids or "").split(",") if x] or None,
+                      fields=[x for x in (a.fields or "").split(",") if x] or None,
+                      tables=[x for x in (a.tables or "").split(",") if x] or None)
+        if a.out:
+            _write(a.out, txt)
+        else:
+            sys.stdout.write(txt)
+        return 0
+
+    if a.cmd == "fromtext":
+        d = Doc.load(a.file)
+        with open(a.text, encoding="utf-8") as fh:
+            txt = fh.read()
+        acts = from_text(d, txt, a.kind, role=a.role,
+                         allow_delete=a.allow_delete, only=a.only)
+        for k, act in acts:
+            print(f"  {act:24s} {k}")
+        if not acts:
+            print("  (no change)")
+        if a.dry_run:
+            print("dry run -- nothing written", file=sys.stderr)
+            return 0
+        if not a.out:
+            raise SystemExit("fromtext needs -o OUT (or --dry-run)")
+        out = d.apply()
+        bad = [x for x in check_balance(out) if x.level == "error"]
+        if bad:
+            for x in bad:
+                print(x)
+            raise SystemExit("refusing to write: the result is not well-formed")
+        _write(a.out, out)
+        return 0
+
     if a.cmd == "self-check":
         rc = 0
         for path in a.files:
@@ -2224,6 +2891,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                            "no unbalanced or stray structural tags"
                            + ("" if not structural
                               else " -- " + "; ".join(f.message for f in structural[:4]))))
+
+            # TEXT VIEW FIDELITY.  Projecting to text and reading it back unedited must
+            # return the document byte for byte.  This is on the self-check path for the
+            # same reason well-formedness is: an editing surface whose identity case is
+            # untested is an editing surface that corrupts quietly, and the corruption
+            # would look like an ordinary reformat in a diff.
+            try:
+                n_units = len(units(d))
+                tv_ok = text_roundtrip_ok(d)
+                tv_why = f"to_text/from_text over {n_units} unit(s) is the identity"
+            except Exception as exc:                      # noqa: BLE001 - reported, not raised
+                tv_ok, tv_why = False, f"text view raised {type(exc).__name__}: {exc}"
+            checks.append(("text-roundtrip", tv_ok, tv_why))
 
             print(f"{path}: {len(d.nodes)} elements, {len(d.blocks())} blocks, "
                   f"{len(d.cards())} cards")
