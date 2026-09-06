@@ -43,7 +43,21 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            // (open+converged+disabled); n_voxels_is_plane = stats_->planes
            // (non-disabled, non-parent nodes currently fitting a plane);
            // n_voxels_converged = stats_->converged.
-           ",n_voxels,n_voxels_is_plane,n_voxels_converged\n";
+           ",n_voxels,n_voxels_is_plane,n_voxels_converged"
+           // CQ-18 item (2): the S decomposition (sum_S + four shares) and
+           // the two per-frame NIS calibration tests, see LioFrameDiag's
+           // own doc comment.
+           ",sum_S,floor_share,sdiag_share,pvar_share,prior_pose_share,nis,nis_est"
+           // CQ-19(a): P (prior_cov_/state_->cov()) decomposed beyond the
+           // bare trace already in trP_pos_pre above.
+           ",p_pos_eig_min_pre,p_pos_eig_mid_pre,p_pos_eig_max_pre"
+           ",p_pos_eig_min_post,p_pos_eig_mid_post,p_pos_eig_max_post"
+           ",p_rot_trace_pre,p_rot_eig_min_pre"
+           ",p_pos_vel_fro_pre,p_pos_bias_fro_pre"
+           // CQ-19(b): the dot product that signs rho_ref.
+           ",cos_pmin_hmin"
+           // CQ-19(c): AdaptiveQ's own gate state.
+           ",q_z_acc,q_z_gyr,q_acf1_acc,q_acf1_gyr,q_active,q_clamped\n";
   first_call = false;
   // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
   // (6 significant figures) collapses every frame in a run to the same
@@ -59,7 +73,17 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.trP_pos_pre
       << "," << lio.boundary_dpos << "," << lio.boundary_drot_deg
       << "," << lio.n_points_after_pfn << "," << lio.n_points_after_ds
-      << "," << n_voxels << "," << n_voxels_is_plane << "," << n_voxels_converged << "\n";
+      << "," << n_voxels << "," << n_voxels_is_plane << "," << n_voxels_converged
+      << "," << lio.sum_S << "," << lio.floor_share << "," << lio.sdiag_share
+      << "," << lio.pvar_share << "," << lio.prior_pose_share
+      << "," << lio.nis << "," << lio.nis_est
+      << "," << lio.p_pos_eig_min_pre << "," << lio.p_pos_eig_mid_pre << "," << lio.p_pos_eig_max_pre
+      << "," << lio.p_pos_eig_min_post << "," << lio.p_pos_eig_mid_post << "," << lio.p_pos_eig_max_post
+      << "," << lio.p_rot_trace_pre << "," << lio.p_rot_eig_min_pre
+      << "," << lio.p_pos_vel_fro_pre << "," << lio.p_pos_bias_fro_pre
+      << "," << lio.cos_pmin_hmin
+      << "," << lio.q_z_acc << "," << lio.q_z_gyr << "," << lio.q_acf1_acc << "," << lio.q_acf1_gyr
+      << "," << (lio.q_active ? 1 : 0) << "," << (lio.q_clamped ? 1 : 0) << "\n";
 }
 }  // namespace
 

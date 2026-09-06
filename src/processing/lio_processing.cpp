@@ -1493,6 +1493,43 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       diag.n_residuals = static_cast<int>(residuals_.size());
       diag.n_points_after_pfn = static_cast<int>(mg.lidar_points.size());
       diag.n_points_after_ds  = static_cast<int>(mg.points.size());
+
+      // CQ-19(a): P's own decomposition (prior_cov_, pre-update -- state_->
+      // cov()'s POST-update counterpart is read further below, once the
+      // covariance update has actually run). Computed unconditionally, NOT
+      // gated on residuals_.empty() -- prior_cov_ exists regardless of
+      // whether any plane matched this frame, and gating it the same way
+      // the HtH-derived diagnostics below must be gated left every
+      // zero-residual frame's P columns at their -1.0 "unavailable"
+      // default even though the prior itself was perfectly well-defined
+      // (confirmed on site1_handheld_1's smoke cell: 150/2044 frames had
+      // residuals_.empty() and silently failed the "eigenvalues sum to
+      // trP_pos_pre" sanity check as a result).
+      Eigen::Vector3d p_pos_pre_min_eigenvector = Eigen::Vector3d::Zero();
+      bool have_p_pos_pre = false;
+      if (prior_cov_.rows() >= StateGroup::idxP() + 3 && prior_cov_.cols() >= StateGroup::idxP() + 3) {
+        const M3D P_pp_pre = prior_cov_.block<3, 3>(StateGroup::idxP(), StateGroup::idxP());
+        Eigen::SelfAdjointEigenSolver<M3D> es_p_pre(P_pp_pre);
+        diag.p_pos_eig_min_pre = es_p_pre.eigenvalues()(0);
+        diag.p_pos_eig_mid_pre = es_p_pre.eigenvalues()(1);
+        diag.p_pos_eig_max_pre = es_p_pre.eigenvalues()(2);
+        p_pos_pre_min_eigenvector = es_p_pre.eigenvectors().col(0);
+        have_p_pos_pre = true;
+
+        const M3D P_rr_pre = prior_cov_.block<3, 3>(StateGroup::idxR(), StateGroup::idxR());
+        Eigen::SelfAdjointEigenSolver<M3D> es_r_pre(P_rr_pre);
+        diag.p_rot_trace_pre   = P_rr_pre.trace();
+        diag.p_rot_eig_min_pre = es_r_pre.eigenvalues()(0);
+
+        diag.p_pos_vel_fro_pre =
+            prior_cov_.block<3, 3>(StateGroup::idxP(), StateGroup::idxV()).norm();
+        if (state_->idxBA() >= 0 &&
+            prior_cov_.rows() >= state_->idxBA() + 3 && prior_cov_.cols() >= state_->idxBA() + 3) {
+          diag.p_pos_bias_fro_pre =
+              prior_cov_.block<3, 3>(StateGroup::idxP(), state_->idxBA()).norm();
+        }
+      }
+
       if (!residuals_.empty()) {
         const M3D H_pp_d = ekf_.HtH.block<3, 3>(3, 3);
         const M3D H_rr_d = ekf_.HtH.block<3, 3>(0, 0);
@@ -1503,6 +1540,53 @@ std::string LioProc::processLIO(MeasureGroup& mg)
         double sw = 0.0;
         for (const auto& r : residuals_) if (r.sigma_squared > 0.0) sw += 1.0 / r.sigma_squared;
         diag.sum_weight = sw;
+
+        // CQ-18 item (2): S = floor_term + sigma_diag_squared + plane_var_term
+        // + s_prior_pose, per residual -- summed for sum_S/the four shares,
+        // and used per-residual for nis (nu^2/S) / nis_est (nu^2/(S-s_prior_pose)),
+        // matching voxelplane.cpp's per-candidate corr_scan.csv definitions
+        // exactly but averaged over THIS frame's accepted residuals instead
+        // of a whole scan's candidates.
+        {
+          double sum_floor = 0.0, sum_sdiag = 0.0, sum_pvar = 0.0, sum_prior_pose = 0.0;
+          double sum_nis = 0.0, sum_nis_est = 0.0;
+          int n_nis = 0, n_nis_est = 0;
+          for (const auto& r : residuals_) {
+            if (r.floor_term < 0.0 || r.sigma_diag_squared < 0.0 || r.s_prior_pose < 0.0) continue;
+            const double S_i = r.floor_term + r.sigma_diag_squared + r.plane_var_term + r.s_prior_pose;
+            if (!(S_i > 0.0)) continue;
+            sum_floor      += r.floor_term;
+            sum_sdiag      += r.sigma_diag_squared;
+            sum_pvar       += r.plane_var_term;
+            sum_prior_pose += r.s_prior_pose;
+            const double nis_i = r.r * r.r / S_i;
+            if (std::isfinite(nis_i)) { sum_nis += nis_i; ++n_nis; }
+            const double S_est_i = r.floor_term + r.sigma_diag_squared + r.plane_var_term;
+            if (S_est_i > 0.0) {
+              const double nis_est_i = r.r * r.r / S_est_i;
+              if (std::isfinite(nis_est_i)) { sum_nis_est += nis_est_i; ++n_nis_est; }
+            }
+          }
+          const double sum_S = sum_floor + sum_sdiag + sum_pvar + sum_prior_pose;
+          if (sum_S > 0.0) {
+            diag.sum_S = sum_S;
+            diag.floor_share      = sum_floor / sum_S;
+            diag.sdiag_share      = sum_sdiag / sum_S;
+            diag.pvar_share       = sum_pvar / sum_S;
+            diag.prior_pose_share = sum_prior_pose / sum_S;
+          }
+          if (n_nis > 0) diag.nis = sum_nis / n_nis;
+          if (n_nis_est > 0) diag.nis_est = sum_nis_est / n_nis_est;
+        }
+
+        // CQ-19(b): the one dot product that signs rho_ref, using HtH_pp's
+        // own weakest eigenvector (es_pp above; SelfAdjointEigenSolver
+        // orders eigenvalues ascending, so column 0 is the weakest
+        // direction, matching diag.h_pp_min_eig) against P_pp's own
+        // weakest eigenvector, computed unconditionally just above.
+        if (have_p_pos_pre) {
+          diag.cos_pmin_hmin = std::abs(p_pos_pre_min_eigenvector.dot(es_pp.eigenvectors().col(0)));
+        }
 
         // P1.  ask/got/refusal.  ekf_.HtH is 6x6 (rows 0-2 rot, 3-5 pos) and is
         // singular whenever a direction is unconstrained, so solve in the
@@ -1542,10 +1626,40 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       }
       // Captured at the TOP of processLIO(), before the update -- see note.
       diag.trP_pos_pre = trP_pos_pre_;
+      // CQ-19(a): the POST-update counterpart to the pre-update p_pos_eig_*
+      // above -- state_->cov() already reflects applyCovarianceUpdate()'s
+      // result by this point in processLIO() (that call runs well above,
+      // unconditionally on any_solved), independent of whether residuals_
+      // was non-empty this frame.
+      {
+        const Eigen::MatrixXd& P_post = state_->cov();
+        if (P_post.rows() >= StateGroup::idxP() + 3 && P_post.cols() >= StateGroup::idxP() + 3) {
+          Eigen::SelfAdjointEigenSolver<M3D> es_p_post(
+              P_post.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()));
+          diag.p_pos_eig_min_post = es_p_post.eigenvalues()(0);
+          diag.p_pos_eig_mid_post = es_p_post.eigenvalues()(1);
+          diag.p_pos_eig_max_post = es_p_post.eigenvalues()(2);
+        }
+      }
       // Captured in finalizeSplineAndQ(), which already ran earlier this
       // same processLIO() call (see that function's own doc comment).
       diag.boundary_dpos     = boundary_dpos_;
       diag.boundary_drot_deg = boundary_drot_deg_;
+      // CQ-19(c): AdaptiveQ's own gate state -- adaptive_q_.update() (also
+      // above this diag block, earlier in this same processLIO() call) has
+      // already run this frame whenever opts_.adaptive_q.enable is set, so
+      // its state is current here regardless of residuals_. Left at their
+      // NaN/false defaults when disabled, per LioFrameDiag's own doc
+      // comment -- cov_acc/cov_gyr stay config-invariant either way, but
+      // these five are the columns that actually distinguish live from off.
+      if (opts_.adaptive_q.enable) {
+        diag.q_z_acc    = adaptive_q_.zAcc();
+        diag.q_z_gyr    = adaptive_q_.zGyr();
+        diag.q_acf1_acc = last_spline_stats_.acf1_acc;
+        diag.q_acf1_gyr = last_spline_stats_.acf1_gyr;
+        diag.q_active   = adaptive_q_.active();
+        diag.q_clamped  = adaptive_q_.clamped();
+      }
       if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) vm->noteLioFrameDiag(diag);
     }
 

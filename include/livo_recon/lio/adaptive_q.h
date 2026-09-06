@@ -195,6 +195,12 @@ public:
   double varAcc() const { return applied_acc_; }
   double varGyr() const { return applied_gyr_; }
   bool   active() const { return active_; }
+  // CQ-19(c): true if update()'s hard bounds (min_ratio/max_ratio/the noise
+  // floor) actually changed the pre-bound value on either channel this
+  // call -- distinguishes "flat because pinned at a bound" from "flat
+  // because nothing is driving the excursion", which cov_acc/cov_gyr alone
+  // (config-invariant by construction, see update()'s early-return) cannot.
+  bool   clamped() const { return clamped_; }
 
   // Last decision, for the log and for the register's own accounting.
   const std::string& lastStatus() const { return status_; }
@@ -217,6 +223,7 @@ private:
   double applied_acc_ = 0.0, applied_gyr_ = 0.0;
   int    frames_ = 0;
   bool   active_ = false;
+  bool   clamped_ = false;
   bool   primed_ = false;
   std::string status_ = "off";
 

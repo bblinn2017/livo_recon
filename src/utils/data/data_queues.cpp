@@ -114,13 +114,12 @@ bool DataQueues::ready()
   std::lock_guard<std::mutex> lock(image_mutex);
   if (image_queue.empty()) return false;
   const double timestamp = image_queue.front().t + start_time;
-
-  if (!streamSettled(timestamp, latest_lidar_time, last_lidar_arrival_ns.load(std::memory_order_relaxed),
-                     lookahead_margin_s, quiet_margin_s))
-    return false;
-  if (!streamSettled(timestamp, latest_imu_time, last_imu_arrival_ns.load(std::memory_order_relaxed),
-                     lookahead_margin_s, quiet_margin_s))
-    return false;
+  const bool lidar_settled = streamSettled(timestamp, latest_lidar_time,
+      last_lidar_arrival_ns.load(std::memory_order_relaxed), lookahead_margin_s, quiet_margin_s);
+  const bool imu_settled = streamSettled(timestamp, latest_imu_time,
+      last_imu_arrival_ns.load(std::memory_order_relaxed), lookahead_margin_s, quiet_margin_s);
+  if (!lidar_settled) return false;
+  if (!imu_settled) return false;
   return true;
 }
 

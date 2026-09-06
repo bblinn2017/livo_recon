@@ -53,6 +53,18 @@ struct Residual
   // added into sigma_squared by LioProc::buildResiduals().
   double plane_var_term = 0.0;
 
+  // CQ-18 item (2): sigma_squared above is floor_term+sigma_diag_squared
+  // already summed -- these two components are split out separately (and
+  // s_prior_pose, the H P- H^T term never folded into sigma_squared/the
+  // real accept-reject weighting, see VoxelPlane::computeResidual()'s own
+  // comment on this) so frame_stats.txt can report the S = floor_term +
+  // sigma_diag_squared + plane_var_term + s_prior_pose decomposition's four
+  // shares per frame. -1.0 (never negative for a real residual) marks "not
+  // set" for a residual predating this field, e.g. constructed elsewhere.
+  double floor_term         = -1.0;
+  double sigma_diag_squared = -1.0;
+  double s_prior_pose       = -1.0;
+
   // Which tier of VoxelMap::findPlaneResidual()'s fallback matched this
   // point: 0 = primary voxel, 1 = single directional neighbor (the only
   // fallback FAST-LIVO2 also has), 2 = the full neighborhood_size box
@@ -537,6 +549,55 @@ struct LioFrameDiag
   // later patch.
   int n_points_after_pfn = -1;
   int n_points_after_ds  = -1;
+
+  // CQ-18 item (2).  S = floor_term + sigma_diag_squared + plane_var_term +
+  // s_prior_pose, summed across this frame's residuals_; the four *_share
+  // fields are each component's fraction of sum_S (sum to 1.0 to printing
+  // precision by construction). nis/nis_est are this frame's MEAN per-
+  // residual nu^2/S and nu^2/(S-s_prior_pose) (see voxelplane.cpp's
+  // per-candidate nis/nis_est, which this mirrors at frame granularity
+  // instead of corr_scan.csv's per-scan aggregate). -1.0 = no residuals /
+  // sum_S <= 0 this frame.
+  double sum_S           = -1.0;
+  double floor_share     = -1.0;
+  double sdiag_share     = -1.0;
+  double pvar_share      = -1.0;
+  double prior_pose_share = -1.0;
+  double nis             = -1.0;
+  double nis_est         = -1.0;
+
+  // CQ-19(a).  P (prior_cov_, pre-update) and state_->cov() (post-update)
+  // decomposed beyond the position block's bare trace (trP_pos_pre above):
+  // the position block's own eigenvalues (an anisotropic prior is a
+  // different object from an isotropic one of the same trace), the
+  // rotation block's trace/min-eigenvalue, and the Frobenius norm of the
+  // pos-vel and pos-bias cross-blocks (where IMU bias error reaches
+  // position). -1.0 = unavailable (e.g. bias not estimated, so no pos-bias
+  // block exists).
+  double p_pos_eig_min_pre  = -1.0, p_pos_eig_mid_pre  = -1.0, p_pos_eig_max_pre  = -1.0;
+  double p_pos_eig_min_post = -1.0, p_pos_eig_mid_post = -1.0, p_pos_eig_max_post = -1.0;
+  double p_rot_trace_pre    = -1.0, p_rot_eig_min_pre  = -1.0;
+  double p_pos_vel_fro_pre  = -1.0, p_pos_bias_fro_pre = -1.0;
+
+  // CQ-19(b).  |v_min(P_pp) . v_min(HtH_pp)| -- the one number that signs
+  // rho_ref: 1 if the prior's tightest axis coincides with HtH's weakest
+  // (benign -- the prior fills exactly what the scan can't see), 0 if they
+  // are orthogonal (a miscalibration, tight where the data is weak). -1.0
+  // = unavailable (no residuals this frame, or P's position block missing).
+  double cos_pmin_hmin = -1.0;
+
+  // CQ-19(c).  AdaptiveQ's own gate state -- cov_acc/cov_gyr (already
+  // logged elsewhere) are the raw residual and are config-invariant by
+  // construction (adaptive_q.cpp's update() returns before touching any of
+  // these when enable=false), so they cannot tell a live module from a
+  // disabled one. These five can. NaN/false = adaptive_q disabled or not
+  // yet run this frame.
+  double q_z_acc    = std::numeric_limits<double>::quiet_NaN();
+  double q_z_gyr    = std::numeric_limits<double>::quiet_NaN();
+  double q_acf1_acc = std::numeric_limits<double>::quiet_NaN();
+  double q_acf1_gyr = std::numeric_limits<double>::quiet_NaN();
+  bool   q_active   = false;
+  bool   q_clamped  = false;
 };
 
 struct VoxelStats

@@ -40,6 +40,12 @@ double AdaptiveQ::applyZ(double nom, double beta, double z)
 
 bool AdaptiveQ::update(const SplineImuResidualStats& st)
 {
+  // CQ-19(c): reset every call so a frame that returns before reaching the
+  // hard-bounds section below (warmup, not-white, below-floor, ...) reports
+  // clamped=false rather than carrying over a stale true from an earlier
+  // frame that did reach it.
+  clamped_ = false;
+
   if (!opts_.enable) { status_ = "off"; return false; }
 
   frames_++;
@@ -104,12 +110,16 @@ bool AdaptiveQ::update(const SplineImuResidualStats& st)
 
   double aa = applyZ(nom_acc_, opts_.beta_acc, z_acc_);
   double ag = applyZ(nom_gyr_, opts_.beta_gyr, z_gyr_);
+  const double pre_bound_aa = aa, pre_bound_ag = ag;
 
   // ---- hard bounds -------------------------------------------------------
   aa = std::max(nom_acc_ * opts_.min_ratio, std::min(nom_acc_ * opts_.max_ratio, aa));
   ag = std::max(nom_gyr_ * opts_.min_ratio, std::min(nom_gyr_ * opts_.max_ratio, ag));
   if (fl_a > 0.0) aa = std::max(aa, fl_a);
   if (fl_g > 0.0) ag = std::max(ag, fl_g);
+  // CQ-19(c): pinned at min_ratio/max_ratio/the noise floor on either
+  // channel this call -- see clamped()'s own doc comment.
+  clamped_ = (aa != pre_bound_aa) || (ag != pre_bound_ag);
 
   if (!std::isfinite(aa) || !std::isfinite(ag) || aa <= 0.0 || ag <= 0.0)
   { status_ = "nonfinite"; return false; }

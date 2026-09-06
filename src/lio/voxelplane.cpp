@@ -660,9 +660,26 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
 
   res.r              = r;
   res.normal         = plane_.normal;
+  res.floor_term         = floor_term;
+  res.sigma_diag_squared = sigma_diag_squared;
   res.sigma_squared  = floor_term + sigma_diag_squared;
   res.plane_id       = this;
   res.plane_var_term = plane_var_term;
+  {
+    // CQ-18 item (2): s_prior_pose (H P- H^T) is needed on every accepted
+    // residual for frame_stats.txt's S decomposition, not just when
+    // corr-scan logging happens to be on (the block above computes an
+    // equivalent value gated behind opts_->logCorrScan(), for corr_scan.csv
+    // specifically). Recomputed here, unconditionally, so the decomposition
+    // doesn't depend on a debug flag that ships off by default -- same
+    // formula as above, point_cross_normal matching LioProc::buildResiduals()'s
+    // own res.point_cross_normal exactly (see that block's comment on why
+    // the expression form itself matters, not just its value).
+    const V3D point_cross_normal = pt.body_point.cross(pt.rot_transpose * plane_.normal);
+    Eigen::Matrix<double, 1, 6> H_i;
+    H_i << point_cross_normal.transpose(), plane_.normal.transpose();
+    res.s_prior_pose = (H_i * pt.prior_cov_rp * H_i.transpose()).value();
+  }
   if (opts_->log_variance_shares_en) debugLogVarianceShare(sigma_diag_squared, plane_var_term);
   return true;
 }
