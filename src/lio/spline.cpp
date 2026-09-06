@@ -9,6 +9,12 @@ namespace livo_recon
 namespace
 {
 
+// Fixed refinement regularisation, replacing the removed prior_w/damping
+// config keys, and the step size above which a refinement is COUNTED as
+// extreme (it is no longer vetoed).
+constexpr double REFINE_TIKHONOV  = 1e-2;   // relative to trace(H)/dim
+constexpr double REFINE_STEP_WARN = 0.10;   // metres
+
 // Boundary-freeze helpers (SplineOptions::boundary_anchor_mode).  Two
 // variants because the fit()/refineWithLidar()/fitRotationCumulative()
 // solves are two different KINDS of linear system:
@@ -48,6 +54,44 @@ void freezeAbsoluteScalarSystem(Eigen::MatrixXd& A, Eigen::MatrixXd& b,
     for (int j = 0; j < n; ++j) { A(i, j) = 0.0; A(j, i) = 0.0; }
     A(i, i) = 1.0;
     b.row(i) = target.transpose();
+  }
+}
+
+// Tail variants of the two helpers above: same construction, indices
+// [n_cp - n_frozen, n_cp) instead of [0, n_frozen).  The uniform cubic basis
+// at u=1 is [0, 1/6, 4/6, 1/6] and sums to 1, so freezing the LAST three
+// control points to a repeated value forces spline(t1) to that value exactly,
+// mirroring the clamped-B-spline identity at t0.
+void freezeAbsoluteScalarSystemTail(Eigen::MatrixXd& A, Eigen::MatrixXd& b,
+                                    int n_frozen, const V3D& target)
+{
+  if (n_frozen <= 0) return;
+  const int n = static_cast<int>(A.rows());
+  const int first = n - n_frozen;
+  if (first <= 0) return;
+  for (int i = 0; i < first; ++i)
+    for (int j = first; j < n; ++j)
+      b.row(i) -= A(i, j) * target.transpose();
+  for (int i = first; i < n; ++i)
+  {
+    for (int j = 0; j < n; ++j) { A(i, j) = 0.0; A(j, i) = 0.0; }
+    A(i, i) = 1.0;
+    b.row(i) = target.transpose();
+  }
+}
+
+void freezeIncrementalBlockSystemTail(Eigen::MatrixXd& H, Eigen::VectorXd& g,
+                                      int n_cp, int n_frozen)
+{
+  if (n_frozen <= 0) return;
+  const int dim = static_cast<int>(H.rows());
+  const int first = 3 * (n_cp - n_frozen);
+  if (first < 0) return;
+  for (int i = first; i < dim; ++i)
+  {
+    for (int j = 0; j < dim; ++j) { H(i, j) = 0.0; H(j, i) = 0.0; }
+    H(i, i) = 1.0;
+    g(i) = 0.0;
   }
 }
 
@@ -161,7 +205,7 @@ void ScanSpline::cumBasisAt(double t, int& first_cp, Eigen::Vector3d& Bt,
 }
 
 bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
-                     const SplineOptions& opts, const SplineImuFitData* imu)
+                     const SplineOptions& opts)
 {
   valid_ = false;
   // NOTE: the refinement counters are NOT reset here.  With
@@ -171,12 +215,14 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   if (poses.size() < 2) return false;
   if (!(t1 > t0)) return false;
 
-  cumulative_ = opts.rotCumulative();
+  cumulative_ = true;
 
-  int n_cp = opts.n_control_points;
-  if (opts.cpFromHz())
-    n_cp = static_cast<int>(std::lround(opts.control_point_hz * (t1 - t0))) + 3;
-  n_cp = std::max(4, std::min(n_cp, opts.n_control_points_max));
+  // n_cp comes from the control-point RATE and nothing else: a fixed n_cp is
+  // a different control rate on every sequence with a different scan
+  // duration.  Floor of 7 because both ends are clamped -- six control points
+  // are spent on the two clamps, so below 7 there is no free interior at all.
+  int n_cp = static_cast<int>(std::lround(opts.control_point_hz * (t1 - t0))) + 3;
+  n_cp = std::max(7, n_cp);
   n_cp_req_ = n_cp;
 
   const int n_samples = static_cast<int>(poses.size());
@@ -230,35 +276,19 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   }
   if (static_cast<int>(rows.size()) < n_cp_ + 1) return false;
 
-  // Second-difference regulariser on the control POLYGON, not on the
-  // trajectory -- it damps ringing without flattening the fitted
-  // acceleration, which is exactly what the Q estimate reads.
-  const double data_trace = AtA.trace();
-  double reg_trace = 0.0;
-  if (opts.fit_regularization > 0.0 && n_cp_ >= 3)
-  {
-    const double w = opts.fit_regularization * data_trace / static_cast<double>(n_cp_);
-    for (int i = 0; i + 2 < n_cp_; ++i)
-    {
-      const int idx[3] = { i, i + 1, i + 2 };
-      const double c[3] = { 1.0, -2.0, 1.0 };
-      for (int a = 0; a < 3; ++a)
-        for (int bb = 0; bb < 3; ++bb)
-          AtA(idx[a], idx[bb]) += w * c[a] * c[bb];
-      reg_trace += w * 6.0;
-    }
-  }
-  fit_reg_frac_ = (data_trace > 0.0) ? (reg_trace / (data_trace + reg_trace)) : 1.0;
-  if (fit_reg_frac_ > opts.fit_reg_max_frac) return false;
-
-  // Boundary freeze (SplineOptions::boundary_anchor_mode).  Position and
-  // tangent-rotation need DIFFERENT frozen targets, so each gets its own
-  // copy of AtA -- n_frozen_cp_==0 (the default) makes both calls no-ops
-  // and this is bit-identical to the single shared ldlt(AtA) this replaces.
-  const V3D frozen_phi = (n_frozen_cp_ > 0) ? V3D(Log(R_anchor_T * frozen_rot_)) : V3D::Zero();
+  // Boundary freeze, BOTH ENDS.  Position and tangent-rotation need
+  // different frozen targets, so each gets its own copy of AtA.  Three
+  // control points at each end is the clamped-B-spline identity in both
+  // directions: the uniform cubic basis is [1/6,4/6,1/6,0] at u=0 and
+  // [0,1/6,4/6,1/6] at u=1, each summing to 1.
+  fit_reg_frac_ = 0.0;
+  const V3D frozen_phi  = (n_frozen_cp_ > 0) ? V3D(Log(R_anchor_T * frozen_rot_))  : V3D::Zero();
+  const V3D frozen_phi1 = (n_frozen_cp_ > 0) ? V3D(Log(R_anchor_T * frozen_rot1_)) : V3D::Zero();
   Eigen::MatrixXd AtA_p = AtA, AtA_r = AtA;
   freezeAbsoluteScalarSystem(AtA_p, Atb_p, n_frozen_cp_, frozen_pos_);
   freezeAbsoluteScalarSystem(AtA_r, Atb_r, n_frozen_cp_, frozen_phi);
+  freezeAbsoluteScalarSystemTail(AtA_p, Atb_p, n_frozen_cp_, frozen_pos1_);
+  freezeAbsoluteScalarSystemTail(AtA_r, Atb_r, n_frozen_cp_, frozen_phi1);
 
   Eigen::LDLT<Eigen::MatrixXd> ldlt_p(AtA_p), ldlt_r(AtA_r);
   if (ldlt_p.info() != Eigen::Success || ldlt_r.info() != Eigen::Success) return false;
@@ -288,206 +318,7 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   bias_gyr_delta_ = V3D::Zero();
   gravity_delta_  = V3D::Zero();
 
-  if (use_acc || use_gyr)
-  {
-    valid_ = true;
-
-    // GYRO first: the accel target needs R(t), so rotation must settle before
-    // position is re-solved.  The target Jr(phi)^-1 (gyro - b_g) depends on
-    // phi itself, hence the relinearisation loop.
-    //
-    // Each pass also re-solves bias_gyr_delta_ (see SplineOptions::
-    // imu_fit_bias_prior_frac): with cp_phi_ just re-fit against the
-    // CURRENT effective bias (imu->bias_gyr + bias_gyr_delta_), the
-    // residual between the fitted spline's own tangent-rate and the raw
-    // gyro target is linear in a further delta, so it gets its own small
-    // (3x3, bias-only) Gauss-Newton solve rather than being folded into
-    // the (n_cp x n_cp) control-point system above.
-    if (use_gyr)
-    {
-      const int iters = std::max(1, opts.imu_fit_iters);
-      for (int it = 0; it < iters; ++it)
-      {
-        const V3D bias_gyr_eff = imu->bias_gyr + bias_gyr_delta_;
-
-        Eigen::MatrixXd Hg = Eigen::MatrixXd::Zero(n_cp_, n_cp_);
-        Eigen::MatrixXd bg = Eigen::MatrixXd::Zero(n_cp_, 3);
-        Eigen::Vector4d bb, dbb, ddbb;
-        int s = 0;
-        int used = 0;
-
-        for (const auto& sm : *imu->samples)
-        {
-          if (sm.t < t0_ || sm.t > t1_) continue;
-          basisAt(sm.t, s, bb, dbb, ddbb);
-
-          const M3D J = Jr(phiAt(sm.t));
-          const Eigen::FullPivLU<M3D> lu(J);
-          if (!lu.isInvertible()) continue;
-          const V3D tgt = lu.solve(V3D(sm.gyro - bias_gyr_eff));
-          if (!tgt.allFinite()) continue;
-
-          for (int i = 0; i < 4; ++i)
-          {
-            const double ci = dbb[i] * inv_delta_;
-            for (int j = 0; j < 4; ++j)
-              Hg(s + i, s + j) += ci * (dbb[j] * inv_delta_);
-            bg.row(s + i) += ci * tgt.transpose();
-          }
-          ++used;
-        }
-
-        const double tg = Hg.trace();
-        if (used < 4 || !(tg > 0.0)) break;
-
-        const double scale = opts.imu_fit_w_gyr * data_trace / tg;
-        Eigen::MatrixXd A_r = AtA + scale * Hg;
-        Eigen::MatrixXd b_r = Atb_r + scale * bg;
-        freezeAbsoluteScalarSystem(A_r, b_r, n_frozen_cp_, frozen_phi);
-
-        Eigen::LDLT<Eigen::MatrixXd> ldlt_r(A_r);
-        if (ldlt_r.info() != Eigen::Success) break;
-        const Eigen::MatrixXd Xr2 = ldlt_r.solve(b_r);
-        if (!Xr2.allFinite()) break;
-        for (int i = 0; i < n_cp_; ++i) cp_phi_.col(i) = Xr2.row(i).transpose();
-
-        if (opts.imu_fit_bias_prior_frac >= 0.0)
-        {
-          // e0 = fitted_phidot - Jr(phi)^-1 (gyro - bias_gyr_eff); linear in
-          // a further delta db with de0/ddb = +Jr(phi)^-1, so
-          // (Jr^-1)^T Jr^-1 db = -(Jr^-1)^T e0, i.e. minimise ||e0 + Jr^-1
-          // db||^2 with a zero-mean ridge pulling db toward 0.
-          M3D H3 = M3D::Zero();
-          V3D g3 = V3D::Zero();
-          int used2 = 0;
-          for (const auto& sm : *imu->samples)
-          {
-            if (sm.t < t0_ || sm.t > t1_) continue;
-            const V3D phidot = phiDotAt(sm.t);
-            const M3D JrI = JrInv(phiAt(sm.t));
-            const V3D e0 = phidot - JrI * V3D(sm.gyro - bias_gyr_eff);
-            if (!e0.allFinite()) continue;
-            H3 += JrI.transpose() * JrI;
-            g3 += -(JrI.transpose() * e0);
-            ++used2;
-          }
-          if (used2 >= 4 && H3.trace() > 0.0)
-          {
-            H3 += (opts.imu_fit_bias_prior_frac * (H3.trace() / 3.0)) * M3D::Identity();
-            const V3D db = H3.ldlt().solve(g3);
-            if (db.allFinite()) bias_gyr_delta_ += db;
-          }
-        }
-      }
-    }
-
-    if (use_acc)
-    {
-      const int iters = std::max(1, opts.imu_fit_iters);
-      for (int it = 0; it < iters; ++it)
-      {
-        const V3D bias_acc_eff = imu->bias_acc + bias_acc_delta_;
-        const V3D gravity_eff  = imu->gravity  + gravity_delta_;
-
-        Eigen::MatrixXd Ha = Eigen::MatrixXd::Zero(n_cp_, n_cp_);
-        Eigen::MatrixXd ba = Eigen::MatrixXd::Zero(n_cp_, 3);
-        Eigen::Vector4d bb, dbb, ddbb;
-        int s = 0;
-        int used = 0;
-
-        for (const auto& sm : *imu->samples)
-        {
-          if (sm.t < t0_ || sm.t > t1_) continue;
-          basisAt(sm.t, s, bb, dbb, ddbb);
-
-          // World-frame specific force at this instant, from the CURRENT
-          // rotation spline.  Rotation is already final here.
-          const V3D tgt = rotAt(sm.t) * (sm.acc - bias_acc_eff) + gravity_eff;
-          if (!tgt.allFinite()) continue;
-
-          const double s2 = inv_delta_ * inv_delta_;
-          for (int i = 0; i < 4; ++i)
-          {
-            const double ci = ddbb[i] * s2;
-            for (int j = 0; j < 4; ++j)
-              Ha(s + i, s + j) += ci * (ddbb[j] * s2);
-            ba.row(s + i) += ci * tgt.transpose();
-          }
-          ++used;
-        }
-
-        const double ta = Ha.trace();
-        if (used < 4 || !(ta > 0.0)) break;
-
-        const double scale = opts.imu_fit_w_acc * data_trace / ta;
-        Eigen::MatrixXd A_p = AtA + scale * Ha;
-        Eigen::MatrixXd b_p = Atb_p + scale * ba;
-        freezeAbsoluteScalarSystem(A_p, b_p, n_frozen_cp_, frozen_pos_);
-
-        Eigen::LDLT<Eigen::MatrixXd> ldlt_p(A_p);
-        if (ldlt_p.info() != Eigen::Success) break;
-        const Eigen::MatrixXd Xp2 = ldlt_p.solve(b_p);
-        if (!Xp2.allFinite()) break;
-        for (int i = 0; i < n_cp_; ++i) cp_p_.col(i) = Xp2.row(i).transpose();
-
-        if (opts.imu_fit_bias_prior_frac >= 0.0)
-        {
-          // e0 = fitted_accel - [R(t)(acc-bias_acc_eff) + gravity_eff],
-          // linear in [dba; dg] with Jacobian [R(t), -I] (3x6): moving
-          // bias_acc up REDUCES the target by R(t), moving gravity up
-          // RAISES it by I, so d(target)/d[dba;dg] = [-R(t), I] and
-          // d(e0)/d[dba;dg] = [R(t), -I].
-          Eigen::Matrix<double, 6, 6> H6 = Eigen::Matrix<double, 6, 6>::Zero();
-          Eigen::Matrix<double, 6, 1> g6 = Eigen::Matrix<double, 6, 1>::Zero();
-          int used2 = 0;
-          for (const auto& sm : *imu->samples)
-          {
-            if (sm.t < t0_ || sm.t > t1_) continue;
-            const M3D R = rotAt(sm.t);
-            const V3D fitted = accAt(sm.t);
-            const V3D e0 = fitted - (R * (sm.acc - bias_acc_eff) + gravity_eff);
-            if (!e0.allFinite()) continue;
-            Eigen::Matrix<double, 3, 6> J;
-            J.block<3, 3>(0, 0) = R;
-            J.block<3, 3>(0, 3) = -M3D::Identity();
-            H6 += J.transpose() * J;
-            g6 += -(J.transpose() * e0);
-            ++used2;
-          }
-          if (used2 >= 4 && H6.trace() > 0.0)
-          {
-            H6 += (opts.imu_fit_bias_prior_frac * (H6.trace() / 6.0))
-                  * Eigen::Matrix<double, 6, 6>::Identity();
-            const Eigen::Matrix<double, 6, 1> d6 = H6.ldlt().solve(g6);
-            if (d6.allFinite())
-            {
-              bias_acc_delta_ += d6.head<3>();
-              gravity_delta_  += d6.tail<3>();
-            }
-          }
-        }
-      }
-    }
-  }
-
-  double sp = 0.0, sr = 0.0;
-  for (size_t k = 0; k < rows.size(); ++k)
-  {
-    V3D pp = V3D::Zero(), pr = V3D::Zero();
-    for (int i = 0; i < 4; ++i)
-    {
-      pp += rows[k][i] * cp_p_.col(row_cp[k] + i);
-      pr += rows[k][i] * cp_phi_.col(row_cp[k] + i);
-    }
-    sp += (pp - tgt_p[k]).squaredNorm();
-    sr += (pr - tgt_r[k]).squaredNorm();
-  }
-  fit_res_pos_ = std::sqrt(sp / static_cast<double>(rows.size()));
-  fit_res_rot_ = std::sqrt(sr / static_cast<double>(rows.size()));
-
-  valid_ = true;
-
-  if (cumulative_ && !fitRotationCumulative(poses, opts.rot_fit_iters))
+  if (!fitRotationCumulative(poses, SplineOptions::ROT_FIT_ITERS))
   {
     // Fall back to the tangent parameterisation rather than to a
     // half-initialised cumulative one -- a wrong rotation spline is worse
@@ -517,6 +348,8 @@ bool ScanSpline::fitRotationCumulative(const std::vector<Pose6D>& poses, int gn_
   // and the GN loop below (via freezeIncrementalBlockSystem) never moves
   // it away from this value.
   for (int i = 0; i < n_frozen_cp_ && i < n_cp_; ++i) cp_R_[i] = frozen_rot_;
+  for (int i = 0; i < n_frozen_cp_ && i < n_cp_; ++i)
+    cp_R_[n_cp_ - 1 - i] = frozen_rot1_;
 
   std::vector<double> ts;  ts.reserve(poses.size());
   std::vector<M3D>    Rs;  Rs.reserve(poses.size());
@@ -632,6 +465,7 @@ bool ScanSpline::fitRotationCumulative(const std::vector<Pose6D>& poses, int gn_
     // Boundary freeze: force the solved STEP to 0 for i<n_frozen_cp_, so
     // cp_R_[i] (already exactly frozen_rot_, set above) never moves.
     freezeIncrementalBlockSystem(H, g, n_frozen_cp_);
+    freezeIncrementalBlockSystemTail(H, g, n_cp_, n_frozen_cp_);
 
     Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
     if (ldlt.info() != Eigen::Success) return false;
@@ -737,25 +571,44 @@ V3D ScanSpline::accAt(double t) const
   for (int i = 0; i < 4; ++i) r += ddb[i] * cp_p_.col(s + i);
   return r * (inv_delta_ * inv_delta_);
 }
-
-void ScanSpline::anchorTo(double t_ref, const M3D& R_ref, const V3D& p_ref)
+// Move the TAIL clamp to a new scan-end pose without re-fitting, so any
+// refinement already applied to the interior survives.
+//
+// The correction is distributed PROPORTIONALLY TO ELAPSED TIME: zero at the
+// head clamp, full at the tail.  Control point i sits at the Greville
+// abscissa (i - 1) * delta after t0 for a uniform cubic, so its normalised
+// time is (i - 1) / (n_cp - 3); clamping that to [0,1] puts w = 0 on cp_0..2
+// and w = 1 on the last three, which is what keeps BOTH identities exact.
+//
+// *** THE DISTRIBUTION IS A MODELLING CHOICE AND IT IS UNVALIDATED. ***
+// Pinning both ends over-determines the trajectory relative to preserving
+// the IMU's own relative increments -- the difference IS the drift the
+// filter corrected -- so something must absorb it, and no measurement in
+// this project says what.  Time-proportional is the same random-walk
+// assumption Q itself encodes: process noise accumulates with time, so a
+// control point halfway through the scan has accumulated half the drift.
+// It is the `w` line below and nothing else depends on the choice.
+void ScanSpline::moveTailClamp(const V3D& pos1, const M3D& rot1)
 {
-  if (!valid_) return;
-  const M3D R_now = rotAt(t_ref);
-  const V3D p_now = posAt(t_ref);
+  if (!valid_ || n_cp_ <= 0) return;
 
-  const M3D dR = R_ref * R_now.transpose();
+  const V3D dp = pos1 - frozen_pos1_;
+  const V3D dphi = Log(M3D(frozen_rot1_.transpose() * rot1));
+  if (!dp.allFinite() || !dphi.allFinite()) return;
 
+  const double span = std::max(1, n_cp_ - 3);
   for (int i = 0; i < n_cp_; ++i)
-    cp_p_.col(i) = dR * (cp_p_.col(i) - p_now) + p_ref;
+  {
+    const double w = std::clamp((static_cast<double>(i) - 1.0) / span, 0.0, 1.0);
+    cp_p_.col(i) += w * dp;
+    if (cumulative_ && i < static_cast<int>(cp_R_.size()))
+      cp_R_[i] = cp_R_[i] * Exp(V3D(w * dphi));
+    else
+      cp_phi_.col(i) += w * dphi;
+  }
 
-  // Left-multiplying the whole trajectory by dR is exactly a change of
-  // anchor, so the SHAPE is untouched.  In tangent mode that means the
-  // anchor absorbs it; in cumulative mode every control rotation is
-  // left-multiplied, which leaves every incremental d_j -- and therefore
-  // omega_body -- bit-identical.
-  R_anchor_ = dR * R_anchor_;
-  for (auto& R : cp_R_) R = dR * R;
+  frozen_pos1_ = pos1;
+  frozen_rot1_ = rot1;
 }
 
 bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
@@ -802,23 +655,24 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
     // Prior toward the pre-refinement (IMU-only) fit.  Without it the system
     // is rank-deficient in every direction the plane normals do not span --
     // and on a corridor or a facade that is a large subspace.
+    // FIXED internal Tikhonov, no longer a config key (Bryce, 2026-09-06
+    // removed prior_w and damping as knobs).  It cannot go to zero: without
+    // ANY regulariser this system is rank-deficient in every direction the
+    // plane normals do not span -- a corridor or a facade being exactly that
+    // -- and the LDLT would fail into the unrefined spline in precisely the
+    // scenes refinement exists for.  Scaled to the data term's own mean
+    // diagonal so it is dimensionless.
     const double scale = std::max(1e-12, H.trace() / static_cast<double>(dim));
-    const double wp = opts.lidar_refine_prior_w * scale;
-    if (wp > 0.0)
-    {
-      for (int i = 0; i < n_cp_; ++i)
-      {
-        H.block<3, 3>(3 * i, 3 * i).diagonal().array() += wp;
-        g.segment<3>(3 * i).noalias() += wp * (cp_p_.col(i) - cp_prior.col(i));
-      }
-    }
-    // Levenberg damping on top, relative to the same scale.
-    const double lm = std::max(0.0, opts.lidar_refine_damping) * scale;
-    for (int i = 0; i < dim; ++i) H(i, i) += lm;
+    for (int i = 0; i < dim; ++i) H(i, i) += REFINE_TIKHONOV * scale;
 
     // Boundary freeze: force the solved step to 0 for i<n_frozen_cp_ (cp_p_
     // was already exactly frozen_pos_ from fit() -- this keeps it there).
+    // Both clamps: the refinement owns the interior SHAPE only.  The ESIKF
+    // owns both endpoints and the solved step is forced to zero on them, so
+    // the two estimators cannot fight over the same quantity -- structurally,
+    // rather than by being overwritten afterwards.
     freezeIncrementalBlockSystem(H, g, n_frozen_cp_);
+    freezeIncrementalBlockSystemTail(H, g, n_cp_, n_frozen_cp_);
 
     Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
     if (ldlt.info() != Eigen::Success)
@@ -832,11 +686,13 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
       max_step = std::max(max_step, step.segment<3>(3 * i).norm());
     last_refine_step_ = max_step;
 
-    // Fail safe to the unrefined spline rather than applying a correction
-    // this system's documented sensitivity cannot absorb.  Counted, not
-    // hidden -- refineRejects() is logged per scan.
-    if (!(max_step <= opts.lidar_refine_max_step))
-    { ++refine_rejects_; accumulateRefineDisplacement(cp_prior); return any; }
+    // The max_step VETO is gone (Bryce, 2026-09-06): with both endpoints
+    // clamped an interior excursion has to return to two fixed points, so
+    // the damage is bounded geometrically rather than by a threshold.  The
+    // COUNTER stays -- with prior_w gone the fixed Tikhonov above is the
+    // only regulariser left, and refine_rejects_ is the sole signal that it
+    // is being asked for something extreme.
+    if (!(max_step <= REFINE_STEP_WARN)) ++refine_rejects_;
 
     for (int i = 0; i < n_cp_; ++i) cp_p_.col(i) += step.segment<3>(3 * i);
     ++refine_applied_;
@@ -873,68 +729,6 @@ double ScanSpline::rotationChordDeg() const
   if (!valid_) return 0.0;
   const M3D dR = rotAt(t0_).transpose() * rotAt(t1_);
   return Log(dR).norm() * 180.0 / M_PI;
-}
-
-bool reintegratePoses(const std::vector<Pose6D>& in,
-                      const V3D& d_bias_acc,
-                      const V3D& d_bias_gyr,
-                      const V3D& d_gravity,
-                      const V3D& gravity_old,
-                      double min_dba, double min_dbg,
-                      std::vector<Pose6D>& out)
-{
-  if (in.size() < 2) return false;
-
-  // Exact no-op below threshold.  Not an optimisation: recovering the
-  // body-frame measurement runs the world acceleration back through R^T and
-  // then forward through R again, which is only equal to the original to
-  // within rounding.  Replaying for a zero correction would perturb the
-  // spline's last bits for nothing and break "adaptive off is bit-identical".
-  if (d_bias_acc.norm() < min_dba && d_bias_gyr.norm() < min_dbg &&
-      d_gravity.norm() < min_dba)
-    return false;
-
-  const V3D g_new = gravity_old + d_gravity;
-
-  out.clear();
-  out.reserve(in.size());
-
-  M3D R   = in.front().rot;
-  V3D pos = in.front().pos;
-  V3D vel = in.front().vel;
-
-  for (const auto& ps : in)
-  {
-    const double dt  = ps.dt;
-    const double dt2 = dt * dt;
-
-    // Recover the body-frame measurements the OLD integration used.  ps.gyr
-    // is angvel_avr, already corrected by the old gyro bias; ps.acc_head and
-    // ps.acc_tail are world accelerations built with the old accel bias and
-    // the old gravity, at the step's head and tail ROTATIONS respectively --
-    // the tail one uses R_k Exp(gyr_k, dt), which is why Expf_old is needed
-    // even though the new integration does not otherwise want it.
-    const M3D Expf_old = Exp(ps.gyr, dt);
-    const V3D a_head_b = ps.rot.transpose() * (ps.acc_head - gravity_old);
-    const V3D a_tail_b = (ps.rot * Expf_old).transpose() * (ps.acc_tail - gravity_old);
-
-    const V3D angvel_new = ps.gyr - d_bias_gyr;
-    const M3D Expf_new   = Exp(angvel_new, dt);
-
-    const V3D acc_wh = R * (a_head_b - d_bias_acc) + g_new;
-    const M3D R_next = R * Expf_new;
-    const V3D acc_wt = R_next * (a_tail_b - d_bias_acc) + g_new;
-    const V3D acc_avr_world = 0.5 * (acc_wh + acc_wt);
-
-    // Head-time state, matching ImuProc::propagate()'s storage convention.
-    out.push_back(Pose6D{ ps.t, acc_wh, acc_wt, angvel_new, vel, pos, R, dt });
-
-    pos = pos + vel * dt + 0.5 * acc_avr_world * dt2;
-    vel = vel + acc_avr_world * dt;
-    R   = R_next;
-  }
-
-  return true;
 }
 
 SplineImuResidualStats computeSplineImuResidual(

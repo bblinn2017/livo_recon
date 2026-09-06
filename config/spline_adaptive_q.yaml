@@ -11,99 +11,47 @@
 # and what it cost to learn.
 
 spline:
-  # Master switch.  Everything below it, and the whole adaptive_q block, is
-  # dead without it -- the Q statistic IS the spline-vs-IMU residual.
-  enable: true
+  # THE ONE MODE KNOB.  Bryce, 2026-09-06.
+  #
+  #   raw_imu        No spline.  Points are deskewed ONCE, before the first
+  #                  IEKF iteration, from the IMU-propagated poses.  Every
+  #                  other spline/* key AND the whole adaptive_q block are
+  #                  REFUSED at startup -- the Q statistic IS the
+  #                  spline-vs-IMU residual, so it has nothing to read.
+  #   spline         Fitted once per frame with BOTH endpoints clamped, and
+  #                  the points re-deskewed against it every IEKF iteration.
+  #   spline+refine  As above, and each iteration the interior shape is
+  #                  refined against the SAME residuals the IEKF solves
+  #                  from -- so both are linearised at one trajectory.
+  #
+  # This replaces spline/enable, spline/per_iteration (five values) and
+  # spline/boundary_anchor_mode (three).  Thirty nominal combinations
+  # carrying five behaviours; SP-4a"/4b" spent half a 276-job grid landing
+  # on ATE-identical duplicates before that was noticed.
+  mode: spline
 
   control_points:
-    # MODE: "n" | "hz".  Mutually exclusive parameterisations of one quantity.
-    # Setting the key belonging to the other mode is an error, not a
-    # preference: precedence used to resolve this silently.
-    mode: n
-    # Live under mode: n.  8 over a 100 ms scan is a ~70 Hz effective control
-    # rate, the band CT-VoxelMap hand-sets per dataset (35-80 Hz).
+    # THE ONLY control-point knob.  n_cp is derived from this rate and the
+    # scan's own duration, so the axis is comparable across sequences -- a
+    # fixed n_cp is a different control rate on every bag.
     #
-    # PROVENANCE, stated because it matters: 8 was chosen on a synthetic
-    # bench ("recovers 0.81-0.96 of truth", "4.8x at 14"), which standing
-    # rule 1 no longer admits as evidence.  It is not a validated default.
-    n: 8
-    # Live under mode: hz.  Prefer this whenever results are compared ACROSS
-    # sequences -- a fixed n is a different control rate on every bag.
-    # hz: 100.0
-    n_max: 32
+    # 100 Hz against a 200 Hz IMU.  Both endpoints are clamped, which spends
+    # SIX control points (three per end), so free interior shape is n_cp - 6:
+    # at a 10 Hz scan this gives n_cp = 13 and 7 free.  Below ~70 Hz the
+    # interior has fewer than 4 free points and the shape is dictated by the
+    # clamps.  fit() also floors n_cp at 7 and the sample count caps it near
+    # 19 at 10 Hz scan / 200 Hz IMU.
+    hz: 100.0
 
-  fit:
-    regularization: 1.0e-6
-    # Also from the synthetic bench; see n above.
-    reg_max_frac: 0.05
-
-    rotation:
-      # MODE: "cumulative" | "tangent".  Cumulative is the form every
-      # published CT-LIO system uses and is the default; tangent is the
-      # ablation arm.  An unrecognised value now REFUSES -- it used to fall
-      # through to tangent, so a typo silently selected the ablation.
-      mode: cumulative
-      # Live under mode: cumulative only.  Tangent is a single linear solve
-      # and has no iteration count.
-      iters: 4
-
-    imu_term:
-      # MODE: "off" | "acc" | "gyr" | "both".  The on/off state used to be
-      # implied by whether a weight happened to be > 0, so "off with a weight
-      # set" and "on with weight 0" were the same configuration.
-      #
-      # DEFAULT off, and that is a judgement: fitting to positions penalises
-      # the double integral of accel error, so the fit is nearly blind to the
-      # high-frequency accel noise adaptive_q is trying to measure.  Weighting
-      # the accel residual into the fit erodes that separation.
-      mode: "off"
-      # w_acc: 0.0
-      # w_gyr: 0.0
-      # iters: 2
-
-  # MODE: the per-iteration pipeline, as ONE key with five values.
-  #
-  #   off                            legacy one-shot deskew
-  #   redeskew                       re-place points every IEKF iteration
-  #   redeskew+refine                ... + LiDAR refinement of the position
-  #                                  control points
-  #   redeskew+reintegrate           ... + replay the poses under the
-  #                                  iteration's corrected biases
-  #   redeskew+refine+reintegrate    both
-  #
-  # These were three booleans until 2026-09-02.  Refinement and
-  # re-integration are steps INSIDE redeskewFromSpline() -- a refined spline
-  # reaches the filter only through the points the re-deskew places -- so the
-  # 2x2x2 space had eight members and five distinct behaviours, and a 276-job
-  # grid spent half its cells finding that out.  Sweep THIS key; an inert
-  # cell is now unrepresentable rather than merely detectable.
-  per_iteration: redeskew
-
-  # Live only when per_iteration includes +refine.
+  # Live only under mode: spline+refine.
   # refine:
-  #   NONE of these four has ever been varied: git log -S puts all of them in
-  #   5dd6e6f, the commit that introduced the feature.  prior_w is scaled by
-  #   trace(H)/dim -- the mean diagonal of the data term -- so 1.0 means the
-  #   pull toward the IMU-only fit is the same order as the entire LiDAR
-  #   information.  Queue row SP-P sweeps them.  Until it has, a null on this
-  #   switch is not a statement about the mechanism.
-  #   damping: 1.0e-2
-  #   prior_w: 1.0
   #   iters: 1
-  #   max_step: 0.10
 
-  # Live only when per_iteration includes +reintegrate.
-  # reintegrate:
-  #   min_dbg: 1.0e-9
-  #   min_dba: 1.0e-9
-
-  # Keep the legacy total_dt^3 * var_acc inflation on each point's covariance.
-  # OFF on purpose: that term puts state->varAcc() -- the quantity adaptive_q
-  # is estimating -- inside the measurement covariance, which closes a loop.
-  keep_time_noise: false
   log_en: true
 
-# Nested under spline/enable in the resolver, not merely warned about.
+# Nested under spline/mode in the resolver, not merely warned about --
+# and REFUSED outright at mode: raw_imu, where the spline-vs-IMU
+# residual this estimator reads does not exist.
 adaptive_q:
   enable: true
   # Bounded excursion.  0.3 is +/- 2x; AI-IMU's own 3 (+/- 1000x) is far too

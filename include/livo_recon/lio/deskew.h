@@ -74,15 +74,15 @@ void deskewPoints(
 // restores a clean separation between Q and R.  That separation is a
 // precondition for AdaptiveQ meaning anything: with var_acc in R as well as
 // in Q, "measure the noise, apply it as process noise" would feed back into
-// its own measurement.  Set spline/keep_time_noise to restore the legacy
-// term for an A/B against this reasoning.
+// its own measurement.  The legacy term is GONE as of the spline restructure
+// (Bryce, 2026-09-06): the escape hatch that restored it is removed with it,
+// so the Q/R separation is now a property of the code rather than a default.
 void deskewPointsSpline(
     const StateGroupPtr& state,
     const ScanSpline& spline,
     double scan_end_time,
     const std::vector<PointXYZT>& points,
     const DeskewOptions& opts,
-    bool keep_time_noise,
     std::vector<PointXYZCov>& points_out);
 
 // As above, but only for the points at `indices` into `points`, writing into
@@ -109,7 +109,6 @@ void deskewPointsSplineCsr(
     const std::vector<int>& offsets,
     const std::vector<int>& members,
     const DeskewOptions& opts,
-    bool keep_time_noise,
     std::vector<PointXYZCov>& points_out);
 
 void deskewPointsSplineSubset(
@@ -119,7 +118,6 @@ void deskewPointsSplineSubset(
     const std::vector<PointXYZT>& points,
     const std::vector<int>& indices,
     const DeskewOptions& opts,
-    bool keep_time_noise,
     std::vector<PointXYZCov>& points_out);
 
 }  // namespace livo_recon

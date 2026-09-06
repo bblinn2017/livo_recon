@@ -145,7 +145,6 @@ struct LioProcOptions
   // that quantity would close a feedback loop through the estimator's own
   // measurement model.  Exposed so the reasoning can be A/B tested rather
   // than assumed.
-  bool spline_keep_time_noise = false;
 
   // History (176-191): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-176
   bool log_consistency_scan_en = false;
@@ -192,12 +191,16 @@ public:
   // legacy one-shot deskew rather than to garbage.
   bool redeskewFromSpline(MeasureGroup& mg);
 
+  // Refine the spline's interior shape against the residuals the IEKF
+  // just accumulated, before the same residuals are used to solve.  Both
+  // clamps are frozen in the solve, so it owns the interior only.
+  bool refineSplineFromResiduals(const MeasureGroup& mg);
+
   // Raw IMU + the CURRENT biases/gravity for the fit's optional acc/gyro term.
   // The samples pointer is left null unless a weight is actually non-zero, so
   // with the weights at their 0 default the fit never dereferences anything
   // and is bit-identical to the pose-only one.  Needs imu/keep_raw_samples,
   // the same prerequisite AdaptiveQ has; without it the term is skipped.
-  SplineImuFitData splineImuFitData(const MeasureGroup& mg) const;
 
   // Fit the spline, and afterwards measure the IMU residual against it and
   // hand the result to AdaptiveQ.  Split from deskewAndDownsample() so the
@@ -288,7 +291,6 @@ private:
   // against the propagation-time bias (state_propagat_, whose bias blocks
   // propagate() never touches), so replaying a replay would apply the
   // correction twice.
-  std::vector<Pose6D> spline_poses0_;
   std::vector<Pose6D> spline_poses_;    // replay target, reused
   int  spline_refits_ = 0;              // per frame, for spline_q.csv
 
@@ -314,8 +316,6 @@ private:
   // totals below are what the end-of-run INERT report reads.
   int    redeskew_calls_ = 0;           // per frame
   double redeskew_dp_rms_ = 0.0;        // m, RMS point move across a re-deskew
-  double reint_dp_max_ = 0.0;           // m, largest pose move from the replay
-  double reint_drot_deg_max_ = 0.0;     // deg, likewise
   std::vector<PointXYZCov> redeskew_prev_;   // scratch, for the displacement
 
   // P3(a).  How far the refit (refine+reintegrate+anchorTo, whatever subset
@@ -339,7 +339,6 @@ private:
   long   run_refine_rejects_ = 0;
   long   run_refits_ = 0;
   double run_refine_dcp_max_ = 0.0;
-  double run_reint_dp_max_ = 0.0;
   double run_redeskew_dp_max_ = 0.0;
   long   run_aq_ok_frames_ = 0;
   double run_aq_applied_min_acc_ = 0.0, run_aq_applied_max_acc_ = 0.0;

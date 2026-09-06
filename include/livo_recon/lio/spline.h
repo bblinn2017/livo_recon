@@ -104,107 +104,68 @@ namespace livo_recon
 
 struct SplineOptions
 {
-  // Master switch.  false (default) = every hook in this file and its
-  // callers is skipped and behaviour is identical to the pre-change build.
-  bool enable = false;
-
-  // MODE: "cumulative" (default) | "tangent" -- see the ROTATION block above.
-  // The default is the literature's form; "tangent" is the ablation arm.
+  // ── THE ONE MODE KNOB.  Bryce, 2026-09-06. ───────────────────────────────
+  // This replaces `enable`, `per_iteration` (five levels) and
+  // `boundary_anchor_mode` (three levels).  Those were 30 nominal
+  // combinations carrying five distinct behaviours, and SP-4a"/4b" spent
+  // half a 276-job grid landing on ATE-identical duplicates discovering it.
   //
-  // Validated at startup against ROT_MODES and the process REFUSES an
-  // unrecognised value.  It used to fall through to "tangent" for anything
-  // that was not exactly "cumulative", so a typo silently selected the
-  // ablation arm and every run in that cell was mislabelled.
-  std::string rot_mode = "cumulative";
-  static constexpr const char* ROT_MODES[] = { "cumulative", "tangent" };
-  bool rotCumulative() const { return rot_mode == "cumulative"; }
-
-  // Number of control points for the scan window.  Minimum 4 (one cubic
-  // segment).  8 over a 100 ms scan is a ~70 Hz effective control rate, in
-  // the same band CT-VoxelMap hand-sets per dataset (35-80 Hz).
-  int n_control_points = 8;
-
-  // Alternative to n_control_points: choose n_cp from a target control-point
-  // rate in Hz over the ACTUAL scan duration, clamped to
-  // [4, n_control_points_max].  0 (default) = use n_control_points as-is.
+  //   "raw_imu"        No spline is fitted.  The points are deskewed ONCE,
+  //                    before the first IEKF iteration, from the IMU-
+  //                    propagated poses.  Every other key in this struct --
+  //                    and every adaptive_q/* key -- is REFUSED at startup.
+  //   "spline"         The spline is fitted once per frame with BOTH
+  //                    endpoints clamped (see below), and the points are
+  //                    re-deskewed against it every IEKF iteration.  No
+  //                    LiDAR refinement of the control points.
+  //   "spline+refine"  As above, and each iteration the control points'
+  //                    interior shape is refined against the SAME residuals
+  //                    the IEKF accumulates from -- so both are linearised
+  //                    at the same trajectory and neither is stale.
   //
-  // Prefer this whenever results are to be compared ACROSS sequences: a
-  // fixed n_cp is a different control rate on every sequence with a
-  // different scan duration, so an n_cp chosen on one bag does not transfer
-  // to another.  control_point_hz is the physically comparable axis.
-  double control_point_hz = 0.0;
-  int    n_control_points_max = 32;
+  // BOTH ENDPOINTS ARE CLAMPED BY CONSTRUCTION, AND anchorTo() IS GONE.
+  // spline(t0) IS the previous scan's final pose and spline(t1) IS this
+  // iteration's corrected pose -- not approximately, not after a rigid
+  // correction, but as an identity the fit is solved under.  The uniform
+  // cubic basis at u=0 is [1/6, 4/6, 1/6, 0] and at u=1 is
+  // [0, 1/6, 4/6, 1/6], each summing to 1, so freezing three control points
+  // at each end forces both endpoints exactly.  Cumulative rotation obeys
+  // the mirror identity for the same reason.
+  //
+  // WHY THAT MATTERS AND IT IS NOT TIDINESS.  anchorTo() applied ONE rigid
+  // correction to the point at t0 and the point at t1 alike -- but the
+  // correction is drift accumulated ACROSS THIS SCAN, and at t0 the state
+  // was already corrected by the previous scan's own update.  So it moved a
+  // point that was already right, and boundary_dpos measured exactly that:
+  // p50 0.00798 m, p90 0.0181 m (B-0).
+  std::string mode = "spline";
+  static constexpr const char* MODES[] = { "raw_imu", "spline", "spline+refine" };
+  bool splineOn() const { return mode != "raw_imu"; }
+  bool refineOn() const { return mode == "spline+refine"; }
 
-  // MODE: "n" (default) | "hz" -- which of the two above is authoritative.
+  // Rotation is ALWAYS the cumulative form (Bryce, 2026-09-06).  The tangent
+  // parameterisation was the ablation arm and is removed.
   //
-  // These are MUTUALLY EXCLUSIVE parameterisations of one quantity, and they
-  // used to be resolved by precedence: control_point_hz won whenever it was
-  // > 0, and n_control_points was read otherwise.  A config that set both
-  // was legal, ran one of them, and said nothing.  Now the mode names which
-  // one is live and the resolver refuses the other if it was set explicitly.
-  std::string cp_mode = "n";
-  static constexpr const char* CP_MODES[] = { "n", "hz" };
-  bool cpFromHz() const { return cp_mode == "hz"; }
+  // GN refinements of the control ROTATIONS after the tangent-space
+  // initialisation.  NOT a tuning knob and no longer a config key: 0 does not
+  // mean "cheaper", it means the Greville re-encoding's loss is never undone
+  // and the spline is unusable.  4 was set when the exact Jacobian landed;
+  // 2 was measured insufficient at n_cp = 8 above ~34 deg of chord.
+  static constexpr int ROT_FIT_ITERS = 4;
 
-  // Tikhonov weight on the second difference of control points.  Keeps A^T A
-  // conditioned when n_cp approaches the pose-sample count and damps ringing
-  // at the scan ends.  Must stay small enough not to bias the residual the Q
-  // estimate is read from, which is what fit_reg_max_frac guards.
-  double fit_regularization = 1e-6;
-  double fit_reg_max_frac = 0.05;
-
-  // Gauss-Newton refinements of the control ROTATIONS after the tangent-space
-  // initialisation, in "cumulative" mode only.  0 means "initialise from the
-  // tangent fit and stop", which is NOT a usable spline -- the Greville
-  // re-encoding is lossy, so at least one refinement is required.
+  // Control-point rate in Hz over the ACTUAL scan duration.  n_cp is derived
+  // from it, never set directly -- a fixed n_cp is a different control rate
+  // on every sequence with a different scan duration, so it does not
+  // transfer between bags and Hz is the physically comparable axis.
   //
-  // Raised from 2 to 4 when the exact Jacobian landed.  The old default was
-  // set against the first-order Jacobian and was measured to be insufficient
-  // at n_cp=8 above ~34 deg of chord; an exact Jacobian should converge much
-  // faster, but that has not been measured on real data yet, and each
-  // iteration is one LDLT of a banded 3*n_cp system (24x24 at n_cp=8) per
-  // frame -- far cheaper than being wrong.  Lower it once SP-R has a number.
-  int rot_fit_iters = 4;
-
-  // Re-run the deskew against the spline on every IEKF inner iteration, and
-  // once more after the loop converges so the map is built from points
-  // placed by the FINAL state rather than the second-to-last one.
-  // MODE: the per-iteration pipeline, as ONE enum rather than three booleans.
-  //
-  //   "off"                            legacy one-shot deskew; the spline is
-  //                                    fitted and used once per frame
-  //   "redeskew"                       re-place the kept points against the
-  //                                    re-anchored spline every IEKF iteration
-  //   "redeskew+refine"                ... and refine the position control
-  //                                    points against the LiDAR residuals
-  //   "redeskew+reintegrate"           ... and replay the pose sequence under
-  //                                    the iteration's corrected biases
-  //   "redeskew+refine+reintegrate"    both
-  //
-  // WHY THIS IS ONE KNOB AND NOT THREE.  The refinement and the
-  // re-integration are steps (1) and (0) INSIDE LioProc::redeskewFromSpline(),
-  // whose first statement is the re-deskew guard.  They are not peers of it:
-  // a refined or re-integrated spline reaches the filter only through the
-  // points the re-deskew places, so with the re-deskew off it is computed and
-  // never read.  As three booleans the 2x2x2 space had eight members and only
-  // FIVE distinct behaviours -- and SP-4a"/4b" spent half of a 276-job grid
-  // discovering that empirically, 32 cells per arm per sequence landing on
-  // ATE-identical duplicates.  Enumerating the five makes an inert cell
-  // unrepresentable rather than merely detectable.
-  //
-  // Validated at startup; the resolver refuses the sub-parameters of a step
-  // this mode does not include.
-  std::string per_iteration = "redeskew";
-  static constexpr const char* PER_ITER_MODES[] = {
-      "off", "redeskew", "redeskew+refine",
-      "redeskew+reintegrate", "redeskew+refine+reintegrate" };
-  bool redeskewOn() const { return per_iteration != "off"; }
-  bool refineOn() const
-  { return per_iteration == "redeskew+refine" ||
-           per_iteration == "redeskew+refine+reintegrate"; }
-  bool reintegrateOn() const
-  { return per_iteration == "redeskew+reintegrate" ||
-           per_iteration == "redeskew+refine+reintegrate"; }
+  // *** 100 Hz AGAINST A 200 Hz IMU, AND THE FLOOR IS NOT ARBITRARY. ***
+  // Both endpoints are clamped, which spends SIX control points -- three at
+  // each end -- so the free interior shape is n_cp - 6.  At a 10 Hz scan,
+  // 100 Hz gives n_cp = 13 and therefore 7 free.  Below ~70 Hz (n_cp = 10)
+  // the interior has fewer than 4 free control points and the shape is
+  // essentially dictated by the two clamps.  fit() additionally clamps n_cp
+  // to n_samples - 1, about 19 at 10 Hz scan / 200 Hz IMU.
+  double control_point_hz = 100.0;
 
   // ── LiDAR refinement of the control points ──────────────────────────────
   // Let each LiDAR return, at its own timestamp, pull the POSITION control
@@ -220,130 +181,20 @@ struct SplineOptions
   // so one weighted linear solve is the exact Gauss-Newton step at fixed
   // associations.  The system is 3*n_cp square (24x24 at n_cp=8) and banded.
   //
-  // DIVISION OF LABOUR, and it is deliberate: the ESIKF owns the scan-END
-  // pose; this refinement owns only the intra-scan SHAPE.  The caller
-  // re-anchors immediately afterwards (anchorTo), which restores the endpoint
-  // exactly, so the two estimators never fight over the same quantity.
+  // DIVISION OF LABOUR, and it is now STRUCTURAL rather than restored after
+  // the fact: the ESIKF owns both endpoints, which are frozen control points
+  // the refinement's solved step is forced to zero on; this refinement owns
+  // only the intra-scan SHAPE.  The two estimators cannot fight over the
+  // same quantity because the refinement cannot reach it.
   // Rotation control points are NOT refined here -- they stay with the
   // IMU + ESIKF.
-  // No lidar_refine_cp boolean any more -- refineOn() is derived from
-  // per_iteration above.  The four scalars below are live only when it is
-  // true, and NONE of them has ever been varied: git log -S puts all four in
-  // 5dd6e6f, the commit that introduced the feature.  prior_w in particular
-  // is scaled by trace(H)/dim -- the mean diagonal of the data term itself --
-  // so 1.0 means the pull toward the IMU-only fit is the same order as the
-  // entire LiDAR information.  Queue row SP-P sweeps them; until it has,
-  // a null on this switch is not a statement about the mechanism.
-  double lidar_refine_damping = 1e-2;    // Levenberg, relative to trace(H)/n
-  double lidar_refine_prior_w = 1.0;     // pull toward the pre-refinement fit
-  int    lidar_refine_iters = 1;
-  // Reject the WHOLE step if any control point would move further than this
-  // (metres).  A system documented to move ATE 18.88% on a semantically inert
-  // 0.1% nudge does not get an unbounded shape correction; failing safe to
-  // the unrefined spline is cheap and the rejection is counted, not hidden.
-  double lidar_refine_max_step = 0.10;
-
-  // ── Raw-IMU term in the FIT itself ──────────────────────────────────────
-  // Until now the acc/gyro residual was diagnostic only: the fit was pure
-  // least squares to the propagated POSES, and the residual was measured
-  // afterwards for AdaptiveQ.  These weights add the residual to the fit.
-  //
-  // Both are LINEAR in their control points at fixed rotation:
-  //     accel:  pddot(t) = sum_j ddb_j(u) cp_p[s+j] / delta^2
-  //             target   = R(t) (acc_raw - b_a) + g
-  //     gyro :  phidot(t) = sum_j db_j(u) cp_phi[s+j] / delta
-  //             target   = Jr(phi(t))^-1 (gyro_raw - b_g)
-  // so each contributes ordinary normal-equation rows.  The gyro target
-  // depends on phi, so it is relinearised imu_fit_iters times.
-  //
-  // WEIGHTS ARE DIMENSIONLESS AND TRACE-NORMALISED, the same idiom
-  // fit_regularization uses: the IMU block is scaled so that its normal-matrix
-  // trace equals w times the POSE block's trace.  w = 1 therefore means "the
-  // IMU term carries as much total weight as the whole pose sequence",
-  // independently of sample counts, n_cp and units.
-  //
-  // DEFAULT 0 (off), and that default is a judgement, not laziness.  Fitting
-  // to positions penalises the DOUBLE INTEGRAL of accel error, which is
-  // heavily low-pass -- the fit is nearly blind to the high-frequency accel
-  // noise that AdaptiveQ's sigma_a is trying to measure, which is exactly why
-  // sigma_a comes out ~15% low instead of collapsing.  Weighting the accel
-  // residual into the fit erodes that separation: the spline starts absorbing
-  // the very quantity it is about to be asked to report.  The DOF ratio
-  // bounds how far this can go (n_cp ~ 8 against ~21 samples cannot
-  // interpolate the IMU), but it does not remove the bias -- it caps it.
-  // Raise these deliberately, and read sigma_a_hat against a known truth when
-  // you do.
-  // MODE: "off" (default) | "acc" | "gyr" | "both".  The two weights below
-  // are live only for the channels the mode names; imu_fit_iters is live
-  // only when the mode is not "off".  Previously the on/off state was
-  // implied by whether the weights happened to be > 0, so "off with a weight
-  // set" and "on with a weight of zero" were the same configuration.
-  std::string imu_fit_mode = "off";
-  static constexpr const char* IMU_FIT_MODES[] = { "off", "acc", "gyr", "both" };
-  bool imuFitAcc() const { return imu_fit_mode == "acc" || imu_fit_mode == "both"; }
-  bool imuFitGyr() const { return imu_fit_mode == "gyr" || imu_fit_mode == "both"; }
-  bool imuFitOn()  const { return imu_fit_mode != "off"; }
-
-  double imu_fit_w_acc = 0.0;
-  double imu_fit_w_gyr = 0.0;
-  int    imu_fit_iters = 2;
-
-  // ── Joint bias_acc/bias_gyr/gravity correction, solved alongside the
-  //    control points ──────────────────────────────────────────────────
-  // SplineImuFitData::bias_acc/bias_gyr/gravity (set by the caller from
-  // state_propagat_, the bias/gravity this frame's IMU propagation
-  // actually started from -- see LioProc::splineImuFitData()) are treated
-  // as a FIXED BASELINE, not the final value: each imu_fit_iters pass,
-  // after cp_phi_/cp_p_ are (re)solved against the current baseline+delta,
-  // a small separate Gauss-Newton solve (3x3 for bias_gyr, 6x6 for
-  // [bias_acc, gravity] jointly, since the accel residual is linear in
-  // both together -- see fit()'s own derivation) finds the delta that
-  // best explains the remaining gap between raw IMU integration and the
-  // control points' own (LiDAR-informed) shape, with a Tikhonov prior
-  // pulling the delta toward 0 so a short/degenerate window can't produce
-  // a wild estimate. Deliberately anchored at the FRAME-START baseline,
-  // not the current-iteration state_ bias (which the IEKF's own point-to-
-  // plane correction is simultaneously moving this frame) -- correcting
-  // against a moving target would double-count whatever the IEKF's own
-  // correction already explains through its pose/bias covariance
-  // cross-terms.
-  //
-  // This delta is used ONLY inside the spline's own fit (better shape ->
-  // better deskewing -> better point-to-plane residuals), exactly like
-  // the plain fixed-bias imu_fit term it replaces -- it is NOT written
-  // back into state_'s own bias/gravity. That feedback loop already
-  // exists, just indirectly: the IEKF's own residual system estimates
-  // bias/gravity itself (see StateGroup::estBG()/estBA()/estGravity()),
-  // via the SAME joint covariance a spline-shape improvement's downstream
-  // effect on point-to-plane residuals also flows through.
-  //
-  // DEFAULT 0.1: the prior counts as 10% of the block's own data weight
-  // (same data-relative convention as fit_regularization/imu_fit_w_*).
-  // Untuned -- this is a new mechanism, not yet validated by ablation.
-  double imu_fit_bias_prior_frac = 0.1;
-
-  // ── Re-integration under the ESIKF's bias corrections ───────────────────
-  // The pose sequence the spline is fitted to was dead-reckoned by
-  // ImuProc::propagate() using the biases as they stood BEFORE this frame's
-  // update, and propagate() is never re-run inside the IEKF loop.  So without
-  // this the spline's SHAPE is frozen at the pre-update bias while every
-  // inner iteration moves that bias.  anchorTo() cannot repair it: a bias
-  // delta produces a shape change (rotation drifting linearly in t, position
-  // quadratically), and anchorTo is a rigid 6-dof transform.
-  //
-  // With this on, reintegratePoses() replays the stored pose recurrence under
-  // the CURRENT bias and gravity before each re-fit.  It needs no raw IMU
-  // samples: Pose6D already carries the per-step world accelerations and the
-  // bias-corrected mean body rate, from which the body-frame measurement is
-  // recoverable exactly.  Zero deltas short-circuit to an exact no-op.
-  // No reintegrate_each_iteration boolean -- reintegrateOn(), above.
-  // Skip the replay when the correction is smaller than this (rad/s and
-  // m/s^2 respectively).  The point is not to save the ~20 integration steps
-  // -- it is that a re-fit moves the spline out from under the LiDAR
-  // residuals the refinement was about to be linearised at, so it should
-  // happen only when it buys something.
-  double reintegrate_min_dbg = 1e-9;
-  double reintegrate_min_dba = 1e-9;
+  // Only `iters` survives (Bryce, 2026-09-06).  prior_w and max_step are
+  // gone as CONFIG KEYS; a fixed Tikhonov term stays inside refineWithLidar()
+  // because without ANY regulariser the normal equations are rank-deficient
+  // in every direction the plane normals do not span -- a corridor or a
+  // facade being exactly that -- and the solve would fail into the unrefined
+  // spline in precisely the scenes refinement is for.
+  int lidar_refine_iters = 1;
 
   // Per-scan CSV of the fit and the IMU residual (spline_q.csv).
   // ── dumping the trajectory as a FUNCTION, for analysis only ──────────
@@ -373,50 +224,11 @@ struct SplineOptions
 
   bool log_en = false;
 
-  // ── Hard boundary constraint at t0 ───────────────────────────────────────
-  // "none" (default): current behaviour -- anchorTo() rigidly re-corrects
-  // the whole spline to match the IEKF's state at t1 every iteration.
-  // boundary_dpos (frame_stats.txt) measures a real, nonzero gap at t0
-  // under this mode: each scan's spline is an independent least-squares
-  // fit, and only ONE end (t1) is pinned, so nothing forces continuity
-  // with the PREVIOUS scan's own t1.
-  //
-  // "single_cp" / "exact": freeze this scan's boundary control point(s) to
-  // the PREVIOUS scan's own final pose BEFORE fit() runs (see
-  // ScanSpline::setFrozenBoundary()), instead of calling anchorTo() at
-  // all -- anchorTo() afterwards would rigidly move the whole spline again
-  // and both re-open the gap it just closed AND degrade the fit (see the
-  // frozen control points' own doc comment for the exact/non-exact
-  // distinction). state_ is NOT written back from the spline under this
-  // mode -- it is one continuously-propagated object across the whole
-  // run, never reconstructed per scan, so it was never actually
-  // discontinuous at scan boundaries in the first place. This mode makes
-  // the SPLINE's own boundary exact (a better internal deskewing
-  // reference); state_'s pose/vel/bias/gravity keep coming exclusively
-  // from the IEKF's own point-to-plane correction, unchanged.
-  std::string boundary_anchor_mode = "exact";
-  static constexpr const char* BOUNDARY_ANCHOR_MODES[] = { "none", "single_cp", "exact" };
-  int nFrozenCp() const
-  {
-    if (boundary_anchor_mode == "single_cp") return 1;
-    if (boundary_anchor_mode == "exact") return 3;
-    return 0;
-  }
-};
-
-// Raw IMU for the fit's optional acc/gyro term.  Separate from the pose
-// sequence because it is the UNAVERAGED, un-bias-corrected stream --
-// ImuProc::keep_raw_samples preserves exactly that as mg.imu_samples_raw.
-struct SplineImuFitData
-{
-  const std::vector<ImuSample>* samples = nullptr;
-  V3D bias_acc = V3D::Zero();
-  V3D bias_gyr = V3D::Zero();
-  V3D gravity  = V3D::Zero();
-
-  bool usable() const { return samples != nullptr && samples->size() >= 4; }
-
-  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  // Both endpoints are clamped unconditionally -- see `mode` above.  Three
+  // control points at each end, which is the clamped-B-spline identity, and
+  // the count is not configurable: 1 ("single_cp") did NOT force the endpoint
+  // exactly and existed only as the weaker ablation arm.
+  static constexpr int N_FROZEN_CP = 3;
 };
 
 // One LiDAR observation, reduced to what the control-point refinement needs.
@@ -436,9 +248,8 @@ struct SplineLidarObs
 class ScanSpline
 {
 public:
-  // `imu` is optional and only read when opts.imu_fit_w_acc/w_gyr > 0.
   bool fit(const std::vector<Pose6D>& poses, double t0, double t1,
-           const SplineOptions& opts, const SplineImuFitData* imu = nullptr);
+           const SplineOptions& opts);
 
   // Per-FRAME reset of the refinement counters.  Deliberately NOT done inside
   // fit(): with spline.reintegrate_each_iteration on, fit() runs once per IEKF
@@ -449,7 +260,7 @@ public:
     refine_dcp_max_ = 0.0; refine_dcp_rms_ = 0.0; }
 
   // Freeze the first n control points (0=off, 1="single_cp", 3="exact" --
-  // see SplineOptions::boundary_anchor_mode) to a single repeated value
+  // SplineOptions::N_FROZEN_CP) to a single repeated value
   // (pos, rot) BEFORE fit() runs. n=3 repeats the value degree(=3) times,
   // the standard "clamped B-spline" identity: since the basis weights at
   // u=0 are [1/6, 4/6, 1/6, 0] and sum to 1, cp_0=cp_1=cp_2=X forces
@@ -458,9 +269,30 @@ public:
   // carry 5/6 of the weight and stay free -- it is deliberately the WEAKER
   // ablation arm. Call before fit(); persists across fit()/
   // refineWithLidar()/fitRotationCumulative() until cleared (n=0).
-  void setFrozenBoundary(int n_frozen, const V3D& pos0, const M3D& rot0)
-  { n_frozen_cp_ = n_frozen; frozen_pos_ = pos0; frozen_rot_ = rot0; }
+  void setFrozenBoundary(int n_frozen,
+                         const V3D& pos0, const M3D& rot0,
+                         const V3D& pos1, const M3D& rot1)
+  { n_frozen_cp_ = n_frozen;
+    frozen_pos_ = pos0; frozen_rot_ = rot0;
+    frozen_pos1_ = pos1; frozen_rot1_ = rot1; }
   int nFrozenCp() const { return n_frozen_cp_; }
+
+  // Move the TAIL clamp to a new scan-end pose without re-fitting, so the
+  // refinement already applied to the interior survives.  The correction is
+  // distributed PROPORTIONALLY TO ELAPSED TIME across the control points:
+  // zero at the head clamp (which stays pinned to the previous scan's end)
+  // and full at the tail.  That is the same random-walk assumption Q itself
+  // encodes -- process noise accumulates with time, so a control point
+  // halfway through the scan has accumulated half the drift and takes half
+  // the correction.
+  //
+  // *** THE DISTRIBUTION IS A MODELLING CHOICE AND IT IS UNVALIDATED. ***
+  // Both endpoints being pinned over-determines the trajectory relative to
+  // preserving the IMU's own relative increments -- the difference IS the
+  // drift the filter corrected -- so something must absorb it and no
+  // measurement in this project says what.  Time-proportional is the
+  // principled default, not a measured one.  It is one line, below.
+  void moveTailClamp(const V3D& pos1, const M3D& rot1);
 
   bool valid() const { return valid_; }
   int  nControlPoints() const { return n_cp_; }
@@ -486,12 +318,11 @@ public:
   // Rigidly transform the whole spline so its pose at `t_ref` equals
   // (R_ref, p_ref).  How the IEKF's 6-dof correction reaches every control
   // point, and how the endpoint is restored after a LiDAR refinement.
-  void anchorTo(double t_ref, const M3D& R_ref, const V3D& p_ref);
 
   // One damped Gauss-Newton step on the POSITION control points against
   // `obs`.  Returns true if a step was applied; false if there was nothing to
-  // do, the system was singular, or the step exceeded lidar_refine_max_step
-  // (in which case the spline is left exactly as it was).  Call anchorTo()
+  // do, the system was singular, or the step was not finite
+  // (in which case the spline is left exactly as it was).
   // immediately afterwards -- see SplineOptions::lidar_refine_cp.
   bool refineWithLidar(const std::vector<SplineLidarObs>& obs,
                        const SplineOptions& opts);
@@ -517,24 +348,18 @@ public:
   // iteration's max step and is overwritten each time.  Neither answers "how
   // far did the refinement actually move the trajectory", which is the only
   // question that separates "ran and did nothing" from "ran and mattered" --
-  // and with lidar_refine_prior_w scaled to trace(H)/dim, a mechanism that is
+  // and with a fixed internal Tikhonov term, a mechanism that is
   // half prior by construction can report an acceptance on every frame while
   // moving the control points by microns.  These are the NET displacement
   // from the pre-refinement fit, accumulated across iterations, per frame.
   double refineDcpMax() const { return refine_dcp_max_; }   // m
   double refineDcpRms() const { return refine_dcp_rms_; }   // m
 
-  // The joint imu_fit_bias_prior_frac correction found by this fit() call
-  // -- see SplineOptions::imu_fit_bias_prior_frac's doc comment. Zero when
-  // imu_fit_mode is "off" or the relevant channel wasn't usable.
-  V3D biasAccDelta() const { return bias_acc_delta_; }
-  V3D biasGyrDelta() const { return bias_gyr_delta_; }
-  V3D gravityDelta() const { return gravity_delta_; }
-
-private:
   int    n_frozen_cp_ = 0;
   V3D    frozen_pos_  = V3D::Zero();
   M3D    frozen_rot_  = M3D::Identity();
+  V3D    frozen_pos1_ = V3D::Zero();
+  M3D    frozen_rot1_ = M3D::Identity();
 
   bool   valid_ = false;
   bool   cumulative_ = true;
@@ -582,34 +407,6 @@ struct SplineImuResidualStats
   double max_abs_gyr = 0.0;
   bool   valid() const { return n >= 8; }
 };
-
-// Replay a stored pose recurrence under corrected biases and gravity.
-//
-// `in` is the sequence ImuProc::propagate() produced; Pose6D carries, per
-// step, the WORLD accelerations at the step's head and tail and the mean body
-// rate already corrected by the OLD gyro bias, which is enough to recover the
-// body-frame measurement exactly:
-//
-//     a_head_body = R_k^T (acc_head - g_old)          == acc_raw_head - ba_old
-//     a_tail_body = (R_k Exp(gyr_k, dt))^T (acc_tail - g_old)
-//
-// The recurrence is then re-run with (bias + d_bias) and (g_old + d_gravity),
-// starting from in.front()'s pose and velocity.  The initial condition is
-// deliberately NOT corrected: the ESIKF's correction is defined at the scan
-// END and is carried by anchorTo(), so correcting both ends would apply it
-// twice.  This function fixes the SHAPE only, which is the part anchorTo
-// cannot reach.
-//
-// Returns false and leaves `out` untouched when every delta is below its
-// threshold -- an exact no-op rather than a round-trip through R^T ... R that
-// would perturb the last bits for nothing.
-bool reintegratePoses(const std::vector<Pose6D>& in,
-                      const V3D& d_bias_acc,
-                      const V3D& d_bias_gyr,
-                      const V3D& d_gravity,
-                      const V3D& gravity_old,
-                      double min_dba, double min_dbg,
-                      std::vector<Pose6D>& out);
 
 SplineImuResidualStats computeSplineImuResidual(
     const ScanSpline& spline,

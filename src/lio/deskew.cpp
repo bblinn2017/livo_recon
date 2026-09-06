@@ -154,8 +154,7 @@ inline PointXYZCov deskewOnePointSpline(
     const StateGroupPtr& state, const ScanSpline& spline,
     const M3D& R_end_T, const V3D& p_end,
     double scan_end_time, const PointXYZT& pt,
-    const DeskewOptions& opts, bool keep_time_noise,
-    const M3D& vel_noise_end)
+    const DeskewOptions& opts)
 {
   // Pose at the point's own capture time, relative to the scan-end frame.
   const M3D R_i   = spline.rotAt(pt.t);
@@ -170,35 +169,11 @@ inline PointXYZCov deskewOnePointSpline(
   const M3D cov_lidar_end = R_rel * cov_lidar_i * R_rel.transpose();
   M3D cov_imu_end = state->lidarToImu(cov_lidar_end);
 
-  if (keep_time_noise && opts.time_based_process_noise != "none")
-  {
-    const double total_dt = scan_end_time - pt.t;
-    if (opts.time_based_process_noise == "state")
-      cov_imu_end.noalias() += (total_dt * total_dt) * vel_noise_end;
-    else
-      cov_imu_end.noalias() += (total_dt * total_dt * total_dt) * vel_noise_end;
-  }
-
   PointXYZCov out{ p_imu_end, cov_imu_end };
   out.t = pt.t;
   return out;
 }
 
-// The legacy inflation matrix, built once per call.  Zero (and never used)
-// unless keep_time_noise is on.
-inline M3D splineVelNoise(const StateGroupPtr& state, const DeskewOptions& opts,
-                          bool keep_time_noise)
-{
-  if (!keep_time_noise) return M3D::Zero();
-  if (opts.time_based_process_noise == "state") {
-    const M3D R_end_T = state->rot().transpose();
-    const M3D P_VV = state->cov().block<3, 3>(StateGroup::idxV(), StateGroup::idxV());
-    return R_end_T * P_VV * R_end_T.transpose();
-  }
-  if (opts.time_based_process_noise == "var_acc")
-    return state->varAcc().asDiagonal();
-  return M3D::Zero();
-}
 
 }  // namespace
 
@@ -208,7 +183,6 @@ void deskewPointsSpline(
     double scan_end_time,
     const std::vector<PointXYZT>& points,
     const DeskewOptions& opts,
-    bool keep_time_noise,
     std::vector<PointXYZCov>& points_out)
 {
   points_out.resize(points.size());
@@ -216,12 +190,10 @@ void deskewPointsSpline(
 
   const M3D R_end_T = spline.rotAt(scan_end_time).transpose();
   const V3D p_end   = spline.posAt(scan_end_time);
-  const M3D vel_noise_end = splineVelNoise(state, opts, keep_time_noise);
 
   for (size_t i = 0; i < points.size(); ++i)
     points_out[i] = deskewOnePointSpline(state, spline, R_end_T, p_end,
-                                          scan_end_time, points[i], opts,
-                                          keep_time_noise, vel_noise_end);
+                                          scan_end_time, points[i], opts,);
 }
 
 void deskewPointsSplineSubset(
@@ -231,7 +203,6 @@ void deskewPointsSplineSubset(
     const std::vector<PointXYZT>& points,
     const std::vector<int>& indices,
     const DeskewOptions& opts,
-    bool keep_time_noise,
     std::vector<PointXYZCov>& points_out)
 {
   points_out.resize(indices.size());
@@ -239,15 +210,13 @@ void deskewPointsSplineSubset(
 
   const M3D R_end_T = spline.rotAt(scan_end_time).transpose();
   const V3D p_end   = spline.posAt(scan_end_time);
-  const M3D vel_noise_end = splineVelNoise(state, opts, keep_time_noise);
 
   for (size_t i = 0; i < indices.size(); ++i)
   {
     const int idx = indices[i];
     if (idx < 0 || idx >= static_cast<int>(points.size())) continue;
     points_out[i] = deskewOnePointSpline(state, spline, R_end_T, p_end,
-                                          scan_end_time, points[idx], opts,
-                                          keep_time_noise, vel_noise_end);
+                                          scan_end_time, points[idx], opts,);
   }
 }
 
@@ -259,7 +228,6 @@ void deskewPointsSplineCsr(
     const std::vector<int>& offsets,
     const std::vector<int>& members,
     const DeskewOptions& opts,
-    bool keep_time_noise,
     std::vector<PointXYZCov>& points_out)
 {
   if (offsets.size() < 2) { points_out.clear(); return; }
@@ -268,7 +236,6 @@ void deskewPointsSplineCsr(
 
   const M3D R_end_T = spline.rotAt(scan_end_time).transpose();
   const V3D p_end   = spline.posAt(scan_end_time);
-  const M3D vel_noise_end = splineVelNoise(state, opts, keep_time_noise);
 
   for (size_t i = 0; i < n_out; ++i)
   {
@@ -282,8 +249,7 @@ void deskewPointsSplineCsr(
       const int idx = members[b];
       if (idx < 0 || idx >= static_cast<int>(points.size())) continue;
       points_out[i] = deskewOnePointSpline(state, spline, R_end_T, p_end,
-                                           scan_end_time, points[idx], opts,
-                                           keep_time_noise, vel_noise_end);
+                                           scan_end_time, points[idx], opts,);
       continue;
     }
 
@@ -301,8 +267,7 @@ void deskewPointsSplineCsr(
       const int idx = members[k];
       if (idx < 0 || idx >= static_cast<int>(points.size())) continue;
       const PointXYZCov d = deskewOnePointSpline(state, spline, R_end_T, p_end,
-                                                 scan_end_time, points[idx], opts,
-                                                 keep_time_noise, vel_noise_end);
+                                                 scan_end_time, points[idx], opts,);
       sum_point      += d.point;
       sum_sensor_cov += d.sensor_cov;
       sum_pos_cov    += d.pos_cov;

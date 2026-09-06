@@ -127,94 +127,36 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   // nested keys are read only inside a live scope and REFUSED if set into a
   // dead one, modes are validated against a named set, and what gets printed
   // is the effective configuration.  See config_resolve.h for why.
-  cfg.get<bool>("spline/enable", opts_.spline.enable, false);
-  const bool sp = opts_.spline.enable;
+  // ── THE ONE MODE KNOB.  Bryce, 2026-09-06. ───────────────────────────────
+  // Replaces spline/enable, spline/per_iteration/mode (five levels) and
+  // spline/boundary_anchor_mode (three levels).  At "raw_imu" every other
+  // spline/* key -- and every adaptive_q/* key -- is REFUSED at startup
+  // rather than silently ignored, which is what `sp` gates below.
+  cfg.mode("spline/mode", opts_.spline.mode, "spline",
+           { "raw_imu", "spline", "spline+refine" });
+  const bool sp = opts_.spline.splineOn();
 
-  cfg.nestedMode(sp, "spline/enable", "spline/control_points/mode",
-                 opts_.spline.cp_mode, "n", { "n", "hz" });
-  cfg.nested<int>(sp && !opts_.spline.cpFromHz(), "spline/control_points/mode=n",
-                  "spline/control_points/n", opts_.spline.n_control_points, 8);
-  cfg.nested<double>(sp && opts_.spline.cpFromHz(), "spline/control_points/mode=hz",
-                     "spline/control_points/hz", opts_.spline.control_point_hz, 0.0);
-  cfg.nested<int>(sp, "spline/enable", "spline/control_points/n_max",
-                  opts_.spline.n_control_points_max, 32);
+  // Control-point RATE is the only control-point knob: n_cp is derived from
+  // it and the scan duration, so the axis is comparable across sequences.
+  cfg.nested<double>(sp, "spline/mode", "spline/control_points/hz",
+                     opts_.spline.control_point_hz, 100.0);
 
-  cfg.nested<double>(sp, "spline/enable", "spline/fit/regularization",
-                     opts_.spline.fit_regularization, 1e-6);
-  cfg.nested<double>(sp, "spline/enable", "spline/fit/reg_max_frac",
-                     opts_.spline.fit_reg_max_frac, 0.05);
-  cfg.nestedMode(sp, "spline/enable", "spline/fit/rotation/mode",
-                 opts_.spline.rot_mode, "cumulative", { "cumulative", "tangent" });
-  // A single linear solve under "tangent" -- the iteration count is not a
-  // parameter of that arm at all.
-  cfg.nested<int>(sp && opts_.spline.rotCumulative(),
-                  "spline/fit/rotation/mode=cumulative",
-                  "spline/fit/rotation/iters", opts_.spline.rot_fit_iters, 4);
-
-  cfg.nestedMode(sp, "spline/enable", "spline/fit/imu_term/mode",
-                 opts_.spline.imu_fit_mode, "off", { "off", "acc", "gyr", "both" });
-  cfg.nested<double>(sp && opts_.spline.imuFitAcc(), "spline/fit/imu_term/mode",
-                     "spline/fit/imu_term/w_acc", opts_.spline.imu_fit_w_acc, 0.0);
-  cfg.nested<double>(sp && opts_.spline.imuFitGyr(), "spline/fit/imu_term/mode",
-                     "spline/fit/imu_term/w_gyr", opts_.spline.imu_fit_w_gyr, 0.0);
-  cfg.nested<int>(sp && opts_.spline.imuFitOn(), "spline/fit/imu_term/mode",
-                  "spline/fit/imu_term/iters", opts_.spline.imu_fit_iters, 2);
-  cfg.nested<double>(sp && opts_.spline.imuFitOn(), "spline/fit/imu_term/mode",
-                     "spline/fit/imu_term/bias_prior_frac",
-                     opts_.spline.imu_fit_bias_prior_frac, 0.1);
-
-  // The per-iteration pipeline: ONE mode with five values, replacing the
-  // three booleans whose 2x2x2 space had only five distinct behaviours.  See
-  // SplineOptions::per_iteration.
-  cfg.nestedMode(sp, "spline/enable", "spline/per_iteration/mode",
-                 opts_.spline.per_iteration, "redeskew",
-                 { "off", "redeskew", "redeskew+refine",
-                   "redeskew+reintegrate", "redeskew+refine+reintegrate" });
-  const bool rf = sp && opts_.spline.refineOn();
-  const bool ri = sp && opts_.spline.reintegrateOn();
-
-  cfg.nested<double>(rf, "spline/per_iteration/mode (no +refine)",
-                     "spline/per_iteration/refine/damping",
-                     opts_.spline.lidar_refine_damping, 1e-2);
-  cfg.nested<double>(rf, "spline/per_iteration/mode (no +refine)",
-                     "spline/per_iteration/refine/prior_w",
-                     opts_.spline.lidar_refine_prior_w, 1.0);
-  cfg.nested<int>(rf, "spline/per_iteration/mode (no +refine)",
-                  "spline/per_iteration/refine/iters",
+  cfg.nested<int>(sp && opts_.spline.refineOn(), "spline/mode=spline+refine",
+                  "spline/refine/iters",
                   opts_.spline.lidar_refine_iters, 1);
-  cfg.nested<double>(rf, "spline/per_iteration/mode (no +refine)",
-                     "spline/per_iteration/refine/max_step",
-                     opts_.spline.lidar_refine_max_step, 0.10);
-  cfg.nested<double>(ri, "spline/per_iteration/mode (no +reintegrate)",
-                     "spline/per_iteration/reintegrate/min_dbg",
-                     opts_.spline.reintegrate_min_dbg, 1e-9);
-  cfg.nested<double>(ri, "spline/per_iteration/mode (no +reintegrate)",
-                     "spline/per_iteration/reintegrate/min_dba",
-                     opts_.spline.reintegrate_min_dba, 1e-9);
 
-  // Hard t0 boundary constraint -- see SplineOptions::boundary_anchor_mode's
-  // own doc comment. Default "exact": boundary_dpos measured a real,
-  // nonzero scan-to-scan gap under the old always-"none" behavior (DV-1(b)),
-  // and freezing the boundary control points to the previous scan's own
-  // final pose closes it by construction rather than approximately.
-  cfg.nestedMode(sp, "spline/enable", "spline/boundary_anchor_mode",
-                 opts_.spline.boundary_anchor_mode, "exact",
-                 { "none", "single_cp", "exact" });
-
-  cfg.nested<bool>(sp, "spline/enable", "spline/log_en", opts_.spline.log_en, false);
+  cfg.nested<bool>(sp, "spline/mode", "spline/log_en", opts_.spline.log_en, false);
   // Analysis-only dense trajectory dump -- see SplineOptions::traj_log_mode.
-  cfg.nestedMode(sp, "spline/enable", "spline/trajectory_log/mode",
+  cfg.nestedMode(sp, "spline/mode", "spline/trajectory_log/mode",
                  opts_.spline.traj_log_mode, "off", { "off", "dense" });
   cfg.nested<double>(sp && opts_.spline.trajLogOn(),
                      "spline/trajectory_log/mode=dense",
                      "spline/trajectory_log/hz", opts_.spline.traj_log_hz, 200.0);
-  cfg.nested<bool>(sp, "spline/enable", "spline/keep_time_noise",
-                   opts_.spline_keep_time_noise, false);
 
   // ── live process-noise estimation ────────────────────────────────────
   // The statistic IS the spline-vs-IMU residual, so this scope is nested
   // under the spline rather than merely warned about.
-  cfg.nested<bool>(sp, "spline/enable", "adaptive_q/enable",
+  cfg.nested<bool>(sp, "spline/mode", "adaptive_q/enable",
                    opts_.adaptive_q.enable, false);
   const bool aq = sp && opts_.adaptive_q.enable;
   cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/beta_acc", opts_.adaptive_q.beta_acc, 0.3);
@@ -489,36 +431,31 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
   spline_refits_ = 0;
   redeskew_calls_ = 0;
   redeskew_dp_rms_ = 0.0;
-  reint_dp_max_ = 0.0;
-  reint_drot_deg_max_ = 0.0;
   refit_dtraj_rms_ = 0.0;
   refit_dtraj_max_ = 0.0;
   refit_drot_deg_ = 0.0;
-  spline_poses0_.clear();
   // Captured HERE, before anything this frame can correct state_'s bias/
   // gravity (the IEKF loop hasn't started) -- see the member doc comments.
   spline_frame_bias_acc_ = state_->biasAcc();
   spline_frame_bias_gyr_ = state_->biasGyr();
   spline_frame_gravity_  = state_->gravity();
-  // Per-FRAME, not per-fit: fit() no longer resets these, because with
-  // reintegrate_each_iteration on it runs once per IEKF iteration.
   spline_.resetRefineStats();
-  if (opts_.spline.enable && !mg.poses.empty())
+  if (opts_.spline.splineOn() && !mg.poses.empty())
   {
     TimedScope ts_fit(profiler_, "lio/spline/fit");
     spline_frame_count_++;
-    const SplineImuFitData ifd = splineImuFitData(mg);
-    // Boundary freeze (SplineOptions::boundary_anchor_mode).  Only once a
-    // previous scan has actually left a boundary to freeze to -- the very
-    // first spline scan of a run has nothing to anchor against, so it
-    // always fits unconstrained (n_frozen=0) regardless of the mode.
+    // BOTH ENDPOINTS ARE CLAMPED.  Head = the previous scan's own final
+    // pose; tail = the PROPAGATED scan-end pose, because the IEKF's
+    // corrected one does not exist yet -- the loop is about to compute it,
+    // and moveTailClamp() carries it in on every iteration afterwards.
+    //
+    // The very first spline scan of a run has no previous boundary to
+    // freeze to, so it fits unconstrained (n_frozen = 0).
     spline_.setFrozenBoundary(
-        prev_scan_end_valid_ ? opts_.spline.nFrozenCp() : 0,
-        prev_scan_end_pos_, prev_scan_end_rot_);
-    spline_ok_ = spline_.fit(mg.poses, mg.poses.front().t, mg.image.t, opts_.spline, &ifd);
-    // Keep the pristine sequence only if something will replay it.
-    if (spline_ok_ && opts_.spline.reintegrateOn())
-      spline_poses0_ = mg.poses;
+        prev_scan_end_valid_ ? SplineOptions::N_FROZEN_CP : 0,
+        prev_scan_end_pos_, prev_scan_end_rot_,
+        state_->pos(), state_->rot());
+    spline_ok_ = spline_.fit(mg.poses, mg.poses.front().t, mg.image.t, opts_.spline);
     if (!spline_ok_)
     {
       // Never substitute a bad spline for a working deskew.  Count the
@@ -532,7 +469,7 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
   std::vector<PointXYZCov> deskewed;
   if (spline_ok_)
     deskewPointsSpline(state_, spline_, mg.image.t, mg.lidar_points,
-                       opts_.deskew, opts_.spline_keep_time_noise, deskewed);
+                       opts_.deskew, deskewed);
   else
     deskewPoints(state_, mg.poses, mg.image.t, mg.lidar_points, opts_.deskew, deskewed);
 
@@ -579,200 +516,27 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
   }
 }
 
-SplineImuFitData LioProc::splineImuFitData(const MeasureGroup& mg) const
-{
-  SplineImuFitData d;
-  if (opts_.spline.imuFitOn())
-    d.samples = &mg.imu_samples_raw;
-  // Deliberately the FRAME-START bias/gravity (captured once in
-  // deskewAndDownsample(), before this frame's IEKF loop can move it), not
-  // state_->biasAcc()/biasGyr()/gravity() directly -- this function is
-  // called again from inside the per-iteration redeskew loop
-  // (redeskewFromSpline()), by which point state_'s own bias has already
-  // been nudged by however many IEKF iterations have run THIS frame.
-  // fit()'s joint bias/gravity correction (SplineOptions::
-  // imu_fit_bias_prior_frac) explains the gap between raw IMU integration
-  // and the LiDAR-fit control points as a correction to THIS fixed
-  // baseline -- correcting against the current, still-drifting iterate
-  // instead would double-count whatever the IEKF's own separate point-to-
-  // plane correction is simultaneously explaining through its own
-  // pose/bias covariance cross-terms.
-  d.bias_acc = spline_frame_bias_acc_;
-  d.bias_gyr = spline_frame_bias_gyr_;
-  d.gravity  = spline_frame_gravity_;
-  return d;
-}
 
 bool LioProc::redeskewFromSpline(MeasureGroup& mg)
 {
-  if (!spline_ok_ || !opts_.spline.redeskewOn()) return false;
-  if (ds_offsets_.size() < 2) return false;
-  if (ds_offsets_.size() != mg.points.size() + 1) return false;
+  if (!spline_ok_ || !opts_.spline.splineOn()) return false;
 
-  TimedScope ts(profiler_, "lio/spline/redeskew");
-
-  // P3(a).  Snapshot the trajectory on a fixed grid BEFORE refinement, and
-  // difference it after.  32 samples across [t0,t1] is well under a
-  // microsecond and answers the question refine_dcp_rms only proxies.
-  std::array<V3D, 32> pre_p;
-  std::array<M3D, 32> pre_R;
-  {
-    const double a0 = spline_.t0(), h0 = (spline_.t1() - a0) / 31.0;
-    for (int k = 0; k < 32; ++k) {
-      pre_p[k] = spline_.posAt(a0 + k * h0);
-      pre_R[k] = spline_.rotAt(a0 + k * h0);
-    }
-  }
-  // P3(b).  The IMU-residual variance the CURRENT spline implies, before the
-  // refit moves it.  computeSplineImuResidual() is the same function
-  // finalizeSplineAndQ() already calls on the post-refit spline; this is one
-  // extra call on the pre-refit spline.
-  const SplineImuResidualStats pre_stats =
-      !mg.imu_samples_raw.empty()
-          ? computeSplineImuResidual(spline_, mg.imu_samples_raw,
-                                     state_->biasAcc(), state_->biasGyr(),
-                                     state_->gravity())
-          : SplineImuResidualStats{};
-  if (pre_stats.valid()) { cov_acc_pre_ = pre_stats.cov_acc; cov_gyr_pre_ = pre_stats.cov_gyr; }
-
-  // (0) SHAPE, from the IMU, under the bias this iteration has arrived at.
-  //
-  // propagate() ran once, before the loop, with the pre-update bias, and is
-  // never re-run -- so without this the spline's shape is frozen there while
-  // every iteration moves the bias.  anchorTo() cannot repair it: a bias delta
-  // is a shape change (rotation drifting linearly in t, position
-  // quadratically) and anchorTo is a rigid transform.  propagate() does not
-  // touch the bias or gravity blocks, so state_propagat_ still holds exactly
-  // the values the stored poses were built with.
-  //
-  // The replay always starts from spline_poses0_, never from the previous
-  // replay, so the correction is applied once rather than compounded.  Note
-  // this moves the spline out from under the LiDAR residuals that step (1)
-  // below is about to be linearised at, by the size of the bias delta -- the
-  // reason reintegrate_min_db{a,g} exist.
-  if (opts_.spline.reintegrateOn() && spline_poses0_.size() >= 2)
-  {
-    TimedScope ts_ri(profiler_, "lio/spline/reintegrate");
-    const V3D dba = state_->biasAcc() - state_propagat_.biasAcc();
-    const V3D dbg = state_->biasGyr() - state_propagat_.biasGyr();
-    const V3D dg  = state_->gravity() - state_propagat_.gravity();
-
-    if (reintegratePoses(spline_poses0_, dba, dbg, dg, state_propagat_.gravity(),
-                         opts_.spline.reintegrate_min_dba,
-                         opts_.spline.reintegrate_min_dbg,
-                         spline_poses_))
-    {
-      // Fit into a COPY and adopt only on success: fit() clears valid_ on
-      // entry, so a failed re-fit would leave the frame with no spline at all
-      // -- strictly worse than the slightly stale one it was replacing.
-      const SplineImuFitData ifd = splineImuFitData(mg);
-      ScanSpline trial = spline_;
-      if (trial.fit(spline_poses_, spline_poses_.front().t, mg.image.t,
-                    opts_.spline, &ifd))
-      {
-        spline_ = trial;
-        spline_refits_++;
-        // MAGNITUDE, not just the refit count -- see the engagement counters
-        // in the header.  How far the replay actually moved the poses the
-        // spline is fitted to; a refit that moves them by nanometres is a
-        // refit that did nothing.
-        const size_t np = std::min(spline_poses0_.size(), spline_poses_.size());
-        for (size_t k = 0; k < np; ++k)
-        {
-          const double dp =
-              (spline_poses_[k].pos - spline_poses0_[k].pos).norm();
-          const double dr =
-              Log(spline_poses0_[k].rot.transpose() * spline_poses_[k].rot).norm()
-              * (180.0 / M_PI);
-          if (std::isfinite(dp)) reint_dp_max_ = std::max(reint_dp_max_, dp);
-          if (std::isfinite(dr)) reint_drot_deg_max_ = std::max(reint_drot_deg_max_, dr);
-        }
-      }
-    }
-  }
-
-  // (1) SHAPE, from the map.  Must run BEFORE anchorTo(), which moves every
-  // point and would leave these residuals describing a spline that no longer
-  // exists.  See SplineOptions::lidar_refine_cp for the division of labour.
-  if (opts_.spline.refineOn() && !residuals_.empty())
-  {
-    lidar_obs_.clear();
-    lidar_obs_.reserve(residuals_.size());
-    for (const auto& r : residuals_)
-    {
-      // Inside the fitted window, not "> 0".  The window runs from the first
-      // IMU pose to the frame reference time precisely so that every LiDAR
-      // return in the scan lands in it (see the fit call above), so this
-      // rejects nothing in normal operation -- which is the point: the old
-      // t > 0 test was a sentinel check reading a real coordinate.  Frame
-      // times are start_time-relative and start_time is the calibration-end
-      // image stamp (DataQueues::setStartTime), so a scan straddling the end
-      // of calibration has genuinely NEGATIVE point times, and that test
-      // silently dropped exactly those points.
-      if (!(r.t >= spline_.t0() && r.t <= spline_.t1())) continue;
-      SplineLidarObs o;
-      o.t      = r.t;
-      o.normal = r.normal;
-      o.r      = r.r;
-      o.sigma2 = r.sigma_squared;
-      lidar_obs_.push_back(o);
-    }
-    spline_.refineWithLidar(lidar_obs_, opts_.spline);
-  }
-
-  // P3(a), continued.  Difference the same 32-point grid against the
-  // pre-refit snapshot above, BEFORE anchorTo() -- this is the refit's own
-  // effect on the trajectory. anchorTo() below is a separate, expected rigid
-  // correction from the IEKF and must not be folded into "how much did the
-  // refit change the trajectory", or L1 (redeskew only, no refine/
-  // reintegrate at all) would show a nonzero refit_dtraj_* purely from the
-  // pose correction every rung gets, contradicting the L0->L1 prediction
-  // that refit_dtraj_* == 0 there.
-  {
-    double s2 = 0.0, mx = 0.0, rmx = 0.0;
-    const double a1 = spline_.t0(), h1 = (spline_.t1() - a1) / 31.0;
-    for (int k = 0; k < 32; ++k) {
-      const double d = (spline_.posAt(a1 + k * h1) - pre_p[k]).norm();
-      s2 += d * d;  mx = std::max(mx, d);
-      const M3D dR = spline_.rotAt(a1 + k * h1) * pre_R[k].transpose();
-      rmx = std::max(rmx, std::acos(std::clamp((dR.trace() - 1.0) / 2.0, -1.0, 1.0))
-                          * (180.0 / M_PI));
-    }
-    refit_dtraj_rms_ = std::max(refit_dtraj_rms_, std::sqrt(s2 / 32.0));
-    refit_dtraj_max_ = std::max(refit_dtraj_max_, mx);
-    refit_drot_deg_  = std::max(refit_drot_deg_, rmx);
-  }
-
-  // (2) POSE, from the IEKF.
-  // Carry the IEKF's correction into EVERY control point, not just the
-  // scan-end pose.  anchorTo() is a rigid transform of the whole spline
-  // that makes its pose at the frame reference time equal the corrected
-  // state, so the intra-scan SHAPE the fit found is preserved exactly
-  // while the whole trajectory moves with the correction.  This is the
-  // difference from the legacy one-shot deskew, where only the scan-end
-  // pose is ever corrected and every earlier point keeps the pose the
-  // IMU-only propagation gave it.
-  //
-  // SKIPPED under boundary freezing (SplineOptions::boundary_anchor_mode
-  // != "none"): a rigid whole-spline correction here would move t0 away
-  // from the value fit()/refineWithLidar() were just constrained to leave
-  // untouched, undoing the freeze every single inner iteration and
-  // degrading the fit against its own residuals for nothing. With
-  // freezing active, the spline's placement comes ONLY from the frozen
-  // fit/refine; state_ is not synchronized to it at all -- state_'s own
-  // pose keeps coming exclusively from the IEKF's own point-to-plane
-  // correction (buildResiduals()/HtH/Htz/applyDelta), same as always.
-  // The spline here remains purely an internal deskewing aid.
-  if (spline_.nFrozenCp() == 0)
-    spline_.anchorTo(mg.image.t, state_->rot(), state_->pos());
+  // CARRY THE IEKF'S CORRECTION IN BY MOVING THE TAIL CLAMP, not by rigidly
+  // transforming the spline.  anchorTo() applied ONE correction to the point
+  // at t0 and the point at t1 alike -- but the correction is drift
+  // accumulated across THIS scan, and at t0 the state was already corrected
+  // by the previous scan's own update, so it moved a point that was already
+  // right.  moveTailClamp() distributes it by elapsed time instead: zero at
+  // the head clamp, full at the tail, and any refinement already applied to
+  // the interior survives because the ramp is additive on top of it.
+  spline_.moveTailClamp(state_->pos(), state_->rot());
 
   // How far the re-deskew actually moved the points it re-placed.  This is
   // the only quantity that says whether the per-iteration mechanism is doing
-  // anything at all, and nothing recorded it before.
+  // anything at all.
   redeskew_prev_ = mg.points;
   deskewPointsSplineCsr(state_, spline_, mg.image.t, mg.lidar_points,
-                        ds_offsets_, ds_members_, opts_.deskew,
-                        opts_.spline_keep_time_noise, mg.points);
+                        ds_offsets_, ds_members_, opts_.deskew, mg.points);
   ++redeskew_calls_;
   if (redeskew_prev_.size() == mg.points.size() && !mg.points.empty())
   {
@@ -789,9 +553,43 @@ bool LioProc::redeskewFromSpline(MeasureGroup& mg)
   return true;
 }
 
+// SHAPE, from the map.  Called from inside the IEKF loop with the residuals
+// the solve is ABOUT TO USE, so the refinement and the state update are
+// linearised at the SAME trajectory -- neither is stale (Bryce, 2026-09-06).
+// The old placement, at the top of the next iteration against the previous
+// iteration's residuals, was linearised at a trajectory that no longer
+// existed by the time the step was applied.
+//
+// Both clamps are frozen in the solve, so this owns the interior shape and
+// only the interior shape; it reaches the endpoint only indirectly, by
+// changing where the points land and therefore what the next residual build
+// reports.
+bool LioProc::refineSplineFromResiduals(const MeasureGroup& mg)
+{
+  if (!spline_ok_ || !opts_.spline.refineOn() || residuals_.empty()) return false;
+
+  TimedScope ts_ref(profiler_, "lio/spline/refine");
+  lidar_obs_.clear();
+  lidar_obs_.reserve(residuals_.size());
+  for (const auto& r : residuals_)
+  {
+    // Inside the fitted window, not "> 0": frame times are start_time-
+    // relative, so a scan straddling the end of calibration has genuinely
+    // NEGATIVE point times and a sentinel test would reject real returns.
+    if (r.t < spline_.t0() - 1e-9 || r.t > spline_.t1() + 1e-9) continue;
+    SplineLidarObs o;
+    o.t      = r.t;
+    o.normal = r.normal;
+    o.r      = r.r;
+    o.sigma2 = r.sigma_squared;
+    lidar_obs_.push_back(o);
+  }
+  return spline_.refineWithLidar(lidar_obs_, opts_.spline);
+}
+
 void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
 {
-  if (!opts_.spline.enable) return;
+  if (!opts_.spline.splineOn()) return;
 
   last_spline_stats_ = SplineImuResidualStats{};
 
@@ -799,18 +597,9 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
   boundary_drot_deg_ = -1.0;
   if (spline_ok_)
   {
-    if (spline_.nFrozenCp() == 0)
-    {
-      // Anchor to the CONVERGED state before measuring.  Measuring against
-      // the propagated-only spline would fold this frame's own correction
-      // error into a number we are about to call "IMU noise".
-      spline_.anchorTo(mg.image.t, state_->rot(), state_->pos());
-    }
-    // Boundary freeze active (nFrozenCp() > 0): t0 was already pinned
-    // exactly before fit()/refineWithLidar() ran (see setFrozenBoundary()'s
-    // own call site) -- anchorTo() here would rigidly move the whole spline
-    // again, re-opening the gap it was constrained to close, so it is
-    // skipped. state_ is NOT written back from the spline's own t1: state_
+    // BOTH CLAMPS ARE ALREADY EXACT: t0 was pinned before fit() ran and t1
+    // was carried in by moveTailClamp() on the last iteration, so there is
+    // nothing to re-anchor here. state_ is NOT written back from the spline's own t1: state_
     // is one continuously-propagated object across the whole run (never
     // reconstructed per scan), so it was never actually discontinuous at
     // scan boundaries in the first place -- only the spline's own
@@ -933,9 +722,9 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
       ofs << "scan_id," << adaptive_q_.csvHeader()
           << ",spline_ok,n_cp,fit_res_pos,fit_res_rot,fit_reg_frac,rot_chord_deg,"
              "fit_fail_count,frame_count,max_abs_acc,max_abs_gyr,"
-             "n_cp_req,rot_mode,refine_applied,refine_rejects,last_refine_step,"
-             "refits,per_iteration,refine_dcp_max,refine_dcp_rms,"
-             "reint_dp_max,reint_drot_deg_max,redeskew_calls,redeskew_dp_rms,"
+             "n_cp_req,refine_applied,refine_rejects,last_refine_step,"
+             "mode,refine_dcp_max,refine_dcp_rms,"
+             "redeskew_calls,redeskew_dp_rms,"
              "refit_dtraj_rms,refit_dtraj_max,refit_drot_deg,cov_acc_pre,cov_gyr_pre,"
              "d_bias_acc_norm,d_bias_gyr_norm,d_gravity_norm\n";
       first = false;
@@ -961,10 +750,9 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
         // mechanism actually moved things this frame.  A cell with
         // per_iteration naming a step whose magnitude column is 0 across the
         // whole run is an INERT cell, not a null result.
-        << opts_.spline.per_iteration << ','
+        << opts_.spline.mode << ','
         << (spline_ok_ ? spline_.refineDcpMax() : 0.0) << ','
         << (spline_ok_ ? spline_.refineDcpRms() : 0.0) << ','
-        << reint_dp_max_ << ',' << reint_drot_deg_max_ << ','
         << redeskew_calls_ << ',' << redeskew_dp_rms_ << ','
         << refit_dtraj_rms_ << ',' << refit_dtraj_max_ << ',' << refit_drot_deg_ << ','
         << cov_acc_pre_ << ',' << cov_gyr_pre_ << ','
@@ -985,7 +773,6 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
   run_redeskew_calls_ += redeskew_calls_;
   run_refits_ += spline_refits_;
   run_redeskew_dp_max_ = std::max(run_redeskew_dp_max_, redeskew_dp_rms_);
-  run_reint_dp_max_ = std::max(run_reint_dp_max_, reint_dp_max_);
   if (spline_ok_)
   {
     run_refine_applied_ += spline_.refineApplied();
@@ -1016,7 +803,7 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
 // was ON with a zero counter prints INERT.
 LioProc::~LioProc()
 {
-  if (!opts_.spline.enable) return;
+  if (!opts_.spline.splineOn()) return;
   const std::string rep = engagementReport();
   ROS_WARN_STREAM("\n" << rep);
   std::ofstream ofs(debugLogPath("engagement.txt"), std::ios::trunc);
@@ -1041,15 +828,13 @@ std::string LioProc::engagementReport() const
         << " times and moved nothing";
   };
 
-  o << "\n  spline/per_iteration = " << opts_.spline.per_iteration;
+  o << "\n  spline/mode = " << opts_.spline.mode;
   line("  redeskew          ", opts_.spline.redeskewOn(), run_redeskew_calls_,
        "max_dp_rms_m", run_redeskew_dp_max_);
   line("  refine            ", opts_.spline.refineOn(), run_refine_applied_,
        "max_dcp_m", run_refine_dcp_max_);
   if (opts_.spline.refineOn())
     o << " rejects=" << run_refine_rejects_;
-  line("  reintegrate       ", opts_.spline.reintegrateOn(), run_refits_,
-       "max_dp_m", run_reint_dp_max_);
 
   o << "\n  adaptive_q/enable = "
     << (opts_.adaptive_q.enable ? "true" : "false");
@@ -1093,9 +878,8 @@ std::string LioProc::engagementReport() const
       << vm->opts()->weight_floor_mode;
   }
 
-  o << "\n  imu_fit/mode = " << opts_.spline.imu_fit_mode
-    << "\n  fit/rotation/mode = " << opts_.spline.rot_mode
-    << "\n  control_points/mode = " << opts_.spline.cp_mode;
+  o << "\n  spline/mode = " << opts_.spline.mode
+    << "\n  control_points/hz = " << opts_.spline.control_point_hz;
   o << "\n[engagement] a flag marked INERT above did not test anything; the "
        "cell is invalid, not null.";
   return o.str();
@@ -1345,6 +1129,11 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       // already-partially-corrected state, which is not the quantity NIS
       // is defined over.
       double error = estimateStateCorrection(mg.points, dtheta, dt, /*allow_consistency_log=*/iter == 0);
+      // SHAPE, from the SAME residuals that solve just used.  Refinement and
+      // the state update are therefore linearised at one trajectory, which
+      // is the whole reason this sits here and not at the top of the next
+      // iteration (Bryce, 2026-09-06).
+      refineSplineFromResiduals(mg);
       if (!residuals_.empty()) any_solved = true;
       total_dtheta += dtheta;
       total_dt     += dt;

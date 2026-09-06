@@ -7,43 +7,24 @@
 # silently dropped.
 
 spline:
-  enable: true
-
-  fit:
-    rotation:
-      # REVERSED 2026-09-02.  Cumulative -- the form every published CT-LIO
-      # system uses -- is the default; tangent is the ablation arm.  The
-      # earlier default rested on a synthetic fixture in which tangent was an
-      # exact linear least-squares solve while the cumulative arm was refined
-      # by Gauss-Newton with a first-order stand-in for its Jacobian: a
-      # correct implementation of the non-standard choice against a sloppy one
-      # of the standard choice.  The Jacobian is now exact (Sommer's
-      # recurrence), so the burden of proof sits on the departure.
-      #
-      # SP-4a"/4b" then measured it on real data: cumulative beats tangent on
-      # BOTH arms on exp05, 0.277 vs 0.334 m debiased and 0.351 vs 0.428 m
-      # pca.  That is 17-20%, which sits AT T0-G's 18.88% error bar rather
-      # than clear of it -- consistent-direction evidence on two arms, not a
-      # measured margin.  Quote it that way.
-      mode: cumulative
-      # Raised 2 -> 4 with the exact Jacobian; each iteration is one LDLT of a
-      # banded 3*n_cp system per frame.
-      iters: 4
-
-  # See config/spline_adaptive_q.yaml.  The five values are the five distinct
-  # behaviours; the three-boolean form had eight configurations and three
-  # duplicates, which is what SP-4a"/4b" spent half its grid discovering.
+  # See config/spline_adaptive_q.yaml for the full commentary.  raw_imu |
+  # spline | spline+refine, replacing enable + per_iteration (5) +
+  # boundary_anchor_mode (3).  THIS is the ablation axis for anything
+  # touching the per-iteration pipeline; do not reintroduce booleans.
   #
-  # THE ABLATION AXIS for anything touching the per-iteration pipeline is this
-  # key, swept over its five values.  Do not reintroduce separate booleans.
-  per_iteration: redeskew
+  # Rotation is always the cumulative form now -- the tangent arm is gone.
+  # SP-4a"/4b" measured cumulative beating tangent on BOTH arms on exp05
+  # (0.277 vs 0.334 m debiased, 0.351 vs 0.428 m pca), which is 17-20% and
+  # sits AT T0-G's 18.88% bar rather than clear of it: consistent-direction
+  # evidence on two arms, not a measured margin.  The removal rests on it
+  # being the published form, not on that number.
+  mode: spline+refine
 
-  # Live only under +refine.  Unvaried since 5dd6e6f -- see SP-P.
+  control_points:
+    hz: 100.0
+
   # refine:
-  #   damping: 1.0e-2
-  #   prior_w: 1.0
   #   iters: 1
-  #   max_step: 0.10
 
   log_en: true
 
