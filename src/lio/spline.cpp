@@ -136,31 +136,6 @@ inline void basisU(double u, Eigen::Vector4d& b, Eigen::Vector4d& db, Eigen::Vec
   ddb[3] = u;
 }
 
-// CUMULATIVE basis, Btilde_j(u) = sum_{k>=j} b_k(u) for j = 1,2,3 (j = 0 is
-// identically 1 and never needed -- it multiplies the base rotation R_s).
-// Derived directly from basisU above; the closed forms are
-//   Btilde_1 = ( u^3 - 3u^2 + 3u + 5 ) / 6
-//   Btilde_2 = ( -2u^3 + 3u^2 + 3u + 1 ) / 6
-//   Btilde_3 = u^3 / 6
-// and their u-derivatives
-//   Btilde_1' = (1-u)^2 / 2
-//   Btilde_2' = ( -2u^2 + 2u + 1 ) / 2
-//   Btilde_3' = u^2 / 2
-inline void cumBasisU(double u, Eigen::Vector3d& Bt, Eigen::Vector3d& dBt)
-{
-  const double u2 = u * u;
-  const double u3 = u2 * u;
-  const double om = 1.0 - u;
-
-  Bt[0] = (u3 - 3.0 * u2 + 3.0 * u + 5.0) / 6.0;
-  Bt[1] = (-2.0 * u3 + 3.0 * u2 + 3.0 * u + 1.0) / 6.0;
-  Bt[2] = u3 / 6.0;
-
-  dBt[0] = 0.5 * om * om;
-  dBt[1] = 0.5 * (-2.0 * u2 + 2.0 * u + 1.0);
-  dBt[2] = 0.5 * u2;
-}
-
 // Inverse SO(3) right Jacobian.  Jr(phi)^-1 = I + [phi]x/2 + c(theta) [phi]x^2
 // with c = 1/theta^2 - (1+cos theta)/(2 theta sin theta), which tends to 1/12.
 // The left inverse is its transpose: Jl(phi) = Jr(phi)^T, so Jl^-1 = (Jr^-1)^T.
@@ -191,18 +166,6 @@ void ScanSpline::basisAt(double t, int& first_cp, Eigen::Vector4d& b,
   first_cp = s;
 }
 
-void ScanSpline::cumBasisAt(double t, int& first_cp, Eigen::Vector3d& Bt,
-                            Eigen::Vector3d& dBt) const
-{
-  const double tc = std::min(std::max(t, t0_), t1_);
-  double x = (tc - t0_) * inv_delta_;
-  int s = static_cast<int>(std::floor(x));
-  if (s >= n_seg_) { s = n_seg_ - 1; x = static_cast<double>(n_seg_); }
-  if (s < 0)       { s = 0;          x = 0.0; }
-  const double u = x - static_cast<double>(s);
-  cumBasisU(u, Bt, dBt);
-  first_cp = s;
-}
 
 bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
                      const SplineOptions& opts)
@@ -215,7 +178,6 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   if (poses.size() < 2) return false;
   if (!(t1 > t0)) return false;
 
-  cumulative_ = true;
 
   // n_cp comes from the control-point RATE and nothing else: a fixed n_cp is
   // a different control rate on every sequence with a different scan
@@ -318,169 +280,32 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   bias_gyr_delta_ = V3D::Zero();
   gravity_delta_  = V3D::Zero();
 
-  if (!fitRotationCumulative(poses, SplineOptions::ROT_FIT_ITERS))
-  {
-    // Fall back to the tangent parameterisation rather than to a
-    // half-initialised cumulative one -- a wrong rotation spline is worse
-    // than an approximate one, and the mode is reported in the log.
-    cumulative_ = false;
-  }
-  return valid_;
-}
-
-// Initialise the control rotations from the tangent fit evaluated at the
-// Greville abscissae, then refine by Gauss-Newton against the pose sequence.
-// The Greville abscissa of control point i for a uniform cubic is
-// t0 + (i-1)*delta; the first and last lie outside [t0,t1] and are clamped by
-// the evaluator, which is correct -- they are extrapolation control points and
-// the GN step below moves them to wherever the data actually wants them.
-bool ScanSpline::fitRotationCumulative(const std::vector<Pose6D>& poses, int gn_iters)
-{
-  cp_R_.assign(n_cp_, M3D::Identity());
+  // CHART GUARD.  The uniform cubic basis is non-negative and sums to 1, so
+  // phi(t) is a CONVEX COMBINATION of the control points and
+  // max_t |phi(t)| <= max_i |cp_phi_[i]| -- a cheap conservative bound, no
+  // sampling required.  Beyond the bound the single-chart parameterisation
+  // distorts, so refuse the fit and let the caller fall back rather than
+  // deskew every point against a trajectory we do not trust.
   for (int i = 0; i < n_cp_; ++i)
   {
-    const double tg = t0_ + (static_cast<double>(i) - 1.0) * delta_;
-    cp_R_[i] = R_anchor_ * Exp(phiAt(tg));
+    if (cp_phi_.col(i).norm() > SplineOptions::CHART_MAX_PHI_RAD)
+    {
+      valid_ = false;
+      return false;
+    }
   }
-  // Boundary freeze: the Greville seeding above is already approximately
-  // close (cp_phi_ was frozen by the caller before this ran), but not
-  // exactly -- overwrite directly so cp_R_[i] starts EXACT for i<n_frozen,
-  // and the GN loop below (via freezeIncrementalBlockSystem) never moves
-  // it away from this value.
-  for (int i = 0; i < n_frozen_cp_ && i < n_cp_; ++i) cp_R_[i] = frozen_rot_;
-  for (int i = 0; i < n_frozen_cp_ && i < n_cp_; ++i)
-    cp_R_[n_cp_ - 1 - i] = frozen_rot1_;
 
-  std::vector<double> ts;  ts.reserve(poses.size());
-  std::vector<M3D>    Rs;  Rs.reserve(poses.size());
+  // The rotation control points came out of the SAME linear solve as the
+  // position ones, exactly, so there is nothing left to refine.
+  double sr = 0.0; int nr = 0;
   for (const auto& ps : poses)
   {
     if (ps.t < t0_ - 1e-9 || ps.t > t1_ + 1e-9) continue;
-    ts.push_back(ps.t);
-    Rs.push_back(ps.rot);
+    sr += Log(M3D(rotAt(ps.t).transpose() * ps.rot)).squaredNorm();
+    ++nr;
   }
-  if (static_cast<int>(ts.size()) < n_cp_ + 1) return false;
-
-  // ── Gauss-Newton with the EXACT Jacobian of the cumulative product ───────
-  //
-  // R(u) = R_s A_1 A_2 A_3,  A_j = Exp(Btilde_j(u) d_j),  d_j = Log(R_{s+j-1}^T R_{s+j})
-  //
-  // Perturb control rotation s+k on the right, R_{s+k} <- R_{s+k} Exp(delta_k),
-  // and collect the induced right perturbation of R:  R <- R Exp(sum_k J_k delta_k).
-  // Each d_j depends on TWO control rotations, which is what the old
-  // first-order stand-in dropped:
-  //
-  //     dd_j/ddelta_{j}    =  Jr(d_j)^-1
-  //     dd_j/ddelta_{j-1}  = -Jl(d_j)^-1
-  //
-  // A right perturbation w_j of A_j moves through the trailing product as
-  // C_j^T w_j with C_j = A_{j+1}...A_3 (for SO(3), R^-1 Exp(w) R = Exp(R^T w)),
-  // and dA_j = A_j Exp(Btilde_j Jr(Btilde_j d_j) dd_j).  Writing
-  // T_j = C_j^T Btilde_j Jr(Btilde_j d_j):
-  //
-  //     J_0 = C_0^T        - T_1 Jl(d_1)^-1        C_0 = A_1 A_2 A_3
-  //     J_1 = T_1 Jr(d_1)^-1 - T_2 Jl(d_2)^-1
-  //     J_2 = T_2 Jr(d_2)^-1 - T_3 Jl(d_3)^-1
-  //     J_3 = T_3 Jr(d_3)^-1
-  //
-  // ANALYTIC CHECK, and it is the reason this can be trusted without a fixture:
-  // as every rotation increment goes to zero (A_j -> I, C_j -> I, all Jacobians
-  // -> I) the four blocks collapse to
-  //     (1 - Bt_1) I,  (Bt_1 - Bt_2) I,  (Bt_2 - Bt_3) I,  Bt_3 I
-  // and those are EXACTLY the ordinary cubic basis b_0..b_3 -- (1-u)^3/6,
-  // (3u^3-6u^2+4)/6, (-3u^3+3u^2+3u+1)/6, u^3/6 -- which is what the previous
-  // implementation used at every rotation magnitude.  So the old code was the
-  // correct zeroth-order limit of this one, and this one reduces to it exactly.
-  //
-  // The residual is r = Log((R Exp(eps))^T R_pose) ~= e - Jl(e)^-1 eps with
-  // e = Log(R^T R_pose), so each block is premultiplied by Jl(e)^-1.
-  //
-  // The system is 3*n_cp square (24x24 at n_cp=8) and banded -- the same shape
-  // and cost as refineWithLidar()'s.  The previous version solved an n_cp
-  // SCALAR system, which is what a Jacobian of b_j(u)*I permits and the exact
-  // one does not.
-  const int dim = 3 * n_cp_;
-  for (int it = 0; it < std::max(0, gn_iters); ++it)
-  {
-    Eigen::MatrixXd H = Eigen::MatrixXd::Zero(dim, dim);
-    Eigen::VectorXd g = Eigen::VectorXd::Zero(dim);
-    Eigen::Vector3d Bt, dBt;
-    int s = 0;
-    int used = 0;
-
-    for (size_t k = 0; k < ts.size(); ++k)
-    {
-      cumBasisAt(ts[k], s, Bt, dBt);
-      if (s < 0 || s + 3 >= n_cp_) continue;
-
-      V3D d[3]; M3D Aj[3];
-      for (int j = 0; j < 3; ++j)
-      {
-        d[j]  = Log(cp_R_[s + j].transpose() * cp_R_[s + j + 1]);
-        Aj[j] = Exp(V3D(Bt[j] * d[j]));
-      }
-
-      const M3D R = cp_R_[s] * Aj[0] * Aj[1] * Aj[2];
-      const V3D e = Log(R.transpose() * Rs[k]);
-      if (!e.allFinite()) continue;
-
-      M3D C[3];                       // C[j] = product of the A's AFTER j
-      C[2] = M3D::Identity();
-      C[1] = Aj[2];
-      C[0] = Aj[1] * Aj[2];
-      const M3D C0 = Aj[0] * C[0];    // the whole product, for R_s
-
-      M3D T[3], JrI[3], JlI[3];
-      for (int j = 0; j < 3; ++j)
-      {
-        T[j]   = C[j].transpose() * (Bt[j] * Jr(V3D(Bt[j] * d[j])));
-        JrI[j] = JrInv(d[j]);
-        JlI[j] = JrI[j].transpose();
-      }
-
-      M3D J[4];
-      J[0] = C0.transpose() - T[0] * JlI[0];
-      J[1] = T[0] * JrI[0]  - T[1] * JlI[1];
-      J[2] = T[1] * JrI[1]  - T[2] * JlI[2];
-      J[3] = T[2] * JrI[2];
-
-      const M3D Le = JrInv(e).transpose();   // Jl(e)^-1
-      M3D M[4];
-      for (int a = 0; a < 4; ++a) M[a] = Le * J[a];
-
-      for (int a = 0; a < 4; ++a)
-      {
-        g.segment<3>(3 * (s + a)) += M[a].transpose() * e;
-        for (int bb = 0; bb < 4; ++bb)
-          H.block<3, 3>(3 * (s + a), 3 * (s + bb)) += M[a].transpose() * M[bb];
-      }
-      ++used;
-    }
-    if (used < n_cp_) return false;
-
-    // Light ridge: the outermost control points are supported by few samples.
-    const double ridge = 1e-9 * std::max(1.0, H.trace() / static_cast<double>(dim));
-    for (int i = 0; i < dim; ++i) H(i, i) += ridge;
-
-    // Boundary freeze: force the solved STEP to 0 for i<n_frozen_cp_, so
-    // cp_R_[i] (already exactly frozen_rot_, set above) never moves.
-    freezeIncrementalBlockSystem(H, g, n_frozen_cp_);
-    freezeIncrementalBlockSystemTail(H, g, n_cp_, n_frozen_cp_);
-
-    Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
-    if (ldlt.info() != Eigen::Success) return false;
-    const Eigen::VectorXd D = ldlt.solve(g);
-    if (!D.allFinite()) return false;
-
-    for (int i = 0; i < n_cp_; ++i)
-      cp_R_[i] = cp_R_[i] * Exp(V3D(D.segment<3>(3 * i)));
-  }
-
-  double sr = 0.0;
-  for (size_t k = 0; k < ts.size(); ++k)
-    sr += Log(rotAt(ts[k]).transpose() * Rs[k]).squaredNorm();
-  fit_res_rot_ = std::sqrt(sr / static_cast<double>(ts.size()));
-  return true;
+  fit_res_rot_ = (nr > 0) ? std::sqrt(sr / static_cast<double>(nr)) : 0.0;
+  return valid_;
 }
 
 V3D ScanSpline::phiAt(double t) const
@@ -501,45 +326,84 @@ V3D ScanSpline::phiDotAt(double t) const
   return r * inv_delta_;
 }
 
+// ── the deskewPoints() hoist, for the spline ────────────────────────────────
+// locate() is the whole per-point index cost; buildSegView() is the per-
+// SEGMENT cost that used to be paid per point; poseAtSeg() is what is left
+// over once both are hoisted.
+void ScanSpline::locate(double t, int& s, double& u) const
+{
+  const double tc = std::min(std::max(t, t0_), t1_);
+  double x = (tc - t0_) * inv_delta_;
+  int si = static_cast<int>(std::floor(x));
+  if (si >= n_seg_) { si = n_seg_ - 1; x = static_cast<double>(n_seg_); }
+  if (si < 0)       { si = 0;          x = 0.0; }
+  s = si;
+  u = x - static_cast<double>(si);
+}
+
+void ScanSpline::buildSegView(int s, SegView& v) const
+{
+  if (v.s == s) return;                    // already built for this segment
+  v.s = s;
+  for (int i = 0; i < 4; ++i)
+  {
+    v.cp[i]  = cp_p_.col(s + i);
+    v.phi[i] = cp_phi_.col(s + i);
+  }
+  if (v.cumulative)
+}
+
+void ScanSpline::poseAtSeg(const SegView& v, double u, M3D& R, V3D& p) const
+{
+  Eigen::Vector4d b, db, ddb;
+  basisU(u, b, db, ddb);
+  p = b[0] * v.cp[0] + b[1] * v.cp[1] + b[2] * v.cp[2] + b[3] * v.cp[3];
+  const V3D phi = b[0] * v.phi[0] + b[1] * v.phi[1]
+                + b[2] * v.phi[2] + b[3] * v.phi[3];
+  R = R_anchor_ * Exp(phi);
+}
+
+// Both halves of the pose from ONE segment lookup and ONE basis evaluation.
+// Position and rotation share the ordinary cubic basis in the tangent
+// parameterisation, which is the whole reason this is one call and not two.
+void ScanSpline::poseAt(double t, M3D& R, V3D& p) const
+{
+  if (!valid_) { R = M3D::Identity(); p = V3D::Zero(); return; }
+  Eigen::Vector4d b, db, ddb; int s = 0;
+  basisAt(t, s, b, db, ddb);
+  p = V3D::Zero(); V3D phi = V3D::Zero();
+  for (int i = 0; i < 4; ++i)
+  {
+    p   += b[i] * cp_p_.col(s + i);
+    phi += b[i] * cp_phi_.col(s + i);
+  }
+  R = R_anchor_ * Exp(phi);
+}
+
 M3D ScanSpline::rotAt(double t) const
 {
   if (!valid_) return M3D::Identity();
-  if (!cumulative_ || cp_R_.empty()) return R_anchor_ * Exp(phiAt(t));
-
-  Eigen::Vector3d Bt, dBt; int s = 0;
-  cumBasisAt(t, s, Bt, dBt);
-  M3D R = cp_R_[s];
-  for (int j = 1; j <= 3; ++j)
-  {
-    const V3D d = Log(cp_R_[s + j - 1].transpose() * cp_R_[s + j]);
-    R = R * Exp(V3D(Bt[j - 1] * d));
-  }
-  return R;
+  return R_anchor_ * Exp(phiAt(t));
 }
 
+// ANGULAR VELOCITY, AND THE RIGHT JACOBIAN IS NOT OPTIONAL.
+//
+//   R(t) = R_a Exp(phi(t))   =>   Rdot = R [ Jr(phi) phidot ]_x
+//   so  omega_body = Jr(phi) phidot,  NOT phidot.
+//
+// Jr(phi) = I + O(theta), so dropping it is exact only as theta -> 0 or when
+// the rotation AXIS is fixed.  At the ~13 deg this window carries off the
+// mid-anchor that is a ~10% systematic error in angular velocity -- and
+// omega_body is what computeSplineImuResidual() differences against the
+// bias-corrected raw gyro to estimate sigma_gyr.  A bias here propagates
+// into AdaptiveQ, hence into Q, hence into P.
+//
+// This is EXACT for this parameterisation.  The approximation lives in the
+// parameterisation itself, not here.
 V3D ScanSpline::omegaBodyAt(double t) const
 {
   if (!valid_) return V3D::Zero();
-  if (!cumulative_ || cp_R_.empty())
-    // R = R_a Exp(phi)  =>  Rdot = R [ Jr(phi) phidot ]_x.  Exact for this
-    // parameterisation; the approximation is in the parameterisation itself.
-    return Jr(phiAt(t)) * phiDotAt(t);
-
-  Eigen::Vector3d Bt, dBt; int s = 0;
-  cumBasisAt(t, s, Bt, dBt);
-
-  // Each A_j has a FIXED axis d_j, so Adot_j = A_j [ dBtilde_j/dt * d_j ]_x
-  // with no right-Jacobian term.  Pushing all three through R^T Rdot gives
-  //   omega = (A_2 A_3)^T w_1 + A_3^T w_2 + w_3.
-  M3D A[3];
-  V3D w[3];
-  for (int j = 1; j <= 3; ++j)
-  {
-    const V3D d = Log(cp_R_[s + j - 1].transpose() * cp_R_[s + j]);
-    A[j - 1] = Exp(V3D(Bt[j - 1] * d));
-    w[j - 1] = (dBt[j - 1] * inv_delta_) * d;
-  }
-  return (A[1] * A[2]).transpose() * w[0] + A[2].transpose() * w[1] + w[2];
+  return Jr(phiAt(t)) * phiDotAt(t);
 }
 
 V3D ScanSpline::posAt(double t) const
@@ -593,18 +457,20 @@ void ScanSpline::moveTailClamp(const V3D& pos1, const M3D& rot1)
   if (!valid_ || n_cp_ <= 0) return;
 
   const V3D dp = pos1 - frozen_pos1_;
-  const V3D dphi = Log(M3D(frozen_rot1_.transpose() * rot1));
+  // In the tangent chart the clamp target is phi1 = Log(R_a^T Y), so the
+  // move is a plain VECTOR DIFFERENCE in that chart -- not Log(Y^T Y').
+  // Both the ramp and the clamp are therefore exactly linear here, which is
+  // the same property that makes the fit linear.
+  const M3D R_aT = R_anchor_.transpose();
+  const V3D dphi = V3D(Log(M3D(R_aT * rot1))) - V3D(Log(M3D(R_aT * frozen_rot1_)));
   if (!dp.allFinite() || !dphi.allFinite()) return;
 
   const double span = std::max(1, n_cp_ - 3);
   for (int i = 0; i < n_cp_; ++i)
   {
     const double w = std::clamp((static_cast<double>(i) - 1.0) / span, 0.0, 1.0);
-    cp_p_.col(i) += w * dp;
-    if (cumulative_ && i < static_cast<int>(cp_R_.size()))
-      cp_R_[i] = cp_R_[i] * Exp(V3D(w * dphi));
-    else
-      cp_phi_.col(i) += w * dphi;
+    cp_p_.col(i)   += w * dp;
+    cp_phi_.col(i) += w * dphi;
   }
 
   frozen_pos1_ = pos1;

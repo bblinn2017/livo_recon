@@ -148,17 +148,27 @@ void deskewPoints(
 namespace
 {
 
-// One point against the spline.  Shared by the full and subset variants so
-// there is exactly one definition of what "spline deskew" means.
+// One point against the spline.  There is exactly one definition of what
+// "spline deskew" means and every entry point below goes through it.
+//
+// STRUCTURED LIKE deskewPoints(): that function hoists everything depending
+// only on the POSE BRACKET out of its per-point body and refreshes it when
+// the bracket changes.  The spline's bracket is the SEGMENT -- within one,
+// the four control points and the three relative rotations are fixed and
+// only the local coordinate u moves.  `v` is that hoist, owned by the
+// CALLER's loop and refreshed by buildSegView() only when the segment
+// actually changes.
 inline PointXYZCov deskewOnePointSpline(
     const StateGroupPtr& state, const ScanSpline& spline,
     const M3D& R_end_T, const V3D& p_end,
-    double scan_end_time, const PointXYZT& pt,
-    const DeskewOptions& opts)
+    const PointXYZT& pt, const DeskewOptions& opts,
+    ScanSpline::SegView& v)
 {
-  // Pose at the point's own capture time, relative to the scan-end frame.
-  const M3D R_i   = spline.rotAt(pt.t);
-  const V3D p_i   = spline.posAt(pt.t);
+  int s = 0; double u = 0.0;
+  spline.locate(pt.t, s, u);
+  spline.buildSegView(s, v);
+  M3D R_i; V3D p_i;
+  spline.poseAtSeg(v, u, R_i, p_i);
   const M3D R_rel = R_end_T * R_i;
   const V3D t_rel = R_end_T * (p_i - p_end);
 
@@ -191,33 +201,13 @@ void deskewPointsSpline(
   const M3D R_end_T = spline.rotAt(scan_end_time).transpose();
   const V3D p_end   = spline.posAt(scan_end_time);
 
+  // One view for the whole sweep.  A scan's points are in time order, so
+  // this refreshes once per SEGMENT (about ten times) rather than once per
+  // point -- which is the deskewPoints() bracket loop, in spline form.
+  ScanSpline::SegView v;
   for (size_t i = 0; i < points.size(); ++i)
     points_out[i] = deskewOnePointSpline(state, spline, R_end_T, p_end,
-                                          scan_end_time, points[i], opts,);
-}
-
-void deskewPointsSplineSubset(
-    const StateGroupPtr& state,
-    const ScanSpline& spline,
-    double scan_end_time,
-    const std::vector<PointXYZT>& points,
-    const std::vector<int>& indices,
-    const DeskewOptions& opts,
-    std::vector<PointXYZCov>& points_out)
-{
-  points_out.resize(indices.size());
-  if (indices.empty()) return;
-
-  const M3D R_end_T = spline.rotAt(scan_end_time).transpose();
-  const V3D p_end   = spline.posAt(scan_end_time);
-
-  for (size_t i = 0; i < indices.size(); ++i)
-  {
-    const int idx = indices[i];
-    if (idx < 0 || idx >= static_cast<int>(points.size())) continue;
-    points_out[i] = deskewOnePointSpline(state, spline, R_end_T, p_end,
-                                          scan_end_time, points[idx], opts,);
-  }
+                                         points[i], opts, v);
 }
 
 void deskewPointsSplineCsr(
@@ -237,19 +227,23 @@ void deskewPointsSplineCsr(
   const M3D R_end_T = spline.rotAt(scan_end_time).transpose();
   const V3D p_end   = spline.posAt(scan_end_time);
 
+  // Voxel-major traversal is not monotone in t, so this refreshes more often
+  // than the linear sweep above -- but never more than once per point, which
+  // is what the unhoisted code paid unconditionally.
+  ScanSpline::SegView v;
   for (size_t i = 0; i < n_out; ++i)
   {
     const int b = offsets[i], e = offsets[i + 1];
     if (e <= b) continue;
 
-    // Single-member cell: identical to deskewPointsSplineSubset().  This is
-    // every cell in FIRST mode, so that mode stays bit-for-bit what it was.
+    // Single-member cell: the plain one-point path.  This is every cell in
+    // FIRST mode, so that mode stays bit-for-bit what it was.
     if (e - b == 1)
     {
       const int idx = members[b];
       if (idx < 0 || idx >= static_cast<int>(points.size())) continue;
       points_out[i] = deskewOnePointSpline(state, spline, R_end_T, p_end,
-                                           scan_end_time, points[idx], opts,);
+                                           points[idx], opts, v);
       continue;
     }
 
@@ -267,7 +261,7 @@ void deskewPointsSplineCsr(
       const int idx = members[k];
       if (idx < 0 || idx >= static_cast<int>(points.size())) continue;
       const PointXYZCov d = deskewOnePointSpline(state, spline, R_end_T, p_end,
-                                                 scan_end_time, points[idx], opts,);
+                                                 points[idx], opts, v);
       sum_point      += d.point;
       sum_sensor_cov += d.sensor_cov;
       sum_pos_cov    += d.pos_cov;

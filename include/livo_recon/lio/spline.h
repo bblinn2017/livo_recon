@@ -143,15 +143,44 @@ struct SplineOptions
   bool splineOn() const { return mode != "raw_imu"; }
   bool refineOn() const { return mode == "spline+refine"; }
 
-  // Rotation is ALWAYS the cumulative form (Bryce, 2026-09-06).  The tangent
-  // parameterisation was the ablation arm and is removed.
+  // ROTATION IS THE TANGENT FORM AND THERE IS NO OTHER (Bryce, 2026-09-06).
   //
-  // GN refinements of the control ROTATIONS after the tangent-space
-  // initialisation.  NOT a tuning knob and no longer a config key: 0 does not
-  // mean "cheaper", it means the Greville re-encoding's loss is never undone
-  // and the spline is unusable.  4 was set when the exact Jacobian landed;
-  // 2 was measured insufficient at n_cp = 8 above ~34 deg of chord.
-  static constexpr int ROT_FIT_ITERS = 4;
+  //   R(t) = R_anchor * Exp( sum_j b_j(u) cp_phi_[s+j] )
+  //
+  // phi(t) is LINEAR in its control points, so rotation solves in the SAME
+  // linear system as position -- one LDLT, exact, no surrogate and nothing
+  // to repair.  The cumulative form could not: R(t) = cp_R[s] * prod
+  // Exp(Btilde_j d_j) with d_j = Log(cp_R[s+j-1]^T cp_R[s+j]) is a product
+  // of exponentials of RELATIVE rotations, each coupling two control points,
+  // so it is not of the form A x = b.  It was therefore fitted in this same
+  // tangent chart and then RE-ENCODED by sampling at the Greville abscissae,
+  // which loses twice over -- a B-spline does not pass through its control
+  // points, and the two parameterisations agree only to first order -- and
+  // Gauss-Newton existed solely to repair that loss.
+  //
+  // WHY THE STANDARD FORM IS NOT KEPT.  This header's own measurement:
+  // "At the rotation a real scan contains they are EQUAL.  SP-4a measured
+  // max rot_chord_deg ~6 deg on eee_01; at 8.5 deg and n_cp=8 the two agree
+  // to three digits.  The gap only opens at rotations these bags do not
+  // reach."  SP-4a"/4b" did measure cumulative ahead on real data by 17-20%
+  // on exp05, which sits AT T0-G's 18.88% nondeterminism bar rather than
+  // clear of it -- consistent-direction evidence on two arms, not a
+  // measured margin.  That is the one result this removal overrides.
+  //
+  // THE COST IS A CHART ASSUMPTION AND IT IS BOUNDED BY SCAN DURATION.
+  // R_anchor is the MIDDLE pose, halving the |phi| the chart must carry, so
+  // at the measured 26.86 deg max chord |phi| <= ~13.4 deg -- nowhere near
+  // the pi injectivity radius.  Longer scans or faster motion erode that,
+  // which is why fit() refuses above CHART_MAX_PHI_RAD rather than
+  // silently distorting.
+  //
+  // 1.0 rad = 57.3 deg, about 4x the largest chord these sequences produce
+  // and well inside the pi injectivity radius.  It is a REFUSAL, not a
+  // clamp: fit() returns false, the frame falls back to the raw-IMU
+  // one-shot deskew, and the failure is counted -- a distorted trajectory
+  // silently applied to every point is worse than no spline that frame.
+  static constexpr double CHART_MAX_PHI_RAD = 1.0;
+  //
 
   // Control-point rate in Hz over the ACTUAL scan duration.  n_cp is derived
   // from it, never set directly -- a fixed n_cp is a different control rate
@@ -298,7 +327,6 @@ public:
   int  nControlPoints() const { return n_cp_; }
   double t0() const { return t0_; }
   double t1() const { return t1_; }
-  bool cumulative() const { return cumulative_; }
   // n_cp as REQUESTED vs as actually used.  A cubic fit needs strictly more
   // pose samples than control points, so the fit silently shrinks n_cp to
   // n_samples-1.  At a 10 Hz scan and a 200 Hz IMU that ceiling is ~19,
@@ -309,6 +337,42 @@ public:
   bool nControlPointsClamped() const { return n_cp_req_ != n_cp_; }
 
   // Evaluation.  `t` is clamped to [t0_, t1_].
+  //
+  // PREFER poseAt() WHERE BOTH ARE WANTED.  rotAt() and posAt() each do their
+  // own segment lookup, so calling both costs the index arithmetic twice --
+  // and the per-point deskew calls both, for every point, on every IEKF
+  // iteration.
+  void poseAt(double t, M3D& R, V3D& p) const;
+
+  // ── SEGMENT-MAJOR EVALUATION, the deskewPoints() pattern ────────────────
+  // deskewPoints() hoists everything that depends only on the POSE BRACKET
+  // out of its per-point body and refreshes it when the bracket changes.
+  // The spline's bracket is the SEGMENT: within one segment the four control
+  // points and the three relative rotations are fixed, and only the local
+  // coordinate u varies per point.  SegView is that hoist, made explicit.
+  //
+  // A scan's points arrive in time order, so a linear sweep changes segment
+  // n_seg times (about 10) rather than n_points times (thousands).  The CSR
+  // traversal is voxel-major and therefore not monotone in t, so it refreshes
+  // more often -- still never more than once per point, which is what the
+  // unhoisted code paid unconditionally.
+  struct SegView
+  {
+    int  s = -1;              // segment index this view is built for
+    V3D  cp[4];               // position control points s..s+3
+    V3D  phi[4];              // rotation control points s..s+3
+  };
+
+  // Segment index and local coordinate for `t`, with `t` clamped to the
+  // window.  Cheap: one multiply, one floor, two compares.
+  void locate(double t, int& s, double& u) const;
+
+  // Refresh `v` only if it is not already built for segment `s`.
+  void buildSegView(int s, SegView& v) const;
+
+  // Evaluate using a view already built for this point's segment.
+  void poseAtSeg(const SegView& v, double u, M3D& R, V3D& p) const;
+
   M3D rotAt(double t) const;
   V3D posAt(double t) const;
   V3D velAt(double t) const;                 // world frame, d/dt p
@@ -362,7 +426,6 @@ public:
   M3D    frozen_rot1_ = M3D::Identity();
 
   bool   valid_ = false;
-  bool   cumulative_ = true;
   int    n_cp_  = 0;
   int    n_seg_ = 0;
   double t0_ = 0.0, t1_ = 0.0, delta_ = 0.0, inv_delta_ = 0.0;
@@ -370,7 +433,6 @@ public:
   M3D    R_anchor_ = M3D::Identity();
   Eigen::Matrix<double, 3, Eigen::Dynamic> cp_p_;     // 3 x n_cp, world
   Eigen::Matrix<double, 3, Eigen::Dynamic> cp_phi_;   // 3 x n_cp, tangent mode
-  std::vector<M3D> cp_R_;                             // n_cp, cumulative mode
 
   double fit_res_pos_ = 0.0, fit_res_rot_ = 0.0, fit_reg_frac_ = 0.0;
   V3D    bias_acc_delta_ = V3D::Zero();
@@ -388,9 +450,6 @@ public:
 
   V3D phiAt(double t) const;
   V3D phiDotAt(double t) const;
-  void cumBasisAt(double t, int& first_cp, Eigen::Vector3d& Bt,
-                  Eigen::Vector3d& dBt) const;
-  bool fitRotationCumulative(const std::vector<Pose6D>& poses, int gn_iters);
 
 public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
