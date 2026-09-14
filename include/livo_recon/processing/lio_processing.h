@@ -358,7 +358,7 @@ private:
   // pre-existing aggregate (unchanged reader compatibility); this is the
   // per-cause breakdown printed in engagementReport(). kNone's slot (index
   // 0) is never incremented.
-  std::array<int, 10> spline_fail_cause_count_{};
+  std::array<int, 11> spline_fail_cause_count_{};   // CQ-24: kPivotGuard added, 10 -> 11
   int        spline_chart_guard_warn_count_ = 0;
   mutable std::vector<std::vector<Residual>> build_thread_residuals_;
 

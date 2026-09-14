@@ -746,7 +746,8 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
              "mode,refine_dcp_max,refine_dcp_rms,"
              "redeskew_calls,redeskew_dp_rms,"
              "refit_dtraj_rms,refit_dtraj_max,refit_drot_deg,cov_acc_pre,cov_gyr_pre,"
-             "d_bias_acc_norm,d_bias_gyr_norm,d_gravity_norm,max_abs_cp_phi\n";
+             "d_bias_acc_norm,d_bias_gyr_norm,d_gravity_norm,max_abs_cp_phi,"
+             "dmin_p,dmax_p,dmin_r,dmax_r\n";
       first = false;
     }
     const double t_abs = mg.image.t + data_queues_->start_time;
@@ -778,7 +779,12 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
         // restructure (CQ-21); these three columns are retained for
         // spline_q.csv's schema stability and always read 0.
         << 0.0 << ',' << 0.0 << ',' << 0.0 << ','
-        << (spline_ok_ ? spline_.maxAbsCpPhi() : 0.0)
+        << (spline_ok_ ? spline_.maxAbsCpPhi() : 0.0) << ','
+        // CQ-24 item (1): NOT gated on spline_ok_ -- these are meaningful
+        // (and -1.0 sentinel otherwise) on a fit that failed at the pivot
+        // guard or at kSolveFailed too, which is the whole point.
+        << spline_.dminPos() << ',' << spline_.dmaxPos() << ','
+        << spline_.dminRot() << ',' << spline_.dmaxRot()
         << '\n';
   }
 
@@ -903,7 +909,7 @@ std::string LioProc::engagementReport() const
     static const char* kCauseNames[] = {
       "none", "too_few_poses", "bad_window", "too_few_samples",
       "n_cp_too_small", "degenerate_delta", "underdetermined",
-      "solve_failed", "non_finite", "chart_guard_hard",
+      "solve_failed", "non_finite", "chart_guard_hard", "pivot_guard",
     };
     o << "\n  spline fit_fail_count=" << spline_fit_fail_count_
       << " of frame_count=" << spline_frame_count_ << ", by cause:";

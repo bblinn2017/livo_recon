@@ -213,6 +213,42 @@ struct SplineOptions
   // RESULTS entry for the full distribution this proposal is based on.
   static constexpr double CHART_HARD_PHI_RAD = 1.0e9;
   //
+  // CQ-24 (2026-09-14): CHART_HARD_PHI_RAD catches a bad ANSWER; this
+  // catches a bad SOLVE, and only one of the two is bounded.
+  // Eigen::LDLT::info() reports allocation/input validity, not rank -- it
+  // read Success on eee_01 scan 3133's exactly-singular
+  // (vectorD().minCoeff()==0) normal-equations matrix. The chart guard
+  // caught that ONE case only because its garbage happened to be enormous
+  // in phi (64.5624 rad); a near-singular solve producing MODERATELY wrong
+  // control points passes every existing guard silently.
+  //
+  // CQ-24 item (2) measured BOTH candidates before choosing, and the
+  // absolute floor won, reversing this card's own a-priori expectation
+  // ("an absolute pivot floor is wrong on a matrix whose scale moves with
+  // the residual count; the ratio is what transfers"). Measured on 3
+  // sequences: dmin's healthy range is remarkably STABLE across sequences
+  // (p50 0.827-0.841, p01 0.525-0.820 -- all comfortably inside
+  // [0.5, 1.0]), while the condition-ratio's healthy MAXIMUM varies by
+  // ~2x across sequences (496 on eee_01, 920 on exp05, 463 on site1) --
+  // a fixed ratio threshold picked safely above one sequence's noise
+  // floor has a thinner, less predictable margin on another. This is
+  // NOT an accident: AtA_p and AtA_r are the SAME left-hand-side matrix
+  // (only Atb_p/Atb_r, the right-hand sides, differ -- see fit()), so
+  // their pivots (and therefore both metrics) are IDENTICAL between the
+  // position and rotation solves on every frame, and the frozen-boundary
+  // rows are pinned to exactly 1.0 by freezeAbsoluteScalarSystem(),
+  // which is very likely why the absolute scale stays this consistent
+  // across sequences with different point densities/geometry -- the
+  // matrix's own conditioning is dominated by that fixed structure, not
+  // by the data. See the CQ-24 RESULTS entry for the full distributions.
+  //
+  // NOT SET BY THIS CARD/COMMIT, same discipline as CHART_HARD_PHI_RAD:
+  // -1.0 is the true no-op (every real pivot is >= 0 by construction, so
+  // dmin < -1.0 can never fire).  Proposed value: 0.1 -- roughly 5x below
+  // the smallest healthy p01 observed (0.525) and far above the one
+  // observed singular case (exactly 0).
+  static constexpr double PIVOT_MIN_FLOOR = -1.0;
+  //
 
   // Control-point rate in Hz over the ACTUAL scan duration.  n_cp is derived
   // from it, never set directly -- a fixed n_cp is a different control rate
@@ -314,6 +350,7 @@ enum class FitFailCause
   kSolveFailed,        // LDLT::info() != Success
   kNonFinite,          // solved control points not all finite
   kChartGuard,         // max_abs_cp_phi > CHART_HARD_PHI_RAD (CQ-23)
+  kPivotGuard,         // condition ratio > PIVOT_MAX_CONDITION_RATIO (CQ-24)
 };
 
 // One LiDAR observation, reduced to what the control-point refinement needs.
@@ -498,6 +535,17 @@ public:
   // CQ-23 item (4): true if the last fit() exceeded CHART_HARD_PHI_RAD.
   // When true, lastFitFailCause() == kChartGuard and valid_ == false.
   bool chartGuardHard() const { return chart_guard_hard_; }
+  // CQ-24 item (1)/(2): the LDLT pivot floor/ceiling for both solves this
+  // fit, stored regardless of info() or of which threshold (if any)
+  // ultimately refuses -- -1.0 if fit() never reached the LDLT solve.
+  double dminPos() const { return dmin_p_; }
+  double dmaxPos() const { return dmax_p_; }
+  double dminRot() const { return dmin_r_; }
+  double dmaxRot() const { return dmax_r_; }
+  // CQ-24 item (3): true if the last fit() exceeded
+  // PIVOT_MAX_CONDITION_RATIO. When true, lastFitFailCause() ==
+  // kPivotGuard and valid_ == false.
+  bool pivotGuardFired() const { return pivot_guard_; }
 
   // CQ-22 item (5): recompute fit_res_pos_/fit_res_rot_ against `poses`
   // using the CURRENT control points. Call this after the last
@@ -540,6 +588,8 @@ public:
   bool         chart_guard_warned_ = false;
   bool         chart_guard_hard_ = false;
   double       last_max_abs_cp_phi_ = 0.0;
+  bool         pivot_guard_ = false;
+  double       dmin_p_ = -1.0, dmax_p_ = -1.0, dmin_r_ = -1.0, dmax_r_ = -1.0;
 
   V3D phiAt(double t) const;
   V3D phiDotAt(double t) const;

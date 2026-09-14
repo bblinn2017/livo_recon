@@ -178,7 +178,13 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   fail_cause_ = FitFailCause::kNone;
   chart_guard_warned_ = false;
   chart_guard_hard_ = false;
+  pivot_guard_ = false;
   last_max_abs_cp_phi_ = 0.0;
+  // CQ-24 item (1): -1 is the "never reached the LDLT solve this call"
+  // sentinel -- a real pivot is always >= 0 (AtA_p/AtA_r are PSD by
+  // construction), so -1 cannot be confused with a genuine (possibly
+  // exactly-zero) pivot.
+  dmin_p_ = dmax_p_ = dmin_r_ = dmax_r_ = -1.0;
   // NOTE: the refinement counters are NOT reset here.  With
   // spline.reintegrate_each_iteration on, fit() runs once per IEKF iteration,
   // so resetting here would make spline_q.csv report the last iteration
@@ -261,8 +267,30 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   freezeAbsoluteScalarSystemTail(AtA_r, Atb_r, n_frozen_cp_, frozen_phi1);
 
   Eigen::LDLT<Eigen::MatrixXd> ldlt_p(AtA_p), ldlt_r(AtA_r);
+  // CQ-24 item (1): logged BEFORE anything is refused, on every solve
+  // regardless of info() -- info() reports allocation/input validity, not
+  // rank (CQ-23's own finding: it reads Success on a rank-deficient
+  // matrix). This is the number a future threshold gets decided from, not
+  // the other way around.
+  dmin_p_ = ldlt_p.vectorD().minCoeff();
+  dmax_p_ = ldlt_p.vectorD().maxCoeff();
+  dmin_r_ = ldlt_r.vectorD().minCoeff();
+  dmax_r_ = ldlt_r.vectorD().maxCoeff();
   if (ldlt_p.info() != Eigen::Success || ldlt_r.info() != Eigen::Success)
   { fail_cause_ = FitFailCause::kSolveFailed; return false; }
+
+  // CQ-24 item (3): info() above cannot catch a rank-deficient-but-
+  // "successful" solve (CQ-23's own finding). Absolute floor, not a
+  // ratio -- item (2) measured both and the floor won (see
+  // SplineOptions::PIVOT_MIN_FLOOR's own comment for the data). Checked
+  // BEFORE solving for Xp/Xr: a near-singular system's "solution" is not
+  // worth computing at all, let alone using.
+  if (std::min(dmin_p_, dmin_r_) < SplineOptions::PIVOT_MIN_FLOOR)
+  {
+    pivot_guard_ = true;
+    fail_cause_ = FitFailCause::kPivotGuard;
+    return false;
+  }
 
   const Eigen::MatrixXd Xp = ldlt_p.solve(Atb_p);
   const Eigen::MatrixXd Xr = ldlt_r.solve(Atb_r);
