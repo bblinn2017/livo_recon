@@ -481,14 +481,14 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
     // the whole cell and the re-deskew re-averages it.  Output is bit-identical
     // to voxelDownsample() in the matching mode -- see
     // voxelDownsampleIndexedCsr()'s doc comment.
-    if (spline_ok_ && opts_.spline.redeskewOn())
+    if (spline_ok_ && opts_.spline.splineOn())
       voxelDownsampleIndexedCsr(deskewed, mg.points, ds_offsets_, ds_members_,
                                 PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
     else
       voxelDownsample(deskewed, mg.points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
   } else {
     mg.points = std::move(deskewed);
-    if (spline_ok_ && opts_.spline.redeskewOn()) {
+    if (spline_ok_ && opts_.spline.splineOn()) {
       ds_members_.resize(mg.points.size());
       ds_offsets_.resize(mg.points.size() + 1);
       for (size_t i = 0; i < ds_members_.size(); ++i) {
@@ -726,7 +726,7 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
              "mode,refine_dcp_max,refine_dcp_rms,"
              "redeskew_calls,redeskew_dp_rms,"
              "refit_dtraj_rms,refit_dtraj_max,refit_drot_deg,cov_acc_pre,cov_gyr_pre,"
-             "d_bias_acc_norm,d_bias_gyr_norm,d_gravity_norm\n";
+             "d_bias_acc_norm,d_bias_gyr_norm,d_gravity_norm,max_abs_cp_phi\n";
       first = false;
     }
     const double t_abs = mg.image.t + data_queues_->start_time;
@@ -741,11 +741,9 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
         << spline_fit_fail_count_ << ',' << spline_frame_count_ << ','
         << last_spline_stats_.max_abs_acc << ',' << last_spline_stats_.max_abs_gyr << ','
         << (spline_ok_ ? spline_.nControlPointsRequested() : 0) << ','
-        << (spline_ok_ ? (spline_.cumulative() ? "cumulative" : "tangent") : "-") << ','
         << (spline_ok_ ? spline_.refineApplied() : 0) << ','
         << (spline_ok_ ? spline_.refineRejects() : 0) << ','
         << (spline_ok_ ? spline_.lastRefineStep() : 0.0) << ','
-        << spline_refits_ << ','
         // The engagement half: what each toggle was set to, and how far its
         // mechanism actually moved things this frame.  A cell with
         // per_iteration naming a step whose magnitude column is 0 across the
@@ -756,15 +754,11 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
         << redeskew_calls_ << ',' << redeskew_dp_rms_ << ','
         << refit_dtraj_rms_ << ',' << refit_dtraj_max_ << ',' << refit_drot_deg_ << ','
         << cov_acc_pre_ << ',' << cov_gyr_pre_ << ','
-        // DX-5: the joint imu_fit bias/gravity correction's own magnitude
-        // (SplineOptions::imu_fit_bias_prior_frac), so its cost/benefit can
-        // be read against the Allan-deviation noise floor directly, rather
-        // than only through ATE. Zero when imu_fit_mode is "off" or the
-        // channel wasn't usable this frame -- see ScanSpline's own doc
-        // comment on these getters.
-        << (spline_ok_ ? spline_.biasAccDelta().norm() : 0.0) << ','
-        << (spline_ok_ ? spline_.biasGyrDelta().norm() : 0.0) << ','
-        << (spline_ok_ ? spline_.gravityDelta().norm() : 0.0)
+        // The imu_fit bias/gravity correction was removed with the
+        // restructure (CQ-21); these three columns are retained for
+        // spline_q.csv's schema stability and always read 0.
+        << 0.0 << ',' << 0.0 << ',' << 0.0 << ','
+        << (spline_ok_ ? spline_.maxAbsCpPhi() : 0.0)
         << '\n';
   }
 
@@ -829,7 +823,7 @@ std::string LioProc::engagementReport() const
   };
 
   o << "\n  spline/mode = " << opts_.spline.mode;
-  line("  redeskew          ", opts_.spline.redeskewOn(), run_redeskew_calls_,
+  line("  redeskew          ", opts_.spline.splineOn(), run_redeskew_calls_,
        "max_dp_rms_m", run_redeskew_dp_max_);
   line("  refine            ", opts_.spline.refineOn(), run_refine_applied_,
        "max_dcp_m", run_refine_dcp_max_);

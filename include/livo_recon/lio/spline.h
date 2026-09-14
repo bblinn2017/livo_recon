@@ -393,6 +393,17 @@ public:
 
   double rotationChordDeg() const;
 
+  // CQ-21 item (5): max_i |cp_phi_[i]| from the last successful fit -- the
+  // EXACT quantity the chart guard checks against CHART_MAX_PHI_RAD, not
+  // the end-to-end chord rotationChordDeg() reports. 0 when invalid.
+  double maxAbsCpPhi() const
+  {
+    if (!valid_ || cp_phi_.cols() == 0) return 0.0;
+    double m = 0.0;
+    for (int i = 0; i < cp_phi_.cols(); ++i) m = std::max(m, cp_phi_.col(i).norm());
+    return m;
+  }
+
   void basisAt(double t, int& first_cp, Eigen::Vector4d& b,
                Eigen::Vector4d& db, Eigen::Vector4d& ddb) const;
 

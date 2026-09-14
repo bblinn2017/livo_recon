@@ -267,15 +267,19 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
     cp_phi_.col(i) = Xr.row(i).transpose();
   }
 
-  // ── optional raw-IMU term ────────────────────────────────────────────────
-  // Both weights default to 0, in which case not a single line below runs and
-  // the fit is bit-identical to the pose-only one.  valid_ is set here rather
-  // than at the end because the passes below evaluate the spline they are
-  // solving for (phiAt/rotAt refuse to answer while invalid), and the object
-  // is in fact a complete, usable fit at this point.
-  const bool use_acc = (imu != nullptr) && imu->usable() && opts.imuFitAcc();
-  const bool use_gyr = (imu != nullptr) && imu->usable() && opts.imuFitGyr();
-
+  // valid_ is set here rather than at the end because the passes below
+  // evaluate the spline they are solving for (phiAt/rotAt refuse to answer
+  // while invalid), and the object is in fact a complete, usable fit at
+  // this point.
+  //
+  // BUG FOUND+FIXED (CQ-21 verification, 2026-09-14): this assignment was
+  // missing from the pushed restructure entirely -- valid_ was set false
+  // at the top of fit() and never set true anywhere, so fit() always
+  // returned false regardless of whether the solve succeeded. Confirmed
+  // via spline_q.csv: spline_ok=0 on 100% of frames on a smoke cell,
+  // engagement.txt reporting redeskew/refine both INERT despite
+  // spline/mode=spline+refine.
+  valid_ = true;
   bias_acc_delta_ = V3D::Zero();
   bias_gyr_delta_ = V3D::Zero();
   gravity_delta_  = V3D::Zero();
@@ -350,7 +354,6 @@ void ScanSpline::buildSegView(int s, SegView& v) const
     v.cp[i]  = cp_p_.col(s + i);
     v.phi[i] = cp_phi_.col(s + i);
   }
-  if (v.cumulative)
 }
 
 void ScanSpline::poseAtSeg(const SegView& v, double u, M3D& R, V3D& p) const
