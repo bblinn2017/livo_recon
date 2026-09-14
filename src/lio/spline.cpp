@@ -171,12 +171,18 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
                      const SplineOptions& opts)
 {
   valid_ = false;
+  // CQ-22 item (4): both reset every call, same reasoning as valid_ above --
+  // fail_cause_ names WHY this call returned false (kNone on success);
+  // chart_guard_warned_ is this call's own chart-guard observation, never
+  // carried over from a previous frame.
+  fail_cause_ = FitFailCause::kNone;
+  chart_guard_warned_ = false;
   // NOTE: the refinement counters are NOT reset here.  With
   // spline.reintegrate_each_iteration on, fit() runs once per IEKF iteration,
   // so resetting here would make spline_q.csv report the last iteration
   // instead of the frame.  LioProc calls resetRefineStats() once per frame.
-  if (poses.size() < 2) return false;
-  if (!(t1 > t0)) return false;
+  if (poses.size() < 2) { fail_cause_ = FitFailCause::kTooFewPoses; return false; }
+  if (!(t1 > t0)) { fail_cause_ = FitFailCause::kBadWindow; return false; }
 
 
   // n_cp comes from the control-point RATE and nothing else: a fixed n_cp is
@@ -188,15 +194,15 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   n_cp_req_ = n_cp;
 
   const int n_samples = static_cast<int>(poses.size());
-  if (n_samples < 5) return false;
+  if (n_samples < 5) { fail_cause_ = FitFailCause::kTooFewSamples; return false; }
   n_cp = std::min(n_cp, n_samples - 1);
-  if (n_cp < 4) return false;
+  if (n_cp < 4) { fail_cause_ = FitFailCause::kNCpTooSmall; return false; }
 
   n_cp_  = n_cp;
   n_seg_ = n_cp_ - 3;
   t0_ = t0; t1_ = t1;
   delta_ = (t1_ - t0_) / static_cast<double>(n_seg_);
-  if (!(delta_ > 1e-9)) return false;
+  if (!(delta_ > 1e-9)) { fail_cause_ = FitFailCause::kDegenerateDelta; return false; }
   inv_delta_ = 1.0 / delta_;
 
   // Anchor at the MIDDLE pose: halves the maximum |phi| the tangent
@@ -236,7 +242,7 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
       Atb_r.row(first_cp + i) += b[i] * phi.transpose();
     }
   }
-  if (static_cast<int>(rows.size()) < n_cp_ + 1) return false;
+  if (static_cast<int>(rows.size()) < n_cp_ + 1) { fail_cause_ = FitFailCause::kUnderdetermined; return false; }
 
   // Boundary freeze, BOTH ENDS.  Position and tangent-rotation need
   // different frozen targets, so each gets its own copy of AtA.  Three
@@ -253,11 +259,13 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   freezeAbsoluteScalarSystemTail(AtA_r, Atb_r, n_frozen_cp_, frozen_phi1);
 
   Eigen::LDLT<Eigen::MatrixXd> ldlt_p(AtA_p), ldlt_r(AtA_r);
-  if (ldlt_p.info() != Eigen::Success || ldlt_r.info() != Eigen::Success) return false;
+  if (ldlt_p.info() != Eigen::Success || ldlt_r.info() != Eigen::Success)
+  { fail_cause_ = FitFailCause::kSolveFailed; return false; }
 
   const Eigen::MatrixXd Xp = ldlt_p.solve(Atb_p);
   const Eigen::MatrixXd Xr = ldlt_r.solve(Atb_r);
-  if (!Xp.allFinite() || !Xr.allFinite()) return false;
+  if (!Xp.allFinite() || !Xr.allFinite())
+  { fail_cause_ = FitFailCause::kNonFinite; return false; }
 
   cp_p_.resize(3, n_cp_);
   cp_phi_.resize(3, n_cp_);
@@ -284,32 +292,53 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   bias_gyr_delta_ = V3D::Zero();
   gravity_delta_  = V3D::Zero();
 
-  // CHART GUARD.  The uniform cubic basis is non-negative and sums to 1, so
-  // phi(t) is a CONVEX COMBINATION of the control points and
-  // max_t |phi(t)| <= max_i |cp_phi_[i]| -- a cheap conservative bound, no
-  // sampling required.  Beyond the bound the single-chart parameterisation
-  // distorts, so refuse the fit and let the caller fall back rather than
-  // deskew every point against a trajectory we do not trust.
+  // CHART GUARD, STOOD DOWN TO A WARNING (CQ-22 item 4, Bryce 2026-09-14).
+  // The uniform cubic basis is non-negative and sums to 1, so phi(t) is a
+  // CONVEX COMBINATION of the control points and max_t |phi(t)| <=
+  // max_i |cp_phi_[i]| -- a cheap conservative bound, no sampling required.
+  // This used to refuse the fit above the bound; it no longer does. A
+  // refusal here falls through to deskewPoints() -- stratum A's own
+  // treatment -- so refusing inside a spline+refine cell silently mixed two
+  // of TQ-12's three levels, data-dependent treatment assignment in a
+  // designed experiment. CQ-21 measured 3.4x headroom at the worst observed
+  // sequence (max_abs_cp_phi max 0.2938 rad on site1_handheld_1, against the
+  // 1.0 rad threshold), so nothing is being given up by not refusing. The
+  // loop still runs to completion (no early exit) so every control point is
+  // checked, not just the first one that trips it, and the guard is now
+  // purely observational: chart_guard_warned_ records whether ANY control
+  // point exceeded the bound this fit, independent of fail_cause_.
   for (int i = 0; i < n_cp_; ++i)
   {
     if (cp_phi_.col(i).norm() > SplineOptions::CHART_MAX_PHI_RAD)
-    {
-      valid_ = false;
-      return false;
-    }
+      chart_guard_warned_ = true;
   }
 
-  // The rotation control points came out of the SAME linear solve as the
-  // position ones, exactly, so there is nothing left to refine.
-  double sr = 0.0; int nr = 0;
+  return valid_;
+}
+
+// CQ-22 item (5): fit_res_pos_/fit_res_rot_ used to be computed inside
+// fit() itself -- i.e. against the control points as the propagation-time
+// boundary freeze left them, BEFORE moveTailClamp() ever runs. Neither
+// getter could therefore observe what the tail-clamp ramp actually does:
+// confirmed by measurement, fit_res_rot_'s old in-fit computation changed
+// by only 0.3% between a normal run and one with the ramp disabled
+// entirely. Callers must invoke this AFTER the frame's last
+// moveTailClamp() (LioProc does so from finalizeSplineAndQ()) so both
+// residuals reflect the converged tail rather than the frozen-at-
+// propagation one.
+void ScanSpline::updateFitResiduals(const std::vector<Pose6D>& poses)
+{
+  if (!valid_) { fit_res_pos_ = 0.0; fit_res_rot_ = 0.0; return; }
+  double sp = 0.0, sr = 0.0; int n = 0;
   for (const auto& ps : poses)
   {
     if (ps.t < t0_ - 1e-9 || ps.t > t1_ + 1e-9) continue;
+    sp += (posAt(ps.t) - ps.pos).squaredNorm();
     sr += Log(M3D(rotAt(ps.t).transpose() * ps.rot)).squaredNorm();
-    ++nr;
+    ++n;
   }
-  fit_res_rot_ = (nr > 0) ? std::sqrt(sr / static_cast<double>(nr)) : 0.0;
-  return valid_;
+  fit_res_pos_ = (n > 0) ? std::sqrt(sp / static_cast<double>(n)) : 0.0;
+  fit_res_rot_ = (n > 0) ? std::sqrt(sr / static_cast<double>(n)) : 0.0;
 }
 
 V3D ScanSpline::phiAt(double t) const
@@ -441,11 +470,27 @@ V3D ScanSpline::accAt(double t) const
 // Move the TAIL clamp to a new scan-end pose without re-fitting, so any
 // refinement already applied to the interior survives.
 //
-// The correction is distributed PROPORTIONALLY TO ELAPSED TIME: zero at the
-// head clamp, full at the tail.  Control point i sits at the Greville
-// abscissa (i - 1) * delta after t0 for a uniform cubic, so its normalised
-// time is (i - 1) / (n_cp - 3); clamping that to [0,1] puts w = 0 on cp_0..2
-// and w = 1 on the last three, which is what keeps BOTH identities exact.
+// The correction is distributed PROPORTIONALLY TO ELAPSED TIME across the
+// FREE interior only: zero at the head clamp, full at the tail, held flat
+// across the six clamped control points at each end. Holding a clamped
+// endpoint of a uniform cubic B-spline exactly requires its THREE control
+// points to move TOGETHER (the basis row at u=0 is [1/6,4/6,1/6,0] and at
+// u=1 is [0,1/6,4/6,1/6] -- any one of the three moving alone perturbs that
+// endpoint). Six control points are therefore spent on the two clamps
+// (cp_0..2 at the head, cp_{n_cp-3}..{n_cp-1} at the tail), so the ramp must
+// run across the n_cp - 6 FREE ones, cp_2 .. cp_{n_cp-3}: w = 0 through
+// cp_2 (inclusive -- it belongs to the head clamp) and w = 1 from
+// cp_{n_cp-3} (inclusive -- it belongs to the tail clamp), giving
+// span = n_cp - 5 and w(i) = clamp((i - 2) / span, 0, 1).
+//
+// BUG FOUND+FIXED (CQ-22, 2026-09-14): the ramp previously used
+// span = n_cp - 3, w(i) = clamp((i - 1) / span, 0, 1) -- one control point
+// short of the six the two clamps actually spend. That reached w = 1 at
+// only the LAST TWO control points (short at the tail) and was NONZERO
+// already at cp_2 (the head's own clamp was allowed to move). Both errors
+// are exactly 1 / (6 * (n_cp - 3)) of the applied correction, identical at
+// both ends, for every n_cp -- confirmed against boundary_dpos/
+// boundary_drot_deg on eee_01 (see CQ-22's filed identity check).
 //
 // *** THE DISTRIBUTION IS A MODELLING CHOICE AND IT IS UNVALIDATED. ***
 // Pinning both ends over-determines the trajectory relative to preserving
@@ -453,8 +498,8 @@ V3D ScanSpline::accAt(double t) const
 // filter corrected -- so something must absorb it, and no measurement in
 // this project says what.  Time-proportional is the same random-walk
 // assumption Q itself encodes: process noise accumulates with time, so a
-// control point halfway through the scan has accumulated half the drift.
-// It is the `w` line below and nothing else depends on the choice.
+// control point halfway through the FREE interior has accumulated half the
+// drift.  It is the `w` line below and nothing else depends on the choice.
 void ScanSpline::moveTailClamp(const V3D& pos1, const M3D& rot1)
 {
   if (!valid_ || n_cp_ <= 0) return;
@@ -468,10 +513,10 @@ void ScanSpline::moveTailClamp(const V3D& pos1, const M3D& rot1)
   const V3D dphi = V3D(Log(M3D(R_aT * rot1))) - V3D(Log(M3D(R_aT * frozen_rot1_)));
   if (!dp.allFinite() || !dphi.allFinite()) return;
 
-  const double span = std::max(1, n_cp_ - 3);
+  const double span = std::max(1, n_cp_ - 5);
   for (int i = 0; i < n_cp_; ++i)
   {
-    const double w = std::clamp((static_cast<double>(i) - 1.0) / span, 0.0, 1.0);
+    const double w = std::clamp((static_cast<double>(i) - 2.0) / span, 0.0, 1.0);
     cp_p_.col(i)   += w * dp;
     cp_phi_.col(i) += w * dphi;
   }

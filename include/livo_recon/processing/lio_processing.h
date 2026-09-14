@@ -353,6 +353,13 @@ private:
   SplineImuResidualStats last_spline_stats_;
   int        spline_fit_fail_count_ = 0;
   int        spline_frame_count_ = 0;
+  // CQ-22 item (4): one counter per ScanSpline::FitFailCause, indexed by
+  // static_cast<int>(cause) -- spline_fit_fail_count_ above stays as the
+  // pre-existing aggregate (unchanged reader compatibility); this is the
+  // per-cause breakdown printed in engagementReport(). kNone's slot (index
+  // 0) is never incremented.
+  std::array<int, 10> spline_fail_cause_count_{};
+  int        spline_chart_guard_warn_count_ = 0;
   mutable std::vector<std::vector<Residual>> build_thread_residuals_;
 
   // Per-thread miss classification for points where findPlaneResidual()

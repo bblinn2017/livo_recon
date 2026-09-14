@@ -260,6 +260,26 @@ struct SplineOptions
   static constexpr int N_FROZEN_CP = 3;
 };
 
+// CQ-22 item (4): one named cause per fit() early-return site, so a run's
+// failure count can be attributed rather than lumped into one shared
+// counter. kChartGuard is retained for the enum's completeness even though
+// the chart guard no longer returns false (see fit()'s chart-guard loop) --
+// it will never be observed as a lastFitFailCause() value post-fix, tracked
+// instead by its own warning counter (chartGuardWarned()).
+enum class FitFailCause
+{
+  kNone = 0,
+  kTooFewPoses,        // poses.size() < 2
+  kBadWindow,          // !(t1 > t0)
+  kTooFewSamples,      // n_samples < 5
+  kNCpTooSmall,        // n_cp < 4 after clamping to n_samples - 1
+  kDegenerateDelta,    // !(delta_ > 1e-9)
+  kUnderdetermined,    // fewer in-window samples than n_cp_ + 1
+  kSolveFailed,        // LDLT::info() != Success
+  kNonFinite,          // solved control points not all finite
+  kChartGuard,         // historical only -- see comment above
+};
+
 // One LiDAR observation, reduced to what the control-point refinement needs.
 // Built from the residuals the IEKF just accumulated, so the refinement is
 // linearised exactly where those residuals were measured.
@@ -430,6 +450,22 @@ public:
   double refineDcpMax() const { return refine_dcp_max_; }   // m
   double refineDcpRms() const { return refine_dcp_rms_; }   // m
 
+  // CQ-22 item (4): which of fit()'s early-return sites fired last time
+  // fit() returned false. kNone after a successful fit.
+  FitFailCause lastFitFailCause() const { return fail_cause_; }
+  // CQ-22 item (4): true if the last fit() exceeded CHART_MAX_PHI_RAD at
+  // any control point. No longer causes a failure (see fit()) -- this is
+  // the guard's own counter, independent of lastFitFailCause().
+  bool chartGuardWarned() const { return chart_guard_warned_; }
+
+  // CQ-22 item (5): recompute fit_res_pos_/fit_res_rot_ against `poses`
+  // using the CURRENT control points. Call this after the last
+  // moveTailClamp() of the frame (not from inside fit(), which runs before
+  // any clamp move) so the residual reflects the converged tail, not the
+  // frozen-at-propagation one. RMS over the same in-window poses fit()
+  // itself uses. No-op (0.0/0.0) if the fit is not valid.
+  void updateFitResiduals(const std::vector<Pose6D>& poses);
+
   int    n_frozen_cp_ = 0;
   V3D    frozen_pos_  = V3D::Zero();
   M3D    frozen_rot_  = M3D::Identity();
@@ -458,6 +494,9 @@ public:
   double refine_dcp_max_ = 0.0, refine_dcp_rms_ = 0.0;
   int    refine_rejects_ = 0, refine_applied_ = 0;
   int    n_cp_req_ = 0;
+
+  FitFailCause fail_cause_ = FitFailCause::kNone;
+  bool         chart_guard_warned_ = false;
 
   V3D phiAt(double t) const;
   V3D phiDotAt(double t) const;
