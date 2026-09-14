@@ -465,12 +465,17 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
       spline_fit_fail_count_++;
       // CQ-22 item (4): attribute this failure to its specific cause, so
       // "1 refusal" can no longer mean any of nine different things.
+      // CQ-23: kChartGuard (the hard ceiling) lands here too, generically --
+      // it is one of the nine causes now, not a separate mechanism.
       spline_fail_cause_count_[static_cast<int>(spline_.lastFitFailCause())]++;
     }
     // Independent of spline_ok_: chart_guard_warned_ only fires from inside
     // the chart-guard loop, which a fit that failed at an earlier site never
     // reaches, so this is correctly 0 for those frames without a separate
-    // gate here.
+    // gate here. A HARD-refused fit reaches the loop too (the value is
+    // stored before either threshold is checked) but chartGuardWarned()
+    // stays false for it -- warn and hard are mutually exclusive per fit(),
+    // the hard count is spline_fail_cause_count_[kChartGuard] above.
     if (spline_.chartGuardWarned()) spline_chart_guard_warn_count_++;
   }
 
@@ -890,14 +895,15 @@ std::string LioProc::engagementReport() const
   o << "\n  spline/mode = " << opts_.spline.mode
     << "\n  control_points/hz = " << opts_.spline.control_point_hz;
 
-  // CQ-22 item (4): the fit-fail breakdown by cause, and the chart guard's
-  // own (now non-failing) warning count -- see ScanSpline::FitFailCause.
+  // CQ-22 item (4): the fit-fail breakdown by cause; CQ-23 made
+  // "chart_guard" (the hard ceiling) a real, live cause again, separate
+  // from the soft warning count below -- see ScanSpline::FitFailCause.
   if (opts_.spline.splineOn())
   {
     static const char* kCauseNames[] = {
       "none", "too_few_poses", "bad_window", "too_few_samples",
       "n_cp_too_small", "degenerate_delta", "underdetermined",
-      "solve_failed", "non_finite", "chart_guard(historical)",
+      "solve_failed", "non_finite", "chart_guard_hard",
     };
     o << "\n  spline fit_fail_count=" << spline_fit_fail_count_
       << " of frame_count=" << spline_frame_count_ << ", by cause:";

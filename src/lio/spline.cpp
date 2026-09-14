@@ -177,6 +177,8 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   // carried over from a previous frame.
   fail_cause_ = FitFailCause::kNone;
   chart_guard_warned_ = false;
+  chart_guard_hard_ = false;
+  last_max_abs_cp_phi_ = 0.0;
   // NOTE: the refinement counters are NOT reset here.  With
   // spline.reintegrate_each_iteration on, fit() runs once per IEKF iteration,
   // so resetting here would make spline_q.csv report the last iteration
@@ -292,26 +294,38 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   bias_gyr_delta_ = V3D::Zero();
   gravity_delta_  = V3D::Zero();
 
-  // CHART GUARD, STOOD DOWN TO A WARNING (CQ-22 item 4, Bryce 2026-09-14).
-  // The uniform cubic basis is non-negative and sums to 1, so phi(t) is a
-  // CONVEX COMBINATION of the control points and max_t |phi(t)| <=
-  // max_i |cp_phi_[i]| -- a cheap conservative bound, no sampling required.
-  // This used to refuse the fit above the bound; it no longer does. A
-  // refusal here falls through to deskewPoints() -- stratum A's own
-  // treatment -- so refusing inside a spline+refine cell silently mixed two
-  // of TQ-12's three levels, data-dependent treatment assignment in a
-  // designed experiment. CQ-21 measured 3.4x headroom at the worst observed
-  // sequence (max_abs_cp_phi max 0.2938 rad on site1_handheld_1, against the
-  // 1.0 rad threshold), so nothing is being given up by not refusing. The
-  // loop still runs to completion (no early exit) so every control point is
-  // checked, not just the first one that trips it, and the guard is now
-  // purely observational: chart_guard_warned_ records whether ANY control
-  // point exceeded the bound this fit, independent of fail_cause_.
+  // CHART GUARD, TWO QUESTIONS (CQ-22 stood it down to a warning; CQ-23
+  // split it in two -- see SplineOptions::CHART_MAX_PHI_RAD/
+  // CHART_HARD_PHI_RAD for the full history/reasoning). The uniform cubic
+  // basis is non-negative and sums to 1, so phi(t) is a CONVEX COMBINATION
+  // of the control points and max_t |phi(t)| <= max_i |cp_phi_[i]| -- a
+  // cheap conservative bound, no sampling required.
+  //
+  // The value is stored FIRST, unconditionally, before either threshold is
+  // consulted (CQ-23 item 2) -- a HARD-refused fit's own value must stay
+  // observable through maxAbsCpPhi(), not disappear behind valid_=false.
+  // The loop always runs to completion so the true max is found regardless
+  // of which control point trips a threshold first.
+  double max_phi = 0.0;
   for (int i = 0; i < n_cp_; ++i)
+    max_phi = std::max(max_phi, cp_phi_.col(i).norm());
+  last_max_abs_cp_phi_ = max_phi;
+
+  if (max_phi > SplineOptions::CHART_HARD_PHI_RAD)
   {
-    if (cp_phi_.col(i).norm() > SplineOptions::CHART_MAX_PHI_RAD)
-      chart_guard_warned_ = true;
+    // The chart is not merely degrading -- CQ-23's own evidence (scan
+    // 3133: Eigen::LDLT reported Success on both solves while
+    // vectorD().minCoeff() was exactly 0) is that this is what a diverged,
+    // numerically singular solve looks like. Treat it as the ninth hard
+    // failure cause: refuse, fall back to deskewPoints(), count it
+    // separately from the seven pre-existing causes and from the warning.
+    chart_guard_hard_ = true;
+    fail_cause_ = FitFailCause::kChartGuard;
+    valid_ = false;
+    return false;
   }
+  if (max_phi > SplineOptions::CHART_MAX_PHI_RAD)
+    chart_guard_warned_ = true;
 
   return valid_;
 }

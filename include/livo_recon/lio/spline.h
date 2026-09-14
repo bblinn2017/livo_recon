@@ -175,11 +175,43 @@ struct SplineOptions
   // silently distorting.
   //
   // 1.0 rad = 57.3 deg, about 4x the largest chord these sequences produce
-  // and well inside the pi injectivity radius.  It is a REFUSAL, not a
-  // clamp: fit() returns false, the frame falls back to the raw-IMU
-  // one-shot deskew, and the failure is counted -- a distorted trajectory
-  // silently applied to every point is worse than no spline that frame.
+  // and well inside the pi injectivity radius.
+  //
+  // CQ-22 (2026-09-14) stood this down from a refusal to a WARNING: a
+  // refusal falls through to deskewPoints(), stratum A's own treatment, so
+  // refusing inside a spline+refine cell silently mixed two of TQ-12's
+  // three levels. Nothing here reverses that call.
+  //
+  // CQ-23 (2026-09-14) found the warning was carrying two different
+  // questions and split it. eee_01 scan 3133 hit max_abs_cp_phi =
+  // 64.5624 rad -- ~3700 degrees, twenty times the pi injectivity radius --
+  // while its own rot_chord_deg (0.6996 rad) was unremarkable next to its
+  // neighbours' (~0.3 rad). That is not a chart degrading as rotation
+  // grows; it is a solve that produced garbage: Eigen::LDLT reported
+  // Success on both the position and tangent-rotation systems
+  // (ldlt_p.info()==ldlt_r.info()==Success), but vectorD().minCoeff() was
+  // EXACTLY 0 on both -- a numerically singular normal-equations matrix
+  // Success did not catch. CHART_MAX_PHI_RAD (below) answers "is the chart
+  // degrading" and should stay a warning. CHART_HARD_PHI_RAD answers "did
+  // the solve diverge" and belongs with fit()'s other hard-failure causes,
+  // where falling back to deskewPoints() is correct and the cell is
+  // honestly marked, exactly like kSolveFailed/kNonFinite above it.
   static constexpr double CHART_MAX_PHI_RAD = 1.0;
+  //
+  // NOT SET BY THIS CARD/COMMIT -- CQ-23's own DELIVERS item (3) is a
+  // proposal, not a committed value ("Bryce sets the number"). Defaulted
+  // to a value that makes this ceiling a no-op (never fires) until Bryce
+  // sets a real one, so shipping this mechanism does not silently start
+  // refusing frames nobody has reviewed the threshold for. CQ-23's own
+  // filed evidence: the largest max_abs_cp_phi any FITTING frame reached
+  // across 3 sequences (excluding scan 3133 itself, which this mechanism
+  // now refuses) was 0.300360 rad (site1_handheld_1); the one observed
+  // divergent value was 64.5624 rad. A proposed CHART_HARD_PHI_RAD = M_PI
+  // (~3.14159 rad, the exponential map's actual injectivity radius) sits
+  // ~10.5x above the largest fitting value and ~20x below the observed
+  // divergence, with no data point anywhere in that gap -- see the CQ-23
+  // RESULTS entry for the full distribution this proposal is based on.
+  static constexpr double CHART_HARD_PHI_RAD = 1.0e9;
   //
 
   // Control-point rate in Hz over the ACTUAL scan duration.  n_cp is derived
@@ -262,10 +294,14 @@ struct SplineOptions
 
 // CQ-22 item (4): one named cause per fit() early-return site, so a run's
 // failure count can be attributed rather than lumped into one shared
-// counter. kChartGuard is retained for the enum's completeness even though
-// the chart guard no longer returns false (see fit()'s chart-guard loop) --
-// it will never be observed as a lastFitFailCause() value post-fix, tracked
-// instead by its own warning counter (chartGuardWarned()).
+// counter.
+//
+// CQ-23: kChartGuard is live again. CQ-22 stood the chart guard down to a
+// pure warning (no return false at all); CQ-23 split it into
+// CHART_MAX_PHI_RAD (still a warning, chartGuardWarned()) and
+// CHART_HARD_PHI_RAD (a real ninth failure cause -- a solve that diverged,
+// not a chart that degraded -- see SplineOptions::CHART_HARD_PHI_RAD's own
+// comment for why these are different questions).
 enum class FitFailCause
 {
   kNone = 0,
@@ -277,7 +313,7 @@ enum class FitFailCause
   kUnderdetermined,    // fewer in-window samples than n_cp_ + 1
   kSolveFailed,        // LDLT::info() != Success
   kNonFinite,          // solved control points not all finite
-  kChartGuard,         // historical only -- see comment above
+  kChartGuard,         // max_abs_cp_phi > CHART_HARD_PHI_RAD (CQ-23)
 };
 
 // One LiDAR observation, reduced to what the control-point refinement needs.
@@ -413,16 +449,18 @@ public:
 
   double rotationChordDeg() const;
 
-  // CQ-21 item (5): max_i |cp_phi_[i]| from the last successful fit -- the
-  // EXACT quantity the chart guard checks against CHART_MAX_PHI_RAD, not
-  // the end-to-end chord rotationChordDeg() reports. 0 when invalid.
-  double maxAbsCpPhi() const
-  {
-    if (!valid_ || cp_phi_.cols() == 0) return 0.0;
-    double m = 0.0;
-    for (int i = 0; i < cp_phi_.cols(); ++i) m = std::max(m, cp_phi_.col(i).norm());
-    return m;
-  }
+  // CQ-21 item (5): max_i |cp_phi_[i]| -- the EXACT quantity the chart
+  // guard checks against CHART_MAX_PHI_RAD/CHART_HARD_PHI_RAD, not the
+  // end-to-end chord rotationChordDeg() reports.
+  //
+  // CQ-23 item (2): stored at computation time (see fit()), not
+  // recomputed live from cp_phi_ gated on valid_ -- a HARD-refused fit
+  // (CHART_HARD_PHI_RAD exceeded) sets valid_=false, and the whole point
+  // of this change is that the value which caused a refusal must still be
+  // observable, not hidden by the refusal itself. 0.0 only for a fit that
+  // never reached the point of computing cp_phi_ at all (an early-return
+  // cause before the LDLT solve).
+  double maxAbsCpPhi() const { return last_max_abs_cp_phi_; }
 
   void basisAt(double t, int& first_cp, Eigen::Vector4d& b,
                Eigen::Vector4d& db, Eigen::Vector4d& ddb) const;
@@ -453,10 +491,13 @@ public:
   // CQ-22 item (4): which of fit()'s early-return sites fired last time
   // fit() returned false. kNone after a successful fit.
   FitFailCause lastFitFailCause() const { return fail_cause_; }
-  // CQ-22 item (4): true if the last fit() exceeded CHART_MAX_PHI_RAD at
-  // any control point. No longer causes a failure (see fit()) -- this is
-  // the guard's own counter, independent of lastFitFailCause().
+  // CQ-22 item (4): true if the last fit() exceeded CHART_MAX_PHI_RAD (the
+  // soft threshold) at any control point. Independent of
+  // lastFitFailCause() -- this can be true on a fit that still succeeded.
   bool chartGuardWarned() const { return chart_guard_warned_; }
+  // CQ-23 item (4): true if the last fit() exceeded CHART_HARD_PHI_RAD.
+  // When true, lastFitFailCause() == kChartGuard and valid_ == false.
+  bool chartGuardHard() const { return chart_guard_hard_; }
 
   // CQ-22 item (5): recompute fit_res_pos_/fit_res_rot_ against `poses`
   // using the CURRENT control points. Call this after the last
@@ -497,6 +538,8 @@ public:
 
   FitFailCause fail_cause_ = FitFailCause::kNone;
   bool         chart_guard_warned_ = false;
+  bool         chart_guard_hard_ = false;
+  double       last_max_abs_cp_phi_ = 0.0;
 
   V3D phiAt(double t) const;
   V3D phiDotAt(double t) const;
