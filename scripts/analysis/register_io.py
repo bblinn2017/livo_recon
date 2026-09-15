@@ -1480,9 +1480,14 @@ def structural_diff(old: Doc, new: Doc) -> list[str]:
 # queue) and a PLANNING AGENT INBOX (results queue + errors queue), with a
 # permission matrix that is the whole point:
 #
-#                     CODE QUEUE    TASK QUEUE    RESULTS      ERRORS
-#   planning          add, modify   add, modify   delete       delete
-#   coding            delete        delete        add          add
+#                     CODE QUEUE   TASK QUEUE   DRAIN     RESULTS   ERRORS
+#   planning          add/mod/DEL  add/mod/DEL  add/DEL   --        --
+#   coding            --           --           --        add/DEL   add/DEL
+#
+# RESTATED 2026-09-14 (rule 48, Bryce).  Each inbox has exactly ONE writer.
+# The drain -- deleting a results/errors entry once its round is filed -- is
+# EXECUTED by the coding agent and AUTHORISED by the planning agent through
+# the drain ledger, a table in the coding inbox.  See audit().
 #
 # Planning cannot delete a queued item; coding cannot add one.  Every function
 # below that mutates a document takes an explicit ``role`` and refuses the
@@ -1506,13 +1511,20 @@ CODING, PLANNING = "coding", "planning"
 
 #: queue -> (role that may add/modify, role that may delete)
 QUEUE_OWNERS = {
-    "code":    (PLANNING, CODING),
-    "task":    (PLANNING, CODING),
-    "results": (CODING, PLANNING),
-    "errors":  (CODING, PLANNING),
+    # RULE 48, Bryce 2026-09-14.  EACH INBOX HAS EXACTLY ONE WRITER.
+    #   coding inbox   (code, task, drain)  <- the planning agent, alone
+    #   planning inbox (results, errors)    <- the coding agent, alone
+    # Concurrent writes are now impossible by construction rather than merged
+    # by convention, and the publish read-gate can no longer fire on either
+    # document.  The cost is that the DRAIN crosses a boundary: see audit().
+    "code":    (PLANNING, PLANNING),
+    "task":    (PLANNING, PLANNING),
+    "drain":   (PLANNING, PLANNING),
+    "results": (CODING, CODING),
+    "errors":  (CODING, CODING),
 }
 
-CODING_QUEUES = ("code", "task")
+CODING_QUEUES = ("code", "task", "drain")
 PLANNING_QUEUES = ("results", "errors")
 
 #: the five columns every code/task row carries, in order
@@ -1679,6 +1691,122 @@ _DCHECK_LINE_RE = re.compile(
     r"\((\d{1,2})\)\s*(PRESENT|MISSING|IMPOSSIBLE)\b")
 
 
+# RULE 49 (Bryce, 2026-09-15).  Rule 44 has said since 2026-09-05 what a sweep
+# report must contain, per lever, every time.  TQ-12 produced 19,696 numbers and
+# filed counts and a file path; the register could answer "what does this lever
+# do to P/Q/R/S and to ATE" for ONE of seven factors.  The rule was not wrong --
+# it had no teeth.  This is the teeth.
+#
+# A task row that dispatches a designed experiment declares its factors:
+#     [SWEEP-FACTORS: C,F,G,H,J,K,L]
+# and its filing must then carry a [LEVER-TABLE] block with ONE LINE PER FACTOR
+# carrying rule 44's six columns:
+#     (C) MECH=... TARGET=Q EFFECT=... PSE=... BAR=... SIGN=... ATE=... SETTLE=...
+#
+# EVERY FIELD IS EITHER A NUMBER OR A NAMED ABSENCE, and a line carrying any
+# absence must also carry WHY=.  That is the whole point: the rule is satisfied
+# by delivering the analysis OR by saying, per lever and per column, exactly what
+# is missing and why.  It cannot be satisfied by omission, and it cannot be
+# satisfied by prose.
+_SWEEP_FACTORS_RE = re.compile(r"\[SWEEP-FACTORS:\s*([A-Za-z0-9,\s]+?)\]")
+_LEVER_RE = re.compile(
+    r"\[LEVER-TABLE\](.*?)(?=\[[A-Z][A-Z0-9-]*\]|\Z)", re.S)
+_LEVER_LINE_RE = re.compile(r"\(([A-Za-z][A-Za-z0-9]?)\)((?:\s*[A-Z]+=[^\s]+)+)")
+_LEVER_KV_RE = re.compile(r"([A-Z]+)=([^\s]+)")
+
+#: the six rule-44 columns, in machine form
+LEVER_COLUMNS = ("MECH", "TARGET", "EFFECT", "PSE", "BAR", "SIGN", "ATE", "SETTLE")
+#: a field may be a number, or exactly one of these -- each of which is a REASON
+LEVER_ABSENCES = {"ABSENT", "INESTIMABLE", "IMPOSSIBLE", "UNSIGNED", "NOT-RUN"}
+#: fields that must be a number or a named absence (the rest are free text)
+LEVER_NUMERIC = ("EFFECT", "PSE", "BAR", "ATE")
+
+
+def _is_number(tok: str) -> bool:
+    try:
+        float(tok.replace(",", "").rstrip("%").lstrip("+"))
+        return True
+    except ValueError:
+        return False
+
+
+def check_lever_table(coding: Doc, planning: Doc) -> list[Finding]:
+    """Rule 49: a sweep's filing carries rule 44's per-lever table, or says why not.
+
+    Activates only for rows that declare [SWEEP-FACTORS: ...], so nothing
+    historical is retroactively flagged.
+    """
+    fs: list[Finding] = []
+    want: dict[str, list[str]] = {}
+    for queue in ("code", "task"):
+        try:
+            items = queue_items(coding, queue)
+        except KeyError:
+            continue
+        for it in items:
+            m = _SWEEP_FACTORS_RE.search(it.what or "")
+            if not m:
+                m = _SWEEP_FACTORS_RE.search(it.delivers or "")
+            if m:
+                want[it.qid] = [x.strip().upper()
+                                for x in m.group(1).split(",") if x.strip()]
+
+    for queue in ("results", "errors"):
+        try:
+            rows = planning.rows(queue)
+        except KeyError:
+            continue
+        for tr in rows:
+            rid = norm_id(planning.row_id(tr))
+            if rid not in want:
+                continue
+            body = tr.inner(planning.src)
+            m = _LEVER_RE.search(body)
+            if not m:
+                fs.append(Finding("error", "lever-table",
+                    f"{rid} declares SWEEP-FACTORS {','.join(want[rid])} and its "
+                    f"{queue} entry carries no [LEVER-TABLE] block -- rule 49: the "
+                    f"analysis is delivered per lever, or what is missing is named "
+                    f"per lever.  Prose and a file path are neither"))
+                continue
+            seen = {}
+            for fac, kvs in _LEVER_LINE_RE.findall(m.group(1)):
+                seen[fac.upper()] = dict(_LEVER_KV_RE.findall(kvs))
+            for fac in want[rid]:
+                row = seen.get(fac)
+                if row is None:
+                    fs.append(Finding("error", "lever-table",
+                        f"{rid}: factor {fac} has no line in the [LEVER-TABLE]"))
+                    continue
+                gaps = [c for c in LEVER_COLUMNS if c not in row]
+                if gaps:
+                    fs.append(Finding("error", "lever-table",
+                        f"{rid} factor {fac}: missing rule-44 column(s) "
+                        f"{','.join(gaps)}"))
+                bad = [c for c in LEVER_NUMERIC
+                       if c in row and not _is_number(row[c])
+                       and row[c].upper() not in LEVER_ABSENCES]
+                if bad:
+                    fs.append(Finding("error", "lever-table",
+                        f"{rid} factor {fac}: {','.join(bad)} is neither a number "
+                        f"nor a named absence ({'/'.join(sorted(LEVER_ABSENCES))})"))
+                absent = [c for c in LEVER_NUMERIC
+                          if row.get(c, "").upper() in LEVER_ABSENCES]
+                if absent and "WHY" not in row:
+                    fs.append(Finding("error", "lever-table",
+                        f"{rid} factor {fac}: {','.join(absent)} absent with no "
+                        f"WHY= -- rule 49 accepts a gap that is explained, never "
+                        f"one that is merely reported"))
+                if row.get("SIGN", "").upper() not in {
+                        "DESIRABLE", "UNDESIRABLE", "UNSIGNED", "INESTIMABLE"}:
+                    fs.append(Finding("warn", "lever-table",
+                        f"{rid} factor {fac}: SIGN={row.get('SIGN','?')} is not one "
+                        f"of DESIRABLE/UNDESIRABLE/UNSIGNED/INESTIMABLE -- rule 44 "
+                        f"column 4 signs an effect against a NAMED standing "
+                        f"diagnosis or reports it unsigned"))
+    return fs
+
+
 def delivers_item_numbers(text: str) -> list[int]:
     """The numbered items in a DELIVERS cell, in order, deduplicated.
 
@@ -1771,6 +1899,7 @@ def audit(coding: Doc, planning: Doc) -> list[Finding]:
     fs: list[Finding] = []
     fs += check_queue_schema(coding)
     fs += check_delivers_coverage(coding, planning)
+    fs += check_lever_table(coding, planning)
 
     task_ids = set(queue_ids(coding, "task"))
     code_ids = set(queue_ids(coding, "code"))
@@ -1783,11 +1912,41 @@ def audit(coding: Doc, planning: Doc) -> list[Finding]:
     result_ids = set(queue_ids(planning, "results"))
     error_ids = set(queue_ids(planning, "errors"))
 
-    for rid in sorted(queued_ids & result_ids):
+    # RULE 48 (2026-09-14).  The coding agent now owns BOTH the writing and the
+    # deletion of results/errors entries, so the authorisation to delete one has
+    # to cross from the other side.  It crosses in the DRAIN LEDGER: a table in
+    # the CODING inbox, written by the planning agent, naming every entry whose
+    # round has been filed.  An entry is deleted only once its id is on it.
+    #
+    # The ledger is APPEND-ONLY.  That is what makes the invariant checkable:
+    # it is the standing record that a filing happened, on the one document the
+    # deleting agent cannot write.  A deletion can therefore never manufacture
+    # its own authorisation -- which is the property the old matrix got from
+    # splitting the two operations between the two agents, preserved here by
+    # splitting them between the two DOCUMENTS instead.
+    #
+    # The limit, stated rather than papered over: an entry deleted with no
+    # ledger line and no queued row leaves no trace either checker can see.
+    # What IS caught is every drain that was authorised and not completed, and
+    # every filing that removed an entry's authorisation without removing its row.
+    try:
+        drain_ids = set(queue_ids(coding, "drain"))
+    except Exception:
+        drain_ids = set()
+
+    for rid in sorted(queued_ids & drain_ids & result_ids):
         which = "task" if rid in task_ids else "code"
         fs.append(Finding("error", "illegal-state",
-            f"{rid} is in the {which} queue AND has a results entry -- a result was "
-            f"filed and the item was not deleted, so that work will be repeated"))
+            f"{rid} has a results entry AND is authorised for drain AND is STILL in "
+            f"the {which} queue -- the round was filed and the row was not removed, "
+            f"so those cells will run again"))
+    for rid in sorted((result_ids | error_ids) & drain_ids):
+        fs.append(Finding("info", "drain-owed",
+            f"{rid} is authorised for drain and its entry is still in the planning "
+            f"inbox -- the coding agent removes it on its next pass"))
+    for rid in sorted(drain_ids - (result_ids | error_ids)):
+        fs.append(Finding("info", "drain-done",
+            f"{rid} drained; its ledger line is the standing record of the filing"))
     for rid in sorted(error_ids - queued_ids):
         fs.append(Finding("error", "illegal-state",
             f"{rid} has an errors entry but is in NEITHER queue -- a failed item "
@@ -2094,7 +2253,7 @@ class Unit:
     node: Optional[Node] = None
 
 
-_QUEUES = ("code", "task", "results", "errors")
+_QUEUES = ("code", "task", "drain", "results", "errors")
 # Other row tables worth editing through the text form.  They are NOT protocol queues:
 # the permission matrix says nothing about them, so ``_queue_of`` deliberately does not
 # claim them and no ``_require`` gate fires on a change to one.
