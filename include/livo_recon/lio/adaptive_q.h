@@ -202,10 +202,37 @@ public:
   // (config-invariant by construction, see update()'s early-return) cannot.
   bool   clamped() const { return clamped_; }
 
+  // CQ-26: whether THIS call reached active_ = true (i.e. produced a fresh
+  // "ok" measurement this frame), distinct from active() -- active_ is a
+  // one-way LATCH (set true at the bottom of update(), never reset), so
+  // active() alone means "has ever activated since startup", not "is
+  // currently contributing". Reset to false at the top of every update()
+  // call, same pattern as clamped_.
+  bool   activeThisFrame() const { return active_this_frame_; }
+
+  // CQ-26: the four per-channel gate reads update() already computes and
+  // previously discarded (white_acc/white_gyr/above_a/above_g are local
+  // variables in update() prior to this). Reported as last computed --
+  // false/stale on a frame that returned before reaching that computation
+  // (off/no_residual/bad_residual; distinguishable via lastStatus()).
+  bool   whiteAcc() const { return white_acc_; }
+  bool   whiteGyr() const { return white_gyr_; }
+  bool   aboveFloorAcc() const { return above_acc_; }
+  bool   aboveFloorGyr() const { return above_gyr_; }
+
   // Last decision, for the log and for the register's own accounting.
   const std::string& lastStatus() const { return status_; }
   double zAcc() const { return z_acc_; }
   double zGyr() const { return z_gyr_; }
+  // CQ-26: z_acc_/z_gyr_ default-construct to 0.0 (a real excursion value,
+  // needed so the rate-limited increment in update() has a numeric starting
+  // point) which is indistinguishable from a genuine zero excursion once
+  // logged. These report NaN until the channel's gate has actually passed
+  // at least once, so "never updated" and "updated to exactly zero" are
+  // distinguishable in the log -- see zAcc()/zGyr() for the raw value the
+  // filter math itself uses (unchanged).
+  double zAccOrNaN() const;
+  double zGyrOrNaN() const;
   double measuredAcc() const { return meas_acc_; }
   double measuredGyr() const { return meas_gyr_; }
   int    frames() const { return frames_; }
@@ -226,6 +253,14 @@ private:
   bool   clamped_ = false;
   bool   primed_ = false;
   std::string status_ = "off";
+
+  // CQ-26: reset every call (active_this_frame_/the two gate pairs) or
+  // latched on first successful update (the two ever_updated_ flags) --
+  // see the getters above for what each means and why.
+  bool   active_this_frame_ = false;
+  bool   white_acc_ = false, white_gyr_ = false;
+  bool   above_acc_ = false, above_gyr_ = false;
+  bool   acc_ever_updated_ = false, gyr_ever_updated_ = false;
 
   // Map a measured variance to a bounded excursion z about the nominal.
   // z = log10(meas / nom) / beta, then clamped by tanh's own range.  The

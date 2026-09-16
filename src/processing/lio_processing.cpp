@@ -1483,12 +1483,24 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       // comment -- cov_acc/cov_gyr stay config-invariant either way, but
       // these five are the columns that actually distinguish live from off.
       if (opts_.adaptive_q.enable) {
-        diag.q_z_acc    = adaptive_q_.zAcc();
-        diag.q_z_gyr    = adaptive_q_.zGyr();
+        // CQ-26: NaN until the channel's gate has actually passed once (see
+        // zAccOrNaN()/zGyrOrNaN()'s doc comment) -- was zAcc()/zGyr()
+        // directly, which default to 0.0 (a real excursion value) and so
+        // could not distinguish "never updated" from "updated to zero".
+        diag.q_z_acc    = adaptive_q_.zAccOrNaN();
+        diag.q_z_gyr    = adaptive_q_.zGyrOrNaN();
         diag.q_acf1_acc = last_spline_stats_.acf1_acc;
         diag.q_acf1_gyr = last_spline_stats_.acf1_gyr;
         diag.q_active   = adaptive_q_.active();
         diag.q_clamped  = adaptive_q_.clamped();
+        // CQ-26: update()'s own per-frame decision, previously computed and
+        // discarded -- see LioFrameDiag's doc comment on these six fields.
+        diag.q_status          = adaptive_q_.lastStatus();
+        diag.q_white_acc       = adaptive_q_.whiteAcc();
+        diag.q_white_gyr       = adaptive_q_.whiteGyr();
+        diag.q_above_floor_acc = adaptive_q_.aboveFloorAcc();
+        diag.q_above_floor_gyr = adaptive_q_.aboveFloorGyr();
+        diag.q_active_frame    = adaptive_q_.activeThisFrame();
       }
       if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) vm->noteLioFrameDiag(diag);
     }

@@ -7,6 +7,7 @@
 #include <atomic>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 #include <Eigen/Eigenvalues>
 
@@ -598,6 +599,20 @@ struct LioFrameDiag
   double q_acf1_gyr = std::numeric_limits<double>::quiet_NaN();
   bool   q_active   = false;
   bool   q_clamped  = false;
+
+  // CQ-26: AdaptiveQ::update()'s own per-frame decision, previously computed
+  // and discarded. q_status is the exact lastStatus() string (off/
+  // no_residual/bad_residual/not_white/below_floor/no_window/warmup/
+  // nonfinite/ok). The four booleans are the per-channel whiteness/floor
+  // gate reads; q_active_frame is whether THIS frame reached active_=true
+  // (active_ itself is a one-way latch -- see adaptive_q.h's activeThisFrame()
+  // doc comment for why that distinction matters).
+  std::string q_status         = "off";
+  bool        q_white_acc      = false;
+  bool        q_white_gyr      = false;
+  bool        q_above_floor_acc = false;
+  bool        q_above_floor_gyr = false;
+  bool        q_active_frame   = false;
 };
 
 struct VoxelStats

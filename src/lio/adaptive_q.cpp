@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
+#include <limits>
 #include <sstream>
 
 namespace livo_recon
@@ -40,11 +41,12 @@ double AdaptiveQ::applyZ(double nom, double beta, double z)
 
 bool AdaptiveQ::update(const SplineImuResidualStats& st)
 {
-  // CQ-19(c): reset every call so a frame that returns before reaching the
-  // hard-bounds section below (warmup, not-white, below-floor, ...) reports
-  // clamped=false rather than carrying over a stale true from an earlier
-  // frame that did reach it.
+  // CQ-19(c)/CQ-26: reset every call so a frame that returns before reaching
+  // the hard-bounds section below (warmup, not-white, below-floor, ...)
+  // reports clamped=false/active_this_frame=false rather than carrying over
+  // a stale true from an earlier frame that did reach it.
   clamped_ = false;
+  active_this_frame_ = false;
 
   if (!opts_.enable) { status_ = "off"; return false; }
 
@@ -60,6 +62,8 @@ bool AdaptiveQ::update(const SplineImuResidualStats& st)
   // measurement at all -- its magnitude is not evidence about anything.
   const bool white_acc = std::abs(st.acf1_acc) <= opts_.acf1_max;
   const bool white_gyr = std::abs(st.acf1_gyr) <= opts_.acf1_max;
+  white_acc_ = white_acc;
+  white_gyr_ = white_gyr;
   if (!white_acc && !white_gyr) { status_ = "not_white"; return false; }
 
   // ---- anchor 1: the physical floor --------------------------------------
@@ -72,6 +76,8 @@ bool AdaptiveQ::update(const SplineImuResidualStats& st)
   const double fl_g = opts_.use_noise_floor ? floor_gyr_ * opts_.noise_floor_scale : 0.0;
   const bool above_a = !(fl_a > 0.0) || st.cov_acc >= fl_a;
   const bool above_g = !(fl_g > 0.0) || st.cov_gyr >= fl_g;
+  above_acc_ = above_a;
+  above_gyr_ = above_g;
   if (!above_a && !above_g) { status_ = "below_floor"; return false; }
 
   // Both gates failing on DIFFERENT channels means no n_cp satisfies both
@@ -104,9 +110,15 @@ bool AdaptiveQ::update(const SplineImuResidualStats& st)
   const double lim = std::max(0.0, opts_.z_rate_limit);
 
   if (white_acc && above_a)
+  {
     z_acc_ += std::max(-lim, std::min(lim, z_a_target - z_acc_));
+    acc_ever_updated_ = true;
+  }
   if (white_gyr && above_g)
+  {
     z_gyr_ += std::max(-lim, std::min(lim, z_g_target - z_gyr_));
+    gyr_ever_updated_ = true;
+  }
 
   double aa = applyZ(nom_acc_, opts_.beta_acc, z_acc_);
   double ag = applyZ(nom_gyr_, opts_.beta_gyr, z_gyr_);
@@ -128,8 +140,19 @@ bool AdaptiveQ::update(const SplineImuResidualStats& st)
   applied_acc_ = aa;
   applied_gyr_ = ag;
   active_ = true;
+  active_this_frame_ = true;
   status_ = "ok";
   return changed;
+}
+
+double AdaptiveQ::zAccOrNaN() const
+{
+  return acc_ever_updated_ ? z_acc_ : std::numeric_limits<double>::quiet_NaN();
+}
+
+double AdaptiveQ::zGyrOrNaN() const
+{
+  return gyr_ever_updated_ ? z_gyr_ : std::numeric_limits<double>::quiet_NaN();
 }
 
 std::string AdaptiveQ::csvHeader() const

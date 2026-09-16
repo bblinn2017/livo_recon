@@ -57,7 +57,12 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            // CQ-19(b): the dot product that signs rho_ref.
            ",cos_pmin_hmin"
            // CQ-19(c): AdaptiveQ's own gate state.
-           ",q_z_acc,q_z_gyr,q_acf1_acc,q_acf1_gyr,q_active,q_clamped\n";
+           ",q_z_acc,q_z_gyr,q_acf1_acc,q_acf1_gyr,q_active,q_clamped"
+           // CQ-26: update()'s per-frame decision (status + the four gate
+           // reads it already computes and previously discarded) plus
+           // q_active_frame, the per-frame counterpart to the latched
+           // q_active above -- see LioFrameDiag's doc comment.
+           ",q_status,q_white_acc,q_white_gyr,q_above_floor_acc,q_above_floor_gyr,q_active_frame\n";
   first_call = false;
   // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
   // (6 significant figures) collapses every frame in a run to the same
@@ -83,7 +88,11 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.p_pos_vel_fro_pre << "," << lio.p_pos_bias_fro_pre
       << "," << lio.cos_pmin_hmin
       << "," << lio.q_z_acc << "," << lio.q_z_gyr << "," << lio.q_acf1_acc << "," << lio.q_acf1_gyr
-      << "," << (lio.q_active ? 1 : 0) << "," << (lio.q_clamped ? 1 : 0) << "\n";
+      << "," << (lio.q_active ? 1 : 0) << "," << (lio.q_clamped ? 1 : 0)
+      << "," << lio.q_status
+      << "," << (lio.q_white_acc ? 1 : 0) << "," << (lio.q_white_gyr ? 1 : 0)
+      << "," << (lio.q_above_floor_acc ? 1 : 0) << "," << (lio.q_above_floor_gyr ? 1 : 0)
+      << "," << (lio.q_active_frame ? 1 : 0) << "\n";
 }
 }  // namespace
 
