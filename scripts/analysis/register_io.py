@@ -1947,7 +1947,7 @@ def audit(coding: Doc, planning: Doc) -> list[Finding]:
     for rid in sorted(drain_ids - (result_ids | error_ids)):
         fs.append(Finding("info", "drain-done",
             f"{rid} drained; its ledger line is the standing record of the filing"))
-    for rid in sorted(error_ids - queued_ids):
+    for rid in sorted(error_ids - queued_ids - drain_ids):
         fs.append(Finding("error", "illegal-state",
             f"{rid} has an errors entry but is in NEITHER queue -- a failed item "
             f"must stay queued; that is the whole point of filing the error"))
