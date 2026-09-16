@@ -67,7 +67,28 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // classes are constructed independently and this keeps the single source
   // of truth in the parameter server, where the sweep harness writes it.
   // The copy is skipped entirely when the spline is off.
-  paramWarn<bool>(pnh, "spline/enable", opts_.keep_raw_samples, false);
+  //
+  // BUG FIX (found 2026-09-15, during a TQ-14 item-8 investigation into why
+  // q_active read exactly 0.0 on every frame across the entire TQ-12/TQ-6/
+  // TQ-7 dataset): this used to read the boolean "spline/enable" key, which
+  // the spline restructure DELETED -- replaced by the string "spline/mode".
+  // Since "spline/enable" is never set on the param server anymore, this
+  // paramWarn<bool> silently fell back to its default (false) on every
+  // single run, so imu_samples_raw was NEVER retained regardless of
+  // spline/mode -- finalizeSplineAndQ()'s `if (!mg.imu_samples_raw.empty())`
+  // guard was always false, last_spline_stats_ stayed default-constructed
+  // (n=0), SplineImuResidualStats::valid() (n>=8) was always false, and
+  // AdaptiveQ::update() hit its very first check ("no_residual") on every
+  // call, before warmup/whiteness/floor were ever evaluated -- active_
+  // never became true anywhere, so state_->setNoiseParams() (gated on
+  // adaptive_q_.active()) was NEVER called, meaning adaptive_q/enable=true
+  // had ZERO effect on any run's actual trajectory: it silently ran
+  // identically to adaptive_q/enable=false. Fixed by reading the current
+  // "spline/mode" string directly (mirroring LioProcOptions::splineOn()'s
+  // own "mode != raw_imu" definition) instead of the deleted boolean key.
+  std::string spline_mode = "raw_imu";
+  paramWarn<std::string>(pnh, "spline/mode", spline_mode, std::string("raw_imu"));
+  opts_.keep_raw_samples = (spline_mode != "raw_imu");
   { std::lock_guard<std::mutex> lock(g_qhat_mtx); g_qhat_enabled = opts_.log_qhat_en; }
 
   std::ostringstream oss;
