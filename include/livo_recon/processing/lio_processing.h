@@ -436,10 +436,32 @@ private:
   // origin; now shared by every sigma_scale.mode level.
   mutable double last_density_scale_ = 1.0;
 
-  // CQ-37 axis D "chi2" level's cross-frame EMA state -- seeded at 1.0
-  // (assume calibrated until data says otherwise) so the scale applied
-  // during warmup is the identity rather than a wild first reading.
+  // CQ-37 axis D "chi2" level's cross-frame state.
+  //
+  // CQ-36 M4 (coding inbox, 2026-09-17): the FIRST version of this made
+  // chi2_ema_ the applied scale directly (scale = chi2_ema_). That closes
+  // the loop on the wrong variable: chi2_ema_ is an EMA of MEASURED
+  // (post-scale) reduced_chi2, and scaling sigma_squared by s makes the
+  // next measurement chi2/s -- so "scale = last measured chi2" has its
+  // fixed point where scale = raw_chi2/scale, i.e. scale* = sqrt(raw_chi2),
+  // NOT raw_chi2 itself, and the measured chi2 at that fixed point is also
+  // sqrt(raw_chi2), never 1. Confirmed empirically: both verification
+  // cells converged the scale and the reported chi2 to the SAME value
+  // (~0.49-0.50) instead of chi2 -> 1.
+  //
+  // FIX: chi2_scale_ is now a SEPARATE, persistent, multiplicatively-
+  // ACCUMULATED state -- an integral controller, not a direct assignment.
+  // Each frame: chi2_ema_ (the smoothed MEASURED reduced_chi2 under the
+  // CURRENTLY applied chi2_scale_) updates as before; then
+  // chi2_scale_ *= chi2_ema_. At the fixed point chi2_ema_ == 1 exactly
+  // (scale stops changing only once measured chi2 has reached 1), which is
+  // the loop this mode's whole premise requires. chi2_ema_ is seeded
+  // directly from measurements during warmup (unchanged); chi2_scale_
+  // stays at its identity default (1.0, inert) through warmup and only
+  // starts accumulating once warmup ends, seeded from chi2_ema_ at that
+  // instant so the first post-warmup step is not a jump from the default.
   mutable double chi2_ema_ = 1.0;
+  mutable double chi2_scale_ = 1.0;
   mutable int    chi2_ema_frames_ = 0;
 
   // Applies opts_.sigma_scale to `residuals` in place (sigma_squared AND,

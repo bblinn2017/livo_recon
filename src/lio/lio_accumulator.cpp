@@ -23,8 +23,30 @@ void accumulateLioResiduals(const std::vector<Residual>& residuals, EkfUpdate& o
   // iterative solve can amplify into materially different results for
   // byte-identical input. Reducing in fixed residual-index order instead
   // makes the result independent of thread count entirely.
-  std::vector<M66> rHtH(n, M66::Zero());
-  std::vector<V6>  rHtz(n, V6::Zero());
+  //
+  // A `static thread_local` version of these two buffers (reused across
+  // calls via resize() instead of freshly allocated every call) was tried
+  // and REVERTED 2026-09-17: it reproducibly SIGSEGV'd at node startup, well
+  // before this function was ever first called (during IMU calibration, in
+  // both a plain "off" config and a chi2-mode config) -- bisected by
+  // isolating this one file's change from the concurrent CQ-36 M4 fix
+  // (which does NOT reproduce the crash on its own) and by reverting just
+  // the static-thread_local declaration while keeping everything else
+  // (direct `=` instead of `+=`, no `Zero()` fill), which alone eliminates
+  // the crash. Root cause not tracked down further (likely a TLS
+  // allocation issue specific to this binary's build, given it links both
+  // OpenMP and CUDA translation units) -- not worth chasing for the size of
+  // the remaining win. This version keeps the safe half of the original
+  // idea: every index i in [0, n) below is written exactly once (never
+  // accumulated onto), so no `Zero()` start value is needed at all -- `=`
+  // instead of `+=` fills every entry of both the 6x6 (all four 3x3
+  // quadrants) and 6x1 (both 3-segments) explicitly, skipping the
+  // zero-initialization pass the original `M66::Zero()`/`V6::Zero()` fill
+  // constructors did on every element. The per-call heap allocation itself
+  // is NOT avoided (unlike the reverted design) -- verified byte-identical
+  // ATE against the pre-change binary on eee_01/off before landing.
+  std::vector<M66> rHtH(n);
+  std::vector<V6>  rHtz(n);
 
   #pragma omp parallel for schedule(static) num_threads(nthreads)
   for (int i = 0; i < n; ++i) {
@@ -34,12 +56,12 @@ void accumulateLioResiduals(const std::vector<Residual>& residuals, EkfUpdate& o
     const double w  = 1.0 / res.sigma_squared;
     const double wr = w * res.r;
 
-    rHtH[i].block<3,3>(0, 0).noalias() += w  * hr * hr.transpose();
-    rHtH[i].block<3,3>(0, 3).noalias() += w  * hr * hp.transpose();
-    rHtH[i].block<3,3>(3, 0).noalias() += w  * hp * hr.transpose();
-    rHtH[i].block<3,3>(3, 3).noalias() += w  * hp * hp.transpose();
-    rHtz[i].segment<3>(0).noalias()    += wr * hr;
-    rHtz[i].segment<3>(3).noalias()    += wr * hp;
+    rHtH[i].block<3,3>(0, 0).noalias() = w  * hr * hr.transpose();
+    rHtH[i].block<3,3>(0, 3).noalias() = w  * hr * hp.transpose();
+    rHtH[i].block<3,3>(3, 0).noalias() = w  * hp * hr.transpose();
+    rHtH[i].block<3,3>(3, 3).noalias() = w  * hp * hp.transpose();
+    rHtz[i].segment<3>(0).noalias()    = wr * hr;
+    rHtz[i].segment<3>(3).noalias()    = wr * hp;
   }
 
   for (int i = 0; i < n; ++i) {

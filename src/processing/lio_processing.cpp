@@ -484,14 +484,13 @@ void LioProc::applySigmaScale(std::vector<Residual>& residuals) const
               static_cast<double>(redundancy_stats_.redund_n_eff);
     scale = std::min(std::max(scale, opts_.sigma_scale.min_ratio), opts_.sigma_scale.max_ratio);
   } else if (opts_.sigma_scale.chi2On()) {
-    // chi2_ema_ is updated once per frame elsewhere (right after
-    // diag.reduced_chi2 is computed, see processLIO()) from THIS frame's
-    // own reduced_chi2 -- so, symmetrically with info_gain_derived above,
-    // the scale applied here is decided from the PREVIOUS frame's
-    // calibration reading. Applied DIRECTLY (not clamped to >= 1 -- CQ-36
-    // item 4b): reduced_chi2 < 1 means sigma_squared is too large, and the
-    // scale must be free to shrink it.
-    scale = std::min(std::max(chi2_ema_, opts_.sigma_scale.min_ratio), opts_.sigma_scale.max_ratio);
+    // CQ-36 M4 fix: chi2_scale_ is the persistent, multiplicatively-
+    // accumulated state (updated post-solve, see processLIO()) -- NOT the
+    // raw chi2_ema_ reading. See chi2_scale_'s own declaration for why a
+    // direct assignment there has the wrong fixed point. Not clamped to
+    // >= 1 (CQ-36 item 4b): reduced_chi2 < 1 means sigma_squared is too
+    // large, and the scale must be free to shrink it.
+    scale = std::min(std::max(chi2_scale_, opts_.sigma_scale.min_ratio), opts_.sigma_scale.max_ratio);
   }
 
   for (auto& r : residuals) {
@@ -1771,20 +1770,34 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       diag.sigma_scale_applied        = last_density_scale_;
       diag.sigma_scale_chi2_ema       = chi2_ema_;
 
-      // CQ-36 item 4/CQ-37 axis D "chi2": update the cross-frame EMA from
-      // THIS frame's own reduced_chi2, just computed above, so NEXT frame's
-      // applySigmaScale() call decides its scale from it (see that
-      // function's own comment on the resulting one-frame lag). Warmup:
-      // seed directly rather than blend for the first chi2_warmup_frames
-      // frames, so the EMA does not start from an arbitrary 1.0 and drift
-      // slowly toward the true value only after many frames.
+      // CQ-36 item 4/CQ-37 axis D "chi2", FIXED per CQ-36 M4 (coding inbox,
+      // 2026-09-17): update chi2_ema_ (the smoothed MEASURED, i.e.
+      // post-scale, reduced_chi2 -- diag.reduced_chi2 was just computed
+      // above under whatever chi2_scale_ this frame actually applied) from
+      // THIS frame's own reading, exactly as before. THEN accumulate it
+      // into chi2_scale_ multiplicatively -- chi2_scale_ *= chi2_ema_ --
+      // which is the actual fix: an integral controller whose fixed point
+      // is chi2_ema_ == 1 (scale stops moving only once measured chi2 has
+      // reached 1), unlike the retired "scale = chi2_ema_" direct
+      // assignment, whose fixed point was sqrt(raw_chi2) on both sides.
+      // Warmup: chi2_ema_ is seeded directly (unchanged) and chi2_scale_
+      // stays at its 1.0 (inert) default throughout warmup -- the very
+      // first post-warmup frame seeds chi2_scale_ FROM chi2_ema_ (a
+      // bootstrap step) rather than starting the multiplicative
+      // accumulation from the arbitrary default.
       if (opts_.sigma_scale.chi2On() && diag.reduced_chi2 > 0.0) {
         ++chi2_ema_frames_;
         if (chi2_ema_frames_ <= opts_.sigma_scale.chi2_warmup_frames) {
           chi2_ema_ = diag.reduced_chi2;
+        } else if (chi2_ema_frames_ == opts_.sigma_scale.chi2_warmup_frames + 1) {
+          const double a = opts_.sigma_scale.chi2_ema;
+          chi2_ema_ = a * chi2_ema_ + (1.0 - a) * diag.reduced_chi2;
+          chi2_scale_ = chi2_ema_;  // bootstrap: seed from the EMA, not from 1.0
         } else {
           const double a = opts_.sigma_scale.chi2_ema;
           chi2_ema_ = a * chi2_ema_ + (1.0 - a) * diag.reduced_chi2;
+          chi2_scale_ = std::min(std::max(chi2_scale_ * chi2_ema_, opts_.sigma_scale.min_ratio),
+                                  opts_.sigma_scale.max_ratio);
         }
       }
 
