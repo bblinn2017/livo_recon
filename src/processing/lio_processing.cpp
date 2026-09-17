@@ -169,7 +169,11 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/beta_acc", opts_.adaptive_q.beta_acc, 0.3);
   cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/beta_gyr", opts_.adaptive_q.beta_gyr, 0.3);
   cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/z_rate_limit", opts_.adaptive_q.z_rate_limit, 0.02);
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/acf1_max", opts_.adaptive_q.acf1_max, 0.35);
+  // CQ-35: kept in sync with AdaptiveQOptions::acf1_max's own default
+  // (adaptive_q.h) -- this call's own literal is the REAL effective default
+  // whenever the YAML doesn't set the key (the common case), since it
+  // overwrites whatever the struct member was already initialised to.
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/acf1_max", opts_.adaptive_q.acf1_max, 1.00);
   cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/bounds/max_ratio", opts_.adaptive_q.max_ratio, 100.0);
   cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/bounds/min_ratio", opts_.adaptive_q.min_ratio, 0.01);
   cfg.nested<int>(aq, "adaptive_q/enable", "adaptive_q/warmup_frames", opts_.adaptive_q.warmup_frames, 20);

@@ -132,11 +132,28 @@ struct AdaptiveQOptions
   // measurement can move the filter far.
   double z_rate_limit = 0.02;
 
-  // Whiteness gate: refuse the measurement if |lag-1 ACF| exceeds this.
-  // 0.2 is loose enough to pass genuinely white residuals at n ~ 20 (where
-  // the ACF's own standard error is ~1/sqrt(n) = 0.22) and tight enough to
-  // catch a spline that is still tracking real motion.
-  double acf1_max = 0.35;
+  // CQ-35, 2026-09-17: raised from 0.35 to 1.00 (inert by construction --
+  // |acf1| <= 1 by Cauchy-Schwarz on the lag-1 numerator against the
+  // full-sample denominator). TQ-27 measured acf1_acc median 0.664 (eee_01)
+  // / 0.658 (eee_02), p10 0.600 / 0.595, and 0.0% of frames below 0.23 on
+  // either sequence (0 of 3982, 0 of 3205) -- the accelerometer channel
+  // never cleared even a 0.35 bar, so update()'s per-channel guard
+  // `white_acc && above_a` never fired and AdaptiveQ was a GYRO-ONLY
+  // estimator on every run this project has ever done, on these beds. The
+  // "usable plateau" documented above (|acf1| <= 0.23 at n_cp 4-10) is a
+  // property of the synthetic bench case it was measured on, not of
+  // NTU_VIRAL -- keep that analysis for what it still shows (the
+  // over-resolution failure mode acf1 catches), but do not read it as
+  // justifying a threshold near 0.23 on these sequences. At the new
+  // default: acceptance 8.2%->99.5% (eee_01) / 12.5%->99.3% (eee_02),
+  // accelerometer adapts to ~x1.99 nominal while gyro holds ~x0.50,
+  // q_clamped_rate stays 0.00%, and ATE reads 28.100mm on eee_01 (the
+  // baseline exactly) and 27.900mm on eee_02 (best of the six TQ-27 arms
+  // on both beds). The gate code itself is UNTOUCHED -- see below -- so a
+  // config can still re-impose it via YAML with no rebuild, and
+  // white_acc_/white_gyr_/not_white remain the instrument that found this,
+  // now logged on a configuration where they are not expected to fire.
+  double acf1_max = 1.00;
 
   // Hard bounds relative to the NOMINAL (the YAML's state/cov/{acc,gyr}).
   // Belt and braces on top of beta -- if beta is ever raised these still
