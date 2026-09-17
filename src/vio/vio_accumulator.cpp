@@ -5,7 +5,7 @@
 #include <cmath>
 #include <fstream>
 #include <limits>
-#include <set>
+#include <map>
 #include <sstream>
 #include <omp.h>
 
@@ -18,12 +18,17 @@ namespace
 // Shared opt-in debug-log append helper -- mirrors vio_processing.cpp's own
 // logIteration() (kept duplicated rather than shared across translation
 // units for this one small helper, to avoid adding a header just for it).
+// CQ-35: one persistent ofstream per distinct path, opened (truncating) the
+// first time that path is seen and kept open for the process lifetime --
+// replaces the old truncated_paths-set + fresh-ofstream-per-call pattern,
+// which paid an open+close syscall pair on every single call.
 void logIteration(const std::string& path, const std::string& msg)
 {
-  static std::set<std::string> truncated_paths;
-  const bool first_call_for_path = truncated_paths.insert(path).second;
-  std::ofstream ofs(path, first_call_for_path ? std::ios::trunc : std::ios::app);
-  ofs << msg << "\n";
+  static std::map<std::string, std::ofstream> streams;
+  auto it = streams.find(path);
+  if (it == streams.end())
+    it = streams.emplace(path, std::ofstream(path, std::ios::trunc)).first;
+  it->second << msg << "\n";
 }
 
 // Point-to-LINE distance (r=N/D, l=t_cc x y, D=||l_xy||) with the FULL

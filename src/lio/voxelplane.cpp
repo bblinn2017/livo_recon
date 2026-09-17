@@ -32,45 +32,51 @@ void updateMaxPlaneVarTrace(double trace)
   while (trace > cur &&
          !g_max_plane_var_trace.compare_exchange_weak(cur, trace, std::memory_order_relaxed)) {}
 }
+// CQ-35: ofs is a function-local static, opened once (truncating) and kept
+// open for the process lifetime instead of reopened every call. This one
+// matters more than most: debugLogVarianceShare()/debugLogPlaneFitStats()
+// below are called once per RESIDUAL / once per plane FIT respectively --
+// thousands of times per frame when their gating flag is on -- so the old
+// open+close-per-call pattern was the dominant cost of enabling either
+// diagnostic, not the write itself.
 void debugLogNoiseFloor(const std::string& msg)
 {
-  static bool first_call = true;
-  std::ofstream ofs(debugLogPath("noise_floor.txt"), first_call ? std::ios::trunc : std::ios::app);
-  first_call = false;
+  static std::ofstream ofs(debugLogPath("noise_floor.txt"), std::ios::trunc);
   ofs << msg << "\n";
 }
 
-// T3-0d: computeResidual() runs inside LioProc::buildResiduals()'s OMP
-// parallel-for loop, so this needs its own lock -- debugLogNoiseFloor()
-// above is only ever called from single-threaded contexts and has no such
-// guard. Off by default (log_variance_shares_en), so the lock is never
-// taken in a normal run.
+// CQ-35: computeResidual() runs inside LioProc::buildResiduals()'s OMP
+// parallel-for loop, once per RESIDUAL -- a per-call mutex there was the
+// dominant cost of enabling this diagnostic. Each thread now appends to
+// its OWN thread_local buffer (no lock, no contention); flushVarianceShareLog()
+// drains the calling thread's buffer under a lock ONCE, and must be called
+// by every thread from inside the same parallel region (see voxelplane.h's
+// doc comment on both flush functions). Off by default (log_variance_shares_en),
+// so the buffer stays empty and the flush is a no-op in a normal run.
+thread_local std::string t_variance_share_buf;
+
 void debugLogVarianceShare(double sigma_diag_squared, double plane_var_term)
 {
-  static bool first_call = true;
-  static std::mutex mtx;
   const double total = sigma_diag_squared + plane_var_term;
   const double share = total > 0.0 ? plane_var_term / total : 0.0;
-  std::lock_guard<std::mutex> lock(mtx);  // guards first_call too -- see comment above
-  std::ofstream ofs(debugLogPath("variance_shares.txt"), first_call ? std::ios::trunc : std::ios::app);
-  first_call = false;
-  ofs << sigma_diag_squared << " " << plane_var_term << " " << share << "\n";
+  std::ostringstream oss;
+  oss << sigma_diag_squared << " " << plane_var_term << " " << share << "\n";
+  t_variance_share_buf += oss.str();
 }
 
 // T3-0d: N/J/N_eff/trace(plane_var_) per VoxelPlane::update() call that
 // commits a plane -- lets a bin_size_fraction or bin_weight_mode sweep be
 // read against how much the effective sample size actually moved, rather
-// than inferred from ATE alone. May be called concurrently across
-// different voxels during map insertion, hence the same mutex pattern as
-// debugLogVarianceShare() above.
+// than inferred from ATE alone. Called from VoxelMap::insert()'s own OMP
+// parallel-for, once per plane fit -- same thread_local-buffer-plus-flush
+// pattern as debugLogVarianceShare() above, for the same reason.
+thread_local std::string t_plane_fit_stats_buf;
+
 void debugLogPlaneFitStats(int n, int j, double n_eff, double trace_plane_var)
 {
-  static bool first_call = true;
-  static std::mutex mtx;
-  std::lock_guard<std::mutex> lock(mtx);
-  std::ofstream ofs(debugLogPath("plane_fit_stats.txt"), first_call ? std::ios::trunc : std::ios::app);
-  first_call = false;
-  ofs << n << " " << j << " " << n_eff << " " << trace_plane_var << "\n";
+  std::ostringstream oss;
+  oss << n << " " << j << " " << n_eff << " " << trace_plane_var << "\n";
+  t_plane_fit_stats_buf += oss.str();
 }
 
 // History (70-79): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-70
@@ -336,6 +342,31 @@ void debugAccumConsistencyCorr(int scan_id, double nu, double S, int gated,
 }
 
 }  // namespace
+
+// CQ-35: drains the CALLING thread's thread_local buffer under one lock,
+// once. Must be called by every thread of the parallel region that did the
+// logging (see voxelplane.h's doc comment) -- a thread that never logged
+// anything (t_variance_share_buf empty) still calls this cheaply and skips
+// the lock entirely.
+void flushVarianceShareLog()
+{
+  if (t_variance_share_buf.empty()) return;
+  static std::mutex mtx;
+  static std::ofstream ofs(debugLogPath("variance_shares.txt"), std::ios::trunc);
+  std::lock_guard<std::mutex> lock(mtx);
+  ofs << t_variance_share_buf;
+  t_variance_share_buf.clear();
+}
+
+void flushPlaneFitStatsLog()
+{
+  if (t_plane_fit_stats_buf.empty()) return;
+  static std::mutex mtx;
+  static std::ofstream ofs(debugLogPath("plane_fit_stats.txt"), std::ios::trunc);
+  std::lock_guard<std::mutex> lock(mtx);
+  ofs << t_plane_fit_stats_buf;
+  t_plane_fit_stats_buf.clear();
+}
 
 // The final scan never sees a scan_id change, so it needs an explicit flush.
 // Wired into VoxelMap's shutdown path -- see the call site added near this

@@ -152,6 +152,15 @@ struct ResidualRedundancyStats
   int redund_n_eff = 0;            // ceil(sum over groups of n_raw_g * corrected_trace_g/naive_trace_g)
   double redund_info_ratio = 1.0;  // admitted/naive information over grouped residuals only; 1.0 when redund_groups==0
 
+  // CQ-34 item 4: redund_groups==0 conflates "no group had >= 2 matched
+  // residuals" with "a group did, but the correction declined it as
+  // degenerate". redund_groups_seen counts group.size()>=2 BEFORE either
+  // degeneracy test; the other two partition its shortfall against
+  // redund_groups: seen == redund_groups + degenerate_pv + degenerate_var.
+  int redund_groups_seen = 0;            // group.size() >= 2, before any degeneracy test
+  int redund_groups_degenerate_pv = 0;   // rho*plane_var_term <= 0
+  int redund_groups_degenerate_var = 0;  // some residual's sigma_squared - shared <= 0
+
   // CQ-31 item 7: LOG BESIDE, DO NOT DRIVE -- computed every frame regardless
   // of mode (including "off"), so claims/c-28's "no direct instrument" gap
   // finally has one. naive_info_gain is trace(sum over grouped residuals of

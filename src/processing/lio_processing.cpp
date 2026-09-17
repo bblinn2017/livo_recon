@@ -35,29 +35,27 @@ namespace
 // /tmp/evo.txt, imu_processing.cpp's /tmp/imu.txt, and FAST-LIVO2's own
 // logs, so all of these can be compared directly against each other.
 // Remove once done debugging.
+// CQ-35: ofs is a function-local static, opened once (truncating) and kept
+// open for the process lifetime instead of reopened every call -- applied
+// to every debugLogXxx() helper in this file (see voxelmap.cpp's
+// debugLogFrameStats() for the same fix applied project-wide).
 void debugLogLio(const std::string& msg)
 {
-  static bool first_call = true;
-  std::ofstream ofs(debugLogPath("lio.txt"), first_call ? std::ios::trunc : std::ios::app);
-  first_call = false;
+  static std::ofstream ofs(debugLogPath("lio.txt"), std::ios::trunc);
   ofs << msg << "\n";
 }
 
 // History (40-42): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-40
 void debugLogIterError(const std::string& msg)
 {
-  static bool first_call = true;
-  std::ofstream ofs(debugLogPath("iter_error.txt"), first_call ? std::ios::trunc : std::ios::app);
-  first_call = false;
+  static std::ofstream ofs(debugLogPath("iter_error.txt"), std::ios::trunc);
   ofs << msg << "\n";
 }
 
 // History (51-54): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-51
 void debugLogLioDryRun(const std::string& msg)
 {
-  static bool first_call = true;
-  std::ofstream ofs(debugLogPath("lio_dryrun.txt"), first_call ? std::ios::trunc : std::ios::app);
-  first_call = false;
+  static std::ofstream ofs(debugLogPath("lio_dryrun.txt"), std::ios::trunc);
   ofs << msg << "\n";
 }
 
@@ -74,7 +72,9 @@ void debugLogQhat(int scan_id, double t_abs, const Eigen::VectorXd& dx,
   static std::mutex mtx;
   std::lock_guard<std::mutex> lock(mtx);
   const int n = static_cast<int>(dx.size());
-  std::ofstream ofs(debugLogPath("qhat.csv"), first_call ? std::ios::trunc : std::ios::app);
+  // CQ-35: ofs is a function-local static, opened once (truncating) and
+  // kept open for the process lifetime instead of reopened every call.
+  static std::ofstream ofs(debugLogPath("qhat.csv"), std::ios::trunc);
   if (first_call) {
     ofs << "scan_id,t,dim";
     for (int i = 0; i < n; ++i) ofs << ",dx" << i;
@@ -291,32 +291,49 @@ void LioProc::buildResiduals(
   if (prior_cov_.rows() >= StateGroup::idxR() + 6 && prior_cov_.cols() >= StateGroup::idxR() + 6)
     prior_cov_rp = prior_cov_.block<6, 6>(StateGroup::idxR(), StateGroup::idxR());
 
-  #pragma omp parallel for schedule(static) num_threads(threads)
-  for (int i = 0; i < n; ++i)
+  // CQ-35: an explicit `omp parallel` region wrapping an `omp for`, rather
+  // than a combined `omp parallel for`, so that flushVarianceShareLog() can
+  // be called once per thread AFTER the implicit barrier at the end of
+  // `omp for` -- every thread is guaranteed to have finished its share of
+  // the loop (and therefore finished appending to its own thread_local
+  // buffer) before any thread reaches the flush call, and it is still the
+  // SAME team of threads that did the logging, so draining "this thread's
+  // buffer" here is well-defined (see voxelplane.h's doc comment on why
+  // this must be called from inside the same parallel region).
+  #pragma omp parallel num_threads(threads)
   {
-    const PointXYZCov sensor_world = state_->toWorld(pts[i]);
-    WorldPointCov pt_world{
-        sensor_world.point, sensor_world.sensor_cov, state_->poseCovAt(pts[i].point)};
-    pt_world.body_point = pts[i].point;
-    pt_world.rot_transpose = rot_transpose;
-    pt_world.prior_cov_rp = prior_cov_rp;
-    Residual res{};
-    bool tier0_had_plane = false;
-    bool tier0_missed = true;
-    if (voxel_map_->findPlaneResidual(pt_world, res, &tier0_had_plane)) {
-      res.point_cross_normal = pts[i].point.cross(state_->rot().transpose() * res.normal);
-      res.sigma_squared += res.plane_var_term;
-      res.t = pts[i].t;   // for the spline control-point refinement
-      build_thread_residuals_[omp_get_thread_num()].push_back(res);
-      tier0_missed = (res.match_tier != 0);
-    } else {
-      const int idx = voxel_map_->hasConvergedNeighbor(pt_world.point) ? 1 : 0;
-      ++build_thread_miss_[omp_get_thread_num()][idx];
+    #pragma omp for schedule(static)
+    for (int i = 0; i < n; ++i)
+    {
+      const PointXYZCov sensor_world = state_->toWorld(pts[i]);
+      WorldPointCov pt_world{
+          sensor_world.point, sensor_world.sensor_cov, state_->poseCovAt(pts[i].point)};
+      pt_world.body_point = pts[i].point;
+      pt_world.rot_transpose = rot_transpose;
+      pt_world.prior_cov_rp = prior_cov_rp;
+      Residual res{};
+      bool tier0_had_plane = false;
+      bool tier0_missed = true;
+      if (voxel_map_->findPlaneResidual(pt_world, res, &tier0_had_plane)) {
+        res.point_cross_normal = pts[i].point.cross(state_->rot().transpose() * res.normal);
+        res.sigma_squared += res.plane_var_term;
+        res.t = pts[i].t;   // for the spline control-point refinement
+        build_thread_residuals_[omp_get_thread_num()].push_back(res);
+        tier0_missed = (res.match_tier != 0);
+      } else {
+        const int idx = voxel_map_->hasConvergedNeighbor(pt_world.point) ? 1 : 0;
+        ++build_thread_miss_[omp_get_thread_num()][idx];
+      }
+      if (tier0_missed) {
+        const int idx0 = tier0_had_plane ? 1 : 0;
+        ++build_thread_tier0_miss_[omp_get_thread_num()][idx0];
+      }
     }
-    if (tier0_missed) {
-      const int idx0 = tier0_had_plane ? 1 : 0;
-      ++build_thread_tier0_miss_[omp_get_thread_num()][idx0];
-    }
+    // Implicit barrier at the end of `omp for` above already happened --
+    // every thread's residual-building work (and its diagnostic logging,
+    // gated behind log_variance_shares_en) is done by the time any thread
+    // reaches here.
+    flushVarianceShareLog();
   }
 
   residuals.clear();
@@ -341,23 +358,22 @@ void LioProc::buildResiduals(
 // History (242-246): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-242
 void LioProc::solveSystem_cuda(const std::vector<Residual>& residuals) const {
   accumulateLioResidualsCuda(residuals, ekf_, cuda_buf_);
-  // CQ-28: mode=="off" (default) skips this call entirely -- see
-  // residual_redundancy.h -- so the CUDA path is byte-identical whenever
-  // the mechanism is disabled, same guarantee as the CPU path below.
-  redundancy_stats_ = opts_.residual_redundancy.on()
-      ? applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_)
-      : ResidualRedundancyStats{};
+  // CQ-34: called UNCONDITIONALLY -- residual_redundancy.h's own header
+  // already promises this is safe at mode=="off" (the module's internal
+  // gate on ekf.HtH/Htz mutation is what keeps "off" byte-identical, not
+  // this call site). The prior ternary here skipped the call entirely at
+  // mode=="off", which silently left redund_groups/naive_info_gain/etc at
+  // their default-constructed zero -- indistinguishable from a genuine
+  // zero-groups measurement. See CQ-34.
+  redundancy_stats_ = applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_);
   ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
 }
 
 void LioProc::solveSystem(const std::vector<Residual>& residuals) const {
   accumulateLioResiduals(residuals, ekf_);
 
-  // CQ-28: see solveSystem_cuda()'s comment above -- same guard, same
-  // byte-identity guarantee at mode=="off".
-  redundancy_stats_ = opts_.residual_redundancy.on()
-      ? applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_)
-      : ResidualRedundancyStats{};
+  // CQ-34: see solveSystem_cuda()'s comment above -- same fix, same reason.
+  redundancy_stats_ = applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_);
 
   // Mean-only update against the frame's FIXED prior (prior_cov_/
   // state_propagat_, snapshotted once in processLIO() before this frame's
@@ -767,7 +783,9 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
   // moment log_en defaulted false, which it does.
   {
     static bool first = true;
-    std::ofstream ofs(debugLogPath("spline_q.csv"), first ? std::ios::trunc : std::ios::app);
+    // CQ-35: opened once (truncating), kept open for the process lifetime
+    // instead of reopened every scan.
+    static std::ofstream ofs(debugLogPath("spline_q.csv"), std::ios::trunc);
     if (first)
     {
       ofs << "scan_id," << adaptive_q_.csvHeader()
@@ -1569,12 +1587,19 @@ std::string LioProc::processLIO(MeasureGroup& mg)
         diag.q_above_floor_gyr = adaptive_q_.aboveFloorGyr();
         diag.q_active_frame    = adaptive_q_.activeThisFrame();
       }
-      // CQ-28: redundancy_stats_ is written by solveSystem()/
-      // solveSystem_cuda() earlier this same processLIO() call, unconditionally
-      // (ResidualRedundancyStats{} default-constructed, i.e. all-zero/1.0, when
-      // the mode is "off") -- no extra guard needed here, unlike AdaptiveQ's
-      // block above which only runs when the block ran at all.
+      // CQ-34: redundancy_stats_ is written by solveSystem()/
+      // solveSystem_cuda() earlier this same processLIO() call by an
+      // UNCONDITIONAL call to applyResidualRedundancyCorrection() -- no
+      // extra guard needed here, unlike AdaptiveQ's block above which only
+      // runs when the block ran at all. (Before CQ-34 this comment was
+      // already true in spirit but false in fact: the two call sites above
+      // still gated the call itself on opts_.residual_redundancy.on(), so a
+      // "0" here at mode=="off" was a default-constructed struct, not a
+      // measurement -- see CQ-34.)
       diag.redund_groups     = redundancy_stats_.redund_groups;
+      diag.redund_groups_seen             = redundancy_stats_.redund_groups_seen;
+      diag.redund_groups_degenerate_pv    = redundancy_stats_.redund_groups_degenerate_pv;
+      diag.redund_groups_degenerate_var   = redundancy_stats_.redund_groups_degenerate_var;
       diag.redund_n_raw      = redundancy_stats_.redund_n_raw;
       diag.redund_n_eff      = redundancy_stats_.redund_n_eff;
       diag.redund_info_ratio = redundancy_stats_.redund_info_ratio;

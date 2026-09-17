@@ -623,6 +623,18 @@ struct LioFrameDiag
   int    redund_n_eff      = 0;
   double redund_info_ratio = 1.0;
 
+  // CQ-34 item 4: a zero redund_groups conflates three distinct facts --
+  // "no plane got >= 2 matched residuals", "some did but rho*plane_var_term
+  // was non-positive (degenerate_pv)", and "some did but a residual's
+  // independent variance went non-positive after subtracting the shared
+  // term (degenerate_var)". redund_groups_seen counts group.size()>=2
+  // BEFORE either degeneracy test, so seen - groups - degenerate_pv -
+  // degenerate_var == 0 always, and the three failure modes are visible
+  // separately instead of collapsing into one ambiguous zero.
+  int redund_groups_seen           = 0;
+  int redund_groups_degenerate_pv  = 0;
+  int redund_groups_degenerate_var = 0;
+
   // CQ-31 item 7: naive vs Woodbury-corrected information-trace, always
   // populated (including mode=="off") -- see ResidualRedundancyStats.
   double naive_info_gain    = 0.0;

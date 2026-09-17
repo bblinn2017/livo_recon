@@ -8,7 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
-#include <set>
+#include <map>
 #include <omp.h>
 #include <opencv2/imgproc.hpp>
 
@@ -27,12 +27,17 @@ namespace
 // old debugLogVio()/kDebugVioLoggingEnabled mechanism (task #149 left it
 // permanently compile-time-disabled) with a properly runtime-toggleable
 // one.
+// CQ-35: one persistent ofstream per distinct path, opened (truncating) the
+// first time that path is seen and kept open for the process lifetime --
+// replaces the old truncated_paths-set + fresh-ofstream-per-call pattern,
+// which paid an open+close syscall pair on every single call.
 void logIteration(const std::string& path, const std::string& msg)
 {
-  static std::set<std::string> truncated_paths;
-  const bool first_call_for_path = truncated_paths.insert(path).second;
-  std::ofstream ofs(path, first_call_for_path ? std::ios::trunc : std::ios::app);
-  ofs << msg << "\n";
+  static std::map<std::string, std::ofstream> streams;
+  auto it = streams.find(path);
+  if (it == streams.end())
+    it = streams.emplace(path, std::ofstream(path, std::ios::trunc)).first;
+  it->second << msg << "\n";
 }
 
 }  // namespace

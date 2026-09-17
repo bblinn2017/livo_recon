@@ -16,11 +16,11 @@ int g_current_frame_idx = -1;
 // PCA quality (eigenvalues, in-plane radius) and fit-uncertainty
 // (plane_var_'s trace) against how many distinct frames actually
 // contributed. Remove once done debugging.
+// CQ-35: ofs is a function-local static, opened once (truncating) and kept
+// open for the process lifetime instead of reopened every call.
 void debugLogPlaneInit(const std::string& msg)
 {
-  static bool first_call = true;
-  std::ofstream ofs(debugLogPath("plane_init.txt"), first_call ? std::ios::trunc : std::ios::app);
-  first_call = false;
+  static std::ofstream ofs(debugLogPath("plane_init.txt"), std::ios::trunc);
   ofs << msg << "\n";
 }
 

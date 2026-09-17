@@ -21,11 +21,11 @@ namespace
 // Absolute (bag/wall-clock) timestamps throughout, matching evo_processing
 // .cpp's /tmp/evo.txt and FAST-LIVO2's own logs, so all of these can be
 // compared directly against each other. Remove once done debugging.
+// CQ-35: ofs is a function-local static, opened once (truncating) and kept
+// open for the process lifetime instead of reopened every call.
 void debugLogImu(const std::string& msg)
 {
-  static bool first_call = true;
-  std::ofstream ofs(debugLogPath("imu.txt"), first_call ? std::ios::trunc : std::ios::app);
-  first_call = false;
+  static std::ofstream ofs(debugLogPath("imu.txt"), std::ios::trunc);
   ofs << msg << "\n";
 }
 

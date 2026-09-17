@@ -31,6 +31,8 @@ double positionMinEig(const M66& HtH)
   return es.eigenvalues().minCoeff();
 }
 
+enum class DegenerateReason { kNone, kPlaneVar, kResidualVar };
+
 struct GroupCorrection
 {
   M66 naive_HtH = M66::Zero();
@@ -38,6 +40,7 @@ struct GroupCorrection
   M66 corrected_HtH = M66::Zero();
   V6  corrected_Htz = V6::Zero();
   int n_raw = 0;
+  DegenerateReason degenerate = DegenerateReason::kNone;  // set iff n_raw==0
 };
 
 // Computes one plane group's naive (what accumulateLioResiduals() already
@@ -52,13 +55,19 @@ GroupCorrection computeGroupCorrection(const std::vector<const Residual*>& group
   GroupCorrection out;
   const double pv = group.front()->plane_var_term;
   const double shared = rho * pv;
-  if (shared <= 0.0) return out;  // n_raw stays 0 -- caller skips
+  if (shared <= 0.0) {
+    out.degenerate = DegenerateReason::kPlaneVar;  // n_raw stays 0 -- caller skips
+    return out;
+  }
 
   std::vector<double> w_indep;
   w_indep.reserve(group.size());
   for (const Residual* r : group) {
     const double sigma_indep2 = r->sigma_squared - shared;
-    if (!(sigma_indep2 > 0.0)) return out;  // degenerate: shared term consumes the whole variance
+    if (!(sigma_indep2 > 0.0)) {
+      out.degenerate = DegenerateReason::kResidualVar;  // shared term consumes the whole variance
+      return out;
+    }
     w_indep.push_back(1.0 / sigma_indep2);
   }
 
@@ -151,9 +160,21 @@ ResidualRedundancyStats applyResidualRedundancyCorrection(
   for (const auto& kv : by_plane) {
     const auto& group = kv.second;
     if (group.size() < 2) continue;
+    ++stats.redund_groups_seen;
 
     const GroupCorrection gc = computeGroupCorrection(group, opts.rho, opts.max_discount);
-    if (gc.n_raw == 0) continue;  // degenerate group, left uncorrected
+    if (gc.n_raw == 0) {
+      // degenerate group, left uncorrected -- CQ-34 item 4: tally WHICH
+      // degeneracy fired, so a zero redund_groups can be told apart from
+      // "plenty of groups, all declined" rather than reading identically
+      // to "no group ever reached size >= 2".
+      if (gc.degenerate == DegenerateReason::kPlaneVar) {
+        ++stats.redund_groups_degenerate_pv;
+      } else if (gc.degenerate == DegenerateReason::kResidualVar) {
+        ++stats.redund_groups_degenerate_var;
+      }
+      continue;
+    }
 
     ++stats.redund_groups;
     stats.redund_n_raw += gc.n_raw;

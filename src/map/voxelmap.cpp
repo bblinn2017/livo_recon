@@ -22,8 +22,13 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
                         double max_plane_var_trace, const LioFrameDiag& lio, int n_planes,
                         int n_voxels, int n_voxels_is_plane, int n_voxels_converged)
 {
+  // CQ-35: ofs is a function-local static, opened ONCE (truncating) on the
+  // first call and kept open for the process lifetime, instead of a fresh
+  // std::ofstream (open+close syscalls) on every frame. Correctness is
+  // unaffected -- the header is still written exactly once, gated on the
+  // same first_call flag; only the open/close cost is removed.
+  static std::ofstream ofs(debugLogPath("frame_stats.txt"), std::ios::trunc);
   static bool first_call = true;
-  std::ofstream ofs(debugLogPath("frame_stats.txt"), first_call ? std::ios::trunc : std::ios::app);
   if (first_call)
     ofs << "t,frame_idx,denom_rejected_count,max_plane_var_trace"
            ",n_residuals,n_planes,h_pp_min_eig,h_rr_min_eig,sum_weight"
@@ -66,6 +71,9 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            // CQ-28: residual-redundancy-correction engagement/magnitude --
            // see LioFrameDiag's own doc comment.
            ",redund_groups,redund_n_raw,redund_n_eff,redund_info_ratio"
+           // CQ-34 item 4: a zero redund_groups conflates three distinct
+           // facts -- see LioFrameDiag's own doc comment.
+           ",redund_groups_seen,redund_groups_degenerate_pv,redund_groups_degenerate_var"
            // TQ-20 item 1/6: kappa = P^-1/HtH -- one derived scalar
            // (kappa_eff, from the already-logged ask/got) plus the 6
            // generalized eigenvalues of the (HtH,P) pencil itself.
@@ -106,6 +114,8 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << (lio.q_active_frame ? 1 : 0)
       << "," << lio.redund_groups << "," << lio.redund_n_raw << "," << lio.redund_n_eff
       << "," << lio.redund_info_ratio
+      << "," << lio.redund_groups_seen << "," << lio.redund_groups_degenerate_pv
+      << "," << lio.redund_groups_degenerate_var
       << "," << lio.kappa_eff
       << "," << lio.kappa_gev0 << "," << lio.kappa_gev1 << "," << lio.kappa_gev2
       << "," << lio.kappa_gev3 << "," << lio.kappa_gev4 << "," << lio.kappa_gev5
@@ -475,12 +485,20 @@ void VoxelMap::updateMap(MeasureGroup& mg) {
     thread_plane_updates_.resize(threads);
     for (auto& v : thread_plane_updates_) v.clear();
 
-    #pragma omp parallel for schedule(guided) num_threads(threads)
-    for (int i = 0; i < n; ++i) {
-      const auto& [key, entry] = bucket_flat_[i];
-      auto it = voxel_map_.find(*key);
-      assert(it != voxel_map_.end() && it->second != nullptr);
-      it->second->insertPoints(entry->world, thread_plane_updates_[omp_get_thread_num()]);
+    // CQ-35: `omp parallel` wrapping `omp for`, not a combined `omp parallel
+    // for`, so flushPlaneFitStatsLog() can run once per thread after the
+    // `omp for`'s implicit barrier -- see buildResiduals()' identical
+    // pattern (lio_processing.cpp) and voxelplane.h's doc comment.
+    #pragma omp parallel num_threads(threads)
+    {
+      #pragma omp for schedule(guided)
+      for (int i = 0; i < n; ++i) {
+        const auto& [key, entry] = bucket_flat_[i];
+        auto it = voxel_map_.find(*key);
+        assert(it != voxel_map_.end() && it->second != nullptr);
+        it->second->insertPoints(entry->world, thread_plane_updates_[omp_get_thread_num()]);
+      }
+      flushPlaneFitStatsLog();
     }
 
     for (const auto& thread_updates : thread_plane_updates_) {

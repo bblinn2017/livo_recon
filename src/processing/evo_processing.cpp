@@ -22,11 +22,11 @@ namespace
 // of each process (first call), appended thereafter. Format matches what
 // FAST-LIVO2's own converted log uses (see scripts/fastlivo_evo.py) so the
 // two can be compared directly.
+// CQ-35: ofs is a function-local static, opened once (truncating) and kept
+// open for the process lifetime instead of reopened every call.
 void debugLogEvo(const std::string& msg)
 {
-  static bool first_call = true;
-  std::ofstream ofs(debugLogPath("evo.txt"), first_call ? std::ios::trunc : std::ios::app);
-  first_call = false;
+  static std::ofstream ofs(debugLogPath("evo.txt"), std::ios::trunc);
   ofs << msg << "\n";
 }
 

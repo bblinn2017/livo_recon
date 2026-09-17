@@ -22,9 +22,11 @@ namespace
 // so this has zero effect on a default/production run.
 void debugLogSyncStage(const std::string& path, const std::string& msg)
 {
-  static bool first_call = true;
-  std::ofstream ofs(path, first_call ? std::ios::trunc : std::ios::app);
-  first_call = false;
+  // CQ-35: opened once (truncating), kept open for the process lifetime --
+  // every call site passes the same opts_.sync_debug_log_path, so a single
+  // function-local static is correct (no per-path dispatch needed). See
+  // debugLogFrameStats() in voxelmap.cpp for the same fix applied project-wide.
+  static std::ofstream ofs(path, std::ios::trunc);
   ofs << msg << "\n";
 }
 

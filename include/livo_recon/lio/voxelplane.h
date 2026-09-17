@@ -7,6 +7,23 @@
 namespace livo_recon
 {
 
+// CQ-35: debugLogVarianceShare()/debugLogPlaneFitStats() (voxelplane.cpp,
+// called from VoxelPlane::computeResidual()/update() respectively) buffer
+// into a thread_local std::string instead of writing under a shared mutex
+// on every call -- computeResidual() runs inside LioProc::buildResiduals()'s
+// OMP parallel-for once per RESIDUAL and update() inside VoxelMap::insert()'s
+// OMP parallel-for once per plane fit, so the old per-call lock was the
+// dominant cost of either diagnostic when its gating flag was on. These two
+// flush functions must be called once per thread, by every thread, from
+// INSIDE the same parallel region that did the logging (after its `omp for`
+// has completed for every thread -- the implicit barrier at the end of
+// `omp for` guarantees this) so the thread_local buffer being drained
+// belongs to the same OS thread that filled it. Calling them from outside
+// any parallel region, or from a different team, drains nothing (each
+// thread's buffer is only visible to that thread).
+void flushVarianceShareLog();
+void flushPlaneFitStatsLog();
+
 class VoxelPlane
 {
 public:
