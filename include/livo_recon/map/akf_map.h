@@ -55,7 +55,8 @@ public:
   // updateMap()'s doc comment on the "across all of this frame's
   // iterations" simplification).
   bool findPlaneResidual(const WorldPointCov& pt, Residual& res,
-                         bool* tier0_had_plane = nullptr) const override;
+                         bool* tier0_had_plane = nullptr,
+                         bool* had_converged_neighbor = nullptr) const override;
 
   bool isEmpty() const override;
   std::string statsString() const override;

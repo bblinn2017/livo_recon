@@ -41,8 +41,15 @@ public:
   // existing per-point OMP loop (many thousands of calls/frame) -- must
   // be const/thread-safe with no shared mutable state touched across
   // concurrent calls.
+  // had_converged_neighbor (if non-null, only meaningful for VoxelMap --
+  // see its own override doc comment): OR'd true when a backend that has a
+  // converged/locked plane concept finds one anywhere within its own
+  // notion of "neighborhood" of pt, even on an overall miss. Left
+  // unset/ignored by a backend with no such concept (e.g. AkfMap), same
+  // convention as hasConvergedNeighbor()'s own default-false below.
   virtual bool findPlaneResidual(const WorldPointCov& pt, Residual& res,
-                                 bool* tier0_had_plane = nullptr) const = 0;
+                                 bool* tier0_had_plane = nullptr,
+                                 bool* had_converged_neighbor = nullptr) const = 0;
 
   // Diagnostic-only (see VoxelMap::hasConvergedNeighbor()'s own doc
   // comment for what this classifies). Default "false" reads naturally as

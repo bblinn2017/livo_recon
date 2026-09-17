@@ -568,7 +568,8 @@ void VoxelMap::ensureNode(const VoxelKey& key)
 }
 
 bool VoxelMap::findPlaneResidualDirectional(const WorldPointCov& pt, const VoxelKey& base, Residual &res,
-                                            VoxelKey* tried_key, int scan_id) const
+                                            VoxelKey* tried_key, int scan_id,
+                                            bool* had_converged_neighbor) const
 {
   // FAST-LIVO2-style single-neighbor step: the primary voxel missed, so
   // step to the one neighbor the point actually leans toward -- per axis,
@@ -594,13 +595,15 @@ bool VoxelMap::findPlaneResidualDirectional(const WorldPointCov& pt, const Voxel
 
   auto it_near = voxel_map_.find(near_key);
   if (it_near == voxel_map_.end() || !it_near->second) return false;
+  if (had_converged_neighbor && it_near->second->hasConvergedPlane()) *had_converged_neighbor = true;
   if (!it_near->second->findPlaneResidual(pt, res, scan_id)) return false;
   res.match_tier = 1;
   return true;
 }
 
 bool VoxelMap::findPlaneResidualNeighborhood(const WorldPointCov& pt, const VoxelKey& base, Residual &res,
-                                             const VoxelKey* exclude, int scan_id) const
+                                             const VoxelKey* exclude, int scan_id,
+                                             bool* had_converged_neighbor) const
 {
   // Exhaustive box search (original livo_recon approach): score every
   // candidate voxel within neighborhood_size in each direction and keep
@@ -624,6 +627,8 @@ bool VoxelMap::findPlaneResidualNeighborhood(const WorldPointCov& pt, const Voxe
 
     auto it = voxel_map_.find(key);
     if (it == voxel_map_.end() || !it->second) continue;
+
+    if (had_converged_neighbor && it->second->hasConvergedPlane()) *had_converged_neighbor = true;
 
     Residual cand;
     if (!it->second->findPlaneResidual(pt, cand, scan_id)) continue;
@@ -657,7 +662,8 @@ bool VoxelMap::hasConvergedNeighbor(const V3D& p_world) const
   return false;
 }
 
-bool VoxelMap::findPlaneResidual(const WorldPointCov& pt, Residual &res, bool* tier0_had_plane) const
+bool VoxelMap::findPlaneResidual(const WorldPointCov& pt, Residual &res, bool* tier0_had_plane,
+                                 bool* had_converged_neighbor) const
 {
   const VoxelKey base = worldToKey(pt.point);
 
@@ -665,8 +671,17 @@ bool VoxelMap::findPlaneResidual(const WorldPointCov& pt, Residual &res, bool* t
   if (it != voxel_map_.end() && it->second && it->second->findPlaneResidual(pt, res, allow_consistency_log_ ? frame_idx_ : -1))
     return true;
 
+  const bool base_converged = (it != voxel_map_.end() && it->second && it->second->hasConvergedPlane());
   if (tier0_had_plane)
-    *tier0_had_plane = (it != voxel_map_.end() && it->second && it->second->hasConvergedPlane());
+    *tier0_had_plane = base_converged;
+  // had_converged_neighbor accumulates the SAME footprint hasConvergedNeighbor()
+  // independently scans (base + every cell within neighborhood_size) -- see
+  // that method's own doc comment. base's contribution is known here already
+  // (base_converged, just computed above); the directional/neighborhood
+  // calls below add their own visited cells' contributions as they go,
+  // giving the identical answer for free instead of via a second full box
+  // scan on a miss.
+  if (had_converged_neighbor && base_converged) *had_converged_neighbor = true;
 
   // Tiered fallback: (1) primary voxel [above] -- (2) the single directional
   // neighbor the point actually leans toward (cheap, catches the common
@@ -677,10 +692,12 @@ bool VoxelMap::findPlaneResidual(const WorldPointCov& pt, Residual &res, bool* t
   // guess had no second chance). frame_idx_ (this frame's scan_id, for
   // T0-D's corr.csv) is threaded through every tier the same way.
   VoxelKey directional_key = base;
-  if (findPlaneResidualDirectional(pt, base, res, &directional_key, allow_consistency_log_ ? frame_idx_ : -1))
+  if (findPlaneResidualDirectional(pt, base, res, &directional_key, allow_consistency_log_ ? frame_idx_ : -1,
+                                    had_converged_neighbor))
     return true;
 
-  return findPlaneResidualNeighborhood(pt, base, res, &directional_key, allow_consistency_log_ ? frame_idx_ : -1);
+  return findPlaneResidualNeighborhood(pt, base, res, &directional_key, allow_consistency_log_ ? frame_idx_ : -1,
+                                       had_converged_neighbor);
 }
 
 // ── Visualization list helpers ────────────────────────────────────────────────

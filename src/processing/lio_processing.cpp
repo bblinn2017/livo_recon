@@ -378,14 +378,22 @@ void LioProc::buildResiduals(
       Residual res{};
       bool tier0_had_plane = false;
       bool tier0_missed = true;
-      if (voxel_map_->findPlaneResidual(pt_world, res, &tier0_had_plane)) {
+      // had_converged_neighbor: was a duplicate hasConvergedNeighbor(pt_world.point)
+      // call on the else branch below (a second full neighborhood_size box
+      // scan of the SAME box findPlaneResidual()'s own tier1/tier2 fallback
+      // just scanned to look for a match) -- findPlaneResidual() now
+      // accumulates the identical answer for free from cells it already
+      // visits, via this out-param, instead of scanning the box twice on
+      // every total miss.
+      bool had_converged_neighbor = false;
+      if (voxel_map_->findPlaneResidual(pt_world, res, &tier0_had_plane, &had_converged_neighbor)) {
         res.point_cross_normal = pts[i].point.cross(state_->rot().transpose() * res.normal);
         res.sigma_squared += res.plane_var_term;
         res.t = pts[i].t;   // for the spline control-point refinement
         build_thread_residuals_[omp_get_thread_num()].push_back(res);
         tier0_missed = (res.match_tier != 0);
       } else {
-        const int idx = voxel_map_->hasConvergedNeighbor(pt_world.point) ? 1 : 0;
+        const int idx = had_converged_neighbor ? 1 : 0;
         ++build_thread_miss_[omp_get_thread_num()][idx];
       }
       if (tier0_missed) {

@@ -225,7 +225,8 @@ void AkfMap::updateMap(MeasureGroup& mg)
   }
 }
 
-bool AkfMap::findPlaneResidual(const WorldPointCov& pt, Residual& res, bool* /*tier0_had_plane*/) const
+bool AkfMap::findPlaneResidual(const WorldPointCov& pt, Residual& res, bool* /*tier0_had_plane*/,
+                               bool* /*had_converged_neighbor*/) const
 {
   const VoxelKey center = worldToKeyFn(pt.point, opts_->voxel_size);
   const M3D pt_cov = pt.sensor_cov + pt.pose_cov;

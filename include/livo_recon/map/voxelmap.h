@@ -29,17 +29,29 @@ public:
   // directly (no miss to classify). Debug-only, for isolating why tier0's
   // hit-rate specifically degrades during fast motion (see
   // hasConvergedNeighbor()'s broader, whole-pipeline counterpart).
-  bool findPlaneResidual(const WorldPointCov& pt, Residual &res, bool* tier0_had_plane = nullptr) const override;
+  // had_converged_neighbor (if non-null): OR'd true if ANY voxel this call
+  // actually visits during its tiered search (the primary voxel, the
+  // directional neighbor if one is tried, and every cell findPlaneResidual-
+  // Neighborhood() scans) has a converged plane -- identical coverage to a
+  // separate hasConvergedNeighbor(p_world) call over the same
+  // neighborhood_size box, computed for free from cells already being
+  // visited rather than via a second full box scan. See buildResiduals()'s
+  // call site: this replaced a design where a miss triggered hasConverged-
+  // Neighbor() as an independent second scan of the same box.
+  bool findPlaneResidual(const WorldPointCov& pt, Residual &res, bool* tier0_had_plane = nullptr,
+                         bool* had_converged_neighbor = nullptr) const override;
 
   // History (34-45): see docs/livo_recon_changelog.md#include-livo_recon-map-voxelmap.h-34
   void setAllowConsistencyLog(bool v) { allow_consistency_log_ = v; }
 
   // Diagnostic-only (see investigation into livo_recon's fast-motion
   // tier0/1 hit-rate drop vs FAST-LIVO2): true iff any voxel within
-  // neighborhood_size of p_world's key has a converged plane -- called only
-  // for points where findPlaneResidual() already failed, to classify that
-  // miss as a real local map-coverage gap (false here) vs a geometric/
-  // pose-offset mismatch (true here -- planes exist nearby, none matched).
+  // neighborhood_size of p_world's key has a converged plane. No longer
+  // called from buildResiduals() (see findPlaneResidual()'s
+  // had_converged_neighbor out-param above, which gets the same answer for
+  // free instead of via a second full box scan) -- kept as a standalone
+  // diagnostic entry point for any other caller that wants the answer
+  // without also running a full tiered residual search.
   bool hasConvergedNeighbor(const V3D& p_world) const override;
 
   std::string statsString() const override;
@@ -128,9 +140,11 @@ private:
   // doc comment. Kept as an explicit param rather than reading frame_idx_
   // directly so these two stay pure/testable in isolation.
   bool findPlaneResidualDirectional(const WorldPointCov& pt, const VoxelKey& base, Residual &res,
-                                    VoxelKey* tried_key = nullptr, int scan_id = -1) const;
+                                    VoxelKey* tried_key = nullptr, int scan_id = -1,
+                                    bool* had_converged_neighbor = nullptr) const;
   bool findPlaneResidualNeighborhood(const WorldPointCov& pt, const VoxelKey& base, Residual &res,
-                                     const VoxelKey* exclude = nullptr, int scan_id = -1) const;
+                                     const VoxelKey* exclude = nullptr, int scan_id = -1,
+                                     bool* had_converged_neighbor = nullptr) const;
 
   void eraseDisc(int32_t id);
   void eraseDot(int32_t id);
