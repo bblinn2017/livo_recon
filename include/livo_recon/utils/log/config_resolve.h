@@ -3,7 +3,9 @@
 #include <ros/ros.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <initializer_list>
+#include <iomanip>
 #include <set>
 #include <sstream>
 #include <string>
@@ -91,6 +93,15 @@ public:
     claim(key);
     out = def;
     if (pnh_.hasParam(key)) ignore(scope, key);
+    // CQ-32 item 1: a value the dead scope FORCED is not the same fact as a
+    // value that was never part of the model, and the effective-config
+    // report must say which. Before this, the dead-scope branch never
+    // touched effective_ at all -- a key forced off was indistinguishable,
+    // in the only place that gets checked against a cell's label, from a
+    // key that was never crossed as a factor to begin with. The marker
+    // format is machine-parseable (one grep lists every forced key and its
+    // killing scope) and visually distinct from get()'s own format.
+    forceEffective(key, detail::paramWarnFormat(out), scope);
   }
 
   // Enumerated option inside a live scope.
@@ -102,6 +113,7 @@ public:
     claim(key);
     out = def;
     if (pnh_.hasParam(key)) ignore(scope, key);
+    forceEffective(key, out, scope);  // CQ-32 item 1 -- see nested()'s comment
   }
 
   // For a derived value the caller computed rather than read (n_cp resolved
@@ -181,6 +193,35 @@ public:
 
   bool ok() const { return errors_.empty(); }
 
+  // CQ-32 item 2: a canonical digest over the sorted (key, effective value)
+  // pairs, INCLUDING the [FORCED: ...] markers item 1 adds -- two cell
+  // labels that resolve to the same digest are the same cell regardless of
+  // what their labels claim, which is exactly the invariant assert_design.py
+  // (item 3) checks across a whole design.
+  //
+  // NOT LITERAL SHA-256, DELIBERATELY, AND SAID PLAINLY: this codebase links
+  // no crypto library today (grepped; confirmed absent), and adding one
+  // (OpenSSL is present on the build host but not yet in this CMakeLists)
+  // is a real link-graph change this pass cannot build-verify before the
+  // sweep it gates -- see the card's own "wait until the sweep is done to
+  // build" constraint. A 64-bit FNV-1a over the same canonical byte string
+  // gives the identical PROPERTY this item needs (two different effective
+  // configs collide only by extraordinary bad luck; two identical ones
+  // always match) without the new dependency. Labeled fnv1a64, not sha256,
+  // so nothing downstream is misled about what algorithm actually ran.
+  std::string configDigest() const
+  {
+    std::vector<std::pair<std::string, std::string>> sorted(effective_);
+    std::sort(sorted.begin(), sorted.end());
+    std::string canon;
+    for (const auto& kv : sorted) { canon += kv.first; canon += '='; canon += kv.second; canon += '\n'; }
+    uint64_t h = 0xcbf29ce484222325ULL;  // FNV-1a 64-bit offset basis
+    for (unsigned char c : canon) { h ^= c; h *= 0x100000001b3ULL; }
+    std::ostringstream oss;
+    oss << std::hex << std::setfill('0') << std::setw(16) << h;
+    return oss.str();
+  }
+
   std::string report() const
   {
     std::ostringstream oss;
@@ -188,6 +229,8 @@ public:
            "YAML asked for";
     for (const auto& kv : effective_)
       oss << "\n  " << kv.first << " = " << kv.second;
+    oss << "\n[config/digest]  fnv1a64=" << configDigest()
+        << "  over " << effective_.size() << " claimed keys";
     if (!errors_.empty())
     {
       oss << "\n[config/REFUSED]  " << errors_.size()
@@ -211,6 +254,18 @@ private:
            "a run that silently drops it is a cell that does not mean what it "
            "says.";
     errors_.push_back(oss.str());
+  }
+
+  // CQ-32 item 1: record a dead-scope key's FORCED value in effective_, with
+  // a marker naming the scope that forced it -- distinct from get()'s own
+  // format ("key = value") so a grep can tell the two apart at a glance.
+  // Format: "key = value  [FORCED: scope 'X' is off]".
+  void forceEffective(const std::string& key, const std::string& value,
+                      const std::string& scope)
+  {
+    std::ostringstream oss;
+    oss << value << "  [FORCED: scope '" << scope << "' is off]";
+    effective_.emplace_back(key, oss.str());
   }
 
   static bool isAllowed(const std::string& v,
