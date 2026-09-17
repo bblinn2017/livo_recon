@@ -179,6 +179,17 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     ConfigResolver cfg(pnh);
     cfg.mode("voxel_map/plane/plane_gate_mode", opts_->plane_gate_mode, "disc",
              { "disc", "ellipse", "ellipse_area_matched" });
+    // Resolved once here, not per-candidate-point -- see voxelplane.cpp's
+    // gate(), which used to re-compare opts_->plane_gate_mode (a
+    // std::string) against these same literals on every single candidate,
+    // every IEKF iteration. Mirrors gate()'s own branch structure exactly:
+    // "ellipse_area_matched" first (most specific), then "ellipse", else
+    // "disc" (the default, and the fallback for any unrecognized value --
+    // though cfg.mode() above already refuses those before this runs).
+    opts_->plane_gate_mode_enum =
+        (opts_->plane_gate_mode == "ellipse_area_matched") ? PlaneGateMode::EllipseAreaMatched :
+        (opts_->plane_gate_mode == "ellipse")               ? PlaneGateMode::Ellipse :
+                                                                PlaneGateMode::Disc;
 
     // ── residual-weight floor ────────────────────────────────────────────
     // sigma_r2 is MIRRORED from imu/sensor/range_err rather than given its
@@ -193,6 +204,21 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
              "sensor_range",
              { "sensor_range", "incidence", "constant", "none", "legacy",
                "roughness" });
+    // Resolved once here, not per-candidate-point -- see voxelplane.cpp's
+    // weightFloor(), which used to re-compare opts_->weight_floor_mode (a
+    // std::string) against up to 5 literals sequentially, called TWICE per
+    // candidate (once from gate(), once from computeResidual()), on every
+    // point, every IEKF iteration. Mirrors weightFloor()'s own if-chain
+    // order exactly (legacy/none/constant/roughness explicit, "incidence"
+    // next, else sensor_range -- the default and the fallback for any
+    // unrecognized value, though cfg.mode() above already refuses those).
+    opts_->weight_floor_mode_enum =
+        (opts_->weight_floor_mode == "legacy")    ? WeightFloorMode::Legacy :
+        (opts_->weight_floor_mode == "none")      ? WeightFloorMode::None :
+        (opts_->weight_floor_mode == "constant")  ? WeightFloorMode::Constant :
+        (opts_->weight_floor_mode == "roughness") ? WeightFloorMode::Roughness :
+        (opts_->weight_floor_mode == "incidence") ? WeightFloorMode::Incidence :
+                                                     WeightFloorMode::SensorRange;
     // The roughness/information combination check lives below, after
     // plane_var_mode is actually loaded (see there) -- opts_->plane_var_mode
     // still holds its struct default ("eigengap") at this point in

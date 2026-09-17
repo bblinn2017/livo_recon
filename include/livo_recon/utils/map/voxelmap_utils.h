@@ -157,6 +157,17 @@ struct RunningMoments
   }
 };
 
+// Resolved-once-at-load enum mirrors of the two hottest per-point mode
+// strings (VoxelOpts::weight_floor_mode/plane_gate_mode below) -- see
+// VoxelMap::loadParameters()'s doc comment where these are resolved, and
+// voxelplane.cpp's gate()/weightFloor(), which switch on these instead of
+// re-comparing the std::string form on every candidate point, every IEKF
+// iteration. The string fields themselves are unchanged and remain the
+// source of truth (config loading, logging, validation) -- these are a
+// derived cache, not a replacement.
+enum class WeightFloorMode { SensorRange, Incidence, Constant, None, Legacy, Roughness };
+enum class PlaneGateMode { Disc, Ellipse, EllipseAreaMatched };
+
 struct VoxelOpts
 {
   int    max_layer                 = 2;
@@ -409,6 +420,9 @@ struct VoxelOpts
   std::string plane_gate_mode = "disc";
   static constexpr const char* PLANE_GATE_MODES[] = {
       "disc", "ellipse", "ellipse_area_matched" };
+  // Resolved once at load, in VoxelMap::loadParameters() -- see this
+  // header's own enum doc comment above VoxelOpts.
+  PlaneGateMode plane_gate_mode_enum = PlaneGateMode::Disc;
 
   // ── The residual-weight floor ───────────────────────────────────────────
   // MODE: "sensor_range" (default) | "incidence" | "constant" | "none".
@@ -487,6 +501,9 @@ struct VoxelOpts
   std::string weight_floor_mode = "sensor_range";
   static constexpr const char* WEIGHT_FLOOR_MODES[] = {
       "sensor_range", "incidence", "constant", "none", "legacy", "roughness" };
+  // Resolved once at load, in VoxelMap::loadParameters() -- see this
+  // header's own enum doc comment above VoxelOpts.
+  WeightFloorMode weight_floor_mode_enum = WeightFloorMode::SensorRange;
   // (m^2) -- the historical literal, live only under "constant".
   double weight_floor_constant = 1e-3;
   // (m^2) -- sigma_r^2, mirrored from imu/sensor/range_err by LioProc so the

@@ -460,7 +460,7 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
                       const V3D& body_dir, const V3D& body_normal,
                       double& r, double& sigma_diag_squared, double& plane_var_term,
                       Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate,
-                      bool* dropped_by_ablation) const
+                      bool* dropped_by_ablation, double* gate_floor_term_out) const
 {
   const V3D& n = plane_.normal;
   r = n.dot(p) + plane_.d;
@@ -468,8 +468,12 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
 
   const V3D d_center = p - plane_.center;
 
-  if (opts_->plane_gate_mode == "ellipse" ||
-      opts_->plane_gate_mode == "ellipse_area_matched") {
+  // Switches on the enum resolved once at load (VoxelMap::loadParameters())
+  // instead of re-comparing opts_->plane_gate_mode (std::string) here --
+  // this runs on every candidate point, every IEKF iteration. Same branch
+  // structure/behavior as the string comparisons it replaces.
+  if (opts_->plane_gate_mode_enum == PlaneGateMode::Ellipse ||
+      opts_->plane_gate_mode_enum == PlaneGateMode::EllipseAreaMatched) {
     // T8-a: Mahalanobis ellipse of the fit's own sampling, replacing the
     // isotropic disc -- same x_normal_/y_normal_ basis J_nq uses below, no
     // new geometry. eigen_values_(2)/(1) are the largest/second-largest
@@ -482,7 +486,7 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
     const double m2 = u1 * u1 / l2 + u2 * u2 / l1;
     double thr2 = opts_->max_radius * opts_->max_radius;
     // History (259-272): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-259
-    if (opts_->plane_gate_mode == "ellipse_area_matched") {
+    if (opts_->plane_gate_mode_enum == PlaneGateMode::EllipseAreaMatched) {
       // History (274-278): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-274
       thr2 *= std::min(4.0, std::sqrt(l2 / l1));
     }
@@ -521,6 +525,7 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
   // threshold and the variance the admitted correspondence was then given
   // disagreed about S.
   const double floor_term = weightFloor(body_dir, body_normal, /*in_gate=*/true);
+  if (gate_floor_term_out) *gate_floor_term_out = floor_term;
   const double sigma_gate_squared = floor_term + sigma_diag_squared + plane_var_term;
   if (!std::isfinite(sigma_gate_squared) || sigma_gate_squared <= 0.0) return false;
 
@@ -532,12 +537,17 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
 double VoxelPlane::weightFloor(const V3D& body_dir, const V3D& body_normal,
                                bool in_gate) const
 {
-  const std::string& m = opts_->weight_floor_mode;
+  // Switches on the enum resolved once at load (VoxelMap::loadParameters())
+  // instead of re-comparing opts_->weight_floor_mode (std::string) here --
+  // this can run twice per candidate point, every IEKF iteration (see
+  // computeResidual()'s call site, which now avoids the second call for
+  // every mode except "legacy").
+  const WeightFloorMode m = opts_->weight_floor_mode_enum;
   // The historical asymmetry, reproduced exactly and only on request -- see
   // VoxelOpts::weight_floor_mode's "legacy" note.
-  if (m == "legacy")   return in_gate ? 0.0 : opts_->weight_floor_constant;
-  if (m == "none")     return 0.0;
-  if (m == "constant") return opts_->weight_floor_constant;
+  if (m == WeightFloorMode::Legacy)   return in_gate ? 0.0 : opts_->weight_floor_constant;
+  if (m == WeightFloorMode::None)     return 0.0;
+  if (m == WeightFloorMode::Constant) return opts_->weight_floor_constant;
   // The unified model's floor: the plane's own measured surface roughness,
   // as a variance.  This is the term the ledger has been recording as
   // missing -- "lambda0 is a binary admission test only: surface roughness
@@ -546,10 +556,10 @@ double VoxelPlane::weightFloor(const V3D& body_dir, const V3D& body_normal,
   // roughness_ is only written under plane_var_mode = "information", which
   // VoxelMap::loadParameters() enforces, so a zero here means the plane has
   // not been fitted yet rather than that the mode is inert.
-  if (m == "roughness") return roughness_;
+  if (m == WeightFloorMode::Roughness) return roughness_;
 
   const double sr2 = opts_->weight_sigma_r2;
-  if (m != "incidence") return sr2;                 // "sensor_range"
+  if (m != WeightFloorMode::Incidence) return sr2;   // "sensor_range"
 
   // sigma_r^2 (cos^2 theta + k sin^2 theta).  cos theta is the angle between
   // the ray and the plane normal, both in the body frame.  If either vector
@@ -577,11 +587,25 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
   // direction is the ray direction to well within the angular resolution
   // this is used at.  pt.rot_transpose is R_wb^T.
   const V3D body_normal = pt.rot_transpose * plane_.normal;
+  double gate_floor_term = std::numeric_limits<double>::quiet_NaN();
   const bool accepted = gate(pt.point, pt.sensor_cov, pt.pose_cov,
                               pt.body_point, body_normal,
                               r, sigma_diag_squared,
-                              plane_var_term, J_nq, &is_candidate, &dropped_by_ablation);
-  const double floor_term = weightFloor(pt.body_point, body_normal, /*in_gate=*/false);
+                              plane_var_term, J_nq, &is_candidate, &dropped_by_ablation,
+                              &gate_floor_term);
+  // Every weight_floor_mode except "legacy" returns the identical value
+  // regardless of in_gate (see weightFloor()'s own branches) -- reuse
+  // gate()'s already-computed floor_term instead of calling weightFloor()
+  // a second time with in_gate=false, whenever gate() actually reached that
+  // computation (gate_floor_term finite -- it can return early, e.g. a
+  // non-finite r or a failed geometric gate, before ever computing it).
+  // "legacy" genuinely needs the OTHER in_gate value (its own documented
+  // asymmetry), so it always recomputes.
+  const bool can_reuse_gate_floor = std::isfinite(gate_floor_term) &&
+      opts_->weight_floor_mode_enum != WeightFloorMode::Legacy;
+  const double floor_term = can_reuse_gate_floor
+      ? gate_floor_term
+      : weightFloor(pt.body_point, body_normal, /*in_gate=*/false);
 
   // P6a.  MEASUREMENT ONLY -- classifies this candidate's ray against the
   // occupancy chart; is_plane_/plane_var_/anything the state estimate reads

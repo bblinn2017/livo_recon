@@ -97,11 +97,20 @@ private:
   int    distinct_frames_ = 1;  // latest VoxelNode::distinct_frames_ seen by addPoints()
 
   // History (122-138): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-122
+  // gate_floor_term_out (if non-null): gate()'s own internal weightFloor(
+  // in_gate=true) result, set whenever gate() reaches that computation
+  // (i.e. the point passed its geometric gate check, regardless of whether
+  // the N-sigma test at the end ultimately accepts/rejects it). Lets
+  // computeResidual() reuse this value instead of calling weightFloor()
+  // again with in_gate=false, for every mode except "legacy" (the one mode
+  // whose return value actually depends on in_gate) -- see
+  // computeResidual()'s own call site.
   bool gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
             const V3D& body_dir, const V3D& body_normal,
             double& r, double& sigma_diag_squared, double& plane_var_term,
             Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate = nullptr,
-            bool* dropped_by_ablation = nullptr) const;
+            bool* dropped_by_ablation = nullptr,
+            double* gate_floor_term_out = nullptr) const;
 
   // Additive along-normal variance floor, m^2 -- see
   // VoxelOpts::weight_floor_mode.  The SAME value feeds gate()'s admission
