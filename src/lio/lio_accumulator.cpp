@@ -1,5 +1,4 @@
 #include "livo_recon/lio/lio_accumulator.h"
-#include "livo_recon/utils/algo/omp_utils.h"
 
 namespace livo_recon
 {
@@ -7,48 +6,49 @@ namespace livo_recon
 void accumulateLioResiduals(const std::vector<Residual>& residuals, EkfUpdate& out)
 {
   const int n = static_cast<int>(residuals.size());
-  const int nthreads = cappedOmpThreads();
 
   out.reset();
   out.n_meas = n;
 
-  using M66 = Eigen::Matrix<double, 6, 6>;
-  using V6  = Eigen::Matrix<double, 6, 1>;
-
-  // Per-RESIDUAL (not per-thread) accumulators -- see VioAccumulator::
-  // accumulate()'s matching fix (vio_accumulator.cpp) for the full
-  // rationale: summing per-thread partial sums makes the floating-point
-  // result depend on how many OMP threads ran this call (different
-  // groupings round differently at the LSB level), which a downstream
-  // iterative solve can amplify into materially different results for
-  // byte-identical input. Reducing in fixed residual-index order instead
-  // makes the result independent of thread count entirely.
+  // Fully serial, single-pass, single-accumulator reduction in residual-
+  // index order -- see VioAccumulator::accumulate()'s matching fix
+  // (vio_accumulator.cpp) for the rationale: the result must not depend on
+  // OMP thread count (a downstream iterative solve can amplify LSB-level
+  // rounding differences from different summation groupings into
+  // materially different results for byte-identical input).
   //
-  // A `static thread_local` version of these two buffers (reused across
-  // calls via resize() instead of freshly allocated every call) was tried
-  // and REVERTED 2026-09-17: it reproducibly SIGSEGV'd at node startup, well
-  // before this function was ever first called (during IMU calibration, in
-  // both a plain "off" config and a chi2-mode config) -- bisected by
-  // isolating this one file's change from the concurrent CQ-36 M4 fix
-  // (which does NOT reproduce the crash on its own) and by reverting just
-  // the static-thread_local declaration while keeping everything else
-  // (direct `=` instead of `+=`, no `Zero()` fill), which alone eliminates
-  // the crash. Root cause not tracked down further (likely a TLS
-  // allocation issue specific to this binary's build, given it links both
-  // OpenMP and CUDA translation units) -- not worth chasing for the size of
-  // the remaining win. This version keeps the safe half of the original
-  // idea: every index i in [0, n) below is written exactly once (never
-  // accumulated onto), so no `Zero()` start value is needed at all -- `=`
-  // instead of `+=` fills every entry of both the 6x6 (all four 3x3
-  // quadrants) and 6x1 (both 3-segments) explicitly, skipping the
-  // zero-initialization pass the original `M66::Zero()`/`V6::Zero()` fill
-  // constructors did on every element. The per-call heap allocation itself
-  // is NOT avoided (unlike the reverted design) -- verified byte-identical
-  // ATE against the pre-change binary on eee_01/off before landing.
-  std::vector<M66> rHtH(n);
-  std::vector<V6>  rHtz(n);
-
-  #pragma omp parallel for schedule(static) num_threads(nthreads)
+  // Two OMP-parallel versions of this function were tried and abandoned
+  // 2026-09-17, in order:
+  //  (1) a per-RESIDUAL `static thread_local` buffer pair, reused across
+  //      calls via resize() to amortize the O(n) allocation -- REVERTED:
+  //      reproducibly SIGSEGV'd at node startup, well before this function
+  //      was ever first called (bisected to that one declaration; likely a
+  //      TLS allocation issue given this binary links both OpenMP and CUDA
+  //      translation units -- root cause not chased further).
+  //  (2) a per-RESIDUAL (not static/thread_local) O(n) buffer pair, freshly
+  //      allocated each call but skipping the Zero() fill (every index
+  //      written exactly once via `=`, not accumulated via `+=`) -- worked,
+  //      but a fair load-matched A/B (same idle host, binary-only diff)
+  //      showed only a ~2% delta on state_estimation/frame -- not worth the
+  //      allocation, the two-pass structure, or the O(n) storage at all.
+  //
+  // This version has neither problem: no static/thread_local (no TLS risk),
+  // and no O(n) storage of any kind (not even per-thread) -- each term is
+  // computed and immediately added into out.HtH/out.Htz's own blocks in one
+  // step, in index order. This is PROVABLY bit-identical to the two-pass
+  // parallel-compute-then-serial-sum design above: `acc += term` is the
+  // same floating-point operation whether `term` was just computed or was
+  // read back from a place it was stored earlier, and the accumulation
+  // order/grouping (strict index order, one add per term, no batching) is
+  // unchanged -- unlike a per-thread partial-sum design (rejected for the
+  // same reason as (1)/(2) above plus this one: grouping by thread chunk,
+  // even with a FIXED thread count, changes the rounding versus a flat
+  // sequential sum, since floating-point addition is not associative). The
+  // tradeoff is no OMP parallelism for computing the n per-residual terms;
+  // each term is a handful of 3x3 matrix products (cheap), and this
+  // function's own share of frame time (~5ms/frame, per profiling) makes
+  // that an acceptable trade for correctness that doesn't need re-verifying
+  // every time this function changes.
   for (int i = 0; i < n; ++i) {
     const auto& res = residuals[i];
     const V3D& hr = res.point_cross_normal;
@@ -56,17 +56,12 @@ void accumulateLioResiduals(const std::vector<Residual>& residuals, EkfUpdate& o
     const double w  = 1.0 / res.sigma_squared;
     const double wr = w * res.r;
 
-    rHtH[i].block<3,3>(0, 0).noalias() = w  * hr * hr.transpose();
-    rHtH[i].block<3,3>(0, 3).noalias() = w  * hr * hp.transpose();
-    rHtH[i].block<3,3>(3, 0).noalias() = w  * hp * hr.transpose();
-    rHtH[i].block<3,3>(3, 3).noalias() = w  * hp * hp.transpose();
-    rHtz[i].segment<3>(0).noalias()    = wr * hr;
-    rHtz[i].segment<3>(3).noalias()    = wr * hp;
-  }
-
-  for (int i = 0; i < n; ++i) {
-    out.HtH += rHtH[i];
-    out.Htz += rHtz[i];
+    out.HtH.block<3,3>(0, 0).noalias() += w  * hr * hr.transpose();
+    out.HtH.block<3,3>(0, 3).noalias() += w  * hr * hp.transpose();
+    out.HtH.block<3,3>(3, 0).noalias() += w  * hp * hr.transpose();
+    out.HtH.block<3,3>(3, 3).noalias() += w  * hp * hp.transpose();
+    out.Htz.segment<3>(0).noalias()    += wr * hr;
+    out.Htz.segment<3>(3).noalias()    += wr * hp;
   }
 }
 
