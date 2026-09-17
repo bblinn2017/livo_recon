@@ -69,7 +69,11 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            // TQ-20 item 1/6: kappa = P^-1/HtH -- one derived scalar
            // (kappa_eff, from the already-logged ask/got) plus the 6
            // generalized eigenvalues of the (HtH,P) pencil itself.
-           ",kappa_eff,kappa_gev0,kappa_gev1,kappa_gev2,kappa_gev3,kappa_gev4,kappa_gev5,kappa_gev_ok\n";
+           ",kappa_eff,kappa_gev0,kappa_gev1,kappa_gev2,kappa_gev3,kappa_gev4,kappa_gev5,kappa_gev_ok"
+           // CQ-31 item 7/8: naive vs Woodbury-corrected info gain (always
+           // populated, including mode=="off") and reduced_chi2 (never
+           // retained before this -- TQ-23 flagged its absence).
+           ",naive_info_gain,woodbury_info_gain,reduced_chi2\n";
   first_call = false;
   // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
   // (6 significant figures) collapses every frame in a run to the same
@@ -105,7 +109,9 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.kappa_eff
       << "," << lio.kappa_gev0 << "," << lio.kappa_gev1 << "," << lio.kappa_gev2
       << "," << lio.kappa_gev3 << "," << lio.kappa_gev4 << "," << lio.kappa_gev5
-      << "," << (lio.kappa_gev_ok ? 1 : 0) << "\n";
+      << "," << (lio.kappa_gev_ok ? 1 : 0)
+      << "," << lio.naive_info_gain << "," << lio.woodbury_info_gain << "," << lio.reduced_chi2
+      << "\n";
 }
 }  // namespace
 

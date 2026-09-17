@@ -99,6 +99,12 @@ struct LioProcOptions
   // behavior by even one ULP.
   ResidualRedundancyOptions residual_redundancy;
 
+  // CQ-31 item 5: the scalar P controls, independent of residual_redundancy
+  // above (these act on the prior directly, not the measurement update) --
+  // see residual_redundancy.h's PriorScalarOptions. Identity at every
+  // default.
+  PriorScalarOptions prior_scalar;
+
   // History (115-132): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-115
   double density_sigma_ref = 0.0;
 

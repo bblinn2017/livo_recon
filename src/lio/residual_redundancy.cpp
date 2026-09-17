@@ -3,6 +3,7 @@
 #include <Eigen/Eigenvalues>
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
 #include <unordered_map>
 
 namespace livo_recon
@@ -99,13 +100,40 @@ GroupCorrection computeGroupCorrection(const std::vector<const Residual*>& group
 
 }  // namespace
 
+namespace
+{
+
+// Position-block (rows/cols 3-5) minimum eigenvalue AND its eigenvector,
+// embedded back into 6D (rotation components zero) -- woodbury_directional
+// needs the direction, not just the value positionMinEig() returns.
+V6 positionMinEigVector(const M66& HtH)
+{
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(HtH.block<3, 3>(3, 3));
+  Eigen::Index idx;
+  es.eigenvalues().minCoeff(&idx);
+  V6 v = V6::Zero();
+  v.segment<3>(3) = es.eigenvectors().col(idx).normalized();
+  return v;
+}
+
+}  // namespace
+
 ResidualRedundancyStats applyResidualRedundancyCorrection(
     const std::vector<Residual>& residuals,
     const ResidualRedundancyOptions& opts,
     EkfUpdate& ekf)
 {
+  if (opts.mode == "woodbury_divpos") {
+    throw std::runtime_error(
+        "lio/residual_redundancy/mode=woodbury_divpos is RETIRED (CQ-31): the "
+        "Woodbury group correction is a rank-one downdate of HtH, so by Weyl's "
+        "inequality h_pp_min_eig can only fall, never be preserved by any "
+        "choice of GAMMA except on a measure-zero alignment -- confirmed "
+        "empirically in CQ-28's own sweep (GAMMA search degenerated to 0 on "
+        "every tested frame). Use woodbury_rescale or woodbury_directional.");
+  }
+
   ResidualRedundancyStats stats{};
-  if (!opts.on()) return stats;  // caller should not reach here with mode=="off", defensive anyway
 
   std::unordered_map<const void*, std::vector<const Residual*>> by_plane;
   for (const Residual& r : residuals) {
@@ -116,6 +144,10 @@ ResidualRedundancyStats applyResidualRedundancyCorrection(
   V6  delta_Htz_total = V6::Zero();
   double naive_trace_total = 0.0, corrected_trace_total = 0.0;
 
+  // CQ-31 item 7: this loop, and everything through redund_info_ratio below,
+  // runs UNCONDITIONALLY -- including opts.mode == "off" -- so naive_
+  // info_gain/woodbury_info_gain are always populated. Only the ekf.HtH/Htz
+  // mutation further down is mode-gated.
   for (const auto& kv : by_plane) {
     const auto& group = kv.second;
     if (group.size() < 2) continue;
@@ -137,9 +169,17 @@ ResidualRedundancyStats applyResidualRedundancyCorrection(
     delta_Htz_total.noalias() += (gc.corrected_Htz - gc.naive_Htz);
   }
 
-  if (stats.redund_groups == 0) return stats;  // nothing to apply; info_ratio stays 1.0
+  // naive_info_gain/woodbury_info_gain are traces over the FULL 6x6, matching
+  // h_pp_min_eig's own convention of reading off the position block from the
+  // full matrix rather than a separately-tracked sub-accumulator.
+  stats.naive_info_gain = naive_trace_total;
+  stats.woodbury_info_gain = corrected_trace_total;
+
+  if (stats.redund_groups == 0) return stats;  // nothing to apply; info_ratio/gains stay at defaults
 
   stats.redund_info_ratio = (naive_trace_total > 0.0) ? (corrected_trace_total / naive_trace_total) : 1.0;
+
+  if (!opts.on()) return stats;  // mode == "off": stats computed above, ekf untouched
 
   if (opts.mode == "woodbury") {
     ekf.HtH += delta_HtH_total;
@@ -147,27 +187,63 @@ ResidualRedundancyStats applyResidualRedundancyCorrection(
     return stats;
   }
 
-  // woodbury_divpos: coarse grid search (not a continuous solve -- this is
-  // an exploratory diagnostic mechanism per CQ-28 item 4, precision beyond
-  // "pick the largest grid point that doesn't erode h_pp_min_eig" is not
-  // the point) for the largest GAMMA in {0, 0.25, 0.5, 0.75, 1.0} whose
-  // rescaled correction leaves the position block's minimum eigenvalue at
-  // or above its pre-correction value.
-  const double naive_min_eig = positionMinEig(ekf.HtH);
-  double gamma_chosen = 0.0;
-  for (double gamma : {1.0, 0.75, 0.5, 0.25}) {
-    const M66 candidate = ekf.HtH + gamma * delta_HtH_total;
-    if (positionMinEig(candidate) >= naive_min_eig) {
-      gamma_chosen = gamma;
-      break;
-    }
+  if (opts.mode == "woodbury_rescale") {
+    // Apply the downdate, then rescale the WHOLE post-correction system
+    // (HtH and Htz together, so the solved mean x = HtH^-1 Htz is UNCHANGED
+    // -- only the resulting covariance/information magnitude moves) by the
+    // scalar that puts the position block's minimum eigenvalue back to
+    // exactly its pre-correction value. One scalar, no search.
+    const double naive_min_eig = positionMinEig(ekf.HtH);
+    const M66 HtH_corrected = ekf.HtH + delta_HtH_total;
+    const V6  Htz_corrected = ekf.Htz + delta_Htz_total;
+    const double corrected_min_eig = positionMinEig(HtH_corrected);
+    const double s = (corrected_min_eig > 0.0) ? (naive_min_eig / corrected_min_eig) : 1.0;
+    ekf.HtH = s * HtH_corrected;
+    ekf.Htz = s * Htz_corrected;
+    stats.redund_info_ratio *= s;
+    return stats;
   }
-  ekf.HtH += gamma_chosen * delta_HtH_total;
-  ekf.Htz += gamma_chosen * delta_Htz_total;
-  // redund_info_ratio reflects what was actually applied, not the
-  // uncapped-by-GAMMA "woodbury" figure computed above.
-  stats.redund_info_ratio = 1.0 - gamma_chosen * (1.0 - stats.redund_info_ratio);
-  return stats;
+
+  if (opts.mode == "woodbury_directional") {
+    // Project the downdate onto the complement of the NAIVE HtH's own
+    // position-block minimum eigenvector v, so the Rayleigh quotient along v
+    // -- v^T HtH v -- is unchanged EXACTLY (v^T delta_proj v == 0 by
+    // construction): the starved direction is untouched, not merely
+    // rescaled along with everything else. Note this protects v's own
+    // direction specifically; it does not guarantee the CORRECTED matrix's
+    // eventual minimum eigenvector is still v (the correction could in
+    // principle open a new weak direction elsewhere) -- that is a separate,
+    // reportable observation, not something this projection can prevent by
+    // its own construction.
+    const V6 v = positionMinEigVector(ekf.HtH);
+    const M66 P_perp = M66::Identity() - v * v.transpose();
+    const M66 delta_HtH_proj = P_perp * delta_HtH_total * P_perp;
+    const V6  delta_Htz_proj = P_perp * delta_Htz_total;
+    ekf.HtH += delta_HtH_proj;
+    ekf.Htz += delta_Htz_proj;
+    const double applied_trace = naive_trace_total + delta_HtH_proj.trace();
+    stats.redund_info_ratio = (naive_trace_total > 0.0) ? (applied_trace / naive_trace_total) : 1.0;
+    return stats;
+  }
+
+  throw std::runtime_error("lio/residual_redundancy/mode: unrecognized value '" + opts.mode + "'");
+}
+
+void applyPriorScalarControls(Eigen::MatrixXd& prior_cov, const PriorScalarOptions& opts)
+{
+  if (!opts.on()) return;  // identity at every default -- zero risk to the "off" path
+
+  if (opts.p_inflate_alpha != 1.0) prior_cov *= opts.p_inflate_alpha;
+
+  if (opts.p_floor_min_eig > 0.0) {
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(prior_cov);
+    Eigen::VectorXd eigvals = es.eigenvalues();
+    for (int i = 0; i < eigvals.size(); ++i)
+      eigvals(i) = std::max(eigvals(i), opts.p_floor_min_eig);
+    prior_cov = es.eigenvectors() * eigvals.asDiagonal() * es.eigenvectors().transpose();
+  }
+
+  if (opts.p_fading_lambda != 1.0) prior_cov /= opts.p_fading_lambda;
 }
 
 }  // namespace livo_recon

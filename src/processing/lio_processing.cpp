@@ -178,14 +178,22 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
 
   // CQ-28: re-lands "woodbury_plane_correction" (see LioProcOptions'
   // historical comment and residual_redundancy.h) as a standalone,
-  // config-gated, inert-by-default mode.
+  // config-gated, inert-by-default mode. CQ-31: "woodbury_divpos" retired
+  // (it cannot satisfy its own preservation criterion -- see
+  // residual_redundancy.h) and replaced by two exactly-satisfiable modes.
   cfg.mode("lio/residual_redundancy/mode", opts_.residual_redundancy.mode, "off",
-           { "off", "woodbury", "woodbury_divpos" });
+           { "off", "woodbury", "woodbury_rescale", "woodbury_directional" });
   const bool rr = opts_.residual_redundancy.mode != "off";
   cfg.nested<double>(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/rho",
                      opts_.residual_redundancy.rho, 1.0);
   cfg.nested<double>(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/max_discount",
                      opts_.residual_redundancy.max_discount, 0.9);
+
+  // CQ-31 item 5: three independently-switchable scalar P controls, all
+  // default-identity -- see residual_redundancy.h's PriorScalarOptions.
+  cfg.get<double>("lio/p_inflate/alpha", opts_.prior_scalar.p_inflate_alpha, 1.0);
+  cfg.get<double>("lio/p_floor/min_eig", opts_.prior_scalar.p_floor_min_eig, 0.0);
+  cfg.get<double>("lio/p_fading/lambda", opts_.prior_scalar.p_fading_lambda, 1.0);
 
   // Downsampling is one axis with three states, not a mode plus a magic
   // zero.  "ds_leaf_size = 0.0 means off" made imu/ds/mode silently INERT
@@ -1163,6 +1171,12 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     // by every solveSystem()/solveSystem_cuda() call below until the loop
     // finishes and applyCovarianceUpdate() is called exactly once.
     prior_cov_ = state_->cov();
+    // CQ-31 item 5: the scalar P controls, applied once here to this frame's
+    // fixed prior snapshot (identity at every default -- see
+    // PriorScalarOptions::on()). trP_pos_pre_ below intentionally reads the
+    // POST-control value, since that is the prior every solveSystem() call
+    // this frame actually blends against.
+    applyPriorScalarControls(prior_cov_, opts_.prior_scalar);
     state_propagat_ = *state_;
     // P1.  Captured here, before this frame's update runs at all -- pairs
     // with the POST value already computed further down (see that block's
@@ -1564,6 +1578,22 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       diag.redund_n_raw      = redundancy_stats_.redund_n_raw;
       diag.redund_n_eff      = redundancy_stats_.redund_n_eff;
       diag.redund_info_ratio = redundancy_stats_.redund_info_ratio;
+      // CQ-31 item 7: log beside, do not drive -- always populated,
+      // including mode=="off", from the stats applyResidualRedundancyCorrection()
+      // now always computes (see residual_redundancy.cpp).
+      diag.naive_info_gain    = redundancy_stats_.naive_info_gain;
+      diag.woodbury_info_gain = redundancy_stats_.woodbury_info_gain;
+      // CQ-31 item 8: reduced_chi2 was computed twice already in this file
+      // (lines ~1048, ~1648) but only ever streamed to a log line -- TQ-23
+      // could not report it per-cell for exactly that reason. Same formula,
+      // computed unconditionally (not gated behind opts_.log_debug_en) so
+      // it is always available: sum(r.r^2/r.sigma_squared) / n_residuals,
+      // which averages to ~1 for a correctly-calibrated residual model.
+      {
+        double sum_chi2 = 0.0;
+        for (const auto& r : residuals_) sum_chi2 += (r.r * r.r) / r.sigma_squared;
+        diag.reduced_chi2 = residuals_.empty() ? 0.0 : sum_chi2 / residuals_.size();
+      }
       if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) vm->noteLioFrameDiag(diag);
     }
 

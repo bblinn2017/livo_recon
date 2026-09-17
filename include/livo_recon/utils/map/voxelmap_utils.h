@@ -623,6 +623,17 @@ struct LioFrameDiag
   int    redund_n_eff      = 0;
   double redund_info_ratio = 1.0;
 
+  // CQ-31 item 7: naive vs Woodbury-corrected information-trace, always
+  // populated (including mode=="off") -- see ResidualRedundancyStats.
+  double naive_info_gain    = 0.0;
+  double woodbury_info_gain = 0.0;
+
+  // CQ-31 item 8: reduced_chi2 = sum(r^2/sigma_squared)/n_residuals, ~1 for
+  // a correctly-calibrated residual model. Computed twice already elsewhere
+  // in this codebase for a console-only debug line; this is the first time
+  // it is retained per-frame (TQ-23 flagged its absence explicitly).
+  double reduced_chi2 = 0.0;
+
   // TQ-20 item 1: kappa = P^-1/HtH, the ratio of prior information to
   // measurement information -- exactly 1/sqrt(1-rho_ref)-1 (rho_ref ==
   // refusal above, same formula), so no new matrix work is needed beyond
