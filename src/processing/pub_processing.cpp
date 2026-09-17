@@ -225,8 +225,20 @@ void PubProc::publishResults(const MeasureGroup& mg)
     // runs) -- print periodic progress instead so a run's liveness/pace is
     // still visible.
     std::ostringstream oss;
-    oss << "[progress]  t=" << std::fixed << std::setprecision(1) << mg.image.t
-        << "s  frame=" << frame_count_;
+    oss << "[progress]  t=" << std::fixed << std::setprecision(1) << mg.image.t << "s";
+    // CQ-36: offline mode knows the bag's total duration up front (unlike
+    // live playback, where "how much bag is left" isn't knowable without
+    // reading the bag file separately) -- report a percentage instead of
+    // just elapsed time whenever runOffline() has set it via
+    // setOfflineTotalDurationSecs(). scripts/monitor_bag_run.sh's own
+    // percent = elapsed/total convention, computed here directly instead
+    // of externally from rosbag info.
+    if (offline_total_duration_secs_ > 0.0) {
+      const double pct = 100.0 * std::min(1.0, mg.image.t / offline_total_duration_secs_);
+      oss << "/" << offline_total_duration_secs_ << "s"
+          << "  (" << std::setprecision(1) << pct << "%)";
+    }
+    oss << "  frame=" << frame_count_;
     printer_->print(PrintCategory::PARAMS, oss.str());
   }
 

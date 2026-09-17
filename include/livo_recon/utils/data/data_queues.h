@@ -90,6 +90,28 @@ struct DataQueues
   std::atomic<int64_t> last_lidar_arrival_ns{0};
   std::atomic<int64_t> last_imu_arrival_ns{0};
 
+  // CQ-37: bag-time analog of last_{lidar,imu}_arrival_ns, for offline
+  // mode's quiet check -- see ready()'s own doc comment and streamSettled()
+  // (data_queues.cpp) for why offline mode needs a DIFFERENT clock here
+  // than live mode's wall-clock one. Updated by push{Imu,Lidar,Image} to
+  // the max message timestamp seen so far across ALL THREE streams (a CAS
+  // loop, same pattern as voxelplane.cpp's g_max_plane_var_trace, since
+  // live mode's callbacks can race here just as they already do on
+  // last_{lidar,imu}_arrival_ns).
+  std::atomic<double> latest_fed_time{-1e18};
+
+  // Set once, at startup, by runOffline() -- see ready()'s own doc comment.
+  // false (default) preserves live mode's existing wall-clock quiet check
+  // exactly; live playback still has the real cross-topic ROS-transport-
+  // delivery race streamSettled()'s wall-clock branch exists for, which a
+  // bag-time check cannot substitute for (message timestamp order is not
+  // the same thing as ROS transport delivery order under live playback).
+  bool offline_mode = false;
+  void setOfflineMode(bool v) { offline_mode = v; }
+  // Internal helper for push{Imu,Lidar,Image} -- see latest_fed_time's doc
+  // comment above.
+  void updateLatestFedTime(double t);
+
   // ready()'s per-stream (lidar, imu) acceptance test, checked against the
   // front image's timestamp `t`, is:
   //   (latest_X_time >= t + lookahead_margin_s)                     -- (A)
@@ -110,6 +132,34 @@ struct DataQueues
   // as the start-time reference, which cascaded into large downstream
   // ATE-comparison instability (every measure-group timestamp shifts by
   // that same amount).
+  //
+  // CQ-37: (B)'s "quiet for quiet_margin_s" was measured in REAL wall-clock
+  // time (std::chrono::steady_clock) unconditionally -- correct for live
+  // playback, where wall-clock quiet genuinely means "the ROS transport
+  // layer has settled" (the cross-topic delivery race this whole mechanism
+  // exists for is itself a real-time phenomenon: message A published
+  // before B can still be RECEIVED after B due to transport/subscriber
+  // jitter, independent of either message's own timestamp). But
+  // runOffline() reads directly from rosbag::View, which delivers messages
+  // in STRICT TIMESTAMP ORDER by construction -- there IS no cross-topic
+  // delivery race to wait out in offline mode, so wall-clock quiet is the
+  // wrong clock entirely there. Confirmed as the root cause of a
+  // reproducible, nondeterministic "IMU calibration stalled" hang this
+  // session: runOffline()'s CALIB loop feeds bag messages in an untimed
+  // busy loop (no rate limit), so its 300-iteration stall budget
+  // (CalibProcOptions::stall_calls_max) can exhaust in far less than
+  // quiet_margin_s's 50ms of real time whenever the CPU is fast/idle --
+  // condition (B) could then never fire before the call budget ran out,
+  // and whether it happened to fire first instead depended on incidental
+  // scheduling jitter, not on the bag or the config. When offline_mode is
+  // set, streamSettled() (data_queues.cpp) uses BAG-TIME quiet instead:
+  // latest_fed_time (the furthest-advanced message timestamp seen across
+  // ALL THREE streams, i.e. "how far into the bag has been read") minus
+  // this stream's own latest_stream_time, compared against quiet_margin_s
+  // -- same semantic ("has the feed moved past this stream without a new
+  // arrival"), measured on the clock offline reading actually advances on,
+  // so it is exact and CPU-speed-independent instead of racing an
+  // unrelated iteration budget.
   double lookahead_margin_s = 0.1;
   double quiet_margin_s     = 0.05;
 

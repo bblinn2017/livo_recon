@@ -56,6 +56,15 @@ public:
   void publishResults(const MeasureGroup& mg);
   void exportColmap();
 
+  // CQ-36: runOffline() calls this once, right after opening the bag view,
+  // with the bag's own total duration (capped to common/offline_duration_secs
+  // when that's set) -- lets the periodic [progress] line below report a
+  // percentage instead of just an elapsed time, since the total is known
+  // up front in offline mode (unlike live playback). -1.0 (default) means
+  // unknown -- publishResults() prints elapsed-time-only in that case,
+  // exactly as before this card.
+  void setOfflineTotalDurationSecs(double secs) { offline_total_duration_secs_ = secs; }
+
 private:
   StateGroupPtr     state_;
   ProfilerPtr       profiler_;
@@ -90,6 +99,7 @@ private:
   uint64_t      images_count_       = 0;
   int           frame_count_        = 0;
   int           export_image_count_ = 0;
+  double        offline_total_duration_secs_ = -1.0;
 
   std::queue<WriteTask>   write_queue_;
   std::mutex              write_mutex_;

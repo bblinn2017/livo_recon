@@ -29,6 +29,7 @@ void logIteration(const std::string& path, const std::string& msg)
   if (it == streams.end())
     it = streams.emplace(path, std::ofstream(path, std::ios::trunc)).first;
   it->second << msg << "\n";
+  it->second.flush();
 }
 
 // Point-to-LINE distance (r=N/D, l=t_cc x y, D=||l_xy||) with the FULL

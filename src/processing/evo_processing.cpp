@@ -22,12 +22,14 @@ namespace
 // of each process (first call), appended thereafter. Format matches what
 // FAST-LIVO2's own converted log uses (see scripts/fastlivo_evo.py) so the
 // two can be compared directly.
-// CQ-35: ofs is a function-local static, opened once (truncating) and kept
-// open for the process lifetime instead of reopened every call.
+// CQ-36: PersistentLogStream -- see its own doc comment for the CQ-35
+// regression this fixes.
 void debugLogEvo(const std::string& msg)
 {
-  static std::ofstream ofs(debugLogPath("evo.txt"), std::ios::trunc);
+  static PersistentLogStream log("evo.txt");
+  std::ofstream& ofs = log.stream();
   ofs << msg << "\n";
+  ofs.flush();
 }
 
 }  // namespace

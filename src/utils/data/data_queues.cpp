@@ -41,9 +41,22 @@ int64_t nowNs()
 }
 }  // namespace
 
+// CQ-37: CAS loop matching voxelplane.cpp's g_max_plane_var_trace pattern --
+// latest_fed_time only ever needs to track the MAXIMUM timestamp seen so
+// far across all three streams, and multiple push{Imu,Lidar,Image} calls
+// can race here under live playback's independent subscriber callbacks
+// just as they already can on last_{lidar,imu}_arrival_ns.
+void DataQueues::updateLatestFedTime(double t)
+{
+  double cur = latest_fed_time.load(std::memory_order_relaxed);
+  while (t > cur &&
+         !latest_fed_time.compare_exchange_weak(cur, t, std::memory_order_relaxed)) {}
+}
+
 void DataQueues::pushImu(const ImuSample& msg)
 {
   last_imu_arrival_ns.store(nowNs(), std::memory_order_relaxed);
+  updateLatestFedTime(msg.t);
   std::lock_guard<std::mutex> lock(imu_mutex);
   if (msg.t < latest_imu_time) return;
   latest_imu_time = msg.t;
@@ -55,6 +68,7 @@ void DataQueues::pushImu(const ImuSample& msg)
 void DataQueues::pushLidar(std::vector<PointXYZT>&& msg)
 {
   last_lidar_arrival_ns.store(nowNs(), std::memory_order_relaxed);
+  updateLatestFedTime(msg.back().t);
   std::lock_guard<std::mutex> lock(lidar_mutex);
   if (msg.front().t < latest_lidar_time) return;
   latest_lidar_time = msg.back().t;
@@ -78,6 +92,7 @@ void DataQueues::pushDryRunLidar(std::vector<PointXYZT>&& msg)
 
 void DataQueues::pushImage(const ImageData& msg)
 {
+  updateLatestFedTime(msg.t);
   std::lock_guard<std::mutex> lock(image_mutex);
   if (msg.t < latest_image_time) return;
   latest_image_time = msg.t;
@@ -98,13 +113,20 @@ namespace
 {
 // Per-stream acceptance test against a candidate image timestamp `t` --
 // see lookahead_margin_s/quiet_margin_s's docs on DataQueues for the
-// rationale of the two branches.
+// rationale of the two branches. CQ-37: the quiet check (B) takes EITHER
+// a real-time duration (live mode: nowNs() - last_arrival_ns) OR a
+// bag-time duration (offline mode: latest_fed_time - latest_stream_time)
+// depending on offline_mode -- see DataQueues::lookahead_margin_s's doc
+// comment for why these are not interchangeable.
 bool streamSettled(double t, double latest_stream_time, int64_t last_arrival_ns,
-                   double lookahead_margin_s, double quiet_margin_s)
+                   double lookahead_margin_s, double quiet_margin_s,
+                   bool offline_mode, double latest_fed_time)
 {
   if (latest_stream_time >= t + lookahead_margin_s) return true;
   if (latest_stream_time < t) return false;
-  const double quiet_for = (nowNs() - last_arrival_ns) * 1e-9;
+  const double quiet_for = offline_mode
+      ? (latest_fed_time - latest_stream_time)
+      : (nowNs() - last_arrival_ns) * 1e-9;
   return quiet_for >= quiet_margin_s;
 }
 }  // namespace
@@ -114,10 +136,13 @@ bool DataQueues::ready()
   std::lock_guard<std::mutex> lock(image_mutex);
   if (image_queue.empty()) return false;
   const double timestamp = image_queue.front().t + start_time;
+  const double fed_time = latest_fed_time.load(std::memory_order_relaxed);
   const bool lidar_settled = streamSettled(timestamp, latest_lidar_time,
-      last_lidar_arrival_ns.load(std::memory_order_relaxed), lookahead_margin_s, quiet_margin_s);
+      last_lidar_arrival_ns.load(std::memory_order_relaxed), lookahead_margin_s, quiet_margin_s,
+      offline_mode, fed_time);
   const bool imu_settled = streamSettled(timestamp, latest_imu_time,
-      last_imu_arrival_ns.load(std::memory_order_relaxed), lookahead_margin_s, quiet_margin_s);
+      last_imu_arrival_ns.load(std::memory_order_relaxed), lookahead_margin_s, quiet_margin_s,
+      offline_mode, fed_time);
   if (!lidar_settled) return false;
   if (!imu_settled) return false;
   return true;

@@ -334,6 +334,12 @@ void LivoReconNode::runOffline(const std::string& bag_path)
       "[node] runOffline: reading " + bag_path + " directly (no rosbag play, "
       "no ROS transport/callback queues in the loop) for reproducible evaluation");
 
+  // CQ-37: switches DataQueues::ready()'s quiet check (data_queues.cpp's
+  // streamSettled()) from wall-clock to bag-time -- see DataQueues::
+  // lookahead_margin_s's doc comment for the calibration-stall bug this
+  // fixes. Must be set before any feedNextMessage()/ready() call below.
+  ctx_.data_queues->setOfflineMode(true);
+
   rosbag::Bag bag;
   bag.open(bag_path, rosbag::bagmode::Read);
 
@@ -351,6 +357,18 @@ void LivoReconNode::runOffline(const std::string& bag_path)
   if (offline_duration_secs_ > 0.0)
     ctx_.printer->print(PrintCategory::PARAMS,
         "[node] runOffline: capping to first " + std::to_string(offline_duration_secs_) + "s (bag-relative)");
+
+  // CQ-36: the bag's own total duration (over the topics actually being
+  // read, matching mg.image.t's own timebase) is known immediately here,
+  // capped to offline_duration_secs_ when that's set -- feed it to PubProc
+  // so publishResults()'s periodic progress line can report a percentage.
+  {
+    const double bag_span_secs = (view.getEndTime() - bag_start_time).toSec();
+    const double total_secs = (offline_duration_secs_ > 0.0)
+        ? std::min(offline_duration_secs_, bag_span_secs)
+        : bag_span_secs;
+    pub_proc_.setOfflineTotalDurationSecs(total_secs);
+  }
 
   // Feeds exactly one message from the bag view (topics merged into a
   // single strictly-timestamp-ordered stream -- see rosbag::View's own

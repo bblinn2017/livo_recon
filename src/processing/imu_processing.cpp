@@ -21,12 +21,15 @@ namespace
 // Absolute (bag/wall-clock) timestamps throughout, matching evo_processing
 // .cpp's /tmp/evo.txt and FAST-LIVO2's own logs, so all of these can be
 // compared directly against each other. Remove once done debugging.
-// CQ-35: ofs is a function-local static, opened once (truncating) and kept
-// open for the process lifetime instead of reopened every call.
+// CQ-36: PersistentLogStream -- see its own doc comment for the CQ-35
+// regression this fixes (a bare static ofstream froze onto the first-ever
+// resolved path and never flushed).
 void debugLogImu(const std::string& msg)
 {
-  static std::ofstream ofs(debugLogPath("imu.txt"), std::ios::trunc);
+  static PersistentLogStream log("imu.txt");
+  std::ofstream& ofs = log.stream();
   ofs << msg << "\n";
+  ofs.flush();
 }
 
 // History (32-34): see docs/livo_recon_changelog.md#src-processing-imu_processing.cpp-32

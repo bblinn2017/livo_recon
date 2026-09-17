@@ -38,6 +38,7 @@ void logIteration(const std::string& path, const std::string& msg)
   if (it == streams.end())
     it = streams.emplace(path, std::ofstream(path, std::ios::trunc)).first;
   it->second << msg << "\n";
+  it->second.flush();
 }
 
 }  // namespace

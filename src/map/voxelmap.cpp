@@ -22,13 +22,15 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
                         double max_plane_var_trace, const LioFrameDiag& lio, int n_planes,
                         int n_voxels, int n_voxels_is_plane, int n_voxels_converged)
 {
-  // CQ-35: ofs is a function-local static, opened ONCE (truncating) on the
-  // first call and kept open for the process lifetime, instead of a fresh
-  // std::ofstream (open+close syscalls) on every frame. Correctness is
-  // unaffected -- the header is still written exactly once, gated on the
-  // same first_call flag; only the open/close cost is removed.
-  static std::ofstream ofs(debugLogPath("frame_stats.txt"), std::ios::trunc);
-  static bool first_call = true;
+  // CQ-36: PersistentLogStream re-resolves debugLogPath() on every call
+  // (reopening only if it actually changed) and the caller flushes after
+  // writing -- see its own doc comment for the CQ-35 regression this
+  // fixes (a bare static std::ofstream froze onto the first-ever resolved
+  // path and never flushed, so this file landed at /tmp, empty, for an
+  // entire run).
+  static PersistentLogStream log("frame_stats.txt");
+  bool first_call;
+  std::ofstream& ofs = log.stream(&first_call);
   if (first_call)
     ofs << "t,frame_idx,denom_rejected_count,max_plane_var_trace"
            ",n_residuals,n_planes,h_pp_min_eig,h_rr_min_eig,sum_weight"
@@ -122,6 +124,7 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << (lio.kappa_gev_ok ? 1 : 0)
       << "," << lio.naive_info_gain << "," << lio.woodbury_info_gain << "," << lio.reduced_chi2
       << "\n";
+  ofs.flush();
 }
 }  // namespace
 

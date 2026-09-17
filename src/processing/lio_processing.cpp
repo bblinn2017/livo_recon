@@ -35,28 +35,34 @@ namespace
 // /tmp/evo.txt, imu_processing.cpp's /tmp/imu.txt, and FAST-LIVO2's own
 // logs, so all of these can be compared directly against each other.
 // Remove once done debugging.
-// CQ-35: ofs is a function-local static, opened once (truncating) and kept
-// open for the process lifetime instead of reopened every call -- applied
-// to every debugLogXxx() helper in this file (see voxelmap.cpp's
-// debugLogFrameStats() for the same fix applied project-wide).
+// CQ-36: PersistentLogStream -- see its own doc comment for the CQ-35
+// regression this fixes -- applied to every debugLogXxx() helper in this
+// file (see voxelmap.cpp's debugLogFrameStats() for the same fix applied
+// project-wide).
 void debugLogLio(const std::string& msg)
 {
-  static std::ofstream ofs(debugLogPath("lio.txt"), std::ios::trunc);
+  static PersistentLogStream log("lio.txt");
+  std::ofstream& ofs = log.stream();
   ofs << msg << "\n";
+  ofs.flush();
 }
 
 // History (40-42): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-40
 void debugLogIterError(const std::string& msg)
 {
-  static std::ofstream ofs(debugLogPath("iter_error.txt"), std::ios::trunc);
+  static PersistentLogStream log("iter_error.txt");
+  std::ofstream& ofs = log.stream();
   ofs << msg << "\n";
+  ofs.flush();
 }
 
 // History (51-54): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-51
 void debugLogLioDryRun(const std::string& msg)
 {
-  static std::ofstream ofs(debugLogPath("lio_dryrun.txt"), std::ios::trunc);
+  static PersistentLogStream log("lio_dryrun.txt");
+  std::ofstream& ofs = log.stream();
   ofs << msg << "\n";
+  ofs.flush();
 }
 
 // History (63-70): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-63
@@ -68,13 +74,14 @@ void debugLogQhat(int scan_id, double t_abs, const Eigen::VectorXd& dx,
                   const Eigen::VectorXd& expected_diag,
                   const Eigen::VectorXd& acw_diag)
 {
-  static bool first_call = true;
   static std::mutex mtx;
   std::lock_guard<std::mutex> lock(mtx);
   const int n = static_cast<int>(dx.size());
-  // CQ-35: ofs is a function-local static, opened once (truncating) and
-  // kept open for the process lifetime instead of reopened every call.
-  static std::ofstream ofs(debugLogPath("qhat.csv"), std::ios::trunc);
+  // CQ-36: PersistentLogStream -- see its own doc comment for the CQ-35
+  // regression this fixes.
+  static PersistentLogStream log("qhat.csv");
+  bool first_call;
+  std::ofstream& ofs = log.stream(&first_call);
   if (first_call) {
     ofs << "scan_id,t,dim";
     for (int i = 0; i < n; ++i) ofs << ",dx" << i;
@@ -82,12 +89,12 @@ void debugLogQhat(int scan_id, double t_abs, const Eigen::VectorXd& dx,
     for (int i = 0; i < n; ++i) ofs << ",acw" << i;
     ofs << "\n";
   }
-  first_call = false;
   ofs << scan_id << "," << t_abs << "," << n;
   for (int i = 0; i < n; ++i) ofs << "," << dx(i);
   for (int i = 0; i < n; ++i) ofs << "," << expected_diag(i);
   for (int i = 0; i < n; ++i) ofs << "," << acw_diag(i);
   ofs << "\n";
+  ofs.flush();
 }
 
 }  // namespace
@@ -365,7 +372,12 @@ void LioProc::solveSystem_cuda(const std::vector<Residual>& residuals) const {
   // mode=="off", which silently left redund_groups/naive_info_gain/etc at
   // their default-constructed zero -- indistinguishable from a genuine
   // zero-groups measurement. See CQ-34.
-  redundancy_stats_ = applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_);
+  // CQ-34 item 2/CQ-35: this call was PREVIOUSLY SKIPPED ENTIRELY at
+  // mode=="off" -- now it runs every IEKF iteration, every frame, and had
+  // no profiler coverage anywhere before this TimedScope, so its wall-clock
+  // cost was invisible even to a profiled run. Reported per CQ-34 item 2.
+  { TimedScope ts(profiler_, "lio/ekf/redundancy");
+    redundancy_stats_ = applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_); }
   ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
 }
 
@@ -373,7 +385,8 @@ void LioProc::solveSystem(const std::vector<Residual>& residuals) const {
   accumulateLioResiduals(residuals, ekf_);
 
   // CQ-34: see solveSystem_cuda()'s comment above -- same fix, same reason.
-  redundancy_stats_ = applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_);
+  { TimedScope ts(profiler_, "lio/ekf/redundancy");
+    redundancy_stats_ = applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_); }
 
   // Mean-only update against the frame's FIXED prior (prior_cov_/
   // state_propagat_, snapshotted once in processLIO() before this frame's
@@ -782,10 +795,11 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
   // exists. Gating it behind log_en would silently break all of them the
   // moment log_en defaulted false, which it does.
   {
-    static bool first = true;
-    // CQ-35: opened once (truncating), kept open for the process lifetime
-    // instead of reopened every scan.
-    static std::ofstream ofs(debugLogPath("spline_q.csv"), std::ios::trunc);
+    // CQ-36: PersistentLogStream -- see its own doc comment for the CQ-35
+    // regression this fixes.
+    static PersistentLogStream log("spline_q.csv");
+    bool first;
+    std::ofstream& ofs = log.stream(&first);
     if (first)
     {
       ofs << "scan_id," << adaptive_q_.csvHeader()
@@ -797,7 +811,6 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
              "refit_dtraj_rms,refit_dtraj_max,refit_drot_deg,cov_acc_pre,cov_gyr_pre,"
              "d_bias_acc_norm,d_bias_gyr_norm,d_gravity_norm,max_abs_cp_phi,"
              "dmin_p,dmax_p,dmin_r,dmax_r\n";
-      first = false;
     }
     const double t_abs = mg.image.t + data_queues_->start_time;
     ofs << voxel_map_->frame_idx_ << ','
@@ -835,6 +848,7 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
         << spline_.dminPos() << ',' << spline_.dmaxPos() << ','
         << spline_.dminRot() << ',' << spline_.dmaxRot()
         << '\n';
+    ofs.flush();
   }
 
   // Run totals for the end-of-run engagement report.

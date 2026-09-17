@@ -22,12 +22,15 @@ namespace
 // so this has zero effect on a default/production run.
 void debugLogSyncStage(const std::string& path, const std::string& msg)
 {
-  // CQ-35: opened once (truncating), kept open for the process lifetime --
-  // every call site passes the same opts_.sync_debug_log_path, so a single
-  // function-local static is correct (no per-path dispatch needed). See
-  // debugLogFrameStats() in voxelmap.cpp for the same fix applied project-wide.
+  // CQ-35/36: opened once (truncating), kept open for the process lifetime --
+  // every call site passes the same opts_.sync_debug_log_path (a config-
+  // loaded, stable string, unlike debugLogPath()'s mutable global -- see
+  // that function's PersistentLogStream doc comment for the regression this
+  // avoided here), so a single function-local static is correct. Flushed
+  // after every write so a tail -f during a run sees data promptly.
   static std::ofstream ofs(path, std::ios::trunc);
   ofs << msg << "\n";
+  ofs.flush();
 }
 
 // Wall-clock "now", seconds since epoch, matching FAST-LIVO2's [sync_debug]

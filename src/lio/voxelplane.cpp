@@ -41,8 +41,10 @@ void updateMaxPlaneVarTrace(double trace)
 // diagnostic, not the write itself.
 void debugLogNoiseFloor(const std::string& msg)
 {
-  static std::ofstream ofs(debugLogPath("noise_floor.txt"), std::ios::trunc);
+  static PersistentLogStream log("noise_floor.txt");
+  std::ofstream& ofs = log.stream();
   ofs << msg << "\n";
+  ofs.flush();
 }
 
 // CQ-35: computeResidual() runs inside LioProc::buildResiduals()'s OMP
@@ -352,9 +354,13 @@ void flushVarianceShareLog()
 {
   if (t_variance_share_buf.empty()) return;
   static std::mutex mtx;
-  static std::ofstream ofs(debugLogPath("variance_shares.txt"), std::ios::trunc);
+  // CQ-36: PersistentLogStream -- see its own doc comment for the CQ-35
+  // regression this fixes.
+  static PersistentLogStream log("variance_shares.txt");
   std::lock_guard<std::mutex> lock(mtx);
+  std::ofstream& ofs = log.stream();
   ofs << t_variance_share_buf;
+  ofs.flush();
   t_variance_share_buf.clear();
 }
 
@@ -362,9 +368,11 @@ void flushPlaneFitStatsLog()
 {
   if (t_plane_fit_stats_buf.empty()) return;
   static std::mutex mtx;
-  static std::ofstream ofs(debugLogPath("plane_fit_stats.txt"), std::ios::trunc);
+  static PersistentLogStream log("plane_fit_stats.txt");
   std::lock_guard<std::mutex> lock(mtx);
+  std::ofstream& ofs = log.stream();
   ofs << t_plane_fit_stats_buf;
+  ofs.flush();
   t_plane_fit_stats_buf.clear();
 }
 
