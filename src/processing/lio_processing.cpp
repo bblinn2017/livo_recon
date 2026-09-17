@@ -341,6 +341,10 @@ void LioProc::buildResiduals(
     // gated behind log_variance_shares_en) is done by the time any thread
     // reaches here.
     flushVarianceShareLog();
+    // CQ-38: same call-site reasoning as flushVarianceShareLog() above --
+    // debugLogConsistencyCorr() (called from computeResidual(), same OMP
+    // region) now buffers per-thread too. See voxelplane.h's doc comment.
+    flushConsistencyCorrLog();
   }
 
   residuals.clear();

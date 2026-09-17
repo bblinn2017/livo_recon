@@ -23,6 +23,14 @@ namespace livo_recon
 // thread's buffer is only visible to that thread).
 void flushVarianceShareLog();
 void flushPlaneFitStatsLog();
+// CQ-38: same pattern and same call-site obligation as the two above, for
+// debugLogConsistencyCorr()/corr.csv (called from computeResidual(), same
+// parallel region as the two above) -- see voxelplane.cpp's doc comment on
+// t_corr_buf for why this one mattered most (log_consistency_mode=
+// corr+covariates writes one row per CANDIDATE correspondence, not just
+// accepted ones, making the old per-call mutex+ofstream the dominant cost
+// whenever that mode is on).
+void flushConsistencyCorrLog();
 
 class VoxelPlane
 {

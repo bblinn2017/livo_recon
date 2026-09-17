@@ -81,6 +81,26 @@ void debugLogPlaneFitStats(int n, int j, double n_eff, double trace_plane_var)
   t_plane_fit_stats_buf += oss.str();
 }
 
+// CQ-38: same thread_local-buffer-plus-flush pattern as
+// t_variance_share_buf/t_plane_fit_stats_buf above -- computeResidual()
+// (VoxelPlane's own member fn) calls debugLogConsistencyCorr() for EVERY
+// candidate correspondence from inside LioProc::buildResiduals()'s OMP
+// parallel region, and under log_consistency_mode=corr+covariates this is
+// the single largest per-frame diagnostic (a 30+-column row per candidate,
+// not just accepted ones -- 9GB+ in under half a bag on a single TQ-27
+// cell). The old per-call `static std::mutex mtx; static std::ofstream
+// ofs;` serialized every thread's writes through one lock + one ofstream
+// for every candidate, turning what should be embarrassingly-parallel
+// residual computation into a largely serialized I/O bottleneck (observed:
+// ~396% CPU on a 128-core host instead of the 700%+ typical offline runs
+// reach). g_corr_with_covariates records whether the header/row need the
+// covariate columns -- set (relaxed) on the first append; it is a
+// per-run-constant (driven by config, not per-call), so a benign race on
+// which thread's write "wins" the store is fine, every writer passes the
+// same value.
+thread_local std::string t_corr_buf;
+std::atomic<bool> g_corr_with_covariates{false};
+
 // History (70-79): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-70
 // D-1's covariates.  corr.csv logged everything about a correspondence
 // EXCEPT the two things the information model is a statement about: the
@@ -122,28 +142,14 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
                               int dropped_by_ablation, double occ_var_u, double occ_var_v,
                               double plane_conf_factor, const CorrInfoCols& info)
 {
-  // History (87-94): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-87
-  static std::mutex mtx;
-  static std::vector<char> buf(1 << 20);
-  static std::ofstream ofs;
-  static bool first_call = true;
-  std::lock_guard<std::mutex> lock(mtx);
-  if (first_call) {
-    ofs.rdbuf()->pubsetbuf(buf.data(), static_cast<std::streamsize>(buf.size()));
-    ofs.open(debugLogPath("corr.csv"), std::ios::trunc);
-    // History (103-111): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-103
-    ofs << "scan_id,nu,S,gated,dropped_by_ablation";
-    // History (113-120): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-113
-    if (with_covariates) ofs << ",S_sensor,S_plane_tilt,S_plane_d,S_pose,S_prior_pose,N,J,aniso,lambda0,occ_aniso,occ_cells,occ_var_u,occ_var_v,plane_conf_factor"
-                             << ",a0,a1,plane_id,roughness,sigma_bar2,n_eff,n_raw,rho,frames"
-                             << ",floor_term,lambda1,lambda2,info_path,vis_state"
-                             << ",x_normal_x,x_normal_y,x_normal_z,y_normal_x,y_normal_y,y_normal_z";
-    ofs << "\n";
-  }
-  first_call = false;
-  ofs << scan_id << "," << nu << "," << S << "," << gated << "," << dropped_by_ablation;
+  // CQ-38: no lock, no I/O here -- appends to this thread's own buffer.
+  // See flushConsistencyCorrLog() for where the header/rows actually reach
+  // disk. g_corr_with_covariates: see its own doc comment above.
+  g_corr_with_covariates.store(with_covariates, std::memory_order_relaxed);
+  std::ostringstream oss;
+  oss << scan_id << "," << nu << "," << S << "," << gated << "," << dropped_by_ablation;
   if (with_covariates)
-    ofs << "," << s_sensor << "," << s_plane_tilt << "," << s_plane_d << "," << s_pose
+    oss << "," << s_sensor << "," << s_plane_tilt << "," << s_plane_d << "," << s_pose
         << "," << s_prior_pose << "," << n << "," << j << "," << aniso << "," << lambda0
         << "," << occ_aniso << "," << occ_cells
         << "," << occ_var_u << "," << occ_var_v << "," << plane_conf_factor
@@ -155,7 +161,8 @@ void debugLogConsistencyCorr(bool with_covariates, int scan_id, double nu, doubl
         << "," << info.info_path << "," << info.vis_state
         << "," << info.x_normal_x << "," << info.x_normal_y << "," << info.x_normal_z
         << "," << info.y_normal_x << "," << info.y_normal_y << "," << info.y_normal_z;
-  ofs << "\n";
+  oss << "\n";
+  t_corr_buf += oss.str();
 }
 
 // History (134-140): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-134
@@ -374,6 +381,36 @@ void flushPlaneFitStatsLog()
   ofs << t_plane_fit_stats_buf;
   ofs.flush();
   t_plane_fit_stats_buf.clear();
+}
+
+// CQ-38: same pattern, for corr.csv (t_corr_buf/g_corr_with_covariates --
+// see their doc comment above debugLogConsistencyCorr()). Unlike the other
+// two flush functions here, the header line is written exactly once ever
+// (not once per PersistentLogStream reopen -- corr.csv's path is stable
+// for the whole run, so this only matters on the very first flush), guarded
+// by the same mutex used for every subsequent flush so there's no separate
+// race to reason about.
+void flushConsistencyCorrLog()
+{
+  if (t_corr_buf.empty()) return;
+  static std::mutex mtx;
+  static PersistentLogStream log("corr.csv");
+  static bool header_written = false;
+  std::lock_guard<std::mutex> lock(mtx);
+  std::ofstream& ofs = log.stream();
+  if (!header_written) {
+    ofs << "scan_id,nu,S,gated,dropped_by_ablation";
+    if (g_corr_with_covariates.load(std::memory_order_relaxed))
+      ofs << ",S_sensor,S_plane_tilt,S_plane_d,S_pose,S_prior_pose,N,J,aniso,lambda0,occ_aniso,occ_cells,occ_var_u,occ_var_v,plane_conf_factor"
+          << ",a0,a1,plane_id,roughness,sigma_bar2,n_eff,n_raw,rho,frames"
+          << ",floor_term,lambda1,lambda2,info_path,vis_state"
+          << ",x_normal_x,x_normal_y,x_normal_z,y_normal_x,y_normal_y,y_normal_z";
+    ofs << "\n";
+    header_written = true;
+  }
+  ofs << t_corr_buf;
+  ofs.flush();
+  t_corr_buf.clear();
 }
 
 // The final scan never sees a scan_id change, so it needs an explicit flush.
