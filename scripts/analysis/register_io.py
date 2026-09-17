@@ -1378,6 +1378,133 @@ def remove_row(doc: Doc, table_key: str, rid: str) -> None:
     doc.stage_cut(doc.row(table_key, rid), f"remove row {rid}")
 
 
+def _extract_row_id(row_html: str) -> str:
+    """The id of a standalone ``<tr>...</tr>`` fragment, for verifying an insertion."""
+    tmp = Doc(f"<table><tbody>{row_html}</tbody></table>")
+    trs = list(tmp.find("tr"))
+    return tmp.row_id(trs[0]) if trs else ""
+
+
+def _table_row_id_map(doc: Doc) -> dict[str, list[str]]:
+    """caption text -> ordered list of row ids, for every table in the document."""
+    return {cap: [doc.row_id(r) for r in doc.rows(t)] for cap, t in doc.tables()}
+
+
+def _table_row_content_map(doc: Doc) -> dict[str, list[str]]:
+    """caption text -> ordered list of each row's FULL outer HTML, for every table.
+
+    Stronger than the id-only map: a mutation that leaves a table's row COUNT and
+    IDS unchanged but corrupts the prose inside one of its untouched rows (e.g. an
+    edit whose span leaked into a neighboring row's cell content without adding or
+    removing a row) would pass an id-only check and still be a real defect. "Every
+    other table has exactly as many as before" (CQ-30 item 2a) means unchanged,
+    full stop -- not merely same row count.
+    """
+    return {cap: [r.outer(doc.src) for r in doc.rows(t)] for cap, t in doc.tables()}
+
+
+def verify_row_mutation(
+    doc_before: Doc, out_text: str, table_key: str,
+    *, removed_id: str = None, added_id: str = None,
+) -> None:
+    """CQ-30's three invariants, checked mechanically after every row add/remove --
+    not merely stated, and not only in a spot self-check.  An id can legitimately
+    appear in a queue row, a ledger row, and another row's prose (rule 43s: the same
+    id occurring in more than one place is normal, not a defect, and a mutation path
+    that doesn't distinguish them is), so the check is by TABLE, not by document-wide
+    id search:
+
+      (a) every table OTHER than the target is byte-for-byte unchanged (same row ids,
+          same order) -- an edit that leaked outside its target table's span shows up
+          here as a row-id-list diff on a table nobody asked to touch.
+      (b) the target table's row count changed by exactly +1 (add) or -1 (remove).
+      (c) for a removal, the requested id is confirmed GONE from the target table
+          specifically (not just gone from the document -- it could still be sitting,
+          untouched, in some other table that happens to share the id); for an
+          addition, the added id is confirmed PRESENT there.
+
+    Raises ValueError naming exactly which invariant failed and where.  Call this
+    BEFORE writing output -- the caller must treat any exception as "write nothing."
+    Containment (the edit's own byte span falling inside the target table) is enforced
+    by construction in remove_row/add_row (both resolve through doc.table(table_key)/
+    doc.rows(table_key), which are already scoped to that one table's span) and
+    reconfirmed here as a side effect of invariant (a): a leak outside the target's
+    span is exactly what would perturb another table's row-id list.
+    """
+    if (removed_id is None) == (added_id is None):
+        raise ValueError("verify_row_mutation: exactly one of removed_id/added_id required")
+    doc_after = Doc(out_text, doc_before.path)
+    # Structural well-formedness FIRST, and directly here rather than only in a
+    # separate self-check pass. Table-scoped row-count/id checks alone have a hole:
+    # truncating the LAST table in a document to end-of-file can satisfy them
+    # trivially (every OTHER table is untouched, the target table's row count drops
+    # by exactly one, the removed id is gone) while still destroying the entire tail
+    # of the document -- footer, closing tags, anything after that table. Confirmed
+    # by construction while testing this fix. check_balance/check_structure catch
+    # exactly this (unclosed tags, stray closers), so run them here unconditionally.
+    structural = [f for f in (check_balance(out_text) + check_structure(doc_after))
+                  if f.level == "error"]
+    if structural:
+        raise ValueError(
+            "row-mutation invariant: output is not well-formed after the mutation -- "
+            + "; ".join(f.message for f in structural[:4]))
+    before_content = _table_row_content_map(doc_before)
+    after_content = _table_row_content_map(doc_after)
+    if set(before_content) != set(after_content):
+        raise ValueError(
+            f"row-mutation invariant (a): the set of tables changed -- "
+            f"{sorted(set(before_content) - set(after_content))!r} disappeared, "
+            f"{sorted(set(after_content) - set(before_content))!r} appeared")
+    target_node = doc_before.table(table_key)
+    target_cap = strip_tags(target_node.first("caption").inner(doc_before.src)) \
+        if target_node.first("caption") else ""
+    target_cap_matches = [c for c in before_content if _fold(c) == _fold(target_cap)]
+    if len(target_cap_matches) != 1:
+        raise ValueError(
+            f"row-mutation invariant: could not uniquely re-identify the target table "
+            f"{table_key!r} (caption {target_cap!r}) by caption after re-parsing; "
+            f"matches: {target_cap_matches!r}")
+    tcap = target_cap_matches[0]
+    for cap in before_content:
+        if cap == tcap:
+            continue
+        if before_content[cap] != after_content[cap]:
+            raise ValueError(
+                f"row-mutation invariant (a): table {cap!r} was not the target "
+                f"({tcap!r} was) but its rows changed anyway -- the edit leaked "
+                f"outside its target table's span (row content differs, not just "
+                f"row count/ids).")
+    before = _table_row_id_map(doc_before)
+    after = _table_row_id_map(doc_after)
+    b_ids, a_ids = before[tcap], after[tcap]
+    if removed_id is not None:
+        want = norm_id(removed_id)
+        if len(a_ids) != len(b_ids) - 1:
+            raise ValueError(
+                f"row-mutation invariant (b): table {tcap!r} had {len(b_ids)} rows, "
+                f"now has {len(a_ids)} -- expected exactly one fewer (removing "
+                f"{removed_id!r})")
+        if want not in [norm_id(x) for x in b_ids]:
+            raise ValueError(
+                f"row-mutation invariant: requested id {removed_id!r} was never a row "
+                f"of table {tcap!r} -- have {b_ids!r}")
+        if want in [norm_id(x) for x in a_ids]:
+            raise ValueError(
+                f"row-mutation invariant (c): id {removed_id!r} is STILL present in "
+                f"table {tcap!r} after its own removal was requested")
+    else:
+        want = norm_id(added_id)
+        if len(a_ids) != len(b_ids) + 1:
+            raise ValueError(
+                f"row-mutation invariant (b): table {tcap!r} had {len(b_ids)} rows, "
+                f"now has {len(a_ids)} -- expected exactly one more (adding "
+                f"{added_id!r})")
+        if want not in [norm_id(x) for x in a_ids]:
+            raise ValueError(
+                f"row-mutation invariant (c): added id {added_id!r} is not present in "
+                f"table {tcap!r} after insertion -- have {a_ids!r}")
+
+
 def retitle_card(
     doc: Doc, cid: str, *, h3: Optional[str] = None, chip: Optional[str] = None,
     chip_class: Optional[str] = None,
@@ -1891,6 +2018,76 @@ def check_delivers_coverage(coding: Doc, planning: Doc) -> list[Finding]:
     return fs
 
 
+_SHA_RE = re.compile(r"\b[0-9a-f]{7,40}\b")
+# Only inside <code>...</code> -- every real commit citation in this
+# document's own convention is wrapped in <code>, and scoping to it avoids
+# flagging an incidental hex-looking word elsewhere in a row's free text.
+_CODE_SPAN_RE = re.compile(r"<code>(.*?)</code>", re.S)
+
+def check_drain_ledger_commits(coding: Doc, repo_path: str = None) -> list[Finding]:
+    """CQ-33 item 3: a drain-ledger line naming a commit SHA is a claim that
+    the round it describes actually landed. Verify each such SHA both EXISTS
+    in this repo and is an ancestor of origin/main; report every line that
+    fails either check, distinguishing the two (a SHA that plain doesn't
+    exist anywhere is a different failure than one that exists but never
+    reached the remote).
+
+    Gated behind having a repo to check against -- when repo_path is None
+    or has no .git, this returns one INFO Finding saying the check was
+    skipped, never silently nothing (rule 43s: an instrument only counts
+    where it runs, and a skip must say so). Defaults ON whenever a repo IS
+    present (repo_path defaults to the current working directory).
+
+    Extracts candidate SHAs only from <code>...</code> spans inside each
+    drain-ledger row's "what" column -- every genuine commit citation in
+    this document's own convention is wrapped in <code>, which keeps an
+    incidental hex-looking word elsewhere in the prose from being flagged.
+    """
+    import subprocess
+
+    if repo_path is None:
+        repo_path = os.getcwd()
+    if not os.path.isdir(os.path.join(repo_path, ".git")):
+        return [Finding("info", "commit-check-skipped",
+            f"CQ-33: no .git at {repo_path!r} -- drain-ledger commit verification "
+            f"did not run this pass")]
+
+    def _git(*args):
+        return subprocess.run(["git", "-C", repo_path, *args],
+                               capture_output=True, text=True)
+
+    fs: list[Finding] = []
+    try:
+        rows = coding.rows("drain")
+    except KeyError:
+        return fs
+    seen = set()
+    for tr in rows:
+        rid = coding.row_id(tr)
+        cells = list(tr.find("td", deep=False))
+        what_html = cells[3].inner(coding.src) if len(cells) > 3 else ""
+        candidates = set()
+        for span in _CODE_SPAN_RE.findall(what_html):
+            candidates.update(_SHA_RE.findall(strip_tags(span)))
+        for sha in candidates:
+            key = (rid, sha)
+            if key in seen:
+                continue
+            seen.add(key)
+            if _git("cat-file", "-e", sha).returncode != 0:
+                fs.append(Finding("error", "commit-not-found",
+                    f"drain ledger line {rid!r} names {sha!r} as a commit, but no "
+                    f"such object exists in this repo at all"))
+                continue
+            merged = _git("merge-base", "--is-ancestor", sha, "origin/main")
+            if merged.returncode != 0:
+                fs.append(Finding("error", "commit-not-on-main",
+                    f"drain ledger line {rid!r} names commit {sha!r}, which exists "
+                    f"locally but is NOT an ancestor of origin/main -- the round it "
+                    f"describes is not actually landed"))
+    return fs
+
+
 def audit(coding: Doc, planning: Doc) -> list[Finding]:
     """The protocol's own audit: the two illegal states, plus what is runnable.
 
@@ -1900,6 +2097,7 @@ def audit(coding: Doc, planning: Doc) -> list[Finding]:
     fs += check_queue_schema(coding)
     fs += check_delivers_coverage(coding, planning)
     fs += check_lever_table(coding, planning)
+    fs += check_drain_ledger_commits(coding)
 
     task_ids = set(queue_ids(coding, "task"))
     code_ids = set(queue_ids(coding, "code"))
@@ -2943,14 +3141,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if a.cmd == "additem":
         d = Doc.load(a.file)
-        add_item(d, a.queue, _read_arg(a.html, a.html_file), role=a.role, at=a.at)
-        _write(a.o, d.apply())
+        d_before = Doc(d.src, a.file)
+        row_html = _read_arg(a.html, a.html_file)
+        new_id = _extract_row_id(row_html)
+        add_item(d, a.queue, row_html, role=a.role, at=a.at)
+        out = d.apply()
+        if new_id:
+            verify_row_mutation(d_before, out, a.queue, added_id=new_id)
+        _write(a.o, out)
         return 0
 
     if a.cmd == "rmitem":
         d = Doc.load(a.file)
+        d_before = Doc(d.src, a.file)
         delete_item(d, a.queue, a.id, role=a.role)
-        _write(a.o, d.apply())
+        out = d.apply()
+        verify_row_mutation(d_before, out, a.queue, removed_id=a.id)
+        _write(a.o, out)
         return 0
 
     if a.cmd == "totext":
@@ -3063,6 +3270,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             except Exception as exc:                      # noqa: BLE001 - reported, not raised
                 tv_ok, tv_why = False, f"text view raised {type(exc).__name__}: {exc}"
             checks.append(("text-roundtrip", tv_ok, tv_why))
+
+            # ROW-MUTATION INVARIANTS (CQ-30 item 3): fold the same checks
+            # verify_row_mutation() runs on every rmitem/additem call into self-check
+            # too, on the first table this document actually has, so a regression in
+            # the invariant function itself is caught the same way a regression in
+            # roundtrip/well-formed would be -- not just exercised once at fix time.
+            rmi_ok, rmi_why = True, "no table with a row to exercise"
+            tables_with_rows = [(cap, t) for cap, t in d.tables() if d.rows(t)]
+            if tables_with_rows:
+                cap, t = tables_with_rows[0]
+                rid = d.row_id(d.rows(t)[0])
+                try:
+                    d4 = Doc(d.src, path)
+                    remove_row(d4, cap, rid)
+                    out4 = d4.apply()
+                    verify_row_mutation(Doc(d.src, path), out4, cap, removed_id=rid)
+                    # and the deliberately-broken case (rule 43o): truncate to EOF
+                    # from the removed row's own start, the historically-reported
+                    # defect shape, and confirm the invariant refuses it.
+                    row_node = d.row(cap, rid)
+                    broken = d.src[: row_node.start]
+                    try:
+                        verify_row_mutation(Doc(d.src, path), broken, cap,
+                                             removed_id=rid)
+                        rmi_ok = False
+                        rmi_why = (f"a truncated-to-EOF mutation of table {cap!r} "
+                                   f"was NOT rejected -- the invariant would miss "
+                                   f"the historically-reported defect shape")
+                    except ValueError:
+                        rmi_why = (f"clean removal from {cap!r} verified; a "
+                                   f"truncated-to-EOF mutation of the same row was "
+                                   f"correctly refused")
+                except Exception as exc:                  # noqa: BLE001 - reported
+                    rmi_ok = False
+                    rmi_why = f"raised {type(exc).__name__}: {exc}"
+            checks.append(("row-mutation", rmi_ok, rmi_why))
 
             print(f"{path}: {len(d.nodes)} elements, {len(d.blocks())} blocks, "
                   f"{len(d.cards())} cards")
