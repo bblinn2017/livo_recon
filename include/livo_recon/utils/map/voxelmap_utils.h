@@ -613,6 +613,39 @@ struct LioFrameDiag
   bool        q_above_floor_acc = false;
   bool        q_above_floor_gyr = false;
   bool        q_active_frame   = false;
+
+  // CQ-28: residual-redundancy-correction engagement/magnitude, from
+  // ResidualRedundancyStats (see residual_redundancy.h) -- 0/0/0/1.0 both
+  // when the mode is "off" and on a frame where no plane group had >= 2
+  // matched residuals (nothing to correct is not an error condition).
+  int    redund_groups     = 0;
+  int    redund_n_raw      = 0;
+  int    redund_n_eff      = 0;
+  double redund_info_ratio = 1.0;
+
+  // TQ-20 item 1: kappa = P^-1/HtH, the ratio of prior information to
+  // measurement information -- exactly 1/sqrt(1-rho_ref)-1 (rho_ref ==
+  // refusal above, same formula), so no new matrix work is needed beyond
+  // what ask/got/refusal already compute; kept as its own named column
+  // rather than making a caller re-derive it from refusal. -1.0 when
+  // refusal/got are unavailable (matches this struct's -1.0 sentinel
+  // convention, not refusal's NaN one, since kappa_eff is a ratio a
+  // consumer is more likely to filter with a numeric comparison).
+  double kappa_eff = -1.0;
+
+  // TQ-20 item 1/6: the 6 generalized eigenvalues of the pencil
+  // (HtH, P) -- i.e. of P^-1*HtH, without ever forming P^-1 explicitly
+  // (GeneralizedSelfAdjointEigenSolver(HtH, P) solves HtH*v=lambda*P*v
+  // directly) -- ascending order, matching every other eigenvalue column
+  // in this struct. A single joint 6-DOF measure of how much each
+  // direction's measurement information dominates its prior, as opposed
+  // to h_pp_min_eig/p_pos_eig_min_pre's separate 3x3 position-only views
+  // above. -1.0 (all six) when P is unavailable or not positive-definite
+  // (GeneralizedSelfAdjointEigenSolver requires the second matrix PD; a
+  // failure here is itself diagnostic -- see kappa_gev_ok below).
+  double kappa_gev0 = -1.0, kappa_gev1 = -1.0, kappa_gev2 = -1.0;
+  double kappa_gev3 = -1.0, kappa_gev4 = -1.0, kappa_gev5 = -1.0;
+  bool   kappa_gev_ok = false;
 };
 
 struct VoxelStats

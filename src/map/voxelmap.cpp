@@ -62,7 +62,14 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            // reads it already computes and previously discarded) plus
            // q_active_frame, the per-frame counterpart to the latched
            // q_active above -- see LioFrameDiag's doc comment.
-           ",q_status,q_white_acc,q_white_gyr,q_above_floor_acc,q_above_floor_gyr,q_active_frame\n";
+           ",q_status,q_white_acc,q_white_gyr,q_above_floor_acc,q_above_floor_gyr,q_active_frame"
+           // CQ-28: residual-redundancy-correction engagement/magnitude --
+           // see LioFrameDiag's own doc comment.
+           ",redund_groups,redund_n_raw,redund_n_eff,redund_info_ratio"
+           // TQ-20 item 1/6: kappa = P^-1/HtH -- one derived scalar
+           // (kappa_eff, from the already-logged ask/got) plus the 6
+           // generalized eigenvalues of the (HtH,P) pencil itself.
+           ",kappa_eff,kappa_gev0,kappa_gev1,kappa_gev2,kappa_gev3,kappa_gev4,kappa_gev5,kappa_gev_ok\n";
   first_call = false;
   // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
   // (6 significant figures) collapses every frame in a run to the same
@@ -92,7 +99,13 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.q_status
       << "," << (lio.q_white_acc ? 1 : 0) << "," << (lio.q_white_gyr ? 1 : 0)
       << "," << (lio.q_above_floor_acc ? 1 : 0) << "," << (lio.q_above_floor_gyr ? 1 : 0)
-      << "," << (lio.q_active_frame ? 1 : 0) << "\n";
+      << "," << (lio.q_active_frame ? 1 : 0)
+      << "," << lio.redund_groups << "," << lio.redund_n_raw << "," << lio.redund_n_eff
+      << "," << lio.redund_info_ratio
+      << "," << lio.kappa_eff
+      << "," << lio.kappa_gev0 << "," << lio.kappa_gev1 << "," << lio.kappa_gev2
+      << "," << lio.kappa_gev3 << "," << lio.kappa_gev4 << "," << lio.kappa_gev5
+      << "," << (lio.kappa_gev_ok ? 1 : 0) << "\n";
 }
 }  // namespace
 

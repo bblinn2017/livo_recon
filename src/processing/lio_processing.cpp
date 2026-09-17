@@ -176,6 +176,17 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(aq, "adaptive_q/enable", "adaptive_q/log_en", opts_.adaptive_q.log_en, false);
   adaptive_q_.configure(opts_.adaptive_q);
 
+  // CQ-28: re-lands "woodbury_plane_correction" (see LioProcOptions'
+  // historical comment and residual_redundancy.h) as a standalone,
+  // config-gated, inert-by-default mode.
+  cfg.mode("lio/residual_redundancy/mode", opts_.residual_redundancy.mode, "off",
+           { "off", "woodbury", "woodbury_divpos" });
+  const bool rr = opts_.residual_redundancy.mode != "off";
+  cfg.nested<double>(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/rho",
+                     opts_.residual_redundancy.rho, 1.0);
+  cfg.nested<double>(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/max_discount",
+                     opts_.residual_redundancy.max_discount, 0.9);
+
   // Downsampling is one axis with three states, not a mode plus a magic
   // zero.  "ds_leaf_size = 0.0 means off" made imu/ds/mode silently INERT
   // whenever downsampling was disabled -- and LD-1's R4 rung turns
@@ -322,11 +333,23 @@ void LioProc::buildResiduals(
 // History (242-246): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-242
 void LioProc::solveSystem_cuda(const std::vector<Residual>& residuals) const {
   accumulateLioResidualsCuda(residuals, ekf_, cuda_buf_);
+  // CQ-28: mode=="off" (default) skips this call entirely -- see
+  // residual_redundancy.h -- so the CUDA path is byte-identical whenever
+  // the mechanism is disabled, same guarantee as the CPU path below.
+  redundancy_stats_ = opts_.residual_redundancy.on()
+      ? applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_)
+      : ResidualRedundancyStats{};
   ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
 }
 
 void LioProc::solveSystem(const std::vector<Residual>& residuals) const {
   accumulateLioResiduals(residuals, ekf_);
+
+  // CQ-28: see solveSystem_cuda()'s comment above -- same guard, same
+  // byte-identity guarantee at mode=="off".
+  redundancy_stats_ = opts_.residual_redundancy.on()
+      ? applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_)
+      : ResidualRedundancyStats{};
 
   // Mean-only update against the frame's FIXED prior (prior_cov_/
   // state_propagat_, snapshotted once in processLIO() before this frame's
@@ -1448,11 +1471,41 @@ std::string LioProc::processLIO(MeasureGroup& mg)
         diag.ask = ask;  diag.got = got;
         diag.refusal = (ask > 0.0) ? (1.0 - got / ask)
                                     : std::numeric_limits<double>::quiet_NaN();
+        // TQ-20 item 1: kappa_eff = 1/sqrt(1-rho_ref)-1, rho_ref==refusal
+        // above (same formula, 1-got/ask) -- got>0.0 is the same
+        // availability condition refusal's own ask>0.0 branch relies on,
+        // since got/ask both come from the same eigenbasis sum above.
+        diag.kappa_eff = (got > 0.0) ? (std::sqrt(ask / got) - 1.0) : -1.0;
         diag.htz_rot_norm = ekf_.Htz.segment<3>(0).norm();
         diag.htz_pos_norm = ekf_.Htz.segment<3>(3).norm();
         diag.iters        = iter + 1;
         diag.dx_rot_deg   = total_dtheta.norm() * (180.0 / M_PI);
         diag.dx_pos_mm    = total_dt.norm() * 1000.0;
+
+        // TQ-20 item 1/6: the 6 generalized eigenvalues of (HtH, P) --
+        // needs the SAME combined 6x6 prior block buildResiduals()'s own
+        // prior_cov_rp slices (rot 0-3, pos 3-6, matching HtH's layout),
+        // re-sliced here since that one is frame-constant context, not
+        // stored on diag. have_p_pos_pre (computed above, this same
+        // iteration) already proved prior_cov_ is at least idxP()+3 --
+        // re-check idxR()+6 explicitly since the combined slice spans
+        // both blocks and idxR()/idxP() are not asserted adjacent in
+        // general (only true by this codebase's current StateGroup
+        // layout, which line 283's prior_cov_rp slice already assumes).
+        if (have_p_pos_pre &&
+            prior_cov_.rows() >= StateGroup::idxR() + 6 &&
+            prior_cov_.cols() >= StateGroup::idxR() + 6) {
+          const Eigen::Matrix<double, 6, 6> P_prior_6 =
+              prior_cov_.block<6, 6>(StateGroup::idxR(), StateGroup::idxR());
+          Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>>
+              ges(ekf_.HtH, P_prior_6);
+          if (ges.info() == Eigen::Success) {
+            const auto& gev = ges.eigenvalues();
+            diag.kappa_gev0 = gev(0); diag.kappa_gev1 = gev(1); diag.kappa_gev2 = gev(2);
+            diag.kappa_gev3 = gev(3); diag.kappa_gev4 = gev(4); diag.kappa_gev5 = gev(5);
+            diag.kappa_gev_ok = true;
+          }
+        }
       }
       // Captured at the TOP of processLIO(), before the update -- see note.
       diag.trP_pos_pre = trP_pos_pre_;
@@ -1502,6 +1555,15 @@ std::string LioProc::processLIO(MeasureGroup& mg)
         diag.q_above_floor_gyr = adaptive_q_.aboveFloorGyr();
         diag.q_active_frame    = adaptive_q_.activeThisFrame();
       }
+      // CQ-28: redundancy_stats_ is written by solveSystem()/
+      // solveSystem_cuda() earlier this same processLIO() call, unconditionally
+      // (ResidualRedundancyStats{} default-constructed, i.e. all-zero/1.0, when
+      // the mode is "off") -- no extra guard needed here, unlike AdaptiveQ's
+      // block above which only runs when the block ran at all.
+      diag.redund_groups     = redundancy_stats_.redund_groups;
+      diag.redund_n_raw      = redundancy_stats_.redund_n_raw;
+      diag.redund_n_eff      = redundancy_stats_.redund_n_eff;
+      diag.redund_info_ratio = redundancy_stats_.redund_info_ratio;
       if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) vm->noteLioFrameDiag(diag);
     }
 

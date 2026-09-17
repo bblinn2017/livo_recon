@@ -10,6 +10,7 @@
 #include "livo_recon/lio/deskew.h"
 #include "livo_recon/lio/spline.h"
 #include "livo_recon/lio/adaptive_q.h"
+#include "livo_recon/lio/residual_redundancy.h"
 
 #include <array>
 
@@ -90,6 +91,13 @@ struct LioProcOptions
   //     (overly conservative by the residual-level calibration standard)
   //     in both cases. A fifth independent confirmation of the same
   //     conclusion above.
+
+  // CQ-28: re-lands the "woodbury_plane_correction" mechanism named in the
+  // historical comment above, as a standalone config-gated mode -- see
+  // residual_redundancy.h for the full derivation. "off" (default) means
+  // this mechanism is never invoked at all, so it cannot perturb existing
+  // behavior by even one ULP.
+  ResidualRedundancyOptions residual_redundancy;
 
   // History (115-132): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-115
   double density_sigma_ref = 0.0;
@@ -432,6 +440,13 @@ private:
 
   bool cuda_enable_ = false;
   mutable LioCudaBuffers cuda_buf_;
+
+  // CQ-28: this frame's residual-redundancy-correction engagement/magnitude
+  // counters, written by solveSystem()/solveSystem_cuda() (both const) right
+  // after accumulate[Cuda]() when opts_.residual_redundancy.on() -- same
+  // mutable-for-a-const-method precedent as cuda_buf_ above. Read into
+  // LioFrameDiag alongside AdaptiveQ's own per-frame state.
+  mutable ResidualRedundancyStats redundancy_stats_;
 };
 
 }
