@@ -1,206 +1,318 @@
 #!/usr/bin/env python3
-"""CQ-32 items (3)/(4): the design-integrity preflight, modeled line for
-line on assert_responses.py's pattern (same failure class TQ-4 hit --
-a mismatch between what a card/generator CLAIMS and what it actually
-emits, found only after cells had already run -- caught here before
-dispatch instead).
+"""CQ-32 item 3: the design-integrity preflight assert_responses.py's own
+comment names as the precedent ("a preflight that prints a per-item
+pass/fail table and exits nonzero, which the generator calls and refuses
+to emit jobs on").
 
-Two checks, run against a design's own declared cell table (a CSV with
-one row per cell and one column per crossed factor, e.g.
-livo_recon_results/tq12/tq12_cells.csv) and the generator module that
-produced it (imported directly, not re-implemented -- see fast_ws/CLAUDE.md's
-"go through gen_jobs.py"-style reuse rule: a design's own emission logic is
-the one place that logic should live, this script recomputes from it
-rather than guessing at collapse semantics independently):
+WHAT THIS CATCHES.  A dead-scope key is FORCED to its default regardless of
+what a cell's label says (config_resolve.h's nested()/nestedMode() -- see
+CQ-32 item 1). If a design crosses a factor that collapses under another
+factor's setting, two cells with DIFFERENT declared labels can resolve to
+the IDENTICAL effective configuration -- the exact TQ-20/use_bins defect:
+voxel_map/plane/use_bins is refused (and therefore omitted, forced false)
+whenever plane_fit_mode=debiased, so every debiased cell ran with
+use_bins=false regardless of its own +1/-1 label, and a seven-factor design
+quietly became six-factor on half its blocks with nothing refusing it.
 
-  (3) DIGEST COLLISION -- two DISTINCT cell labels (differing in at least
-      one declared factor) must never resolve to byte-identical effective
-      configs. A collision means the design has a dead/unswept factor
-      hiding behind a label that implies it varies -- exactly the kind of
-      gap CQ-32 names (use_bins forced false off-pca, adaptive_q's whole
-      namespace absent outside spline+refine, etc). Rows sharing a label
-      whose OWN stratum/control marks it as intentionally repeated (the
-      generator's CONTROLS stratum -- nudge pairs, logging on/off pairs,
-      build-identity twins) are expected to collide and are excluded.
-
-  (4) LABEL -> EFFECTIVE ROUND-TRIP -- for every factor a cell's row
-      declares (including generated factors K/L), recompute what the
-      generator's own config_for_cell()/derive() produce from that row's
-      OTHER declared levels and compare against the row's own claimed
-      value. A mismatch means the cell table's label doesn't actually
-      describe the config that would be (or was) emitted for it --
-      exactly the round-trip gap this item exists to catch.
-
-Both checks report a per-item pass/fail table (rule 41b) and exit nonzero
-naming the specific colliding/mismatched cell ids if anything fails.
+This script re-derives the EFFECTIVE config for each cell in a design from
+its declared overrides, using the SAME dead-scope table
+lio_processing.cpp/voxelmap.cpp actually apply (NESTING_TABLE below,
+extracted by reading every cfg.nested<T>()/nestedMode() call site directly
+-- grep the two files for "cfg.nested" to re-verify this table against the
+live source before trusting it on a new design; a call site added there
+without a matching row here is exactly the gap this script exists to
+close). It then digests each cell's effective config and refuses if two
+DISTINCT labels share a digest.
 
 Usage:
-    assert_design.py --cells-csv livo_recon_results/tq12/tq12_cells.csv \\
-                      --generator gen_tq12_grid
+    assert_design.py --cells cells.json [--base base_overrides.json]
+    assert_design.py --config-dir DIR   (one *.yaml per cell, filename = label)
+
+cells.json: {"label1": {"key/path": value, ...}, "label2": {...}, ...}
+Keys use the same slash-path convention as the C++ side
+(voxel_map/plane/use_bins, not nested YAML) for a flat, order-independent
+representation -- see `flatten_yaml()` if starting from real config.yaml
+files (also what --config-dir uses internally).
 """
 import argparse
-import csv
 import hashlib
-import importlib
 import json
 import sys
+from collections import defaultdict
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
 
 
-FACTOR_COLS = ("C", "F", "G", "H", "J", "K", "L")
-CONTROL_STRATA = {"CONTROLS"}
+# ---------------------------------------------------------------------------
+# STRUCT DEFAULTS -- every key ANY nesting rule below can force, or that a
+# design might declare, needs a default here so a cell that never sets it
+# still resolves to something (matching the C++ member-default / nested()'s
+# own `def` argument, whichever this project's constructor uses. Re-verify
+# against the .h/.cpp sources if either drifts).
+# ---------------------------------------------------------------------------
+DEFAULTS = {
+    "spline/mode": "spline",
+    "spline/control_points/hz": 100.0,
+    "spline/refine/iters": 1,
+    "spline/log_en": False,
+    "spline/trajectory_log/mode": "off",
+    "spline/trajectory_log/hz": 200.0,
+    "adaptive_q/enable": False,
+    "adaptive_q/beta_acc": 0.3,
+    "adaptive_q/beta_gyr": 0.3,
+    "adaptive_q/z_rate_limit": 0.02,
+    "adaptive_q/acf1_max": 1.00,  # CQ-35
+    "adaptive_q/bounds/max_ratio": 100.0,
+    "adaptive_q/bounds/min_ratio": 0.01,
+    "adaptive_q/warmup_frames": 20,
+    "adaptive_q/ema": 0.9,
+    "adaptive_q/noise_floor/mode": "allan",
+    "adaptive_q/noise_floor/scale": 1.0,
+    "adaptive_q/log_en": False,
+    "lio/residual_redundancy/mode": "off",
+    "lio/residual_redundancy/rho": 1.0,
+    "lio/residual_redundancy/max_discount": 0.9,
+    "imu/ds/mode": "first",
+    "imu/ds/ds_leaf_size": 0.15,
+    "lio/ekf/density_sigma_mode": "off",
+    "voxel_map/plane/weight_floor/mode": "sensor_range",
+    "voxel_map/plane/weight_floor/constant": 1e-3,
+    "voxel_map/plane/weight_floor/incidence_k": 1.0,
+    "voxel_map/plane/plane_fit_mode": "pca",
+    "voxel_map/plane/plane_var_mode": "eigengap",
+    "voxel_map/plane/plane_var_denom_floor_en": False,
+    "voxel_map/plane/use_bins": False,
+    "voxel_map/plane/bin_size_fraction": 0.2,
+    "voxel_map/plane/bin_weight_mode_fit": "count",
+    "voxel_map/plane/bin_weight_mode_var": "count",
+    "voxel_map/plane/log_consistency_mode": "off",
+    "voxel_map/plane/log_consistency_corr_stride": 1,
+}
+
+# ---------------------------------------------------------------------------
+# NESTING TABLE -- (key, scope_description, live_predicate, dead_default),
+# IN THE SAME ORDER cfg.nested()/nestedMode() calls them in the C++, since a
+# later predicate can read an earlier key's OWN resolved (possibly-forced)
+# value. `live_predicate` takes the cell's resolved-so-far dict.
+#
+# Source: src/processing/lio_processing.cpp (spline/adaptive_q/redundancy/ds
+# block, ~line 142-218) and src/map/voxelmap.cpp (weight_floor/plane_var/
+# use_bins block, ~line 190-322). Re-grep both files for "cfg.nested" before
+# trusting this on a design that crosses a key not listed here.
+# ---------------------------------------------------------------------------
+NESTING_TABLE = [
+    ("spline/control_points/hz", "spline/mode",
+     lambda r: r["spline/mode"] != "raw_imu", 100.0),
+    ("spline/refine/iters", "spline/mode=spline+refine",
+     lambda r: r["spline/mode"] == "spline+refine", 1),
+    ("spline/log_en", "spline/mode",
+     lambda r: r["spline/mode"] != "raw_imu", False),
+    ("spline/trajectory_log/mode", "spline/mode",
+     lambda r: r["spline/mode"] != "raw_imu", "off"),
+    ("spline/trajectory_log/hz", "spline/trajectory_log/mode=dense",
+     lambda r: r["spline/mode"] != "raw_imu" and r["spline/trajectory_log/mode"] == "dense", 200.0),
+    ("adaptive_q/enable", "spline/mode",
+     lambda r: r["spline/mode"] != "raw_imu", False),
+    ("adaptive_q/beta_acc", "adaptive_q/enable",
+     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 0.3),
+    ("adaptive_q/beta_gyr", "adaptive_q/enable",
+     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 0.3),
+    ("adaptive_q/z_rate_limit", "adaptive_q/enable",
+     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 0.02),
+    ("adaptive_q/acf1_max", "adaptive_q/enable",
+     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 1.00),
+    ("adaptive_q/bounds/max_ratio", "adaptive_q/enable",
+     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 100.0),
+    ("adaptive_q/bounds/min_ratio", "adaptive_q/enable",
+     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 0.01),
+    ("adaptive_q/warmup_frames", "adaptive_q/enable",
+     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 20),
+    ("adaptive_q/ema", "adaptive_q/enable",
+     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 0.9),
+    ("adaptive_q/noise_floor/mode", "adaptive_q/enable",
+     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], "allan"),
+    ("adaptive_q/noise_floor/scale", "adaptive_q/noise_floor/mode=allan",
+     lambda r: (r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"]
+                and r["adaptive_q/noise_floor/mode"] == "allan"), 1.0),
+    ("adaptive_q/log_en", "adaptive_q/enable",
+     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], False),
+    ("lio/residual_redundancy/rho", "lio/residual_redundancy/mode!=off",
+     lambda r: r["lio/residual_redundancy/mode"] != "off", 1.0),
+    ("lio/residual_redundancy/max_discount", "lio/residual_redundancy/mode!=off",
+     lambda r: r["lio/residual_redundancy/mode"] != "off", 0.9),
+    ("imu/ds/ds_leaf_size", "imu/ds/mode != off",
+     lambda r: r["imu/ds/mode"] != "off", 0.15),
+    ("voxel_map/plane/weight_floor/constant", "voxel_map/plane/weight_floor/mode=constant|legacy",
+     lambda r: r["voxel_map/plane/weight_floor/mode"] in ("constant", "legacy"), 1e-3),
+    ("voxel_map/plane/weight_floor/incidence_k", "voxel_map/plane/weight_floor/mode=incidence",
+     lambda r: r["voxel_map/plane/weight_floor/mode"] == "incidence", 1.0),
+    ("voxel_map/plane/plane_var_denom_floor_en", "voxel_map/plane/plane_var_mode=eigengap",
+     lambda r: r["voxel_map/plane/plane_var_mode"] == "eigengap", False),
+    ("voxel_map/plane/use_bins", "voxel_map/plane/plane_fit_mode=pca",
+     lambda r: r["voxel_map/plane/plane_fit_mode"] == "pca", False),
+    ("voxel_map/plane/bin_size_fraction", "voxel_map/plane/use_bins=true",
+     lambda r: r["voxel_map/plane/plane_fit_mode"] == "pca" and r["voxel_map/plane/use_bins"], 0.2),
+    ("voxel_map/plane/bin_weight_mode_fit", "voxel_map/plane/use_bins=true",
+     lambda r: r["voxel_map/plane/plane_fit_mode"] == "pca" and r["voxel_map/plane/use_bins"], "count"),
+    ("voxel_map/plane/bin_weight_mode_var", "voxel_map/plane/use_bins=true",
+     lambda r: r["voxel_map/plane/plane_fit_mode"] == "pca" and r["voxel_map/plane/use_bins"], "count"),
+    ("voxel_map/plane/log_consistency_corr_stride", "voxel_map/plane/log_consistency_mode=corr|corr+covariates",
+     lambda r: r["voxel_map/plane/log_consistency_mode"] in ("corr", "corr+covariates"), 1),
+]
+
+NESTED_KEYS = {row[0] for row in NESTING_TABLE}
 
 
-def load_cells(path):
-    with open(path, newline="") as fh:
-        reader = csv.DictReader(fh)
-        rows = list(reader)
-    return rows
+def resolve_cell(declared: dict) -> dict:
+    """Effective config for one cell: DEFAULTS + declared overrides, then
+    every nesting rule applied in source order, forcing a dead key to its
+    default regardless of what was declared. Returns {key: (value, forced)}."""
+    resolved = dict(DEFAULTS)
+    for k, v in declared.items():
+        resolved[k] = v
+    forced = {}
+    for key, scope, live_pred, dead_default in NESTING_TABLE:
+        if key not in resolved:
+            resolved[key] = dead_default
+        if not live_pred(resolved):
+            # Matches config_resolve.h's nested(): the dead branch ALWAYS
+            # marks the key FORCED, regardless of whether a value was ever
+            # declared or what it was -- "denied" is denied either way, and
+            # two cells that both got denied must produce the SAME marker
+            # (and therefore the same digest) even if one of them never
+            # bothered to declare the key at all.
+            forced[key] = scope
+            resolved[key] = dead_default
+    return resolved, forced
 
 
-def levels_of(row):
-    return {f: int(row[f]) for f in FACTOR_COLS if row.get(f) not in (None, "")}
+def digest_cell(resolved: dict, forced: dict, key_universe) -> str:
+    pairs = []
+    for k in sorted(key_universe):
+        v = resolved.get(k, DEFAULTS.get(k))
+        marker = f"[FORCED:{forced[k]}]" if k in forced else ""
+        pairs.append(f"{k}={v!r}{marker}")
+    blob = "\n".join(pairs).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
 
 
-def label_key(row):
-    """The design-level label identity: everything that's supposed to make
-    two cells the SAME designed point vs. different ones -- block, sequence,
-    stratum, and the 5 basic factors (K/L are generated, not independently
-    labeled, so they're excluded from identity and checked by item 4 instead)."""
-    return (row.get("block", ""), row.get("sequence", ""), row.get("stratum", ""),
-            row.get("C", ""), row.get("F", ""), row.get("G", ""),
-            row.get("H", ""), row.get("J", ""))
+def flatten_yaml(doc, prefix=""):
+    out = {}
+    if isinstance(doc, dict):
+        for k, v in doc.items():
+            out.update(flatten_yaml(v, f"{prefix}{k}/" if prefix == "" else f"{prefix}{k}/"))
+        return out
+    else:
+        return {prefix.rstrip("/"): doc}
 
 
-def config_digest(cfg):
-    canon = json.dumps(cfg, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canon.encode()).hexdigest()
-
-
-def recompute_config(gen, row):
-    block_name = row["block"]
-    seq_name = row["sequence"]
-    stratum = row["stratum"]
-    block = gen.BLOCKS[block_name]
-    seq = gen.SEQUENCES[seq_name]
-    base_levels = {f: int(row[f]) for f in ("C", "F", "G", "H", "J")}
-    levels = gen.derive(base_levels)
-    cfg = gen.config_for_cell(block_name, block, seq, levels, "unused_out_dir",
-                               stratum=stratum, tier=row.get("tier", "A"))
-    return levels, cfg
-
-
-def check_digest_collisions(gen, rows):
-    """Item 3. Returns (n_fail, n_checked, failures) -- failures is a list
-    of (digest, [cell_ids]) for groups whose members have DIFFERENT labels."""
-    by_digest = {}
-    n_checked = 0
-    for row in rows:
-        if row.get("stratum", "") in CONTROL_STRATA:
+def load_cells_from_config_dir(d):
+    import os
+    if yaml is None:
+        print("ERROR: pyyaml not available; cannot parse --config-dir", file=sys.stderr)
+        sys.exit(2)
+    cells = {}
+    for fn in sorted(os.listdir(d)):
+        if not fn.endswith(".yaml"):
             continue
-        try:
-            _, cfg = recompute_config(gen, row)
-        except Exception as e:
-            continue
-        n_checked += 1
-        digest = config_digest(cfg)
-        by_digest.setdefault(digest, []).append(row)
-
-    failures = []
-    for digest, group in by_digest.items():
-        if len(group) < 2:
-            continue
-        distinct_labels = {label_key(r) for r in group}
-        if len(distinct_labels) > 1:
-            failures.append((digest, [r["cell_id"] for r in group],
-                              sorted(str(k) for k in distinct_labels)))
-    n_fail = len(failures)
-    return n_fail, n_checked, failures
-
-
-def check_label_roundtrip(gen, rows):
-    """Item 4. For every row, recompute K/L from C/F/G/H/J via the
-    generator's own derive() and compare against the row's own claimed
-    K/L -- the declared-vs-derived round trip. Returns (n_fail, n_checked,
-    mismatches) -- mismatches is a list of (cell_id, factor, claimed,
-    derived)."""
-    mismatches = []
-    n_checked = 0
-    for row in rows:
-        if not all(row.get(f) not in (None, "") for f in ("C", "F", "G", "H", "J", "K", "L")):
-            continue
-        n_checked += 1
-        base_levels = {f: int(row[f]) for f in ("C", "F", "G", "H", "J")}
-        derived = gen.derive(base_levels)
-        for f in ("K", "L"):
-            claimed = int(row[f])
-            if claimed != derived[f]:
-                mismatches.append((row["cell_id"], f, claimed, derived[f]))
-    n_fail = len(mismatches)
-    return n_fail, n_checked, mismatches
+        label = fn[:-len(".yaml")]
+        with open(os.path.join(d, fn)) as fh:
+            doc = yaml.safe_load(fh)
+        cells[label] = flatten_yaml(doc or {})
+    return cells
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                   formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--cells-csv", required=True, help="declared cell table (e.g. tq12_cells.csv)")
-    ap.add_argument("--generator", required=True,
-                     help="importable generator module name (e.g. gen_tq12_grid), "
-                          "must expose BLOCKS, SEQUENCES, derive(), config_for_cell()")
+    ap.add_argument("--cells", default="", help="JSON: {label: {key/path: value, ...}, ...}")
+    ap.add_argument("--config-dir", default="", help="directory of label.yaml files, one per cell")
+    ap.add_argument("--base", default="", help="JSON of overrides applied to every cell before its own")
     args = ap.parse_args()
 
-    gen = importlib.import_module(args.generator)
-    rows = load_cells(args.cells_csv)
+    if not args.cells and not args.config_dir:
+        print("ERROR: need --cells or --config-dir", file=sys.stderr)
+        sys.exit(2)
 
-    print(f"=== assert_design.py: {args.cells_csv} ({len(rows)} rows) "
-          f"against generator {args.generator} ===")
-
-    n_fail = 0
-    results = []
-
-    n3_fail, n3_checked, collisions = check_digest_collisions(gen, rows)
-    if n3_fail:
-        n_fail += 1
-        names = ", ".join(cid for _, cids, _ in collisions for cid in cids[:2])
-        results.append(("(3) digest-collision", "FAIL",
-                         f"{n3_fail} colliding group(s) among {n3_checked} non-control cells "
-                         f"-- distinct labels sharing one effective config, e.g. {names}"))
+    if args.config_dir:
+        cells = load_cells_from_config_dir(args.config_dir)
     else:
-        results.append(("(3) digest-collision", "PASS",
-                         f"0 collisions among {n3_checked} non-control cells checked"))
+        with open(args.cells) as fh:
+            cells = json.load(fh)
 
-    n4_fail, n4_checked, mismatches = check_label_roundtrip(gen, rows)
-    if n4_fail:
-        n_fail += 1
-        names = ", ".join(f"{cid}.{f}(claimed {c} != derived {d})"
-                           for cid, f, c, d in mismatches[:5])
-        results.append(("(4) label-roundtrip", "FAIL",
-                         f"{n4_fail} mismatch(es) among {n4_checked} cells checked -- {names}"))
-    else:
-        results.append(("(4) label-roundtrip", "PASS",
-                         f"0 mismatches among {n4_checked} cells checked"))
+    base_overrides = {}
+    if args.base:
+        with open(args.base) as fh:
+            base_overrides = json.load(fh)
 
-    width = max(len(r[0]) for r in results)
-    for name, status, note in results:
-        line = f"  {name:<{width}}  {status}"
-        if note:
-            line += f"  -- {note}"
-        print(line)
+    key_universe = set(DEFAULTS) | set(base_overrides)
+    for decl in cells.values():
+        key_universe |= set(decl)
 
-    print(f"\n{len(results) - n_fail}/{len(results)} design-integrity checks passed; {n_fail} failed")
-    if n_fail:
-        if collisions:
-            print("\nfull collision detail:", file=sys.stderr)
-            for digest, cids, labels in collisions:
-                print(f"  digest {digest[:12]}...: cells {cids} -- labels {labels}", file=sys.stderr)
+    print(f"=== assert_design.py: {len(cells)} cells, {len(key_universe)} keys in the union ===")
+
+    by_digest = defaultdict(list)
+    per_cell_forced = {}
+    invalid_cells = {}  # CQ-32 item 4: label->effective round-trip
+    for label, decl in cells.items():
+        merged = dict(base_overrides)
+        merged.update(decl)
+        resolved, forced = resolve_cell(merged)
+        d = digest_cell(resolved, forced, key_universe)
+        by_digest[d].append(label)
+        per_cell_forced[label] = forced
+        if forced:
+            for k, scope in forced.items():
+                print(f"  {label}: {k} FORCED by dead scope '{scope}' "
+                      f"(declared {merged.get(k)!r}, effective {resolved[k]!r})")
+        # item 4: for every key THIS cell's own label explicitly declared,
+        # a dead-scope force means the label's intent and the effective
+        # config disagree -- that is a round-trip failure, not merely a
+        # note, and makes the cell INVALID under the n_valid/n_designed
+        # rule regardless of whether it also collides with another label's
+        # digest (a cell can fail its own round-trip with no collision at
+        # all, e.g. if it is the only cell ever declaring that factor).
+        mismatches = {k: (decl[k], resolved[k]) for k in decl
+                      if k in forced and decl[k] != resolved[k]}
         if mismatches:
-            print("\nfull round-trip mismatch detail:", file=sys.stderr)
-            for cid, f, c, d in mismatches:
-                print(f"  {cid}: {f} claimed={c} derived={d}", file=sys.stderr)
-        print(f"REFUSED: {n_fail} design-integrity check(s) failed against {args.cells_csv}",
-              file=sys.stderr)
+            invalid_cells[label] = mismatches
+
+    n_refused = 0
+    for d, labels in by_digest.items():
+        if len(labels) > 1:
+            n_refused += 1
+            # Name the factors these labels actually differ in.
+            decls = [cells[l] for l in labels]
+            diff_keys = set()
+            for i in range(1, len(decls)):
+                for k in set(decls[0]) | set(decls[i]):
+                    if decls[0].get(k) != decls[i].get(k):
+                        diff_keys.add(k)
+            print(f"REFUSED: {len(labels)} distinct labels resolve to the SAME effective "
+                  f"digest {d[:12]}...: {', '.join(labels)}", file=sys.stderr)
+            print(f"  they claim to differ in: {sorted(diff_keys) or '(nothing declared differently)'}",
+                  file=sys.stderr)
+            for l in labels:
+                if per_cell_forced[l]:
+                    print(f"  {l} forced: {per_cell_forced[l]}", file=sys.stderr)
+
+    if invalid_cells:
+        print(f"\nINVALID (label != effective, item 4's round-trip): {len(invalid_cells)} of {len(cells)} cells")
+        for label, mism in invalid_cells.items():
+            for k, (declared_v, effective_v) in mism.items():
+                print(f"  {label}: declared {k}={declared_v!r}, but effective is {effective_v!r} "
+                      f"(dead scope) -- INVALID")
+
+    print(f"\n{len(by_digest)} distinct effective configs over {len(cells)} cells; "
+          f"{n_refused} digest collision(s) between distinct labels; "
+          f"{len(invalid_cells)} cell(s) INVALID under the label-round-trip check")
+    if n_refused or invalid_cells:
         sys.exit(1)
-    print("OK: every declared cell's label matches its recomputed effective config, "
-          "and no two distinct labels collide.")
+    print("OK: every distinct label resolves to a distinct effective config, "
+          "and every cell's label round-trips to its effective value.")
     sys.exit(0)
 
 
