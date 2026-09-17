@@ -11,6 +11,7 @@
 #include "livo_recon/lio/spline.h"
 #include "livo_recon/lio/adaptive_q.h"
 #include "livo_recon/lio/residual_redundancy.h"
+#include "livo_recon/lio/residual_weighting.h"
 
 #include <array>
 
@@ -105,27 +106,53 @@ struct LioProcOptions
   // default.
   PriorScalarOptions prior_scalar;
 
-  // History (115-132): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-115
-  double density_sigma_ref = 0.0;
+  // CQ-37 axis A/B: residual-set reduction (collapse) and per-residual
+  // reweight (per_residual) -- see residual_weighting.h for the full
+  // derivation of both. Both default off/identity.
+  ResidualWeightingOptions residual_weighting;
 
-  // density_sigma_mode: shape of the density_sigma_ref scale curve as a
-  // function of x = n_residuals/density_sigma_ref (all clamped to >= 1, so
-  // this only ever INCREASES sigma_squared, never shrinks it below the unscaled
-  // baseline): "linear" (x, the default/original form), "sqrt" (sqrt(x) --
-  // gentler growth, damps high-density frames less aggressively than
-  // linear, tried to see if it lets rotation's H_rr recover more without
-  // needing an extreme (low) density_sigma_ref that risks instability),
-  // "quadratic" (x^2 -- steeper growth, tried to see if rotation's lagging
-  // recovery just needs stronger damping at the SAME density_sigma_ref
-  // rather than a different reference value). An "info_gain_derived" mode
-  // (adaptive per-frame scale via the Sherman-Morrison machinery) and a
-  // separate woodbury_plane_correction option (per-plane Woodbury
-  // marginalization) were also tried and removed -- see the historical
-  // doc comment above for both.
-  std::string density_sigma_mode = "off";
-  // The whole density mechanism is live only under a non-"off" mode; the
-  // scalar above is its sub-option rather than its hidden on/off switch.
-  bool densitySigmaOn() const { return density_sigma_mode != "off"; }
+  // CQ-37 axis D: ONE global multiplicative scalar applied to every
+  // residual's sigma_squared (and, item 1c, plane_var_term by the same
+  // factor) BEFORE accumulation. SUBSUMES the former standalone
+  // density_sigma_mode/density_sigma_ref (now sigma_scale.mode's three
+  // "density_*" levels, unchanged shape -- see below) and CQ-36's proposed
+  // standalone sigma_calibration_mode (now sigma_scale.mode's "chi2"
+  // level): two separate keys would let two multiplicative scales on the
+  // same quantity fight silently, so this rebuild keeps axis D as one
+  // enum, exclusive by construction (CQ-37 item 1).
+  //
+  // Levels: "off" (default, identity). "density_linear"/"density_sqrt"/
+  // "density_quadratic" -- x = n_residuals/sigma_scale.density_ref, scale
+  // = x / sqrt(x) / x^2 respectively, clamped >= 1 (only ever INCREASES
+  // sigma_squared -- this is the former density_sigma_mode's exact shape,
+  // renamed). "info_gain_derived" -- one aggregate per-frame scalar
+  // n_raw/n_eff from the PREVIOUS frame's residual-redundancy-correction
+  // counters (LioProc::redundancy_stats_ -- axis D runs before
+  // accumulation, so THIS frame's own n_raw/n_eff do not exist yet; using
+  // last frame's is a one-frame lag, not a same-frame reuse, and is
+  // flagged as such at its own call site), bounded by
+  // [sigma_scale.min_ratio, sigma_scale.max_ratio]. "chi2" -- an EMA of
+  // the previous frames' reduced_chi2 (LioProc::chi2_ema_), applied
+  // DIRECTLY as the scale (reduced_chi2 < 1 means sigma_squared is too
+  // LARGE, so the scale must be able to go BELOW 1 -- CQ-36 item 4b's
+  // explicit correction against reusing density's max(1, .) clamp),
+  // bounded the same way.
+  struct SigmaScaleOptions
+  {
+    std::string mode = "off";
+    double density_ref = 0.0;
+    double min_ratio = 0.01;
+    double max_ratio = 100.0;
+    double chi2_ema = 0.9;
+    int    chi2_warmup_frames = 20;
+
+    bool densityOn() const {
+      return mode == "density_linear" || mode == "density_sqrt" || mode == "density_quadratic";
+    }
+    bool infoGainDerivedOn() const { return mode == "info_gain_derived"; }
+    bool chi2On() const { return mode == "chi2"; }
+    bool on() const { return mode != "off"; }
+  } sigma_scale;
 
   // History (151-159): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-151
 
@@ -404,9 +431,29 @@ private:
   mutable int n_tier0_miss_coverage_ = 0;
   mutable int n_tier0_miss_mismatch_ = 0;
 
-  // Last-computed density_sigma_ref scale, for debug logging only -- see
-  // LioProcOptions::density_sigma_ref/mode docs.
+  // Last-computed axis-D (sigma_scale) scale, for debug logging only -- see
+  // LioProcOptions::SigmaScaleOptions docs. Named for its density-mode
+  // origin; now shared by every sigma_scale.mode level.
   mutable double last_density_scale_ = 1.0;
+
+  // CQ-37 axis D "chi2" level's cross-frame EMA state -- seeded at 1.0
+  // (assume calibrated until data says otherwise) so the scale applied
+  // during warmup is the identity rather than a wild first reading.
+  mutable double chi2_ema_ = 1.0;
+  mutable int    chi2_ema_frames_ = 0;
+
+  // Applies opts_.sigma_scale to `residuals` in place (sigma_squared AND,
+  // per item 1c, plane_var_term by the same factor) -- called once per
+  // frame from both estimateStateCorrection() and accumulateForCombined(),
+  // BEFORE accumulation, replacing what used to be two duplicated
+  // density-only blocks at those two call sites. No-op when
+  // opts_.sigma_scale.mode == "off".
+  void applySigmaScale(std::vector<Residual>& residuals) const;
+
+  // Axis A/B (residual_weighting) engagement/magnitude, this frame -- read
+  // into LioFrameDiag alongside redundancy_stats_ below.
+  mutable CollapseStats collapse_stats_;
+  mutable PerResidualStats per_residual_stats_;
 
   mutable EkfUpdate ekf_;
 

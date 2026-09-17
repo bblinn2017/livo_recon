@@ -522,6 +522,14 @@ struct LioFrameDiag
   double h_pp_min_eig = -1.0; // min eigenvalue of HtH's position block
   double h_rr_min_eig = -1.0; // min eigenvalue of HtH's rotation block
   double sum_weight   = 0.0;  // total residual weight, i.e. how much information
+  // CQ-36 item 1: trace(HtH's position block), read directly off ekf_.HtH --
+  // unlike sum_weight above (summed from residuals_, structurally blind to
+  // any HtH-level correction axis C applies, see residual_redundancy.h),
+  // this DOES move under axis C. Equal to sum_weight exactly at
+  // lio/residual_redundancy/mode=="off" (and every axis A/B/D level off);
+  // divergent otherwise -- the pair is its own control. h_rr_trace below is
+  // the rotation-block counterpart (already existed, kept unrenamed).
+  double htth_pos_trace = -1.0;
   // P1.  All from objects the update already holds; one 6x6 solve per frame.
   double h_rr_trace   = 0.0;  // denominator for DIV_rot; trace(H_pp)==sum_weight already
   double htz_rot_norm = 0.0;  // |Htz(0..2)| -- rotation drive
@@ -645,6 +653,17 @@ struct LioFrameDiag
   // in this codebase for a console-only debug line; this is the first time
   // it is retained per-frame (TQ-23 flagged its absence explicitly).
   double reduced_chi2 = 0.0;
+
+  // CQ-37 items 2/3/4/6: axis A/B/D engagement/magnitude, this frame --
+  // always populated (0/1.0 at every axis's own off default), mirroring the
+  // redund_* columns' "log beside, do not drive" precedent.
+  int    collapse_groups_collapsed  = 0;
+  int    collapse_residuals_removed = 0;
+  int    per_residual_touched       = 0;
+  double per_residual_renorm_factor = 1.0;
+  double per_residual_mean_scale    = 1.0;
+  double sigma_scale_applied        = 1.0;  // axis D's last applied scale, this frame
+  double sigma_scale_chi2_ema       = 1.0;  // chi2 level's own EMA state, this frame (1.0 if mode != chi2)
 
   // TQ-20 item 1: kappa = P^-1/HtH, the ratio of prior information to
   // measurement information -- exactly 1/sqrt(1-rho_ref)-1 (rho_ref ==

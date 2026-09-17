@@ -83,7 +83,16 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            // CQ-31 item 7/8: naive vs Woodbury-corrected info gain (always
            // populated, including mode=="off") and reduced_chi2 (never
            // retained before this -- TQ-23 flagged its absence).
-           ",naive_info_gain,woodbury_info_gain,reduced_chi2\n";
+           ",naive_info_gain,woodbury_info_gain,reduced_chi2"
+           // CQ-36 item 1: the HtH-level control column -- see LioFrameDiag's
+           // own comment. CQ-37: axis A/B/D engagement, always populated
+           // (0/1.0 at every axis's off default, matching the redund_*
+           // columns' own "populated, mode-gated only on the ekf mutation"
+           // precedent).
+           ",htth_pos_trace"
+           ",collapse_groups_collapsed,collapse_residuals_removed"
+           ",per_residual_touched,per_residual_renorm_factor,per_residual_mean_scale"
+           ",sigma_scale_applied,sigma_scale_chi2_ema\n";
   first_call = false;
   // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
   // (6 significant figures) collapses every frame in a run to the same
@@ -123,6 +132,11 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.kappa_gev3 << "," << lio.kappa_gev4 << "," << lio.kappa_gev5
       << "," << (lio.kappa_gev_ok ? 1 : 0)
       << "," << lio.naive_info_gain << "," << lio.woodbury_info_gain << "," << lio.reduced_chi2
+      << "," << lio.htth_pos_trace
+      << "," << lio.collapse_groups_collapsed << "," << lio.collapse_residuals_removed
+      << "," << lio.per_residual_touched << "," << lio.per_residual_renorm_factor
+      << "," << lio.per_residual_mean_scale
+      << "," << lio.sigma_scale_applied << "," << lio.sigma_scale_chi2_ema
       << "\n";
   ofs.flush();
 }
