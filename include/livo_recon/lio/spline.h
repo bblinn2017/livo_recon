@@ -572,12 +572,26 @@ public:
   // fair "regularized + constrained" vs "regularized + free" comparison,
   // not "regularized + constrained" vs "unregularized + free". Curvature
   // (refine_curvature_weight) is included the same way.
+  // TQ-36, Bryce 2026-09-18: cp_free_out/fit_res_pos_free_out are additive
+  // outputs -- cp_free_out is the FULL (3 x n_cp) free-tail control-point
+  // matrix (not just its t1 evaluation), so a caller can read the
+  // per-control-point delta d_i = cp_free_out.col(i) - cp_p_.col(i) for
+  // EVERY i, not only the boundary. fit_res_pos_free_out is
+  // updateFitResiduals()'s own RMS-vs-poses formula (posAt(ps.t)-ps.pos,
+  // squared, averaged, sqrt), evaluated against cp_free_out instead of
+  // cp_p_ -- needs `poses` (the same mg.poses fit() was built from) since
+  // it can't reuse the member posAt() (that reads live cp_p_, not the
+  // hypothetical free-tail solution).
   bool diagnosticFreeTailFit(const std::vector<SplineLidarObs>& obs,
                              const SplineOptions& opts,
                              const std::vector<ImuSample>& imu_raw,
                              const V3D& bias_acc, const V3D& gravity,
                              double var_acc_floor,
-                             V3D& pos1_free, V3D& vel1_free, V3D& acc1_free) const;
+                             const std::vector<Pose6D>& poses,
+                             V3D& pos1_free, V3D& vel1_free, V3D& acc1_free,
+                             M3D& cov_pos1_free,
+                             Eigen::MatrixXd& cp_free_out,
+                             double& fit_res_pos_free_out) const;
 
   double rotationChordDeg() const;
 

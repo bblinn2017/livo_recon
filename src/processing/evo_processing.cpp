@@ -324,6 +324,25 @@ EvoProc::StageMetrics EvoProc::logStage(const char* stage_name, const char* mode
 
   matched.push_back(MatchedPose{t_abs, est_pos_corrected, est_rot, gt_pos, gt_rot});
 
+  // TQ-35, Bryce 2026-09-18: dump the exact (t_abs, est_pos_corrected,
+  // gt_pos) pairs this stage's own already-verified matching logic
+  // produces, for the stage=lio mode=interp stream specifically (the same
+  // stream results_lio.txt's live ATE comes from) -- lets a downstream
+  // consumer (nees_diag.txt's post-hoc GT join) reuse this exact,
+  // known-correct correspondence instead of re-deriving GT bracket/
+  // interpolation independently, which is easy to get subtly wrong (units,
+  // gating, which timestamp basis) with no local signal that it's wrong.
+  if (std::string(stage_name) == "lio" && std::string(mode_name) == "interp") {
+    static PersistentLogStream log("lio_gt_matched.csv");
+    bool first;
+    std::ofstream& ofs = log.stream(&first);
+    if (first) ofs << "t_abs,est_px,est_py,est_pz,gt_px,gt_py,gt_pz\n";
+    ofs << std::setprecision(12) << t_abs << ','
+        << est_pos_corrected.x() << ',' << est_pos_corrected.y() << ',' << est_pos_corrected.z() << ','
+        << gt_pos.x() << ',' << gt_pos.y() << ',' << gt_pos.z() << '\n';
+    ofs.flush();
+  }
+
   StageMetrics m;
   M3D R_align;
   V3D t_align;

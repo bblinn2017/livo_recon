@@ -889,10 +889,14 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
       // constrained acceleration) is how "the target itself is wrong" gets
       // told apart from "forcing exact equality is what creates curvature".
       V3D pos1_free = V3D::Zero(), vel1_free = V3D::Zero(), acc1_free = V3D::Zero();
+      M3D cov_pos1_free = M3D::Zero();
+      Eigen::MatrixXd cp_free_unused;
+      double fit_res_pos_free_unused = 0.0;
       const bool free_tail_ok = spline_.diagnosticFreeTailFit(
           lidar_obs_, opts_.spline, mg.imu_samples_raw, spline_frame_bias_acc_,
-          spline_frame_gravity_, state_->varAccFloor().mean(),
-          pos1_free, vel1_free, acc1_free);
+          spline_frame_gravity_, state_->varAccFloor().mean(), mg.poses,
+          pos1_free, vel1_free, acc1_free, cov_pos1_free,
+          cp_free_unused, fit_res_pos_free_unused);
 
       ofs << "scan_id=" << voxel_map_->frame_idx_
           << " acc_t0=" << spline_.accAt(spline_.t0()).norm()
@@ -930,6 +934,115 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
       }
       ofs << "\n";
       ofs.flush();
+    }
+
+    // TQ-35, Bryce 2026-09-18: "is P honest?" -- per-scan NEES-vs-ground-
+    // truth diagnostic, plus the free-tail statistic calibrated against it.
+    // READ-ONLY: reads state_->cov()/pos() (already posterior -- this runs
+    // after ekf_.applyCovarianceUpdate(), see the main loop above) and
+    // writes to nees_diag.txt; nothing here can feed back into state_ or
+    // any other spline/EKF machinery, so it cannot alter the filter (the
+    // md5-unchanged proof this card requires is a property of the code
+    // shape, not something that needs separate runtime verification beyond
+    // confirming no assignment targets state_/spline_/prior_cov_).
+    // GT join is NOT done in C++ -- no GT access exists inside LioProc, and
+    // wiring it in is out of this diagnostic's scope -- eps_pos/eps_rot are
+    // computed post-hoc in Python from this log joined against the GT
+    // source, per TQ-35 item (2)'s own instruction to report the join
+    // details explicitly before any epsilon.
+    if (opts_.log_debug_en) {
+      static PersistentLogStream log("nees_diag.txt");
+      std::ofstream& ofs = log.stream();
+      const Eigen::MatrixXd& P = state_->cov();
+      const int iP = StateGroup::idxP(), iR = StateGroup::idxR();
+      const bool have_p = P.rows() >= iP + 3 && P.cols() >= iP + 3;
+      const bool have_r = P.rows() >= iR + 3 && P.cols() >= iR + 3;
+      const M3D P_pp = have_p ? M3D(P.block<3, 3>(iP, iP)) : M3D::Zero();
+      const M3D P_rr = have_r ? M3D(P.block<3, 3>(iR, iR)) : M3D::Zero();
+      const double t_abs = mg.image.t + data_queues_->start_time;
+
+      // item (5): free_tail_d, using diagnosticFreeTailFit() with the
+      // regularizers FORCED ON (curvature_weight=1.0, imu_acc_weight=1.0)
+      // regardless of this run's own opts_.spline -- the card's own
+      // instruction ("with the regularisers on"), decoupled from whatever
+      // the main fit's shipped config happens to use (still 0.0/off by
+      // default as of CQ-41's own filing).
+      SplineOptions forced_opts = opts_.spline;
+      forced_opts.refine_curvature_weight = 1.0;
+      forced_opts.refine_imu_acc_weight   = 1.0;
+      V3D ft_pos1 = V3D::Zero(), ft_vel1 = V3D::Zero(), ft_acc1 = V3D::Zero();
+      M3D ft_cov = M3D::Zero();
+      Eigen::MatrixXd ft_cp_free;
+      double ft_fit_res_pos_free = 0.0;
+      const bool ft_ok = spline_.diagnosticFreeTailFit(
+          lidar_obs_, forced_opts, mg.imu_samples_raw, spline_frame_bias_acc_,
+          spline_frame_gravity_, state_->varAccFloor().mean(), mg.poses,
+          ft_pos1, ft_vel1, ft_acc1, ft_cov, ft_cp_free, ft_fit_res_pos_free);
+      double free_tail_d = -1.0;
+      if (ft_ok && have_p) {
+        const V3D d = ft_pos1 - state_->pos();
+        const M3D S = P_pp + ft_cov;
+        const Eigen::LDLT<M3D> ldlt_s(S);
+        if (ldlt_s.info() == Eigen::Success) {
+          const V3D x = ldlt_s.solve(d);
+          if (x.allFinite()) free_tail_d = d.dot(x);
+        }
+      }
+
+      ofs << std::setprecision(12)
+          << "scan_id=" << voxel_map_->frame_idx_ << " t_abs=" << t_abs
+          << " state_px=" << state_->pos().x() << " state_py=" << state_->pos().y()
+          << " state_pz=" << state_->pos().z()
+          << " trP_pos_pre=" << trP_pos_pre_
+          << " trP_pos_post=" << (have_p ? P_pp.trace() : -1.0)
+          << " Ppp_xx=" << P_pp(0, 0) << " Ppp_xy=" << P_pp(0, 1) << " Ppp_xz=" << P_pp(0, 2)
+          << " Ppp_yy=" << P_pp(1, 1) << " Ppp_yz=" << P_pp(1, 2) << " Ppp_zz=" << P_pp(2, 2)
+          << " Prr_xx=" << P_rr(0, 0) << " Prr_xy=" << P_rr(0, 1) << " Prr_xz=" << P_rr(0, 2)
+          << " Prr_yy=" << P_rr(1, 1) << " Prr_yz=" << P_rr(1, 2) << " Prr_zz=" << P_rr(2, 2)
+          << " have_Ppp=" << (have_p ? 1 : 0) << " have_Prr=" << (have_r ? 1 : 0)
+          << " free_tail_d=" << free_tail_d
+          << "\n";
+      ofs.flush();
+
+      // TQ-36, Bryce 2026-09-18: is the free-tail correction DRIFT or
+      // NOISE, along the WHOLE scan, not just at the endpoint? Per
+      // control point i, d_i = cp_free[i] - cp_pinned[i] (cp_pinned is
+      // spline_.posAt-equivalent's own cp_p_ -- the REAL, tail-
+      // constrained refinement this frame actually used; cp_free is
+      // ft_cp_free from the SAME forced-on-regularizer call used for
+      // free_tail_d above). Travel direction is a single per-scan
+      // reference (state_->vel(), normalized) -- decomposing every d_i
+      // against a per-control-point direction would make the profile
+      // depend on a quantity (local heading) the card doesn't ask for.
+      if (ft_ok && ft_cp_free.cols() == spline_.nControlPoints()) {
+        static PersistentLogStream log("tq36_profile.txt");
+        std::ofstream& pofs = log.stream();
+        const int n_cp = spline_.nControlPoints();
+        const Eigen::Matrix<double, 3, Eigen::Dynamic>& cp_pinned = spline_.cpPos();
+        const double speed = state_->vel().norm();
+        const V3D travel_dir = (speed > 1e-6) ? V3D(state_->vel() / speed) : V3D::Zero();
+        pofs << std::setprecision(9)
+             << "scan_id=" << voxel_map_->frame_idx_ << " n_cp=" << n_cp
+             << " fit_res_pos_pinned=" << spline_.fitResidualPos()
+             << " fit_res_pos_free=" << ft_fit_res_pos_free;
+        V3D d_last_world = V3D::Zero();
+        for (int i = 0; i < n_cp; ++i) {
+          const V3D d = ft_cp_free.col(i) - cp_pinned.col(i);
+          const double d_travel = d.dot(travel_dir);
+          pofs << " d_norm_" << i << "=" << d.norm()
+               << " d_travel_" << i << "=" << d_travel;
+          if (i == n_cp - 1) d_last_world = d;
+        }
+        // TQ-36 item (4): body-frame per-axis mean/std needs the FULL
+        // vector at the last free control point, not just its travel-
+        // direction scalar -- rotated into this scan's own body frame at
+        // t1 the same way CQ-41's follow-on did for vel1_free_err.
+        const V3D d_last_body = spline_.rotAt(spline_.t1()).transpose() * d_last_world;
+        pofs << " d_last_bx=" << d_last_body.x() << " d_last_by=" << d_last_body.y()
+             << " d_last_bz=" << d_last_body.z();
+        pofs << "\n";
+        pofs.flush();
+      }
     }
 
     // BOTH CLAMPS ARE ALREADY EXACT: t0 was pinned before fit() ran and t1

@@ -881,8 +881,11 @@ bool ScanSpline::diagnosticFreeTailFit(const std::vector<SplineLidarObs>& obs,
                                        const std::vector<ImuSample>& imu_raw,
                                        const V3D& bias_acc, const V3D& gravity,
                                        double var_acc_floor,
+                                       const std::vector<Pose6D>& poses,
                                        V3D& pos1_free, V3D& vel1_free,
-                                       V3D& acc1_free) const
+                                       V3D& acc1_free, M3D& cov_pos1_free,
+                                       Eigen::MatrixXd& cp_free_out,
+                                       double& fit_res_pos_free_out) const
 {
   if (!valid_ || !opts.refineOn()) return false;
   if (static_cast<int>(obs.size()) < n_cp_) return false;
@@ -1003,6 +1006,47 @@ bool ScanSpline::diagnosticFreeTailFit(const std::vector<SplineLidarObs>& obs,
   }
   vel1_free *= inv_delta_;
   acc1_free *= (inv_delta_ * inv_delta_);
+
+  // TQ-36: expose the full control-point matrix (every d_i = cp_free_out.
+  // col(i) - cp_p_.col(i), not just the t1 evaluation), and the free-tail
+  // fit's own RMS residual against `poses` -- same formula as
+  // updateFitResiduals()'s position term, evaluated against cp_free
+  // instead of the live cp_p_ member (posAt() can't be reused here for
+  // exactly that reason).
+  cp_free_out = cp_free;
+  {
+    double sp = 0.0; int np = 0;
+    Eigen::Vector4d bp, dbp, ddbp; int sp_idx = 0;
+    for (const auto& ps : poses)
+    {
+      if (ps.t < t0_ - 1e-9 || ps.t > t1_ + 1e-9) continue;
+      basisAt(ps.t, sp_idx, bp, dbp, ddbp);
+      V3D pos_free_t = V3D::Zero();
+      for (int i = 0; i < 4; ++i) pos_free_t += bp[i] * cp_free.col(sp_idx + i);
+      sp += (pos_free_t - ps.pos).squaredNorm();
+      ++np;
+    }
+    fit_res_pos_free_out = (np > 0) ? std::sqrt(sp / static_cast<double>(np)) : 0.0;
+  }
+
+  // TQ-35 item (5): the marginal covariance of pos1_free, for the
+  // free_tail_d statistic d = (pos1_free-state_pos)^T (P_pp+Sigma_spline)^-1
+  // (...). H was assembled from properly-weighted (1/variance) terms
+  // throughout (data term: 1/sigma2; curvature/imu-accel: 1/var_acc_floor-
+  // scaled), so the KKT inverse's leading dim x dim block IS the standard
+  // Gauss-Newton/LS covariance of the control points -- solve for just the
+  // 12 columns (4 relevant control points x 3 dims) touching t1's basis
+  // support, rather than the full (expensive, mostly unused) inverse.
+  Eigen::MatrixXd E = Eigen::MatrixXd::Zero(dim + k, 12);
+  E.block<12, 12>(3 * ss, 0) = Eigen::MatrixXd::Identity(12, 12);
+  const Eigen::MatrixXd cov_cols = ldlt.solve(E);
+  if (!cov_cols.allFinite()) return false;
+  const Eigen::MatrixXd cov_cp = cov_cols.block<12, 12>(3 * ss, 0);
+  cov_pos1_free = M3D::Zero();
+  for (int j = 0; j < 4; ++j)
+    for (int kk = 0; kk < 4; ++kk)
+      cov_pos1_free += (bb[j] * bb[kk]) * cov_cp.block<3, 3>(3 * j, 3 * kk);
+
   return true;
 }
 
