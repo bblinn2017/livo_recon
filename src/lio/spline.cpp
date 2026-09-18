@@ -595,6 +595,13 @@ void ScanSpline::moveTailClamp(const V3D& pos1, const M3D& rot1, const V3D& vel1
   const V3D dphi = V3D(Log(M3D(R_aT * rot1))) - V3D(Log(M3D(R_aT * frozen_rot1_)));
   if (!dp.allFinite() || !dphi.allFinite() || !dv.allFinite()) return;
 
+  // CQ-43 item 0: record BEFORE the early-return-on-solve-failure paths
+  // below, same discipline as fit()'s own dmin_p_/dmax_p_ (CQ-24 item 1) --
+  // this is what the caller's own moveTailClamp() invocation actually asked
+  // for, independent of whether the KKT increment solve below succeeds.
+  last_tail_move_dp_norm_   = dp.norm();
+  last_tail_move_dphi_norm_ = dphi.norm() * (180.0 / M_PI);
+
   // k_end = rows PER END = kkt_k_p_/2 (2 if end_constraint_velocity was on
   // for the fit() this scan's cache came from, else 1) -- rotation's own
   // k_end is always 1 (attitude only, no rate row, either setting).

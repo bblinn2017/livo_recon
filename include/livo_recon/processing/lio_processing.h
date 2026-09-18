@@ -499,6 +499,12 @@ private:
   // CQ-41 item (4): the head velocity constraint -- populated alongside
   // prev_scan_end_pos_/prev_scan_end_rot_, from the same CONVERGED state.
   V3D   prev_scan_end_vel_   = V3D::Zero();
+  // CQ-43 item (4d-ii): this frame's own EKF rotation correction, in
+  // degrees -- total_dtheta.norm() at the end of the real IEKF loop, saved
+  // here (a local in processLIO(), not otherwise visible) so
+  // finalizeSplineAndQ() can log it alongside the rest of the rotation
+  // consistency read.
+  double last_total_dtheta_deg_ = 0.0;
   // This scan's own boundary_dpos/drot (vs the PREVIOUS scan's end),
   // -1 if unavailable (first spline scan, or previous scan's spline
   // failed) -- read by debugLogFrameStats() the same frame it's computed.

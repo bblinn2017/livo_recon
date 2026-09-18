@@ -167,6 +167,12 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
                    "spline/refine/imu_acc_weight>0",
                    "spline/refine/imu_acc_solve_bias",
                    opts_.spline.refine_imu_acc_solve_bias, false);
+  // CQ-43 item (2): see SplineOptions::final_pass's own doc comment.
+  // DEFAULT false, per item (6) -- do not change this from this card's
+  // own numbers, whatever they show.
+  cfg.nested<bool>(sp && opts_.spline.refineOn(), "spline/mode=spline+refine",
+                   "spline/refine/final_pass",
+                   opts_.spline.final_pass, false);
 
   cfg.nested<bool>(sp, "spline/mode", "spline/log_en", opts_.spline.log_en, false);
   // CQ-41, Bryce 2026-09-18: DEFAULT true, authorised by Bryce in the
@@ -989,10 +995,21 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
         }
       }
 
+      // CQ-43 item (4d): state rotation as a quaternion, so rot_drift_deg
+      // (= ||Log(R(t0)^T R(t))|| against a chosen reference scan, truth 0
+      // at rest) can be computed post-hoc without re-deriving it here --
+      // this diagnostic has no notion of "the stationary window's first
+      // scan" (that is TQ-34's own scan-id convention, established in
+      // Python), so the reference choice stays a post-processing decision.
+      const Eigen::Quaterniond state_q(state_->rot());
+
       ofs << std::setprecision(12)
           << "scan_id=" << voxel_map_->frame_idx_ << " t_abs=" << t_abs
           << " state_px=" << state_->pos().x() << " state_py=" << state_->pos().y()
           << " state_pz=" << state_->pos().z()
+          << " state_qw=" << state_q.w() << " state_qx=" << state_q.x()
+          << " state_qy=" << state_q.y() << " state_qz=" << state_q.z()
+          << " total_dtheta_deg=" << last_total_dtheta_deg_
           << " trP_pos_pre=" << trP_pos_pre_
           << " trP_pos_post=" << (have_p ? P_pp.trace() : -1.0)
           << " Ppp_xx=" << P_pp(0, 0) << " Ppp_xy=" << P_pp(0, 1) << " Ppp_xz=" << P_pp(0, 2)
@@ -1602,6 +1619,15 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     std::string stop = "max_iter";
     int iter = 0;
 
+    // CQ-43 item 0: ONE stream for both write sites below (in-loop and
+    // post-loop) -- PersistentLogStream::stream() opens its own ofstream
+    // with std::ios::trunc on first use per INSTANCE, so two separate
+    // `static PersistentLogStream log(...)` declarations against the same
+    // basename (the bug this fixes, caught by inspecting the corrupted
+    // output before filing) truncate/interleave each other's writes rather
+    // than sharing one file position.
+    static PersistentLogStream cq43_tailmove_log("cq43_tailmove.txt");
+
     // Fixed IEKF prior for this frame's ENTIRE inner loop -- see ekf.h's
     // applyMeanUpdate() doc comment. Set once here, read (never rewritten)
     // by every solveSystem()/solveSystem_cuda() call below until the loop
@@ -1637,6 +1663,23 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       // from points placed by the CURRENT trajectory estimate, not by the
       // IMU-only propagation that produced the frame.
       if (iter > 0) redeskewFromSpline(mg);
+
+      // CQ-43 item 0, read-only: how far THIS iteration's moveTailClamp()
+      // call (invoked from redeskewFromSpline() immediately above, for
+      // iter>0 only) actually moved the tail target. is_final=0 here --
+      // the one post-loop call below (after convergence) is is_final=1 and
+      // is what the interior never gets refitted against (the card's own
+      // finding). -1 sentinels (lastTailMoveDpNorm()'s own convention) mean
+      // this scan had no boundary (n_frozen_cp_<=0) and are left as -1
+      // rather than coerced to 0, matching that function's own distinction.
+      if (opts_.log_debug_en && spline_ok_ && opts_.spline.splineOn() && iter > 0) {
+        std::ofstream& ofs = cq43_tailmove_log.stream();
+        const double dp = spline_.lastTailMoveDpNorm();
+        ofs << "scan_id=" << voxel_map_->frame_idx_ << " iter=" << iter
+            << " is_final=0 dp_mm=" << (dp >= 0.0 ? dp * 1000.0 : dp)
+            << " dphi_deg=" << spline_.lastTailMoveDphiNorm() << "\n";
+        ofs.flush();
+      }
 
       // T0-D wants the first-iteration (pre-update, un-relinearized)
       // innovation only -- later iterations relinearize at an
@@ -1712,14 +1755,76 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     if (any_solved)
       ekf_.applyCovarianceUpdate(state_, prior_cov_);
 
+    // CQ-43 item (4d-ii): save this frame's own EKF rotation correction
+    // (total_dtheta is local to this scope) for finalizeSplineAndQ() to
+    // log alongside the rest of the rotation consistency read.
+    last_total_dtheta_deg_ = total_dtheta.norm() * (180.0 / M_PI);
+
     // FINAL re-deskew, against the converged state.  redeskewFromSpline()
     // runs at the TOP of each iteration, so without this call the last
     // solve's correction never reaches mg.points -- and the node calls
     // VoxelMap::updateMap() on exactly those points once processLIO()
     // returns.  The map would be built, permanently, from points placed by
-    // the second-to-last state.  Also runs one last shape refinement against
-    // the final residual set.
+    // the second-to-last state.
+    //
+    // CQ-43 item 1, Bryce 2026-09-18: this comment used to end "Also runs
+    // one last shape refinement against the final residual set." THAT WAS
+    // FALSE -- redeskewFromSpline() calls only moveTailClamp() then
+    // deskewPointsSplineCsr(), and refineSplineFromResiduals() (line 1650
+    // above) has no second call site anywhere in this function. So the
+    // interior control-point SHAPE is fitted only to the pre-this-
+    // iteration's-own-correction residuals inside the loop -- the
+    // converged state's own final correction reaches the interior solely
+    // as this call's moveTailClamp() RAMP, never as a fit. See CQ-43's own
+    // card for the measurement this discrepancy motivated.
     redeskewFromSpline(mg);
+
+    // CQ-43 item 0, read-only: this is the is_final=1 counterpart to the
+    // in-loop log above -- the one moveTailClamp() call whose dp/dphi is
+    // never followed by a refit, which is the card's own headline
+    // question. iter (loop-scope, still in scope here) is this scan's
+    // total iteration count, for the "distribution of iteration count per
+    // scan" part of item 0.
+    if (opts_.log_debug_en && spline_ok_ && opts_.spline.splineOn()) {
+      std::ofstream& ofs = cq43_tailmove_log.stream();
+      const double dp = spline_.lastTailMoveDpNorm();
+      ofs << "scan_id=" << voxel_map_->frame_idx_ << " iter=" << iter
+          << " is_final=1 dp_mm=" << (dp >= 0.0 ? dp * 1000.0 : dp)
+          << " dphi_deg=" << spline_.lastTailMoveDphiNorm()
+          << " n_iters=" << iter << "\n";
+      ofs.flush();
+    }
+
+    // CQ-43 item (2): the gated post-convergence refinement pass. Rebuilds
+    // residuals against the FULLY CONVERGED trajectory (buildResiduals()
+    // is const w.r.t. state_ -- it never calls solveSystem()/
+    // applyMeanUpdate(), unlike estimateStateCorrection()) and refits the
+    // spline interior to them, then re-deskews once more so the shape
+    // change reaches mg.points before VoxelMap::updateMap() sees them.
+    // Read-only w.r.t. state_ by construction: buildResiduals() is const,
+    // refineSplineFromResiduals() only ever touches spline_'s cp_p_, and
+    // redeskewFromSpline()'s own moveTailClamp() call is a no-op here
+    // (frozen_pos1_/frozen_rot1_/frozen_vel1_ already equal state_'s
+    // current pos()/rot()/vel(), set by THIS frame's last real
+    // moveTailClamp() call two lines above -- dp/dphi come back ~0, not
+    // skipped, so item (0)'s own log gets one more is_final=1-shaped row
+    // for this scan if log_debug_en is on; harmless, and left visible
+    // rather than special-cased out).
+    if (opts_.spline.splineOn() && opts_.spline.final_pass && spline_ok_) {
+      const V3D pos_before = state_->pos();
+      buildResiduals(mg.points, residuals_, /*allow_consistency_log=*/false);
+      refineSplineFromResiduals(mg);
+      redeskewFromSpline(mg);
+      // Item (2)'s own pass condition: assert, don't just hope.
+      const double moved_mm = (state_->pos() - pos_before).norm() * 1000.0;
+      if (opts_.log_debug_en) {
+        static PersistentLogStream log("cq43_finalpass_assert.txt");
+        std::ofstream& ofs = log.stream();
+        ofs << "scan_id=" << voxel_map_->frame_idx_
+            << " state_moved_mm=" << moved_mm << "\n";
+        ofs.flush();
+      }
+    }
 
     // Measure the IMU against the converged spline and, if enabled, update
     // the applied process noise for the NEXT frame.  Placed after the

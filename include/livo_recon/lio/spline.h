@@ -290,6 +290,20 @@ struct SplineOptions
   // spline in precisely the scenes refinement is for.
   int lidar_refine_iters = 1;
 
+  // CQ-43 item (2), Bryce 2026-09-18: refineSplineFromResiduals() only ever
+  // runs INSIDE the IEKF loop, against that iteration's pre-update
+  // residuals -- the converged state's own final correction reaches the
+  // spline interior solely via moveTailClamp()'s ramp, never a refit (see
+  // the card's own finding). When true, after the frame's state is fully
+  // converged, rebuild residuals against the FINAL trajectory and refine
+  // once more -- READ-ONLY with respect to state_ (no estimateStateCorrection(),
+  // no covariance update, no new moveTailClamp() target), so it can only
+  // change spline_'s own interior shape and, downstream, the deskewed
+  // points VoxelMap::updateMap() builds the map from. DEFAULT false --
+  // this is a behavior change (the map), not a diagnostic, and item (6)
+  // says explicitly not to flip this default from this card's own numbers.
+  bool final_pass = false;
+
   // CQ-41 follow-up (2026-09-18): second-difference (discrete curvature)
   // regulariser on the refinement step, relative to trace(H)/dim (same
   // convention as the fixed positional Tikhonov above). Config key:
@@ -562,6 +576,14 @@ public:
   // state_->biasAcc() anywhere.
   const V3D& lastDeltaBiasAcc() const { return last_delta_bias_acc_; }
 
+  // CQ-43 item 0: how far the LAST moveTailClamp() call actually moved the
+  // tail constraint target, in the position/rotation channels respectively
+  // -- -1.0 sentinel if that call returned early (kkt_k_p_<=0, no boundary
+  // this scan) rather than 0.0, so "moved by exactly zero" and "never
+  // measured" stay distinguishable.
+  double lastTailMoveDpNorm()   const { return last_tail_move_dp_norm_; }
+  double lastTailMoveDphiNorm() const { return last_tail_move_dphi_norm_; }
+
   // Bryce, 2026-09-18: diagnostic -- does the LiDAR-implied trajectory
   // agree with the TAIL boundary target (state_->pos()/vel(), what the
   // real fit is pinned to), or is there a persistent disagreement (which
@@ -719,6 +741,7 @@ public:
   double refine_dcp_max_ = 0.0, refine_dcp_rms_ = 0.0;
   int    refine_rejects_ = 0, refine_applied_ = 0;
   V3D    last_delta_bias_acc_ = V3D::Zero();
+  double last_tail_move_dp_norm_ = -1.0, last_tail_move_dphi_norm_ = -1.0;
   int    n_cp_req_ = 0;
 
   FitFailCause fail_cause_ = FitFailCause::kNone;
