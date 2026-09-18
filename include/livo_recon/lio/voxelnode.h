@@ -75,10 +75,10 @@ public:
   // a valid-but-not-yet-full plane can already match residuals fine.
   // Gating this on CONVERGED status undercounts real "mismatch" misses as
   // "coverage" ones (a bug caught and fixed after initial results looked
-  // suspiciously coverage-dominated). PARENT/DISABLED nodes already null
-  // out plane_ptr_ (see insertPoints()), so the plane_ptr_ null check
-  // alone correctly excludes them without needing to check status_.
-  bool hasConvergedPlane() const { return plane_ptr_ != nullptr && plane_ptr_->isPlane(); }
+  // suspiciously coverage-dominated). PARENT/DISABLED nodes already set
+  // plane_retired_ (see insertPoints()), so that check alone correctly
+  // excludes them without needing to check status_.
+  bool hasConvergedPlane() const { return !plane_retired_ && plane_.isPlane(); }
 
 private:
   void passToChildren(const std::vector<PointXYZCov>& points_world,
@@ -97,7 +97,24 @@ private:
 
   VoxelOptsPtr  opts_;
   VoxelStatsPtr stats_;
-  VoxelPlane   *plane_ptr_;
+  // Perf audit finding #7: inlined (was a separately heap-allocated
+  // VoxelPlane*) to remove one level of pointer-chasing on every
+  // findPlaneResidual() hit -- this and the VoxelKeyMap hash lookup that
+  // finds the owning VoxelNode were the two heap dereferences the per-point
+  // hot loop paid on every match attempt. VoxelPlane is default-copyable/
+  // -movable (no custom dtor) and constructed once, in this class's own
+  // constructor initializer list, exactly as the old `new VoxelPlane(opts)`
+  // was. plane_retired_ replaces the old null-pointer sentinel for "this
+  // node transitioned to PARENT/DISABLED and its plane data is stale" --
+  // set (never cleared) at the same two call sites that used to `delete
+  // plane_ptr_; plane_ptr_ = nullptr;`. The retired VoxelPlane object
+  // itself is simply left inert (not destroyed/freed) for the rest of this
+  // node's lifetime -- a small, bounded amount of memory (one VoxelPlane's
+  // worth) versus the alternative of adding a reset()/clear() method,
+  // which only a minority of nodes (ones that get subdivided or give up)
+  // ever pay at all.
+  VoxelPlane    plane_;
+  bool          plane_retired_ = false;
   int           layer_;
   V3D           voxel_center_;
   VoxelStatus   status_;

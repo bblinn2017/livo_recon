@@ -31,7 +31,7 @@ void debugLogPlaneInit(const std::string& msg)
 void setCurrentFrame(int idx) { g_current_frame_idx = idx; }
 
 VoxelNode::VoxelNode(VoxelOptsPtr opts, VoxelStatsPtr stats, int layer, const V3D& center)
-  : opts_(opts), stats_(stats), plane_ptr_(new VoxelPlane(opts)), layer_(layer),
+  : opts_(opts), stats_(stats), plane_(opts), layer_(layer),
     voxel_center_(center), status_(VoxelStatus::OPEN),
     node_id_(stats->next_node_id.fetch_add(1, std::memory_order_relaxed)),
     density_weight_leaf_(opts->bin_size_fraction * opts->voxel_size / (1 << layer))
@@ -47,8 +47,6 @@ VoxelNode::~VoxelNode()
   for (int i = 0; i < 8; i++)
     if (leaves_[i])
       delete leaves_[i];
-  if (plane_ptr_)
-    delete plane_ptr_;
 }
 
 int VoxelNode::childIndex(const V3D& p) const
@@ -114,8 +112,8 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     ++distinct_frames_;
   }
 
-  const bool was_init   = plane_ptr_->isInit();
-  bool       was_plane  = plane_ptr_->isPlane();
+  const bool was_init   = plane_.isInit();
+  bool       was_plane  = plane_.isPlane();
   const bool debiased   = opts_->plane_fit_mode == "debiased";
 
   bool now_plane;
@@ -133,7 +131,7 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       // scans from a STATIONARY sensor, same vantage point repeated -- see
       // VoxelPlane::addPoints()'s trust_sensor_noise docs); don't trust
       // those points' sensor_cov for the debiasing correction.
-      plane_ptr_->addPoints(points_world, -1, distinct_frames_, g_current_frame_idx >= 1, g_current_frame_idx);
+      plane_.addPoints(points_world, -1, distinct_frames_, g_current_frame_idx >= 1, g_current_frame_idx);
       // History (135-153): see docs/livo_recon_changelog.md#src-lio-voxelnode.cpp-135
       //
       // n_planes accounting fix.  addPoints() (via refitDebiased()) can
@@ -153,18 +151,18 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       // POINT (updated in place) so the shared bookkeeping below sees no
       // further transition to double-count.
       {
-        const bool now_plane_immediate = plane_ptr_->isPlane();
+        const bool now_plane_immediate = plane_.isPlane();
         if (!was_plane && now_plane_immediate)  stats_->planes.fetch_add(1, std::memory_order_relaxed);
         if (was_plane  && !now_plane_immediate) stats_->planes.fetch_sub(1, std::memory_order_relaxed);
         was_plane = now_plane_immediate;
       }
-      if (!plane_ptr_->isInit()) return;
+      if (!plane_.isInit()) return;
       if (!was_init && g_current_frame_idx >= 1 &&
           distinct_frames_ < opts_->min_frames_to_init)
       {
         return;
       }
-      now_plane = plane_ptr_->isPlane();
+      now_plane = plane_.isPlane();
     } else {
     const bool use_bins = useBins();
 
@@ -206,23 +204,23 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     // share that instant's pose error and are not independent observations.
     // The debiased path receives this through addPoints(); the pca path has
     // no other channel for it.
-    plane_ptr_->noteFrames(distinct_frames_);
+    plane_.noteFrames(distinct_frames_);
 
     if (use_bins) {
       std::vector<PointXYZCov> bin_reps;
       std::vector<double> fit_weights, var_weights;
       buildBinReps(bin_reps, fit_weights, var_weights);
-      plane_ptr_->update(bin_reps, total_count_, &fit_weights, nullptr, &var_weights, g_current_frame_idx);
+      plane_.update(bin_reps, total_count_, &fit_weights, nullptr, &var_weights, g_current_frame_idx);
     } else {
-      plane_ptr_->update(points_, -1, nullptr, &running_moments_, nullptr, g_current_frame_idx);
+      plane_.update(points_, -1, nullptr, &running_moments_, nullptr, g_current_frame_idx);
     }
     update_count_ = 0;
-    now_plane = plane_ptr_->isPlane();
+    now_plane = plane_.isPlane();
     }
 
     if (!was_init) {
       if (opts_->log_debug_en) {
-        const V3D& ev = plane_ptr_->eigenValues();
+        const V3D& ev = plane_.eigenValues();
         std::ostringstream dbg;
         // voxel_center_ is the SAME quantized key across separate runs on
         // the same bag/config as long as trajectories haven't yet diverged
@@ -234,15 +232,15 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
         // plane_fit_mode divergence investigation
         // (docs/debiased_voxel_plane_fit_2026aug24.md).
         PlaneVizInfo viz{};
-        const bool have_viz = plane_ptr_->getVizInfo(viz);
+        const bool have_viz = plane_.getVizInfo(viz);
         dbg << "mode=" << opts_->plane_fit_mode
             << " voxel=[" << voxel_center_.transpose() << "]"
             << " frame=" << g_current_frame_idx
             << " distinct_frames=" << distinct_frames_
-            << " n_points=" << plane_ptr_->pointsSize()
+            << " n_points=" << plane_.pointsSize()
             << " eig0=" << ev(0) << " eig1=" << ev(1) << " eig2=" << ev(2)
-            << " radius=" << plane_ptr_->radius()
-            << " plane_var_trace=" << plane_ptr_->planeVar().trace()
+            << " radius=" << plane_.radius()
+            << " plane_var_trace=" << plane_.planeVar().trace()
             << " is_plane=" << (now_plane ? 1 : 0);
         if (have_viz)
           dbg << " normal=[" << viz.normal.transpose() << "]"
@@ -266,8 +264,7 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     stats_->transition(status_, VoxelStatus::PARENT);
     status_ = VoxelStatus::PARENT;
     if (was_plane) updates.push_back({node_id_, true, {}});
-    delete plane_ptr_;
-    plane_ptr_ = nullptr;
+    plane_retired_ = true;
     if (debiased) {
       // No raw-point history to hand off (VoxelPlane::addPoints() keeps
       // only O(1) accumulators, by design) -- fall back to just this
@@ -316,7 +313,7 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     // anyway for parity with pca mode's give-up behavior.
     should_lock = !now_plane && (layer_ >= opts_->max_layer);
   } else {
-    should_lock = plane_ptr_->isFull();
+    should_lock = plane_.isFull();
     if (opts_->convergence_mode == "frame_gated")
       should_lock = should_lock && (distinct_frames_ >= opts_->min_frames_to_converge);
     else if (opts_->convergence_mode == "always_update" && now_plane)
@@ -326,7 +323,7 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
   if (!should_lock) {
     PlaneVizInfo info;
     info.is_converged = false;
-    if (now_plane && plane_ptr_->getVizInfo(info))
+    if (now_plane && plane_.getVizInfo(info))
       updates.push_back({node_id_, false, info});
     else if (was_plane && !now_plane)
       updates.push_back({node_id_, true, {}});
@@ -344,12 +341,11 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
   if (now_plane) {
     PlaneVizInfo info;
     info.is_converged = true;
-    if (plane_ptr_->getVizInfo(info))
+    if (plane_.getVizInfo(info))
       updates.push_back({node_id_, false, info});
   } else {
     if (was_plane) updates.push_back({node_id_, true, {}});
-    delete plane_ptr_;
-    plane_ptr_ = nullptr;
+    plane_retired_ = true;
   }
 }
 
@@ -363,8 +359,8 @@ bool VoxelNode::findPlaneResidual(const WorldPointCov& pt, Residual& res, int sc
     return child->findPlaneResidual(pt, res, scan_id);
   }
 
-  if (!plane_ptr_) return false;
-  return plane_ptr_->computeResidual(pt, res, scan_id);
+  if (plane_retired_) return false;
+  return plane_.computeResidual(pt, res, scan_id);
 }
 
 }  // namespace livo_recon
