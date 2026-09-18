@@ -224,12 +224,20 @@ struct SplineOptions
   // NOT an accident: AtA_p and AtA_r are the SAME left-hand-side matrix
   // (only Atb_p/Atb_r, the right-hand sides, differ -- see fit()), so
   // their pivots (and therefore both metrics) are IDENTICAL between the
-  // position and rotation solves on every frame, and the frozen-boundary
-  // rows are pinned to exactly 1.0 by freezeAbsoluteScalarSystem(),
-  // which is very likely why the absolute scale stays this consistent
-  // across sequences with different point densities/geometry -- the
-  // matrix's own conditioning is dominated by that fixed structure, not
-  // by the data. See the CQ-24 RESULTS entry for the full distributions.
+  // position and rotation solves on every frame. See the CQ-24 RESULTS
+  // entry for the full distributions this paragraph describes.
+  //
+  // CQ-41 (2026-09-18): the identity-pinned boundary rows this paragraph
+  // used to credit for the healthy p50 0.827-0.841 range are gone --
+  // freezeAbsoluteScalarSystem() was deleted, replaced by a KKT-
+  // constrained solve (see fit()'s own comment). dmin_p/dmax_p are still
+  // read off a separate LDLT of AtA alone (item 3a), so PIVOT_MIN_FLOOR's
+  // meaning is unchanged, but dmin_p is now genuinely DATA-dependent
+  // rather than dominated by fixed identity structure -- measured
+  // (CQ-41 filing) at two orders of magnitude below the old range
+  // (p50 ~0.0006 vs the ~0.83 above, eee_01, velocity:true default),
+  // confirming item (3b)'s own prediction that removing the freeze would
+  // expose real end conditioning rather than hide it.
   //
   // NOT SET BY THIS CARD/COMMIT, same discipline as CHART_HARD_PHI_RAD:
   // -1.0 is the true no-op (every real pivot is >= 0 by construction, so
