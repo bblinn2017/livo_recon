@@ -173,6 +173,11 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(sp && opts_.spline.refineOn(), "spline/mode=spline+refine",
                    "spline/refine/final_pass",
                    opts_.spline.final_pass, false);
+  // TQ-38 item (4): see SplineOptions::diag_free_tail_imu_acc_weight's own
+  // doc comment -- diagnostic only, never read by the real refinement path.
+  cfg.nested<double>(sp, "spline/mode",
+                     "spline/refine/diag_free_tail_imu_acc_weight",
+                     opts_.spline.diag_free_tail_imu_acc_weight, 1.0);
 
   cfg.nested<bool>(sp, "spline/mode", "spline/log_en", opts_.spline.log_en, false);
   // CQ-41, Bryce 2026-09-18: DEFAULT true, authorised by Bryce in the
@@ -713,6 +718,12 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
           << "\n";
       ofs.flush();
     }
+
+    // TQ-38 item 1: snapshot the UNREFINED control points, unconditionally
+    // (not gated on log_debug_en -- this is a cheap 3xn_cp copy, and the
+    // TQ-38 diagnostic below needs it every frame it runs, not only frames
+    // where firstfit debug logging happened to also be on).
+    cp_p_unrefined_snapshot_ = spline_.cpPos();
   }
 
   std::vector<PointXYZCov> deskewed;
@@ -973,9 +984,16 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
       // instruction ("with the regularisers on"), decoupled from whatever
       // the main fit's shipped config happens to use (still 0.0/off by
       // default as of CQ-41's own filing).
+      // TQ-38 item (4): diag_free_tail_imu_acc_weight overrides the forced
+      // imu_acc_weight below, default 1.0 (identical to the hardcoded
+      // value TQ-35/TQ-36 already shipped with -- this override is inert
+      // at its default). Lets the imu_acc_weight sweep vary ONLY this
+      // diagnostic's forced weight without touching the run's own shipped
+      // refine_imu_acc_weight (a different field, read by the REAL
+      // refinement path, refineWithLidar()).
       SplineOptions forced_opts = opts_.spline;
       forced_opts.refine_curvature_weight = 1.0;
-      forced_opts.refine_imu_acc_weight   = 1.0;
+      forced_opts.refine_imu_acc_weight   = opts_.spline.diag_free_tail_imu_acc_weight;
       V3D ft_pos1 = V3D::Zero(), ft_vel1 = V3D::Zero(), ft_acc1 = V3D::Zero();
       M3D ft_cov = M3D::Zero();
       Eigen::MatrixXd ft_cp_free;
@@ -1059,6 +1077,59 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
              << " d_last_bz=" << d_last_body.z();
         pofs << "\n";
         pofs.flush();
+      }
+
+      // TQ-38 item (1): delta_a(t) = R(t)^T * (accAt_refined(t) -
+      // accAt_unrefined(t)), at every raw IMU sample in the scan window --
+      // the IMU correction the refinement is implicitly asking for.
+      // delta_w is 0 by construction (refineWithLidar() touches cp_p_
+      // only, never cp_phi_ -- standing/refine-cannot-reach), so it is not
+      // computed here, per the card's own instruction.
+      //
+      // Two "refined" variants against the SAME unrefined baseline
+      // (cp_p_unrefined_snapshot_, captured right after fit()):
+      //   pinned -- the LIVE cp_p_ (this run's own config: V1 if
+      //     curvature_weight=imu_acc_weight=0, V2 if both=1.0)
+      //   free   -- ft_cp_free (V3: free tail, regularizers FORCED on,
+      //     same diagnosticFreeTailFit() call above used for free_tail_d
+      //     and TQ-36's profile -- so V3's own numbers do not depend on
+      //     this run's own curvature_weight/imu_acc_weight config at all)
+      // accAt() reads whatever cp_p_ currently holds, so evaluating three
+      // variants means swapping ScanSpline::cpPosMut() in and back out --
+      // read-only: the live value is always the last one restored.
+      if (ft_ok && ft_cp_free.cols() == spline_.nControlPoints() &&
+          cp_p_unrefined_snapshot_.cols() == spline_.nControlPoints()) {
+        static PersistentLogStream log("tq38_delta_a.txt");
+        std::ofstream& ofs = log.stream();
+        const Eigen::Matrix<double, 3, Eigen::Dynamic> cp_live = spline_.cpPos();
+        for (const auto& samp : mg.imu_samples_raw) {
+          if (samp.t < spline_.t0() - 1e-9 || samp.t > spline_.t1() + 1e-9) continue;
+          const M3D R = spline_.rotAt(samp.t);  // cp_phi_ untouched by any swap below
+
+          const V3D acc_pinned_refined = spline_.accAt(samp.t);  // live cp_p_
+
+          spline_.cpPosMut() = cp_p_unrefined_snapshot_;
+          const V3D acc_unrefined = spline_.accAt(samp.t);
+
+          spline_.cpPosMut() = ft_cp_free;
+          const V3D acc_free_refined = spline_.accAt(samp.t);
+
+          spline_.cpPosMut() = cp_live;  // restore before anything else reads cp_p_
+
+          const V3D delta_a_pinned = R.transpose() * (acc_pinned_refined - acc_unrefined);
+          const V3D delta_a_free   = R.transpose() * (acc_free_refined   - acc_unrefined);
+          ofs << std::setprecision(9)
+              << "scan_id=" << voxel_map_->frame_idx_
+              << " t_abs=" << (samp.t + data_queues_->start_time)
+              << " delta_a_pinned_norm=" << delta_a_pinned.norm()
+              << " delta_a_free_norm=" << delta_a_free.norm()
+              << " acc_refined_pinned_norm=" << acc_pinned_refined.norm()
+              << " acc_refined_free_norm=" << acc_free_refined.norm()
+              << " acc_unrefined_norm=" << acc_unrefined.norm()
+              << " sigma_acc_floor=" << std::sqrt(state_->varAccFloor().mean())
+              << "\n";
+        }
+        ofs.flush();
       }
 
       // TQ-34, Bryce 2026-09-18: item (3b)'s decile profile -- per RAW IMU

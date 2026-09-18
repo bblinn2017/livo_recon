@@ -505,6 +505,14 @@ private:
   // finalizeSplineAndQ() can log it alongside the rest of the rotation
   // consistency read.
   double last_total_dtheta_deg_ = 0.0;
+  // TQ-38 item 1: the spline's control points EXACTLY as fit() left them
+  // (boundary-constrained, UNREFINED) -- captured once, right after fit(),
+  // before refineSplineFromResiduals() ever runs this frame, so accAt() can
+  // be evaluated against this snapshot later (finalizeSplineAndQ(), after
+  // refinement has already overwritten the live cp_p_) via a temporary
+  // ScanSpline::cpPosMut() swap. Read-only: swapped back immediately after
+  // each use, never left in place.
+  Eigen::Matrix<double, 3, Eigen::Dynamic> cp_p_unrefined_snapshot_;
   // This scan's own boundary_dpos/drot (vs the PREVIOUS scan's end),
   // -1 if unavailable (first spline scan, or previous scan's spline
   // failed) -- read by debugLogFrameStats() the same frame it's computed.

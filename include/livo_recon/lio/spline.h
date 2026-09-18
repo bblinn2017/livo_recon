@@ -304,6 +304,14 @@ struct SplineOptions
   // says explicitly not to flip this default from this card's own numbers.
   bool final_pass = false;
 
+  // TQ-38 item (4): overrides ONLY the forced imu_acc_weight the
+  // nees_diag.txt/tq38_delta_a.txt free-tail diagnostic (diagnosticFreeTailFit(),
+  // regularizers forced on) uses -- the REAL refinement path
+  // (refineWithLidar()) always reads refine_imu_acc_weight above, never
+  // this field. Default 1.0, identical to what that diagnostic's forced
+  // value already was before this field existed -- inert at default.
+  double diag_free_tail_imu_acc_weight = 1.0;
+
   // CQ-41 follow-up (2026-09-18): second-difference (discrete curvature)
   // regulariser on the refinement step, relative to trace(H)/dim (same
   // convention as the fixed positional Tikhonov above). Config key:
