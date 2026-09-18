@@ -151,6 +151,22 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<int>(sp && opts_.spline.refineOn(), "spline/mode=spline+refine",
                   "spline/refine/iters",
                   opts_.spline.lidar_refine_iters, 1);
+  // CQ-41 follow-up: see SplineOptions::refine_curvature_weight's own doc
+  // comment for the A/B numbers. Default 0.0 (off) preserves prior behavior.
+  cfg.nested<double>(sp && opts_.spline.refineOn(), "spline/mode=spline+refine",
+                     "spline/refine/curvature_weight",
+                     opts_.spline.refine_curvature_weight, 0.0);
+  // CQ-41 follow-up, third term: see SplineOptions::refine_imu_acc_weight's
+  // own doc comment. Default 0.0 (off) preserves prior behavior.
+  cfg.nested<double>(sp && opts_.spline.refineOn(), "spline/mode=spline+refine",
+                     "spline/refine/imu_acc_weight",
+                     opts_.spline.refine_imu_acc_weight, 0.0);
+  // Bryce, 2026-09-18: diagnostic experiment -- see
+  // SplineOptions::refine_imu_acc_solve_bias's own doc comment.
+  cfg.nested<bool>(sp && opts_.spline.refineOn() && opts_.spline.refine_imu_acc_weight > 0.0,
+                   "spline/refine/imu_acc_weight>0",
+                   "spline/refine/imu_acc_solve_bias",
+                   opts_.spline.refine_imu_acc_solve_bias, false);
 
   cfg.nested<bool>(sp, "spline/mode", "spline/log_en", opts_.spline.log_en, false);
   // CQ-41, Bryce 2026-09-18: DEFAULT true, authorised by Bryce in the
@@ -666,6 +682,31 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
     // stays false for it -- warn and hard are mutually exclusive per fit(),
     // the hard count is spline_fail_cause_count_[kChartGuard] above.
     if (spline_.chartGuardWarned()) spline_chart_guard_warn_count_++;
+
+    // CQ-41 follow-up: does the large endpoint acceleration come from
+    // refinement, or is it already present in the very first fit?  Logged
+    // HERE, immediately after fit() and before the IEKF loop's first
+    // redeskewFromSpline()/refineSplineFromResiduals() call -- this is the
+    // boundary-CONSTRAINED (setFrozenBoundary() above already ran) but
+    // UNREFINED spline. Comparing this against spline_endpoint_debug.txt's
+    // same-scan_id row (logged post-refinement in finalizeSplineAndQ())
+    // isolates refinement's own contribution. It does NOT isolate the
+    // boundary constraint's contribution -- that's baked into fit() itself
+    // via setFrozenBoundary() above, present in this row exactly as much as
+    // in the final one -- a genuinely unconstrained-fit comparison would
+    // need a separate ablation.
+    if (opts_.log_debug_en && spline_ok_) {
+      static PersistentLogStream log("spline_firstfit_debug.txt");
+      std::ofstream& ofs = log.stream();
+      ofs << "scan_id=" << voxel_map_->frame_idx_
+          << " acc_t0=" << spline_.accAt(spline_.t0()).norm()
+          << " acc_t1=" << spline_.accAt(spline_.t1()).norm()
+          << " omega_t0=" << spline_.omegaBodyAt(spline_.t0()).norm()
+          << " omega_t1=" << spline_.omegaBodyAt(spline_.t1()).norm()
+          << " n_cp=" << spline_.nControlPoints()
+          << "\n";
+      ofs.flush();
+    }
   }
 
   std::vector<PointXYZCov> deskewed;
@@ -790,7 +831,14 @@ bool LioProc::refineSplineFromResiduals(const MeasureGroup& mg)
   // CQ-39 item (1): threads this LioProc's existing log_debug_en straight
   // through -- not a new config key -- to gate refineWithLidar()'s
   // per-pass proof log.
-  return spline_.refineWithLidar(lidar_obs_, opts_.spline, opts_.log_debug_en);
+  // CQ-41 follow-up: imu_samples_raw/spline_frame_bias_acc_/
+  // spline_frame_gravity_/varAccFloor() are the same four inputs
+  // computeSplineImuResidual() already uses -- only consulted by
+  // refineWithLidar() when opts_.spline.refine_imu_acc_weight > 0.
+  return spline_.refineWithLidar(lidar_obs_, opts_.spline, mg.imu_samples_raw,
+                                 spline_frame_bias_acc_, spline_frame_gravity_,
+                                 state_->varAccFloor().mean(), state_->covBiasAcc(),
+                                 opts_.log_debug_en);
 }
 
 void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
@@ -831,7 +879,23 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
       const V3D vel_err1 = spline_.velAt(spline_.t1()) - state_->vel();
       const V3D pos_err0 = spline_.posAt(spline_.t0()) - prev_scan_end_pos_;
       const V3D pos_err1 = spline_.posAt(spline_.t1()) - state_->pos();
-      ofs << "acc_t0=" << spline_.accAt(spline_.t0()).norm()
+
+      // Bryce, 2026-09-18: free-tail diagnostic -- see
+      // ScanSpline::diagnosticFreeTailFit()'s own doc comment. pos1_free/
+      // vel1_free/acc1_free are what the LiDAR-only-informed trajectory
+      // naturally wants at t1 with the boundary constraint relaxed to
+      // head-only; comparing against state_->pos()/vel() (what the tail is
+      // actually pinned to) and against acc_t1 above (the actual, boundary-
+      // constrained acceleration) is how "the target itself is wrong" gets
+      // told apart from "forcing exact equality is what creates curvature".
+      V3D pos1_free = V3D::Zero(), vel1_free = V3D::Zero(), acc1_free = V3D::Zero();
+      const bool free_tail_ok = spline_.diagnosticFreeTailFit(
+          lidar_obs_, opts_.spline, mg.imu_samples_raw, spline_frame_bias_acc_,
+          spline_frame_gravity_, state_->varAccFloor().mean(),
+          pos1_free, vel1_free, acc1_free);
+
+      ofs << "scan_id=" << voxel_map_->frame_idx_
+          << " acc_t0=" << spline_.accAt(spline_.t0()).norm()
           << " acc_t1=" << spline_.accAt(spline_.t1()).norm()
           << " omega_t0=" << spline_.omegaBodyAt(spline_.t0()).norm()
           << " omega_t1=" << spline_.omegaBodyAt(spline_.t1()).norm()
@@ -839,7 +903,32 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
           << " pos_err0=" << pos_err0.norm() << " pos_err1=" << pos_err1.norm()
           << " n_cp=" << spline_.nControlPoints()
           << " delta=" << (spline_.t1() - spline_.t0()) / std::max(1, spline_.nControlPoints() - 3)
-          << "\n";
+          << " delta_ba_norm=" << spline_.lastDeltaBiasAcc().norm()
+          << " delta_ba_x=" << spline_.lastDeltaBiasAcc().x()
+          << " delta_ba_y=" << spline_.lastDeltaBiasAcc().y()
+          << " delta_ba_z=" << spline_.lastDeltaBiasAcc().z()
+          << " free_tail_ok=" << (free_tail_ok ? 1 : 0)
+          << " pos1_free_err=" << (free_tail_ok ? (pos1_free - state_->pos()).norm() : -1.0)
+          << " vel1_free_err=" << (free_tail_ok ? (vel1_free - state_->vel()).norm() : -1.0)
+          << " acc1_free=" << (free_tail_ok ? acc1_free.norm() : -1.0);
+      if (free_tail_ok) {
+        // Bryce, 2026-09-18: bias_acc lives in BODY frame (see
+        // refineWithLidar()'s R^T*(...)+bias_acc convention) -- a genuine
+        // constant body-frame bias, viewed through this WORLD-frame
+        // velocity error, would appear to ROTATE as the platform's
+        // orientation changes scan to scan, not stay constant. Log both:
+        // world-frame (vel1_free_err_w*) for reference, and the SAME
+        // vector rotated into this scan's own body frame at t1
+        // (vel1_free_err_b*, via rotAt(t1)^T) so a persistence check can be
+        // done in the frame the bias itself actually lives in.
+        const V3D vel_err_w = vel1_free - state_->vel();
+        const V3D vel_err_b = spline_.rotAt(spline_.t1()).transpose() * vel_err_w;
+        ofs << " vel1_free_err_wx=" << vel_err_w.x() << " vel1_free_err_wy=" << vel_err_w.y()
+            << " vel1_free_err_wz=" << vel_err_w.z()
+            << " vel1_free_err_bx=" << vel_err_b.x() << " vel1_free_err_by=" << vel_err_b.y()
+            << " vel1_free_err_bz=" << vel_err_b.z();
+      }
+      ofs << "\n";
       ofs.flush();
     }
 
@@ -977,7 +1066,7 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
              "redeskew_calls,redeskew_dp_rms,"
              "refit_dtraj_rms,refit_dtraj_max,refit_drot_deg,cov_acc_pre,cov_gyr_pre,"
              "d_bias_acc_norm,d_bias_gyr_norm,d_gravity_norm,max_abs_cp_phi,"
-             "dmin_p,dmax_p,dmin_r,dmax_r\n";
+             "dmin_p,dmax_p,dmin_r,dmax_r,mean_abs_acc,mean_abs_gyr\n";
     }
     const double t_abs = mg.image.t + data_queues_->start_time;
     ofs << voxel_map_->frame_idx_ << ','
@@ -1013,7 +1102,8 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
         // (and -1.0 sentinel otherwise) on a fit that failed at the pivot
         // guard or at kSolveFailed too, which is the whole point.
         << spline_.dminPos() << ',' << spline_.dmaxPos() << ','
-        << spline_.dminRot() << ',' << spline_.dmaxRot()
+        << spline_.dminRot() << ',' << spline_.dmaxRot() << ','
+        << last_spline_stats_.mean_abs_acc << ',' << last_spline_stats_.mean_abs_gyr
         << '\n';
     ofs.flush();
   }

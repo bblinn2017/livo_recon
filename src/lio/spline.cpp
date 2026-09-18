@@ -17,6 +17,24 @@ namespace
 constexpr double REFINE_TIKHONOV  = 1e-2;   // relative to trace(H)/dim
 constexpr double REFINE_STEP_WARN = 0.10;   // metres
 
+// CQ-41 follow-up (2026-09-18): REFINE_TIKHONOV regularises each control
+// point's DISPLACEMENT magnitude toward its pre-refinement prior, but
+// nothing regularises the SHAPE of the resulting control polygon -- a few
+// cm of independent per-point noise pulling adjacent control points in
+// opposite directions is enough to make ddb.cp (and therefore accAt(),
+// which scales it by inv_delta_^2 ~ 1e4 at 100Hz control points) blow up to
+// thousands of m/s^2, even though each individual displacement is well
+// under REFINE_STEP_WARN. This second-difference (discrete curvature)
+// penalty targets exactly that: it penalises ||D * cp_new||^2, where D is
+// the standard [1,-2,1] second-difference operator over control points, so
+// a smooth/gently-curving control polygon costs nothing while an
+// alternating high-frequency one is directly suppressed -- unlike
+// REFINE_TIKHONOV, which cannot distinguish the two (both cost the same
+// under a pure magnitude-toward-prior penalty). Weight is a config knob
+// (SplineOptions::refine_curvature_weight, default 0.0/off) rather than a
+// fixed constant like REFINE_TIKHONOV -- see that field's doc comment for
+// the A/B numbers motivating it.
+
 // CQ-41, Bryce 2026-09-18: the repeated-control-point freeze this comment
 // block used to describe forced acceleration and angular velocity to
 // exactly zero at both ends as an unintended side effect of the repeated-
@@ -608,12 +626,19 @@ void ScanSpline::moveTailClamp(const V3D& pos1, const M3D& rot1, const V3D& vel1
 }
 
 bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
-                                 const SplineOptions& opts, bool log_debug_en)
+                                 const SplineOptions& opts,
+                                 const std::vector<ImuSample>& imu_raw,
+                                 const V3D& bias_acc, const V3D& gravity,
+                                 double var_acc_floor, const V3D& cov_bias_acc,
+                                 bool log_debug_en)
 {
   if (!valid_ || !opts.refineOn()) return false;
   if (static_cast<int>(obs.size()) < n_cp_) return false;
 
   const int dim = 3 * n_cp_;
+  const bool solve_bias = opts.refine_imu_acc_weight > 0.0 && opts.refine_imu_acc_solve_bias;
+  const int  bias_off = dim;               // delta_ba occupies [dim, dim+3) when solve_bias
+  const int  ext_dim  = dim + (solve_bias ? 3 : 0);
   const Eigen::Matrix<double, 3, Eigen::Dynamic> cp_prior = cp_p_;
 
   // CQ-39: `obs` is a const input that never changes across passes of this
@@ -632,8 +657,8 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
   bool any = false;
   for (int it = 0; it < std::max(1, opts.lidar_refine_iters); ++it)
   {
-    Eigen::MatrixXd H = Eigen::MatrixXd::Zero(dim, dim);
-    Eigen::VectorXd g = Eigen::VectorXd::Zero(dim);
+    Eigen::MatrixXd H = Eigen::MatrixXd::Zero(ext_dim, ext_dim);
+    Eigen::VectorXd g = Eigen::VectorXd::Zero(ext_dim);
 
     Eigen::Vector4d b, db, ddb;
     int s = 0;
@@ -674,6 +699,97 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
     const double scale = std::max(1e-12, H.trace() / static_cast<double>(dim));
     for (int i = 0; i < dim; ++i) H(i, i) += REFINE_TIKHONOV * scale;
 
+    // Curvature (second-difference) prior -- see REFINE_CURVATURE_TIKHONOV's
+    // doc comment above. Penalises ||D * (cp_prior + step)||^2, D being the
+    // [1,-2,1] operator over control points (n_cp-2 rows); contributes
+    // H += lambda * D^T D, g += lambda * D^T D * cp_prior (Gauss-Newton
+    // normal-equation form for a linear residual D*cp_new, matching the data
+    // term's own r_i-is-linear-in-cp derivation above). Block-expanded with
+    // 3x3 identity blocks, same interleaved [x,y,z]-per-control-point layout
+    // H/g already use.
+    if (n_cp_ >= 3 && opts.refine_curvature_weight > 0.0) {
+      const double lambda = opts.refine_curvature_weight * scale;
+      for (int i = 0; i + 2 < n_cp_; ++i) {
+        // Row i of D: +1 at cp i, -2 at cp i+1, +1 at cp i+2.
+        static constexpr int    idx[3] = {0, 1, 2};
+        static constexpr double val[3] = {1.0, -2.0, 1.0};
+        for (int a = 0; a < 3; ++a) {
+          const int ca = i + idx[a];
+          for (int b = 0; b < 3; ++b) {
+            const int cb = i + idx[b];
+            const double w = lambda * val[a] * val[b];
+            H.block<3, 3>(3 * ca, 3 * cb).diagonal().array() += w;
+          }
+          g.segment<3>(3 * ca).noalias() +=
+              (lambda * val[a]) * (val[0] * cp_prior.col(i) + val[1] * cp_prior.col(i + 1) +
+                                    val[2] * cp_prior.col(i + 2));
+        }
+      }
+    }
+
+    // IMU-acceleration anchor -- see SplineOptions::refine_imu_acc_weight's
+    // doc comment. Penalises how far the refined spline's predicted
+    // (body-frame) acceleration is from what the raw accelerometer actually
+    // measured, weighted by 1/var_acc_floor. Linear in cp_p_ because
+    // rotation (R(t), via rotAt()) is NOT touched by this position-only
+    // refinement -- R^T R cancels to identity in H, so despite the rotation
+    // this reduces to the same "linear-in-cp, isotropic 3x3 blocks" form the
+    // data/curvature terms above already have. accAt(t) = ddb.cp * c with
+    // c = inv_delta_^2 (same as the member accAt(), but evaluated against
+    // cp_prior -- the fixed linearisation point every term in this pass
+    // uses -- rather than live cp_p_, matching CQ-39's "every pass solves
+    // the identical system" invariant when obs/imu_raw don't change).
+    if (opts.refine_imu_acc_weight > 0.0 && var_acc_floor > 0.0) {
+      const double w_imu = opts.refine_imu_acc_weight / var_acc_floor;
+      const double c = inv_delta_ * inv_delta_;
+      Eigen::Vector4d bi, dbi, ddbi;
+      int si = 0;
+      for (const auto& samp : imu_raw) {
+        if (samp.t < t0_ - 1e-9 || samp.t > t1_ + 1e-9) continue;
+        basisAt(samp.t, si, bi, dbi, ddbi);
+        const M3D R = rotAt(samp.t);
+        V3D acc_pred_world = V3D::Zero();
+        for (int i = 0; i < 4; ++i) acc_pred_world += ddbi[i] * cp_prior.col(si + i);
+        acc_pred_world *= c;
+        const V3D r = R.transpose() * (acc_pred_world - gravity) + bias_acc - samp.acc;
+        for (int j = 0; j < 4; ++j) {
+          const int rj = 3 * (si + j);
+          for (int k = 0; k < 4; ++k)
+            H.block<3, 3>(rj, 3 * (si + k)).diagonal().array() +=
+                w_imu * ddbi[j] * ddbi[k] * c * c;
+          g.segment<3>(rj).noalias() += (w_imu * ddbi[j] * c) * (R * r);
+
+          // Bryce, 2026-09-18: optional extra unknown delta_ba (accel bias
+          // correction, constant over the scan) -- see
+          // SplineOptions::refine_imu_acc_solve_bias's doc comment. Since
+          // r(cp,delta_ba) = r_base + J_cp*step_cp + I3*delta_ba (linear),
+          // Gauss-Newton adds a cross block J_cp_j^T W I3 = w_imu*ddb[j]*c*R
+          // and its transpose, plus J_cp_j and I3 both contribute to
+          // H(rj,rj)/H(bias,bias) as usual.
+          if (solve_bias) {
+            H.block<3, 3>(rj, bias_off).noalias()      += (w_imu * ddbi[j] * c) * R;
+            H.block<3, 3>(bias_off, rj).noalias()      += (w_imu * ddbi[j] * c) * R.transpose();
+          }
+        }
+        if (solve_bias) {
+          H.block<3, 3>(bias_off, bias_off).diagonal().array() += w_imu;
+          g.segment<3>(bias_off).noalias() += w_imu * r;
+        }
+      }
+      // Prior toward zero correction, variance = cov_bias_acc * scan
+      // duration -- the SAME per-scan process-noise budget the EKF's own
+      // bias random walk already allows (ImuProc::propagate()'s
+      // q_alpha_bias term, scaled by dt there exactly as here). Keeps this
+      // diagnostic correction consistent with what the EKF's own model
+      // would consider a plausible amount of bias drift within one scan,
+      // rather than letting it fit noise unconstrained.
+      if (solve_bias) {
+        const double dt_scan = std::max(1e-6, t1_ - t0_);
+        const double var_ba = std::max(1e-12, cov_bias_acc.mean() * dt_scan);
+        H.block<3, 3>(bias_off, bias_off).diagonal().array() += 1.0 / var_ba;
+      }
+    }
+
     // CQ-41 item (6): the refinement step must respect the SAME position
     // constraints fit()/moveTailClamp() do, not a separate freeze -- a
     // NULL-SPACE solve (C.delta = 0) rather than forcing the step to zero
@@ -693,6 +809,10 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
     // acts on H/g's interleaved [x,y,z] per-control-point block layout.
     // k=0 (kkt_k_p_==0, no boundary this scan) degenerates this to plain
     // unconstrained Gauss-Newton, matching fit()'s own k=0 case.
+    // Cb stays sized on `dim` columns (delta_ba, when present, is entirely
+    // unconstrained by the boundary condition -- it's a bias correction,
+    // not part of the position spline) and gets zero-padded up to ext_dim
+    // below.
     const int k = 3 * kkt_k_p_;
     Eigen::MatrixXd Cb = Eigen::MatrixXd::Zero(k, dim);
     for (int ci = 0; ci < kkt_k_p_; ++ci)
@@ -700,13 +820,13 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
         if (kkt_C_p_(ci, cj) != 0.0)
           Cb.block<3, 3>(3 * ci, 3 * cj) = kkt_C_p_(ci, cj) * M3D::Identity();
 
-    Eigen::MatrixXd KKT = Eigen::MatrixXd::Zero(dim + k, dim + k);
-    KKT.topLeftCorner(dim, dim) = H;
-    KKT.topRightCorner(dim, k) = Cb.transpose();
-    KKT.bottomLeftCorner(k, dim) = Cb;
-    Eigen::VectorXd rhs(dim + k);
+    Eigen::MatrixXd KKT = Eigen::MatrixXd::Zero(ext_dim + k, ext_dim + k);
+    KKT.topLeftCorner(ext_dim, ext_dim) = H;
+    KKT.block(0, ext_dim, dim, k) = Cb.transpose();
+    KKT.block(ext_dim, 0, k, dim) = Cb;
+    Eigen::VectorXd rhs(ext_dim + k);
     rhs.setZero();
-    rhs.head(dim) = -g;
+    rhs.head(ext_dim) = -g;
 
     Eigen::LDLT<Eigen::MatrixXd> ldlt(KKT);
     if (ldlt.info() != Eigen::Success)
@@ -715,6 +835,7 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
     if (!sol.allFinite())
     { ++refine_rejects_; accumulateRefineDisplacement(cp_prior); return any; }
     const Eigen::VectorXd step = sol.head(dim);
+    if (solve_bias) last_delta_bias_acc_ = sol.segment<3>(bias_off);
 
     double max_step = 0.0;
     for (int i = 0; i < n_cp_; ++i)
@@ -748,6 +869,141 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
   }
   accumulateRefineDisplacement(cp_prior);
   return any;
+}
+
+// See this method's own doc comment in spline.h. Deliberately duplicates
+// (rather than shares) refineWithLidar()'s data-term-building loop -- the
+// two need different constraint sets (both ends vs. head-only) applied to
+// the SAME H/g, and factoring that out cleanly is more machinery than this
+// one-off diagnostic is worth.
+bool ScanSpline::diagnosticFreeTailFit(const std::vector<SplineLidarObs>& obs,
+                                       const SplineOptions& opts,
+                                       const std::vector<ImuSample>& imu_raw,
+                                       const V3D& bias_acc, const V3D& gravity,
+                                       double var_acc_floor,
+                                       V3D& pos1_free, V3D& vel1_free,
+                                       V3D& acc1_free) const
+{
+  if (!valid_ || !opts.refineOn()) return false;
+  if (static_cast<int>(obs.size()) < n_cp_) return false;
+  if (n_frozen_cp_ <= 0 || kkt_k_p_ <= 0) return false;
+
+  const int dim = 3 * n_cp_;
+  const Eigen::Matrix<double, 3, Eigen::Dynamic>& cp_prior = cp_p_;
+  Eigen::MatrixXd H = Eigen::MatrixXd::Zero(dim, dim);
+  Eigen::VectorXd g = Eigen::VectorXd::Zero(dim);
+
+  Eigen::Vector4d b, db, ddb;
+  int s = 0;
+  int used = 0;
+  for (const auto& o : obs)
+  {
+    if (!(o.sigma2 > 0.0) || !std::isfinite(o.r)) continue;
+    if (o.t < t0_ - 1e-9 || o.t > t1_ + 1e-9) continue;
+    basisAt(o.t, s, b, db, ddb);
+    const double w = 1.0 / o.sigma2;
+    const V3D& n = o.normal;
+    for (int j = 0; j < 4; ++j)
+    {
+      const int rj = 3 * (s + j);
+      for (int k = 0; k < 4; ++k)
+        H.block<3, 3>(rj, 3 * (s + k)).noalias() += (w * b[j] * b[k]) * (n * n.transpose());
+      g.segment<3>(rj).noalias() += (w * b[j] * o.r) * n;
+    }
+    ++used;
+  }
+  if (used < n_cp_) return false;
+
+  const double scale = std::max(1e-12, H.trace() / static_cast<double>(dim));
+  for (int i = 0; i < dim; ++i) H(i, i) += REFINE_TIKHONOV * scale;
+
+  // Same curvature prior refineWithLidar() applies -- see its own comment.
+  if (n_cp_ >= 3 && opts.refine_curvature_weight > 0.0) {
+    const double lambda = opts.refine_curvature_weight * scale;
+    for (int i = 0; i + 2 < n_cp_; ++i) {
+      static constexpr int    idx[3] = {0, 1, 2};
+      static constexpr double val[3] = {1.0, -2.0, 1.0};
+      for (int a = 0; a < 3; ++a) {
+        const int ca = i + idx[a];
+        for (int bb = 0; bb < 3; ++bb) {
+          const int cb = i + idx[bb];
+          H.block<3, 3>(3 * ca, 3 * cb).diagonal().array() += lambda * val[a] * val[bb];
+        }
+        g.segment<3>(3 * ca).noalias() +=
+            (lambda * val[a]) * (val[0] * cp_prior.col(i) + val[1] * cp_prior.col(i + 1) +
+                                  val[2] * cp_prior.col(i + 2));
+      }
+    }
+  }
+
+  // Same IMU-acceleration anchor refineWithLidar() applies (bias-only, no
+  // delta_ba solve here -- that's a separate experiment) -- see its own
+  // comment.
+  if (opts.refine_imu_acc_weight > 0.0 && var_acc_floor > 0.0) {
+    const double w_imu = opts.refine_imu_acc_weight / var_acc_floor;
+    const double c = inv_delta_ * inv_delta_;
+    Eigen::Vector4d bi, dbi, ddbi;
+    int si = 0;
+    for (const auto& samp : imu_raw) {
+      if (samp.t < t0_ - 1e-9 || samp.t > t1_ + 1e-9) continue;
+      basisAt(samp.t, si, bi, dbi, ddbi);
+      const M3D R = rotAt(samp.t);
+      V3D acc_pred_world = V3D::Zero();
+      for (int i = 0; i < 4; ++i) acc_pred_world += ddbi[i] * cp_prior.col(si + i);
+      acc_pred_world *= c;
+      const V3D r = R.transpose() * (acc_pred_world - gravity) + bias_acc - samp.acc;
+      for (int j = 0; j < 4; ++j) {
+        const int rj = 3 * (si + j);
+        for (int k = 0; k < 4; ++k)
+          H.block<3, 3>(rj, 3 * (si + k)).diagonal().array() +=
+              w_imu * ddbi[j] * ddbi[k] * c * c;
+        g.segment<3>(rj).noalias() += (w_imu * ddbi[j] * c) * (R * r);
+      }
+    }
+  }
+
+  // HEAD-ONLY constraint: kkt_C_p_'s first half of rows -- buildEndConstraints()
+  // always emits head rows first, tail rows second, in equal k_end-sized
+  // halves (see its own comment).
+  const int k_end = kkt_k_p_ / 2;
+  const int k = 3 * k_end;
+  Eigen::MatrixXd Cb = Eigen::MatrixXd::Zero(k, dim);
+  for (int ci = 0; ci < k_end; ++ci)
+    for (int cj = 0; cj < n_cp_; ++cj)
+      if (kkt_C_p_(ci, cj) != 0.0)
+        Cb.block<3, 3>(3 * ci, 3 * cj) = kkt_C_p_(ci, cj) * M3D::Identity();
+
+  Eigen::MatrixXd KKT = Eigen::MatrixXd::Zero(dim + k, dim + k);
+  KKT.topLeftCorner(dim, dim) = H;
+  KKT.topRightCorner(dim, k) = Cb.transpose();
+  KKT.bottomLeftCorner(k, dim) = Cb;
+  Eigen::VectorXd rhs(dim + k);
+  rhs.setZero();
+  rhs.head(dim) = -g;
+
+  Eigen::LDLT<Eigen::MatrixXd> ldlt(KKT);
+  if (ldlt.info() != Eigen::Success) return false;
+  const Eigen::VectorXd sol = ldlt.solve(rhs);
+  if (!sol.allFinite()) return false;
+  const Eigen::VectorXd step = sol.head(dim);
+
+  // Evaluate the hypothetical free-tail control points at t1, on a LOCAL
+  // copy -- cp_p_ itself is never touched.
+  Eigen::Matrix<double, 3, Eigen::Dynamic> cp_free = cp_p_;
+  for (int i = 0; i < n_cp_; ++i) cp_free.col(i) += step.segment<3>(3 * i);
+
+  Eigen::Vector4d bb, dbb, ddbb;
+  int ss = 0;
+  basisAt(t1_, ss, bb, dbb, ddbb);
+  pos1_free = V3D::Zero(); vel1_free = V3D::Zero(); acc1_free = V3D::Zero();
+  for (int i = 0; i < 4; ++i) {
+    pos1_free += bb[i] * cp_free.col(ss + i);
+    vel1_free += dbb[i] * cp_free.col(ss + i);
+    acc1_free += ddbb[i] * cp_free.col(ss + i);
+  }
+  vel1_free *= inv_delta_;
+  acc1_free *= (inv_delta_ * inv_delta_);
+  return true;
 }
 
 // NET displacement from the pre-refinement fit -- see refineDcpMax()'s doc
@@ -808,6 +1064,8 @@ SplineImuResidualStats computeSplineImuResidual(
   V3D ma = V3D::Zero(), mw = V3D::Zero();
   for (int i = 0; i < st.n; ++i) { ma += ra[i]; mw += rw[i]; }
   ma /= st.n; mw /= st.n;
+  st.mean_abs_acc = ma.norm();
+  st.mean_abs_gyr = mw.norm();
 
   double sa = 0.0, sw = 0.0;
   for (int i = 0; i < st.n; ++i)

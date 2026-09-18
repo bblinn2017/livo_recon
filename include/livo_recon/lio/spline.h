@@ -282,6 +282,46 @@ struct SplineOptions
   // spline in precisely the scenes refinement is for.
   int lidar_refine_iters = 1;
 
+  // CQ-41 follow-up (2026-09-18): second-difference (discrete curvature)
+  // regulariser on the refinement step, relative to trace(H)/dim (same
+  // convention as the fixed positional Tikhonov above). Config key:
+  // spline/refine/curvature_weight. 0.0 (default) preserves prior behavior
+  // exactly -- opt in explicitly. A/B on eee_01 (velocity:true, weight=1.0):
+  // max_abs_acc p50 2061->98 m/s^2 (-95%), ATE 0.0268->0.0253m (improved),
+  // constraint (pos_err at boundary) unchanged (~1e-15). See
+  // refineWithLidar()'s own comment for the mechanism (curvature between
+  // adjacent control points is what accAt()'s 1/delta^2 amplifies; the
+  // plain magnitude-toward-prior Tikhonov above cannot distinguish a smooth
+  // correction from an oscillating one that costs the same under an
+  // isotropic-magnitude penalty).
+  double refine_curvature_weight = 0.0;
+
+  // CQ-41 follow-up (2026-09-18), third term: anchor the refined spline's
+  // ACCELERATION to what the raw accelerometer actually measured, weighted
+  // by the calibration noise floor (1/var_acc_floor), rather than only
+  // regularising the control polygon's own shape (curvature, above) or
+  // magnitude (REFINE_TIKHONOV). Complementary to curvature_weight, not a
+  // replacement -- curvature penalises internal smoothness; this anchors
+  // absolute level to physical reality. Config key:
+  // spline/refine/imu_acc_weight. 0.0 (default) preserves prior behavior.
+  double refine_imu_acc_weight = 0.0;
+
+  // Bryce, 2026-09-18: experiment -- does letting the refinement solve for
+  // a small PER-SCAN accelerometer bias CORRECTION (on top of the fixed
+  // state_->biasAcc() the imu_acc term above otherwise anchors to) let the
+  // endpoint snapping resolve through a bias shift instead of curvature,
+  // while still fitting well? Only meaningful when refine_imu_acc_weight >
+  // 0 (there is otherwise no term this correction could affect). The
+  // correction is regularised toward zero with variance
+  // cov_bias_acc * scan_duration -- the SAME process-noise budget the
+  // EKF's own bias random walk already allows per scan (see
+  // ImuProc::propagate()'s q_alpha_bias term) -- specifically so this
+  // cannot invent a per-scan bias that the EKF's own uncertainty model
+  // would consider implausible. NOT fed back into state_->biasAcc() (that
+  // coupling is the open question, not yet resolved) -- purely diagnostic
+  // for now: see ScanSpline::lastDeltaBiasAcc().
+  bool refine_imu_acc_solve_bias = false;
+
   // Per-scan CSV of the fit and the IMU residual (spline_q.csv).
   // ── dumping the trajectory as a FUNCTION, for analysis only ──────────
   //
@@ -389,7 +429,7 @@ public:
   // refine_rejects report only the last iteration instead of the frame.
   void resetRefineStats()
   { refine_rejects_ = 0; refine_applied_ = 0; last_refine_step_ = 0.0;
-    refine_dcp_max_ = 0.0; refine_dcp_rms_ = 0.0; }
+    refine_dcp_max_ = 0.0; refine_dcp_rms_ = 0.0; last_delta_bias_acc_ = V3D::Zero(); }
 
   // Freeze the first n control points (0=off, 1="single_cp", 3="exact" --
   // SplineOptions::N_FROZEN_CP) to a single repeated value
@@ -496,8 +536,48 @@ public:
   // H.trace(), step.norm()) that this inner loop's H/g/step are IDENTICAL
   // every pass when lidar_refine_iters > 1, since `obs` never changes
   // inside the loop -- see the inner loop's own comment.
+  // imu_raw/bias_acc/gravity/var_acc_floor/cov_bias_acc: only consulted
+  // when opts.refine_imu_acc_weight > 0 -- see that field's doc comment.
+  // Cheap to pass unconditionally (the caller already has all five on hand
+  // for computeSplineImuResidual()/ImuProc::propagate()) rather than making
+  // them optional.
   bool refineWithLidar(const std::vector<SplineLidarObs>& obs,
-                       const SplineOptions& opts, bool log_debug_en = false);
+                       const SplineOptions& opts,
+                       const std::vector<ImuSample>& imu_raw,
+                       const V3D& bias_acc, const V3D& gravity,
+                       double var_acc_floor, const V3D& cov_bias_acc,
+                       bool log_debug_en = false);
+
+  // Diagnostic only (see SplineOptions::refine_imu_acc_solve_bias) -- the
+  // per-scan accelerometer bias correction the LAST refineWithLidar() pass
+  // solved for, or zero if solve_bias was off / never ran. NOT applied to
+  // state_->biasAcc() anywhere.
+  const V3D& lastDeltaBiasAcc() const { return last_delta_bias_acc_; }
+
+  // Bryce, 2026-09-18: diagnostic -- does the LiDAR-implied trajectory
+  // agree with the TAIL boundary target (state_->pos()/vel(), what the
+  // real fit is pinned to), or is there a persistent disagreement (which
+  // would point at the EKF's propagated boundary target itself being
+  // subtly wrong -- e.g. from accel/gyro bias mis-estimation -- rather
+  // than the curvature being an artifact of forcing exact equality)? One
+  // Gauss-Newton step against the SAME LiDAR data term refineWithLidar()
+  // uses, starting from the current (converged, both-ends-constrained)
+  // cp_p_, but with ONLY the head frozen (to the trusted, already-
+  // converged previous scan's end pose) -- reads where the tail naturally
+  // wants to land. Purely read-only: does not modify cp_p_ or any other
+  // spline state. Requires a boundary to exist (nFrozenCp() > 0) and
+  // enough LiDAR observations, same preconditions as refineWithLidar().
+  // imu_raw/bias_acc/gravity/var_acc_floor: same as refineWithLidar()'s own
+  // -- included here too (when opts.refine_imu_acc_weight > 0) so this is a
+  // fair "regularized + constrained" vs "regularized + free" comparison,
+  // not "regularized + constrained" vs "unregularized + free". Curvature
+  // (refine_curvature_weight) is included the same way.
+  bool diagnosticFreeTailFit(const std::vector<SplineLidarObs>& obs,
+                             const SplineOptions& opts,
+                             const std::vector<ImuSample>& imu_raw,
+                             const V3D& bias_acc, const V3D& gravity,
+                             double var_acc_floor,
+                             V3D& pos1_free, V3D& vel1_free, V3D& acc1_free) const;
 
   double rotationChordDeg() const;
 
@@ -616,6 +696,7 @@ public:
   double last_refine_step_ = 0.0;
   double refine_dcp_max_ = 0.0, refine_dcp_rms_ = 0.0;
   int    refine_rejects_ = 0, refine_applied_ = 0;
+  V3D    last_delta_bias_acc_ = V3D::Zero();
   int    n_cp_req_ = 0;
 
   FitFailCause fail_cause_ = FitFailCause::kNone;
@@ -635,12 +716,21 @@ public:
 struct SplineImuResidualStats
 {
   int    n = 0;
-  double cov_acc = 0.0;    // (m/s^2)^2, isotropic
-  double cov_gyr = 0.0;    // (rad/s)^2, isotropic
+  double cov_acc = 0.0;    // (m/s^2)^2, isotropic -- SPREAD of (pred-raw) around
+                           // its own mean, not the deviation from raw itself.
+  double cov_gyr = 0.0;    // (rad/s)^2, isotropic -- same caveat.
   double acf1_acc = 0.0;
   double acf1_gyr = 0.0;
-  double max_abs_acc = 0.0;
+  double max_abs_acc = 0.0;  // also mean-subtracted -- see cov_acc's caveat.
   double max_abs_gyr = 0.0;
+  // Mean-residual magnitude: ||mean_i(pred_i - raw_i)|| -- a genuine, honest
+  // "how far is the predicted acc/gyro from what the IMU actually measured"
+  // number, distinct from cov_acc/max_abs_acc above (both of which subtract
+  // this mean out first and therefore cannot see it). A large mean_abs_acc
+  // with small cov_acc means predicted and raw disagree consistently, not
+  // just noisily.
+  double mean_abs_acc = 0.0;
+  double mean_abs_gyr = 0.0;
   bool   valid() const { return n >= 8; }
 };
 
