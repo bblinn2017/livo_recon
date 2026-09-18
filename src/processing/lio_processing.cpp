@@ -1043,6 +1043,40 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
         pofs << "\n";
         pofs.flush();
       }
+
+      // TQ-34, Bryce 2026-09-18: item (3b)'s decile profile -- per RAW IMU
+      // sample within this scan's window (not per-scan), its own
+      // normalised in-scan time u=(t-t0)/(t1-t0), and the four quantities
+      // whose truth is zero at rest: accAt/omegaBodyAt/velAt norms and
+      // pos_drift (=posAt(t)-posAt(t0)). rot_drift (degrees, vs rotAt(t0))
+      // alongside. Binning into deciles happens downstream, in analysis --
+      // this just logs every sample at full resolution.
+      {
+        static PersistentLogStream log("tq34_samples.txt");
+        std::ofstream& sofs = log.stream();
+        const double t0 = spline_.t0(), t1 = spline_.t1();
+        const double span = std::max(1e-9, t1 - t0);
+        const V3D pos_t0 = spline_.posAt(t0);
+        const M3D rot_t0 = spline_.rotAt(t0);
+        for (const auto& samp : mg.imu_samples_raw) {
+          if (samp.t < t0 - 1e-9 || samp.t > t1 + 1e-9) continue;
+          const double u = (samp.t - t0) / span;
+          const double pos_drift = (spline_.posAt(samp.t) - pos_t0).norm();
+          const double rot_drift_deg = std::acos(std::clamp(
+              (M3D(rot_t0.transpose() * spline_.rotAt(samp.t)).trace() - 1.0) / 2.0,
+              -1.0, 1.0)) * (180.0 / M_PI);
+          sofs << std::setprecision(9)
+               << "scan_id=" << voxel_map_->frame_idx_ << " t_abs=" << (samp.t + data_queues_->start_time)
+               << " u=" << u
+               << " acc_at_norm=" << spline_.accAt(samp.t).norm()
+               << " omega_body_norm=" << spline_.omegaBodyAt(samp.t).norm()
+               << " vel_at_norm=" << spline_.velAt(samp.t).norm()
+               << " pos_drift=" << pos_drift
+               << " rot_drift_deg=" << rot_drift_deg
+               << "\n";
+        }
+        sofs.flush();
+      }
     }
 
     // BOTH CLAMPS ARE ALREADY EXACT: t0 was pinned before fit() ran and t1

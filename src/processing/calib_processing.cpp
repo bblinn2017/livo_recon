@@ -225,6 +225,15 @@ std::string CalibProc::estimateFromBuffer()
   if (opts_.use_calib_var)
     state_->setNoiseParams(var_acc, var_gyr);
 
+  // TQ-34, Bryce 2026-09-18: groups_seen/groups_dropped/stall_calls were
+  // only ever printed on the STALL path (above) -- a normal, successful
+  // calibration never surfaced them, even though the counters are right
+  // here. R_init's own roll/pitch weren't surfaced anywhere either
+  // (computeInitialRotation()'s result was consumed by setCalibResult()
+  // and then only visible indirectly through biasAcc()). Both added to
+  // this existing success log line rather than a new file -- this run's
+  // TQ-34 diagnostic reads them straight out of run.log.
+  const V3D r_init_rpy = R_init.eulerAngles(0, 1, 2) * (180.0 / M_PI);
   oss << "\nIMU calibration done with " << calib_imu_samples.size() << " samples."
       << "\n  acc bias:   " << state_->biasAcc().transpose()
       << "\n  gyro bias:  " << state_->biasGyr().transpose()
@@ -232,7 +241,11 @@ std::string CalibProc::estimateFromBuffer()
       << "\n  gyro noise: " << state_->varGyr().transpose()
       << "\n  acc floor:  " << state_->varAccFloor().transpose()
       << "\n  gyro floor: " << state_->varGyrFloor().transpose()
-      << "\n  gravity:    " << state_->gravity().transpose();
+      << "\n  gravity:    " << state_->gravity().transpose()
+      << "\n  groups_seen=" << calib_groups_seen_
+      << " groups_dropped_for_fewer_than_2_imu=" << calib_groups_short_imu_
+      << " stall_calls=" << calib_stall_calls_
+      << "\n  R_init_roll_deg=" << r_init_rpy(0) << " R_init_pitch_deg=" << r_init_rpy(1);
   const std::string done_msg = oss.str();
 
   data_queues_->setStartTime(calib_last_img_.t);
