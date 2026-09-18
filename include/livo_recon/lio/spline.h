@@ -52,36 +52,25 @@
 // all three through R^T Rdot gives the exact body rate
 //     omega_body = (A_2 A_3)^T w_1 + A_3^T w_2 + w_3,
 //     w_j = (dBtilde_j/du) * (1/delta) * d_j.
-// Its fit is Gauss-Newton with the EXACT Jacobian of that product (Sommer's
-// recurrence; see fitRotationCumulative()), initialised from the tangent fit.
+// CQ-39 item (2), 2026-09-17: this block used to describe a cumulative-
+// rotation-fit path (fitRotationCumulative(), a cp_R_ member) as the
+// shipped default. That path was REMOVED by 826619a "revert to linear
+// tangent splines" (2026-09-06, an ancestor of HEAD) -- there is no
+// fitRotationCumulative() definition anywhere in spline.cpp, and cp_phi_
+// (this class's actual rotation control-point storage, see line 37 above)
+// is the tangent parameterization. TANGENT IS WHAT SHIPS. Caught after a
+// claim built on "the cumulative path" turned out to describe dead code --
+// a comment describing a removed path as the default is exactly the kind
+// of defect that causes that.
 //
-// WHY CUMULATIVE IS THE DEFAULT, as of 2026-09-02 -- and this reverses the
-// previous default along with the reasoning that set it.
-//
-// The earlier default was "tangent", on a moving-axis synthetic fixture where
-// tangent came out ahead at large rotation.  That comparison was rigged, in a
-// way that took a second look to see: tangent is an EXACT linear least-squares
-// solve, while fitRotationCumulative() was refining by Gauss-Newton using the
-// ORDINARY basis b_j(u)*I as its Jacobian -- a first-order stand-in for the
-// true derivative of the cumulative product.  So a correct implementation of
-// the non-standard choice was being compared against a sloppy implementation
-// of the standard one, and the non-standard one was kept because it won.
-//
-// Two further facts, both from the same re-examination:
-//   - At the rotation a real scan contains they are EQUAL.  SP-4a measured max
-//     rot_chord_deg ~6 deg on eee_01; at 8.5 deg and n_cp=8 the two agree to
-//     three digits.  The gap only opens at rotations these bags do not reach.
-//   - The claim that cumulative was "fully converged -- rot_fit_iters 2, 4, 8,
-//     16 and 32 agree to five digits" was established at n_cp=16.  At the
-//     shipped n_cp=8 it fails above ~34 deg: most of the apparent tangent
-//     advantage at 128 and 166 deg was under-convergence of our own solver.
-//
-// So the default is now the form every published CT-LIO system uses, the
-// Jacobian is exact, and the burden of proof sits where it belongs: on the
-// departure.  "tangent" is retained as the ablation arm, and whether it is
-// worth keeping is now an empirical question on real sequences (queue item
-// SP-R), not a synthetic one.  No synthetic number appears in this decision
-// any more except as the reason to stop trusting synthetic numbers here.
+// The SP-4a measurement that motivated the (since-reverted) switch is still
+// true and still load-bearing, so it's kept here rather than deleted along
+// with the conclusion it was used for: at the rotation a real scan
+// contains, tangent and a Gauss-Newton cumulative fit are EQUAL. SP-4a
+// measured max rot_chord_deg ~6 deg on eee_01; at 8.5 deg and n_cp=8 the two
+// agree to three digits. The two approaches only diverge at rotations these
+// bags do not reach -- which is also why reverting to tangent cost nothing
+// measurable on real sequences.
 // ---------------------------------------------------------------------------
 //
 // PARAMETERISATION.  Uniform cubic (order 4) B-spline over the scan window
@@ -481,8 +470,14 @@ public:
   // do, the system was singular, or the step was not finite
   // (in which case the spline is left exactly as it was).
   // immediately afterwards -- see SplineOptions::lidar_refine_cp.
+  // log_debug_en: reuses LioProcOptions::log_debug_en (threaded by the
+  // caller, LioProc::refineSplineFromResiduals()) -- not a new config key.
+  // CQ-39 item (1): gates a per-pass proof log (it, max_step, g.norm(),
+  // H.trace(), step.norm()) that this inner loop's H/g/step are IDENTICAL
+  // every pass when lidar_refine_iters > 1, since `obs` never changes
+  // inside the loop -- see the inner loop's own comment.
   bool refineWithLidar(const std::vector<SplineLidarObs>& obs,
-                       const SplineOptions& opts);
+                       const SplineOptions& opts, bool log_debug_en = false);
 
   double rotationChordDeg() const;
 

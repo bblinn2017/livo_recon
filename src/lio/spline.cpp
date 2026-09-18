@@ -1,7 +1,9 @@
 #include "livo_recon/lio/spline.h"
+#include "livo_recon/utils/log/debug_log_dir.h"
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 
 namespace livo_recon
 {
@@ -568,7 +570,7 @@ void ScanSpline::moveTailClamp(const V3D& pos1, const M3D& rot1)
 }
 
 bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
-                                 const SplineOptions& opts)
+                                 const SplineOptions& opts, bool log_debug_en)
 {
   if (!valid_ || !opts.refineOn()) return false;
   if (static_cast<int>(obs.size()) < n_cp_) return false;
@@ -576,6 +578,19 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
   const int dim = 3 * n_cp_;
   const Eigen::Matrix<double, 3, Eigen::Dynamic> cp_prior = cp_p_;
 
+  // CQ-39: `obs` is a const input that never changes across passes of this
+  // loop, and neither does anything H/g are built from (o.r/o.normal/
+  // o.sigma2/o.t) -- only cp_p_ (the ACCUMULATED solution) changes, via the
+  // `cp_p_.col(i) += step` at the loop's end, and nothing re-reads cp_p_ to
+  // recompute o.r before the next pass. So every pass solves the IDENTICAL
+  // linear system and produces the IDENTICAL step -- lidar_refine_iters=k
+  // applies k times the SAME step, a step-magnitude multiplier, not k
+  // independent re-linearizations. The genuine re-linearization against a
+  // moved state happens one level up: LioProc::refineSplineFromResiduals()
+  // is called fresh from inside the IEKF loop, against that iteration's own
+  // freshly-rebuilt residual set. Verified via the per-pass log below --
+  // see refineSplineFromResiduals()'s own doc comment for how this is
+  // exercised.
   bool any = false;
   for (int it = 0; it < std::max(1, opts.lidar_refine_iters); ++it)
   {
@@ -641,6 +656,19 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
     for (int i = 0; i < n_cp_; ++i)
       max_step = std::max(max_step, step.segment<3>(3 * i).norm());
     last_refine_step_ = max_step;
+
+    // CQ-39 item (1): the proof. If the inner-loop comment above is right,
+    // it/max_step/g.norm()/H.trace()/step.norm() are IDENTICAL across every
+    // pass here whenever lidar_refine_iters > 1, since none of H/g/step's
+    // inputs (obs) change between passes.
+    if (log_debug_en) {
+      static PersistentLogStream log("spline_refine_iters_debug.txt");
+      std::ofstream& ofs = log.stream();
+      ofs << "it=" << it << " max_step=" << max_step
+          << " g_norm=" << g.norm() << " H_trace=" << H.trace()
+          << " step_norm=" << step.norm() << "\n";
+      ofs.flush();
+    }
 
     // The max_step VETO is gone (Bryce, 2026-09-06): with both endpoints
     // clamped an interior excursion has to return to two fixed points, so

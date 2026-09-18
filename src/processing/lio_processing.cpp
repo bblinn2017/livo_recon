@@ -778,7 +778,10 @@ bool LioProc::refineSplineFromResiduals(const MeasureGroup& mg)
     o.sigma2 = r.sigma_squared;
     lidar_obs_.push_back(o);
   }
-  return spline_.refineWithLidar(lidar_obs_, opts_.spline);
+  // CQ-39 item (1): threads this LioProc's existing log_debug_en straight
+  // through -- not a new config key -- to gate refineWithLidar()'s
+  // per-pass proof log.
+  return spline_.refineWithLidar(lidar_obs_, opts_.spline, opts_.log_debug_en);
 }
 
 void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
