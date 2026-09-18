@@ -17,100 +17,89 @@ namespace
 constexpr double REFINE_TIKHONOV  = 1e-2;   // relative to trace(H)/dim
 constexpr double REFINE_STEP_WARN = 0.10;   // metres
 
-// Boundary-freeze helpers (SplineOptions::boundary_anchor_mode).  Two
-// variants because the fit()/refineWithLidar()/fitRotationCumulative()
-// solves are two different KINDS of linear system:
+// CQ-41, Bryce 2026-09-18: the repeated-control-point freeze this comment
+// block used to describe forced acceleration and angular velocity to
+// exactly zero at both ends as an unintended side effect of the repeated-
+// triple identity -- "we shouldn't be able to fix those." Replaced
+// throughout this file by an explicit KKT-constrained least-squares
+// system: the boundary condition (position, optionally velocity, always
+// attitude -- never acceleration, angular velocity, or angular
+// acceleration, none of which has a code path anywhere below) is a LINEAR
+// EQUALITY solved jointly with the data term, not a value forced into the
+// unknown vector by decoupling rows.
 //
-//   "absolute" systems (fit()'s position/tangent-rotation/gyro/accel
-//   solves) solve DIRECTLY for the control point VALUES. Freezing here
-//   must (a) subtract the frozen columns' known contribution from the
-//   free rows' RHS -- otherwise the free solve silently assumes the
-//   frozen columns are still 0 -- then (b) decouple the frozen rows/cols
-//   and pin their RHS to the target, so solving gives exactly
-//   X[i]=target for i<n_frozen and the mathematically correct
-//   constrained value for i>=n_frozen.
+//   [ AtA   C^T ] [ X ]   [ Atb ]
+//   [  C     0  ] [ L ] = [  D  ]
 //
-//   "incremental" systems (refineWithLidar()'s Gauss-Newton step,
-//   fitRotationCumulative()'s Gauss-Newton step) solve for a STEP/
-//   increment applied on top of the CURRENT (already-frozen) values. The
-//   desired step for a frozen index is exactly zero, and forcing that
-//   makes the coupling term to the free rows vanish on its own -- no RHS
-//   adjustment needed, just decouple and zero.
-//
-// Both assume `target`/frozen rows are indices [0, n_frozen) of a 3-wide
-// (position/tangent-phi) or 3x3-block (LiDAR H, cumulative-rotation H)
-// system; n_frozen is 0, 1 or 3 (SplineOptions::nFrozenCp()).
+// C is k x n_cp (k constraint rows, shared across the 3 spatial dims, same
+// "one scalar system reused via a 3-wide RHS" pattern AtA/Atb_p/Atb_r
+// already use), D is k x 3 (the constraint targets). The matrix is
+// symmetric INDEFINITE by construction (the zero block guarantees negative
+// pivots) -- see fit()'s own comment for why the pivot-guard diagnostic
+// must NOT be read off this matrix.
 
-// A is n_cp x n_cp (one SHARED scalar matrix reused for all 3 spatial
-// dims -- fit()'s own AtA/Atb_p / Atb_r pattern), b is n_cp x 3.
-void freezeAbsoluteScalarSystem(Eigen::MatrixXd& A, Eigen::MatrixXd& b,
-                                int n_frozen, const V3D& target)
+// Builds the k x n_cp constraint-row matrix C and k x 3 target D for one
+// channel (position or rotation) of the KKT system above. include_rate
+// adds a velocity/rate row at each end (position channel only, when
+// SplineOptions::end_constraint_velocity is on) -- head_rate/tail_rate are
+// ignored when include_rate is false. Basis values match basisU(0,...)/
+// basisU(1,...) exactly (b=[1/6,4/6,1/6,0], db=[-1/2,0,1/2,0] at u=0; the
+// mirror image at u=1) -- see item (2)'s own worked-out rows.
+void buildEndConstraints(int n_cp, bool include_rate,
+                         const V3D& head_target, const V3D& tail_target,
+                         const V3D& head_rate, const V3D& tail_rate, double delta,
+                         Eigen::MatrixXd& C, Eigen::MatrixXd& D)
 {
-  if (n_frozen <= 0) return;
-  const int n = static_cast<int>(A.rows());
-  for (int i = n_frozen; i < n; ++i)
-    for (int j = 0; j < n_frozen; ++j)
-      b.row(i) -= A(i, j) * target.transpose();
-  for (int i = 0; i < n_frozen; ++i)
-  {
-    for (int j = 0; j < n; ++j) { A(i, j) = 0.0; A(j, i) = 0.0; }
-    A(i, i) = 1.0;
-    b.row(i) = target.transpose();
+  const int k_end = include_rate ? 2 : 1;
+  const int k = 2 * k_end;
+  C = Eigen::MatrixXd::Zero(k, n_cp);
+  D = Eigen::MatrixXd::Zero(k, 3);
+
+  C(0, 0) = 1.0 / 6.0; C(0, 1) = 4.0 / 6.0; C(0, 2) = 1.0 / 6.0;
+  D.row(0) = head_target.transpose();
+  if (include_rate) {
+    C(1, 0) = -0.5; C(1, 2) = 0.5;
+    D.row(1) = (head_rate * delta).transpose();   // d/dt = (db.cp)/delta
+  }
+
+  const int t0 = n_cp - 3;
+  C(k_end, t0) = 1.0 / 6.0; C(k_end, t0 + 1) = 4.0 / 6.0; C(k_end, t0 + 2) = 1.0 / 6.0;
+  D.row(k_end) = tail_target.transpose();
+  if (include_rate) {
+    C(k_end + 1, t0) = -0.5; C(k_end + 1, t0 + 2) = 0.5;
+    D.row(k_end + 1) = (tail_rate * delta).transpose();
   }
 }
 
-// Tail variants of the two helpers above: same construction, indices
-// [n_cp - n_frozen, n_cp) instead of [0, n_frozen).  The uniform cubic basis
-// at u=1 is [0, 1/6, 4/6, 1/6] and sums to 1, so freezing the LAST three
-// control points to a repeated value forces spline(t1) to that value exactly,
-// mirroring the clamped-B-spline identity at t0.
-void freezeAbsoluteScalarSystemTail(Eigen::MatrixXd& A, Eigen::MatrixXd& b,
-                                    int n_frozen, const V3D& target)
+// Builds and factors the (n_cp+k) x (n_cp+k) KKT matrix from AtA/Atb (the
+// data term, shared across channels before this call) and C/D (one
+// channel's constraint rows), solves for X (n_cp x 3, the control points --
+// the Lagrange multipliers are discarded, this system is never queried for
+// them), and leaves the factorization in ldlt_out for reuse (CQ-41 item 3c:
+// "the KKT factorisation depends only on AtA and C, never on the RHS, so it
+// can be REUSED" -- moveTailClamp()'s own constraint-increment solve is
+// exactly that reuse, with a different, zero-data-term RHS).
+bool solveKkt(const Eigen::MatrixXd& AtA, const Eigen::MatrixXd& Atb,
+             const Eigen::MatrixXd& C, const Eigen::MatrixXd& D,
+             Eigen::LDLT<Eigen::MatrixXd>& ldlt_out, Eigen::MatrixXd& X)
 {
-  if (n_frozen <= 0) return;
-  const int n = static_cast<int>(A.rows());
-  const int first = n - n_frozen;
-  if (first <= 0) return;
-  for (int i = 0; i < first; ++i)
-    for (int j = first; j < n; ++j)
-      b.row(i) -= A(i, j) * target.transpose();
-  for (int i = first; i < n; ++i)
-  {
-    for (int j = 0; j < n; ++j) { A(i, j) = 0.0; A(j, i) = 0.0; }
-    A(i, i) = 1.0;
-    b.row(i) = target.transpose();
-  }
-}
+  const int n = static_cast<int>(AtA.rows());
+  const int k = static_cast<int>(C.rows());
+  Eigen::MatrixXd KKT = Eigen::MatrixXd::Zero(n + k, n + k);
+  KKT.topLeftCorner(n, n) = AtA;
+  KKT.topRightCorner(n, k) = C.transpose();
+  KKT.bottomLeftCorner(k, n) = C;
 
-void freezeIncrementalBlockSystemTail(Eigen::MatrixXd& H, Eigen::VectorXd& g,
-                                      int n_cp, int n_frozen)
-{
-  if (n_frozen <= 0) return;
-  const int dim = static_cast<int>(H.rows());
-  const int first = 3 * (n_cp - n_frozen);
-  if (first < 0) return;
-  for (int i = first; i < dim; ++i)
-  {
-    for (int j = 0; j < dim; ++j) { H(i, j) = 0.0; H(j, i) = 0.0; }
-    H(i, i) = 1.0;
-    g(i) = 0.0;
-  }
-}
+  Eigen::MatrixXd rhs(n + k, 3);
+  rhs.topRows(n) = Atb;
+  rhs.bottomRows(k) = D;
 
-// H is 3*n_cp x 3*n_cp (full 3x3 coupling blocks -- refineWithLidar()'s/
-// fitRotationCumulative()'s own pattern), g is 3*n_cp. Increment/step
-// variant: forces the solved step to 0 for the frozen blocks.
-void freezeIncrementalBlockSystem(Eigen::MatrixXd& H, Eigen::VectorXd& g, int n_frozen)
-{
-  if (n_frozen <= 0) return;
-  const int dim = static_cast<int>(H.rows());
-  const int frozen_dim = 3 * n_frozen;
-  for (int i = 0; i < frozen_dim; ++i)
-  {
-    for (int j = 0; j < dim; ++j) { H(i, j) = 0.0; H(j, i) = 0.0; }
-    H(i, i) = 1.0;
-    g(i) = 0.0;
-  }
+  ldlt_out.compute(KKT);
+  if (ldlt_out.info() != Eigen::Success) return false;
+  const Eigen::MatrixXd sol = ldlt_out.solve(rhs);
+  if (!sol.allFinite()) return false;
+  X = sol.topRows(n);
+  return true;
 }
 
 // Uniform cubic B-spline basis on u in [0,1) and its first two derivatives
@@ -183,9 +172,8 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   pivot_guard_ = false;
   last_max_abs_cp_phi_ = 0.0;
   // CQ-24 item (1): -1 is the "never reached the LDLT solve this call"
-  // sentinel -- a real pivot is always >= 0 (AtA_p/AtA_r are PSD by
-  // construction), so -1 cannot be confused with a genuine (possibly
-  // exactly-zero) pivot.
+  // sentinel -- a real pivot is always >= 0 (AtA is PSD by construction),
+  // so -1 cannot be confused with a genuine (possibly exactly-zero) pivot.
   dmin_p_ = dmax_p_ = dmin_r_ = dmax_r_ = -1.0;
   // NOTE: the refinement counters are NOT reset here.  With
   // spline.reintegrate_each_iteration on, fit() runs once per IEKF iteration,
@@ -254,39 +242,39 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   }
   if (static_cast<int>(rows.size()) < n_cp_ + 1) { fail_cause_ = FitFailCause::kUnderdetermined; return false; }
 
-  // Boundary freeze, BOTH ENDS.  Position and tangent-rotation need
-  // different frozen targets, so each gets its own copy of AtA.  Three
-  // control points at each end is the clamped-B-spline identity in both
-  // directions: the uniform cubic basis is [1/6,4/6,1/6,0] at u=0 and
-  // [0,1/6,4/6,1/6] at u=1, each summing to 1.
+  // CQ-41: boundary condition, BOTH ENDS, as KKT linear-equality constraint
+  // rows -- see the anonymous-namespace comment above for the full
+  // derivation. Position and rotation(-attitude) each get their own
+  // constraint set (buildEndConstraints()) but SHARE the same AtA/Atb data
+  // term, unlike the old freeze which needed a separately-modified AtA per
+  // channel.
   fit_reg_frac_ = 0.0;
   const V3D frozen_phi  = (n_frozen_cp_ > 0) ? V3D(Log(R_anchor_T * frozen_rot_))  : V3D::Zero();
   const V3D frozen_phi1 = (n_frozen_cp_ > 0) ? V3D(Log(R_anchor_T * frozen_rot1_)) : V3D::Zero();
-  Eigen::MatrixXd AtA_p = AtA, AtA_r = AtA;
-  freezeAbsoluteScalarSystem(AtA_p, Atb_p, n_frozen_cp_, frozen_pos_);
-  freezeAbsoluteScalarSystem(AtA_r, Atb_r, n_frozen_cp_, frozen_phi);
-  freezeAbsoluteScalarSystemTail(AtA_p, Atb_p, n_frozen_cp_, frozen_pos1_);
-  freezeAbsoluteScalarSystemTail(AtA_r, Atb_r, n_frozen_cp_, frozen_phi1);
 
-  Eigen::LDLT<Eigen::MatrixXd> ldlt_p(AtA_p), ldlt_r(AtA_r);
+  // CQ-41 item (3a): the pivot-guard diagnostic is read off AtA ALONE, via
+  // its own LDLT -- NOT off the KKT matrix below, which is symmetric
+  // INDEFINITE by construction (its zero block guarantees negative pivots),
+  // so dmin_*/dmax_* from it would be meaningless and PIVOT_MIN_FLOOR would
+  // misfire the moment it's ever above its shipped no-op value. AtA no
+  // longer differs between the position and rotation channels (nothing
+  // modifies it before this point any more, unlike the old per-channel-
+  // frozen AtA_p/AtA_r) -- dmin_p_==dmin_r_ and dmax_p_==dmax_r_ are now the
+  // same number by construction. Both names are kept (spline_q.csv schema
+  // continuity), logging the identical value twice rather than collapsing
+  // to one column.
+  Eigen::LDLT<Eigen::MatrixXd> ldlt_diag(AtA);
   // CQ-24 item (1): logged BEFORE anything is refused, on every solve
-  // regardless of info() -- info() reports allocation/input validity, not
-  // rank (CQ-23's own finding: it reads Success on a rank-deficient
-  // matrix). This is the number a future threshold gets decided from, not
-  // the other way around.
-  dmin_p_ = ldlt_p.vectorD().minCoeff();
-  dmax_p_ = ldlt_p.vectorD().maxCoeff();
-  dmin_r_ = ldlt_r.vectorD().minCoeff();
-  dmax_r_ = ldlt_r.vectorD().maxCoeff();
-  if (ldlt_p.info() != Eigen::Success || ldlt_r.info() != Eigen::Success)
+  // regardless of info().
+  dmin_p_ = dmin_r_ = ldlt_diag.vectorD().minCoeff();
+  dmax_p_ = dmax_r_ = ldlt_diag.vectorD().maxCoeff();
+  if (ldlt_diag.info() != Eigen::Success)
   { fail_cause_ = FitFailCause::kSolveFailed; return false; }
 
   // CQ-24 item (3): info() above cannot catch a rank-deficient-but-
   // "successful" solve (CQ-23's own finding). Absolute floor, not a
-  // ratio -- item (2) measured both and the floor won (see
-  // SplineOptions::PIVOT_MIN_FLOOR's own comment for the data). Checked
-  // BEFORE solving for Xp/Xr: a near-singular system's "solution" is not
-  // worth computing at all, let alone using.
+  // ratio. Checked BEFORE the KKT solve below: a near-singular data term is
+  // not worth constraining and solving at all, let alone using.
   if (std::min(dmin_p_, dmin_r_) < SplineOptions::PIVOT_MIN_FLOOR)
   {
     pivot_guard_ = true;
@@ -294,10 +282,54 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
     return false;
   }
 
-  const Eigen::MatrixXd Xp = ldlt_p.solve(Atb_p);
-  const Eigen::MatrixXd Xr = ldlt_r.solve(Atb_r);
-  if (!Xp.allFinite() || !Xr.allFinite())
+  // k=0 (no rows) whenever n_frozen_cp_<=0 -- the first spline scan of a
+  // run has no previous boundary to constrain to, so it fits fully
+  // unconstrained OLS (CQ-41 item 4's own instruction: do not invent a head
+  // velocity, or any boundary, for it).
+  //
+  // CQ-41 item (3b), post-landing investigation, 2026-09-18: accAt(t0)/
+  // accAt(t1) are now large in practice (median ~2000 m/s^2, eee_01,
+  // control_point_hz=100) -- item 3b's own "report a worse number, do not
+  // treat it as a failure" prediction, confirmed and explained rather than
+  // just reproduced: (a) accAt scales curvature by 1/delta^2 (~1e4 at
+  // delta~=0.01s), (b) the boundary is genuinely data-sparse (mg.poses is
+  // IMU-SAMPLE-rate, not LiDAR-point-rate -- ~39 samples/scan here, a
+  // handful of which fall near either boundary), and (c) DOUBLING
+  // control_point_hz to 200 made it ~4.4x WORSE, not better (matching the
+  // 1/delta^2 scaling almost exactly, with the same fixed IMU-sample budget
+  // now spread across nearly twice as many control points) -- ruling out
+  // "too coarse a spline" as the explanation. velocity:false (this
+  // constraint fully off) does not shrink it either -- vel_err at the
+  // boundary is then itself large (1-28 m/s) instead. Read together: this
+  // is high-order-derivative sensitivity to IMU-propagated position noise
+  // at a locally sparse boundary, not a defect in the constraint math
+  // (verified separately: pos_err/vel_err at the CONSTRAINED boundary are
+  // ~1e-14, i.e. the KKT solve meets exactly what it's asked to meet).
+  const bool have_boundary = n_frozen_cp_ > 0;
+  Eigen::MatrixXd C_p, D_p, C_r, D_r;
+  if (have_boundary) {
+    buildEndConstraints(n_cp_, opts.end_constraint_velocity,
+                        frozen_pos_, frozen_pos1_, frozen_vel_, frozen_vel1_,
+                        delta_, C_p, D_p);
+    buildEndConstraints(n_cp_, /*include_rate=*/false,
+                        frozen_phi, frozen_phi1, V3D::Zero(), V3D::Zero(),
+                        delta_, C_r, D_r);
+  } else {
+    C_p = Eigen::MatrixXd(0, n_cp_); D_p = Eigen::MatrixXd(0, 3);
+    C_r = Eigen::MatrixXd(0, n_cp_); D_r = Eigen::MatrixXd(0, 3);
+  }
+
+  Eigen::MatrixXd Xp, Xr;
+  // kkt_ldlt_p_/kkt_ldlt_r_/kkt_k_p_/kkt_k_r_ are class members -- cached
+  // here for moveTailClamp()'s later constraint-increment reuse (item 3c).
+  kkt_k_p_ = static_cast<int>(C_p.rows());
+  kkt_k_r_ = static_cast<int>(C_r.rows());
+  const bool ok_p = solveKkt(AtA, Atb_p, C_p, D_p, kkt_ldlt_p_, Xp);
+  const bool ok_r = solveKkt(AtA, Atb_r, C_r, D_r, kkt_ldlt_r_, Xr);
+  if (!ok_p || !ok_r)
   { fail_cause_ = FitFailCause::kNonFinite; return false; }
+  kkt_C_p_ = C_p;   // cached raw (unfactored) for refineWithLidar()'s
+                     // block-expanded null-space constraint (item 6)
 
   cp_p_.resize(3, n_cp_);
   cp_phi_.resize(3, n_cp_);
@@ -511,62 +543,68 @@ V3D ScanSpline::accAt(double t) const
   for (int i = 0; i < 4; ++i) r += ddb[i] * cp_p_.col(s + i);
   return r * (inv_delta_ * inv_delta_);
 }
-// Move the TAIL clamp to a new scan-end pose without re-fitting, so any
-// refinement already applied to the interior survives.
+// CQ-41 item (3c): move the TAIL constraint to a new scan-end pose without
+// re-fitting, so any refinement already applied to the interior survives.
+// REPLACES the old time-proportional ramp (kept only at HEAD~1 -- see
+// CQ-41's own filing) with a constraint-INCREMENT solve reusing fit()'s own
+// KKT factorization: "The KKT factorisation depends only on AtA and C,
+// never on the RHS, so it can be REUSED."
 //
-// The correction is distributed PROPORTIONALLY TO ELAPSED TIME across the
-// FREE interior only: zero at the head clamp, full at the tail, held flat
-// across the six clamped control points at each end. Holding a clamped
-// endpoint of a uniform cubic B-spline exactly requires its THREE control
-// points to move TOGETHER (the basis row at u=0 is [1/6,4/6,1/6,0] and at
-// u=1 is [0,1/6,4/6,1/6] -- any one of the three moving alone perturbs that
-// endpoint). Six control points are therefore spent on the two clamps
-// (cp_0..2 at the head, cp_{n_cp-3}..{n_cp-1} at the tail), so the ramp must
-// run across the n_cp - 6 FREE ones, cp_2 .. cp_{n_cp-3}: w = 0 through
-// cp_2 (inclusive -- it belongs to the head clamp) and w = 1 from
-// cp_{n_cp-3} (inclusive -- it belongs to the tail clamp), giving
-// span = n_cp - 5 and w(i) = clamp((i - 2) / span, 0, 1).
+//   [ AtA   C^T ] [ dX ]   [  0  ]
+//   [  C     0  ] [ dL ] = [ dD  ]
 //
-// BUG FOUND+FIXED (CQ-22, 2026-09-14): the ramp previously used
-// span = n_cp - 3, w(i) = clamp((i - 1) / span, 0, 1) -- one control point
-// short of the six the two clamps actually spend. That reached w = 1 at
-// only the LAST TWO control points (short at the tail) and was NONZERO
-// already at cp_2 (the head's own clamp was allowed to move). Both errors
-// are exactly 1 / (6 * (n_cp - 3)) of the applied correction, identical at
-// both ends, for every n_cp -- confirmed against boundary_dpos/
-// boundary_drot_deg on eee_01 (see CQ-22's filed identity check).
-//
-// *** THE DISTRIBUTION IS A MODELLING CHOICE AND IT IS UNVALIDATED. ***
-// Pinning both ends over-determines the trajectory relative to preserving
-// the IMU's own relative increments -- the difference IS the drift the
-// filter corrected -- so something must absorb it, and no measurement in
-// this project says what.  Time-proportional is the same random-walk
-// assumption Q itself encodes: process noise accumulates with time, so a
-// control point halfway through the FREE interior has accumulated half the
-// drift.  It is the `w` line below and nothing else depends on the choice.
-void ScanSpline::moveTailClamp(const V3D& pos1, const M3D& rot1)
+// dD is nonzero ONLY at the tail constraint rows (the head target hasn't
+// moved), so this is the minimum-AtA-norm change to the control points that
+// achieves the requested tail move: zero at the head by construction,
+// distributed through the interior according to the fit's own metric
+// (rather than a hand-chosen time ramp), and it disturbs applied
+// refinement as little as that metric allows.
+void ScanSpline::moveTailClamp(const V3D& pos1, const M3D& rot1, const V3D& vel1)
 {
   if (!valid_ || n_cp_ <= 0) return;
+  // No boundary this scan (kkt_k_p_==0, k=0 -- see fit()'s own comment):
+  // nothing was constrained, so there is no constraint to move. Still
+  // record the new targets so state stays consistent if a later scan finds
+  // a boundary again.
+  if (kkt_k_p_ <= 0)
+  { frozen_pos1_ = pos1; frozen_rot1_ = rot1; frozen_vel1_ = vel1; return; }
 
   const V3D dp = pos1 - frozen_pos1_;
+  const V3D dv = vel1 - frozen_vel1_;
   // In the tangent chart the clamp target is phi1 = Log(R_a^T Y), so the
   // move is a plain VECTOR DIFFERENCE in that chart -- not Log(Y^T Y').
-  // Both the ramp and the clamp are therefore exactly linear here, which is
-  // the same property that makes the fit linear.
   const M3D R_aT = R_anchor_.transpose();
   const V3D dphi = V3D(Log(M3D(R_aT * rot1))) - V3D(Log(M3D(R_aT * frozen_rot1_)));
-  if (!dp.allFinite() || !dphi.allFinite()) return;
+  if (!dp.allFinite() || !dphi.allFinite() || !dv.allFinite()) return;
 
-  const double span = std::max(1, n_cp_ - 5);
+  // k_end = rows PER END = kkt_k_p_/2 (2 if end_constraint_velocity was on
+  // for the fit() this scan's cache came from, else 1) -- rotation's own
+  // k_end is always 1 (attitude only, no rate row, either setting).
+  const int k_end_p = kkt_k_p_ / 2;
+  Eigen::MatrixXd D_p = Eigen::MatrixXd::Zero(kkt_k_p_, 3);
+  D_p.row(k_end_p) = dp.transpose();
+  if (k_end_p == 2) D_p.row(k_end_p + 1) = (dv * delta_).transpose();
+  Eigen::MatrixXd D_r = Eigen::MatrixXd::Zero(kkt_k_r_, 3);
+  D_r.row(1) = dphi.transpose();
+
+  Eigen::MatrixXd rhs_p(n_cp_ + kkt_k_p_, 3); rhs_p.setZero();
+  rhs_p.bottomRows(kkt_k_p_) = D_p;
+  Eigen::MatrixXd rhs_r(n_cp_ + kkt_k_r_, 3); rhs_r.setZero();
+  rhs_r.bottomRows(kkt_k_r_) = D_r;
+
+  const Eigen::MatrixXd dXp = kkt_ldlt_p_.solve(rhs_p);
+  const Eigen::MatrixXd dXr = kkt_ldlt_r_.solve(rhs_r);
+  if (!dXp.allFinite() || !dXr.allFinite()) return;
+
   for (int i = 0; i < n_cp_; ++i)
   {
-    const double w = std::clamp((static_cast<double>(i) - 2.0) / span, 0.0, 1.0);
-    cp_p_.col(i)   += w * dp;
-    cp_phi_.col(i) += w * dphi;
+    cp_p_.col(i)   += dXp.row(i).transpose();
+    cp_phi_.col(i) += dXr.row(i).transpose();
   }
 
   frozen_pos1_ = pos1;
   frozen_rot1_ = rot1;
+  frozen_vel1_ = vel1;
 }
 
 bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
@@ -636,21 +674,47 @@ bool ScanSpline::refineWithLidar(const std::vector<SplineLidarObs>& obs,
     const double scale = std::max(1e-12, H.trace() / static_cast<double>(dim));
     for (int i = 0; i < dim; ++i) H(i, i) += REFINE_TIKHONOV * scale;
 
-    // Boundary freeze: force the solved step to 0 for i<n_frozen_cp_ (cp_p_
-    // was already exactly frozen_pos_ from fit() -- this keeps it there).
-    // Both clamps: the refinement owns the interior SHAPE only.  The ESIKF
-    // owns both endpoints and the solved step is forced to zero on them, so
-    // the two estimators cannot fight over the same quantity -- structurally,
-    // rather than by being overwritten afterwards.
-    freezeIncrementalBlockSystem(H, g, n_frozen_cp_);
-    freezeIncrementalBlockSystemTail(H, g, n_cp_, n_frozen_cp_);
+    // CQ-41 item (6): the refinement step must respect the SAME position
+    // constraints fit()/moveTailClamp() do, not a separate freeze -- a
+    // NULL-SPACE solve (C.delta = 0) rather than forcing the step to zero
+    // on the boundary control points. The refinement owns the interior
+    // SHAPE subject to the endpoint constraints; it no longer "cannot
+    // reach" the boundary by having those rows decoupled to identity, it is
+    // constrained not to violate them -- structurally the same division of
+    // labour the old freeze gave, expressed as an equality instead of a
+    // fixed value.
+    //
+    //   [ H + tikhonov   Cb^T ] [ d ]   [ -g ]
+    //   [ Cb             0    ] [ l ] = [  0 ]
+    //
+    // Cb = kkt_C_p_ (fit()'s own cached, unfactored position-channel
+    // constraint rows) expanded to block form: each scalar entry becomes a
+    // 3x3 diagonal block (one row -> 3 rows, one per spatial dim) so it
+    // acts on H/g's interleaved [x,y,z] per-control-point block layout.
+    // k=0 (kkt_k_p_==0, no boundary this scan) degenerates this to plain
+    // unconstrained Gauss-Newton, matching fit()'s own k=0 case.
+    const int k = 3 * kkt_k_p_;
+    Eigen::MatrixXd Cb = Eigen::MatrixXd::Zero(k, dim);
+    for (int ci = 0; ci < kkt_k_p_; ++ci)
+      for (int cj = 0; cj < n_cp_; ++cj)
+        if (kkt_C_p_(ci, cj) != 0.0)
+          Cb.block<3, 3>(3 * ci, 3 * cj) = kkt_C_p_(ci, cj) * M3D::Identity();
 
-    Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
+    Eigen::MatrixXd KKT = Eigen::MatrixXd::Zero(dim + k, dim + k);
+    KKT.topLeftCorner(dim, dim) = H;
+    KKT.topRightCorner(dim, k) = Cb.transpose();
+    KKT.bottomLeftCorner(k, dim) = Cb;
+    Eigen::VectorXd rhs(dim + k);
+    rhs.setZero();
+    rhs.head(dim) = -g;
+
+    Eigen::LDLT<Eigen::MatrixXd> ldlt(KKT);
     if (ldlt.info() != Eigen::Success)
     { ++refine_rejects_; accumulateRefineDisplacement(cp_prior); return any; }
-    const Eigen::VectorXd step = -ldlt.solve(g);
-    if (!step.allFinite())
+    const Eigen::VectorXd sol = ldlt.solve(rhs);
+    if (!sol.allFinite())
     { ++refine_rejects_; accumulateRefineDisplacement(cp_prior); return any; }
+    const Eigen::VectorXd step = sol.head(dim);
 
     double max_step = 0.0;
     for (int i = 0; i < n_cp_; ++i)

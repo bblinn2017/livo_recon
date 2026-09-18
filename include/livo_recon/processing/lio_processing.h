@@ -496,6 +496,9 @@ private:
   bool  prev_scan_end_valid_ = false;
   V3D   prev_scan_end_pos_   = V3D::Zero();
   M3D   prev_scan_end_rot_   = M3D::Identity();
+  // CQ-41 item (4): the head velocity constraint -- populated alongside
+  // prev_scan_end_pos_/prev_scan_end_rot_, from the same CONVERGED state.
+  V3D   prev_scan_end_vel_   = V3D::Zero();
   // This scan's own boundary_dpos/drot (vs the PREVIOUS scan's end),
   // -1 if unavailable (first spline scan, or previous scan's spline
   // failed) -- read by debugLogFrameStats() the same frame it's computed.

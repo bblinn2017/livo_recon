@@ -153,6 +153,14 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
                   opts_.spline.lidar_refine_iters, 1);
 
   cfg.nested<bool>(sp, "spline/mode", "spline/log_en", opts_.spline.log_en, false);
+  // CQ-41, Bryce 2026-09-18: DEFAULT true, authorised by Bryce in the
+  // message that requested this item -- see SplineOptions::
+  // end_constraint_velocity's own doc comment. Rule 26 item 1 (a numerics
+  // default change) normally NEEDS BRYCE; the flag is set here BY Bryce
+  // naming the default he wants, so no further authorization is needed for
+  // this one default -- do not extend that to any other default.
+  cfg.nested<bool>(sp, "spline/mode", "spline/end_constraint/velocity",
+                   opts_.spline.end_constraint_velocity, true);
   // Analysis-only dense trajectory dump -- see SplineOptions::traj_log_mode.
   cfg.nestedMode(sp, "spline/mode", "spline/trajectory_log/mode",
                  opts_.spline.traj_log_mode, "off", { "off", "dense" });
@@ -634,8 +642,8 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
     // freeze to, so it fits unconstrained (n_frozen = 0).
     spline_.setFrozenBoundary(
         prev_scan_end_valid_ ? SplineOptions::N_FROZEN_CP : 0,
-        prev_scan_end_pos_, prev_scan_end_rot_,
-        state_->pos(), state_->rot());
+        prev_scan_end_pos_, prev_scan_end_rot_, prev_scan_end_vel_,
+        state_->pos(), state_->rot(), state_->vel());
     spline_ok_ = spline_.fit(mg.poses, mg.poses.front().t, mg.image.t, opts_.spline);
     if (!spline_ok_)
     {
@@ -720,10 +728,11 @@ bool LioProc::redeskewFromSpline(MeasureGroup& mg)
   // at t0 and the point at t1 alike -- but the correction is drift
   // accumulated across THIS scan, and at t0 the state was already corrected
   // by the previous scan's own update, so it moved a point that was already
-  // right.  moveTailClamp() distributes it by elapsed time instead: zero at
-  // the head clamp, full at the tail, and any refinement already applied to
-  // the interior survives because the ramp is additive on top of it.
-  spline_.moveTailClamp(state_->pos(), state_->rot());
+  // right.  CQ-41: moveTailClamp() now distributes it via a constraint-
+  // increment KKT solve (see spline.cpp), not the old time-proportional
+  // ramp -- zero at the head by construction, and any refinement already
+  // applied to the interior survives as far as the fit's own metric allows.
+  spline_.moveTailClamp(state_->pos(), state_->rot(), state_->vel());
 
   // How far the re-deskew actually moved the points it re-placed.  This is
   // the only quantity that says whether the per-iteration mechanism is doing
@@ -801,6 +810,39 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
     // first point in the frame where the residual reflects that move.
     spline_.updateFitResiduals(mg.poses);
 
+    // CQ-41 items 5a/5c: the endpoint-derivative proof. Debug-gated (same
+    // convention as CQ-39's per-pass log), one line per scan, evaluated on
+    // the FINAL converged spline (after this frame's last moveTailClamp()
+    // -- see the comment immediately below for why that's already true
+    // here). HEAD~1 must report exactly 0 for all four; HEAD (either new
+    // mode) must not.
+    if (opts_.log_debug_en) {
+      static PersistentLogStream log("spline_endpoint_debug.txt");
+      std::ofstream& ofs = log.stream();
+      // Diagnostic addendum (not in CQ-39/41's original DELIVERS list):
+      // how well the constraint the KKT solve was actually asked to meet
+      // IS met, alongside the (unconstrained, and therefore far more
+      // sensitive to boundary data sparsity) acceleration reading -- lets
+      // a large acc_t0/acc_t1 be told apart from "the constraint itself
+      // isn't holding" (a real bug) vs. "the constraint holds fine, the
+      // curvature implied by 13 control points over a ~0.1s window with a
+      // 1/delta^2 ~ 1e4 amplification is just large" (expected, item 3b).
+      const V3D vel_err0 = spline_.velAt(spline_.t0()) - prev_scan_end_vel_;
+      const V3D vel_err1 = spline_.velAt(spline_.t1()) - state_->vel();
+      const V3D pos_err0 = spline_.posAt(spline_.t0()) - prev_scan_end_pos_;
+      const V3D pos_err1 = spline_.posAt(spline_.t1()) - state_->pos();
+      ofs << "acc_t0=" << spline_.accAt(spline_.t0()).norm()
+          << " acc_t1=" << spline_.accAt(spline_.t1()).norm()
+          << " omega_t0=" << spline_.omegaBodyAt(spline_.t0()).norm()
+          << " omega_t1=" << spline_.omegaBodyAt(spline_.t1()).norm()
+          << " vel_err0=" << vel_err0.norm() << " vel_err1=" << vel_err1.norm()
+          << " pos_err0=" << pos_err0.norm() << " pos_err1=" << pos_err1.norm()
+          << " n_cp=" << spline_.nControlPoints()
+          << " delta=" << (spline_.t1() - spline_.t0()) / std::max(1, spline_.nControlPoints() - 3)
+          << "\n";
+      ofs.flush();
+    }
+
     // BOTH CLAMPS ARE ALREADY EXACT: t0 was pinned before fit() ran and t1
     // was carried in by moveTailClamp() on the last iteration, so there is
     // nothing to re-anchor here. state_ is NOT written back from the spline's own t1: state_
@@ -838,6 +880,7 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
     // the spline is not the source of truth for state_.
     prev_scan_end_pos_ = state_->pos();
     prev_scan_end_rot_ = state_->rot();
+    prev_scan_end_vel_ = state_->vel();
     prev_scan_end_valid_ = true;
 
     if (!mg.imu_samples_raw.empty())

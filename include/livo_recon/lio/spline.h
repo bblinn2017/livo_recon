@@ -310,11 +310,32 @@ struct SplineOptions
 
   bool log_en = false;
 
-  // Both endpoints are clamped unconditionally -- see `mode` above.  Three
-  // control points at each end, which is the clamped-B-spline identity, and
-  // the count is not configurable: 1 ("single_cp") did NOT force the endpoint
-  // exactly and existed only as the weaker ablation arm.
+  // Both endpoints are constrained unconditionally -- see `mode` above.
+  // N_FROZEN_CP names how many control points setFrozenBoundary()'s caller
+  // reserves at each end for the KKT constraint construction (fit()'s own
+  // doc comment) -- it is not itself a freeze count any more (CQ-41: the
+  // repeated-triple freeze that forced acceleration/angular rate to zero is
+  // gone), just the historical name for "boundary values are available this
+  // call" (0 = first scan of a run, no boundary yet).
   static constexpr int N_FROZEN_CP = 3;
+
+  // CQ-41, Bryce 2026-09-18: "they should be unconstrained as they're
+  // variables we're trying to estimate and compare to the imu measurements."
+  // The endpoint constraint is now a LINEAR EQUALITY solved via a KKT
+  // system (see fit()'s own doc comment), not a repeated-control-point
+  // freeze -- the freeze's side effect of also forcing acceleration and
+  // angular velocity to exactly zero at both ends (an unintended
+  // consequence of the repeated-triple identity, never a chosen behavior --
+  // setFrozenBoundary() never had a velocity parameter) is now structurally
+  // impossible: there is no key, enum value or code path anywhere in this
+  // class that can constrain acceleration, angular velocity, or angular
+  // acceleration. Only position and velocity (this flag) and attitude
+  // (always, both settings) are ever constrained.
+  //   true  (DEFAULT, Bryce-authorised 2026-09-18): position AND velocity
+  //         constrained at both ends (k=4 constraint rows on the position
+  //         channel); attitude constrained at both ends (k=2, unconditional).
+  //   false: position only at both ends (k=2); attitude unchanged (k=2).
+  bool end_constraint_velocity = true;
 };
 
 // CQ-22 item (4): one named cause per fit() early-return site, so a run's
@@ -380,30 +401,29 @@ public:
   // carry 5/6 of the weight and stay free -- it is deliberately the WEAKER
   // ablation arm. Call before fit(); persists across fit()/
   // refineWithLidar()/fitRotationCumulative() until cleared (n=0).
+  // CQ-41 item (4): vel0/vel1 added -- the head velocity comes from the
+  // PREVIOUS scan's converged state_->vel() (LioProc::prev_scan_end_vel_,
+  // populated the same place/time as prev_scan_end_pos_/prev_scan_end_rot_),
+  // the tail velocity from state_->vel() at the CURRENT IEKF iteration
+  // (moveTailClamp() updates it every iteration, same as pos1/rot1 always
+  // have). Both are ignored by the k=2 (velocity:false) constraint set but
+  // always stored, since which setting is active can change frame to frame.
   void setFrozenBoundary(int n_frozen,
-                         const V3D& pos0, const M3D& rot0,
-                         const V3D& pos1, const M3D& rot1)
+                         const V3D& pos0, const M3D& rot0, const V3D& vel0,
+                         const V3D& pos1, const M3D& rot1, const V3D& vel1)
   { n_frozen_cp_ = n_frozen;
-    frozen_pos_ = pos0; frozen_rot_ = rot0;
-    frozen_pos1_ = pos1; frozen_rot1_ = rot1; }
+    frozen_pos_ = pos0; frozen_rot_ = rot0; frozen_vel_ = vel0;
+    frozen_pos1_ = pos1; frozen_rot1_ = rot1; frozen_vel1_ = vel1; }
   int nFrozenCp() const { return n_frozen_cp_; }
 
-  // Move the TAIL clamp to a new scan-end pose without re-fitting, so the
-  // refinement already applied to the interior survives.  The correction is
-  // distributed PROPORTIONALLY TO ELAPSED TIME across the control points:
-  // zero at the head clamp (which stays pinned to the previous scan's end)
-  // and full at the tail.  That is the same random-walk assumption Q itself
-  // encodes -- process noise accumulates with time, so a control point
-  // halfway through the scan has accumulated half the drift and takes half
-  // the correction.
-  //
-  // *** THE DISTRIBUTION IS A MODELLING CHOICE AND IT IS UNVALIDATED. ***
-  // Both endpoints being pinned over-determines the trajectory relative to
-  // preserving the IMU's own relative increments -- the difference IS the
-  // drift the filter corrected -- so something must absorb it and no
-  // measurement in this project says what.  Time-proportional is the
-  // principled default, not a measured one.  It is one line, below.
-  void moveTailClamp(const V3D& pos1, const M3D& rot1);
+  // CQ-41 item (3c): move the TAIL constraint to a new scan-end pose
+  // without re-fitting, so refinement already applied to the interior
+  // survives -- via a constraint-increment solve reusing fit()'s own KKT
+  // factorization (see spline.cpp's implementation comment for the linear
+  // system). REPLACES the old time-proportional ramp, kept only at HEAD~1.
+  // vel1 is ignored when the constrained fit this scan's cache came from
+  // used end_constraint_velocity=false.
+  void moveTailClamp(const V3D& pos1, const M3D& rot1, const V3D& vel1);
 
   bool valid() const { return valid_; }
   int  nControlPoints() const { return n_cp_; }
@@ -553,8 +573,27 @@ public:
   int    n_frozen_cp_ = 0;
   V3D    frozen_pos_  = V3D::Zero();
   M3D    frozen_rot_  = M3D::Identity();
+  V3D    frozen_vel_  = V3D::Zero();
   V3D    frozen_pos1_ = V3D::Zero();
   M3D    frozen_rot1_ = M3D::Identity();
+  V3D    frozen_vel1_ = V3D::Zero();
+
+  // CQ-41 item (3c): the KKT factorization built by fit() for the position
+  // and rotation channels, cached so moveTailClamp() can reuse it for a
+  // constraint-increment solve instead of the old ad hoc time-ramp --
+  // "The KKT factorisation depends only on AtA and C, never on the RHS, so
+  // it can be REUSED." Sized (n_cp_+k) x (n_cp_+k), k = kPosConstraints()
+  // for position (4 if end_constraint_velocity else 2) or 2 for rotation
+  // (always -- attitude is constrained in both settings). Invalid (empty)
+  // whenever n_frozen_cp_==0 (first scan of a run, no boundary -- fit() is
+  // unconstrained OLS, k=0, nothing to cache).
+  Eigen::LDLT<Eigen::MatrixXd> kkt_ldlt_p_, kkt_ldlt_r_;
+  int kkt_k_p_ = 0, kkt_k_r_ = 0;
+  // Raw (unfactored) position-channel constraint rows, cached alongside the
+  // factorization -- refineWithLidar() needs the RAW C to block-expand into
+  // Cb (item 6), not the KKT factorization itself (that system's H differs
+  // from fit()'s AtA).
+  Eigen::MatrixXd kkt_C_p_;
 
   bool   valid_ = false;
   int    n_cp_  = 0;
