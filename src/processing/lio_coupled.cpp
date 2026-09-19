@@ -53,6 +53,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/phi_at_scan_end", copts_.phi_at_scan_end, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/h_at_point_time", copts_.h_at_point_time, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_jrow_leverage_en", copts_.log_jrow_leverage_en, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/freeze_bg", copts_.freeze_bg, false);
 
   // Every spline/* and adaptive_q/* key is unclaimed by this class by
   // construction -- refuseUnclaimed only needs to additionally cover
@@ -73,6 +74,7 @@ std::string LioProcCoupled::engagementReport() const
       << " phi_at_scan_end=" << (copts_.phi_at_scan_end ? "true" : "false")
       << " h_at_point_time=" << (copts_.h_at_point_time ? "true" : "false")
       << " log_jrow_leverage_en=" << (copts_.log_jrow_leverage_en ? "true" : "false")
+      << " freeze_bg=" << (copts_.freeze_bg ? "true" : "false")
       << " -- no spline/AdaptiveQ engagement to report (this class has "
          "neither)";
   return oss.str();
@@ -508,6 +510,17 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // the card's own prescription, named here rather than silently
   // substituted for the real Schur-complement prior.
   if (!have_pi_ss) Pi_ss = Eigen::MatrixXd::Identity(ncol_s, ncol_s) * 1e6;
+
+  // CQ-52 item 2, the decisive test: hold delta_bg at (effectively) zero by
+  // inflating its own prior-precision diagonal block to near-infinite,
+  // rather than touching the actual IMU process-noise config -- a standard
+  // "freeze this state block" EKF technique. Off-diagonal Pi_ss entries
+  // (bg's correlation with phi0/p0/v/ba/g) are left untouched, so the OTHER
+  // blocks still solve correctly accounting for whatever prior correlation
+  // exists; only bg's own column is driven toward zero regardless of what
+  // the LiDAR evidence below would otherwise push it to. Column 3*3=9 in
+  // the [phi0,p0,v,bg,ba,g] layout (bi=3 in the idx[6] array above).
+  if (copts_.freeze_bg) Pi_ss.block<3, 3>(9, 9) += M3D::Identity() * 1e12;
 
   Eigen::VectorXd c_vec(ncol_c);
   for (int j = 0; j < n_c; ++j) {

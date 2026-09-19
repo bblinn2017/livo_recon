@@ -71,6 +71,13 @@ struct LioProcCoupledOptions
   // leaving it deleted. Off by default -- per-residual, so real cost when
   // on. See jrow_leverage.txt's own write site for the exact columns.
   bool log_jrow_leverage_en = false;
+  // CQ-52 item 2, the decisive test: when true, inflates delta_bg's own
+  // prior-precision diagonal in Pi_ss to near-infinite, holding the gyro
+  // bias fixed (the accumulator) while leaving c_gyr/c_acc's within-scan
+  // correction (the forcing) fully active -- isolates whether h_at_point_
+  // time's incomplete fix is the forcing's form or the accumulator
+  // compounding a persistent one-sided error into a walk. Default false.
+  bool freeze_bg = false;
 };
 
 // CQ-49: the coupled estimator, reimplemented as its own class -- see
