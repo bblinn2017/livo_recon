@@ -4,10 +4,37 @@
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/lio/voxelplane.h"
 
+#include <memory>
 #include <stdexcept>
 
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
+
+namespace
+{
+// CQ-49 item 3c/3f: estimator/mode selects WHICH LioProcBase subclass is
+// constructed -- read here, once, with a bare paramWarn (marks the key
+// consumed so checkAllParamsConsumed() stays happy), BEFORE lio_proc_ is
+// built. lio/estimator/mode (the pre-split key) is refused explicitly
+// rather than silently ignored, per rule 4f.
+std::unique_ptr<livo_recon::LioProcBase> makeLioProc(ros::NodeHandle& pnh, livo_recon::NodeContext& ctx)
+{
+  if (pnh.hasParam("lio/estimator/mode"))
+    throw std::runtime_error(
+        "[config] refused: lio/estimator/mode was RENAMED to estimator/mode "
+        "-- it selects which LioProc is constructed and is read at the "
+        "node, not inside LioProc.");
+  std::string mode;
+  livo_recon::paramWarn<std::string>(pnh, "estimator/mode", mode, "decoupled");
+  if (mode == "coupled")
+    return std::make_unique<livo_recon::LioProcCoupled>(ctx);
+  if (mode != "decoupled")
+    throw std::runtime_error(
+        "[config] refused: estimator/mode='" + mode + "' -- must be "
+        "'decoupled' or 'coupled'");
+  return std::make_unique<livo_recon::LioProcDecoupled>(ctx);
+}
+}  // namespace
 
 namespace livo_recon
 {
@@ -16,7 +43,8 @@ LivoReconNode::LivoReconNode(ros::NodeHandle& nh, ros::NodeHandle& pnh)
   : nh_(nh), pnh_(pnh), it_(nh_),
     ctx_(nh_, pnh_, it_),
     cbk_proc_(ctx_), pub_proc_(ctx_), calib_proc_(ctx_),
-    imu_proc_(ctx_), lio_proc_(ctx_), vio_proc_(ctx_), combined_proc_(ctx_), evo_proc_(ctx_)
+    imu_proc_(ctx_), lio_proc_(makeLioProc(pnh_, ctx_)),
+    vio_proc_(ctx_), combined_proc_(ctx_), evo_proc_(ctx_)
 {
   loadParameters();
   ctx_.printer->print(PrintCategory::PARAMS, "[node] initialized");
@@ -97,7 +125,7 @@ void LivoReconNode::loadParameters()
   ctx_.printer->print(PrintCategory::PARAMS, cbk_proc_.loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, calib_proc_.loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, imu_proc_.loadParameters(pnh_));
-  ctx_.printer->print(PrintCategory::PARAMS, lio_proc_.loadParameters(pnh_));
+  ctx_.printer->print(PrintCategory::PARAMS, lio_proc_->loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, evo_proc_.loadParameters(pnh_));
 
   paramWarn<bool>(pnh_, "outputs/auto_terminate_on_idle", auto_terminate_on_idle_, false);
@@ -156,7 +184,7 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
   // already populated (mirrors what ImuProc::undistortLidar()/
   // downsamplePoints() used to guarantee before this deskewing logic
   // moved out of ImuProc).
-  lio_proc_.deskewAndDownsample(mg);
+  lio_proc_->deskewAndDownsample(mg);
 
   // mg.tracked_frame was already populated by CbkProc::syncMeasures()
   // before this measure group ever reached popMeasureGroup() (task #145)
@@ -179,7 +207,7 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
     // there's no meaningful separate "LIO-only" checkpoint once the two
     // are fused, so both stages correctly read identically here.
     std::string combined_log;
-    { TimedScope ts(ctx_.profiler, "combined"); combined_log = combined_proc_.processCombined(mg, lio_proc_, vio_proc_); }
+    { TimedScope ts(ctx_.profiler, "combined"); combined_log = combined_proc_.processCombined(mg, *lio_proc_, vio_proc_); }
     mg.pos_after_lio = mg.pos_after_vio = ctx_.state->pos();
     mg.rot_after_lio = mg.rot_after_vio = ctx_.state->rot();
     ctx_.printer->print(PrintCategory::LIO, combined_log);
@@ -196,7 +224,7 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
   {
     // Original sequential path, unchanged.
     std::string lio_log, vio_log;
-    { TimedScope ts(ctx_.profiler, "lio"); lio_log = lio_proc_.processLIO(mg); }
+    { TimedScope ts(ctx_.profiler, "lio"); lio_log = lio_proc_->processLIO(mg); }
     mg.pos_after_lio = ctx_.state->pos();
     mg.rot_after_lio = ctx_.state->rot();
 

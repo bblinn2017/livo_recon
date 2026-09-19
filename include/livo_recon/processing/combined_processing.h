@@ -8,7 +8,7 @@
 namespace livo_recon
 {
 
-class LioProc;
+class LioProcBase;
 class VioProc;
 
 struct CombinedProcOptions
@@ -67,11 +67,11 @@ public:
 
   bool enabled() const { return opts_.enable; }
 
-  // lio_proc/vio_proc are LivoReconNode's own existing LioProc/VioProc
+  // lio_proc/vio_proc are LivoReconNode's own existing LioProc(Base)/VioProc
   // instances (passed in, not owned here) -- this class only orchestrates
   // their accumulate-only entry points, it doesn't duplicate LIO/VIO's own
   // per-frame bookkeeping (voxel map, tracker, etc.).
-  std::string processCombined(MeasureGroup& mg, LioProc& lio_proc, VioProc& vio_proc);
+  std::string processCombined(MeasureGroup& mg, LioProcBase& lio_proc, VioProc& vio_proc);
 
 private:
   CombinedProcOptions opts_;

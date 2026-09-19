@@ -118,7 +118,9 @@ add_executable(livo_recon_node
   src/processing/calib_processing.cpp
   src/processing/imu_processing.cpp
   src/processing/vio_processing.cpp
-  src/processing/lio_processing.cpp
+  src/processing/lio_base.cpp
+  src/processing/lio_decoupled.cpp
+  src/processing/lio_coupled.cpp
   src/processing/combined_processing.cpp
   src/processing/evo_processing.cpp
   src/lio/voxelplane.cpp
@@ -129,6 +131,7 @@ add_executable(livo_recon_node
   src/lio/adaptive_q.cpp
   src/lio/residual_redundancy.cpp
   src/lio/residual_weighting.cpp
+  src/lio/coupled_estimator.cpp
   src/map/voxelmap.cpp
   src/map/akf_map.cpp
   src/map/map_backend_factory.cpp

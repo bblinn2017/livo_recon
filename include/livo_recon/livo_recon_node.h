@@ -5,10 +5,13 @@
 #include "livo_recon/processing/pub_processing.h"
 #include "livo_recon/processing/calib_processing.h"
 #include "livo_recon/processing/imu_processing.h"
-#include "livo_recon/processing/lio_processing.h"
+#include "livo_recon/processing/lio_decoupled.h"
+#include "livo_recon/processing/lio_coupled.h"
 #include "livo_recon/processing/vio_processing.h"
 #include "livo_recon/processing/combined_processing.h"
 #include "livo_recon/processing/evo_processing.h"
+
+#include <memory>
 
 namespace livo_recon
 {
@@ -75,7 +78,13 @@ private:
   PubProc   pub_proc_;
   CalibProc calib_proc_;
   ImuProc   imu_proc_;
-  LioProc      lio_proc_;
+  // CQ-49 item 3c: estimator/mode is read ONCE, at the node, with a bare
+  // paramWarn -- BEFORE lio_proc_ is constructed, since which LioProcBase
+  // subclass to build IS what the key selects (a selector living inside
+  // the thing it selects is the same category error CQ-44 bug 4 was: a
+  // flag that has to be right rather than a choice enforced by which
+  // object exists at all). See livo_recon_node.cpp's makeLioProc().
+  std::unique_ptr<LioProcBase> lio_proc_;
   VioProc      vio_proc_;
   CombinedProc combined_proc_;
   EvoProc      evo_proc_;
