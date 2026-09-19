@@ -232,10 +232,21 @@ CorrScanAccum g_corr_scan;
 void flushCorrScan(CorrScanAccum& a)
 {
   if (a.scan_id < 0) return;
-  static bool first = true;
-  static std::ofstream ofs;
-  if (first) {
-    ofs.open(debugLogPath("corr_scan.csv"), std::ios::trunc);
+  // CQ-60 item 0b: was a raw function-local static std::ofstream, opened
+  // once via a fixed relative path that resolved to the process's cwd
+  // (/tmp under this project's launch convention) rather than the run's
+  // own outputs/debug_log_dir, AND never explicitly flushed -- writes sat
+  // in libstdc++'s buffer and were lost on anything but a clean static-
+  // destructor exit. PersistentLogStream (every other diagnostic in this
+  // file already uses it) fixes both: it redirects through debugLogPath()
+  // and this call site now flushes explicitly, matching e.g.
+  // jrow_leverage.txt's own sibling comment on why THAT one doesn't need
+  // to (this one, at one row per SCAN rather than per residual, can
+  // afford to).
+  static PersistentLogStream log("corr_scan.csv");
+  bool just_opened = false;
+  std::ofstream& ofs = log.stream(&just_opened);
+  if (just_opened) {
     ofs << "scan_id,n_candidates,n_accepted,n_dropped,n_nis_finite,"
            "sum_nis,sum_nis2,sum_log_nis,max_nis,n_share,sum_share,"
            "n_S,sum_S,sum_floor,sum_sdiag,sum_pvar,sum_prior_pose,"
@@ -247,7 +258,6 @@ void flushCorrScan(CorrScanAccum& a)
            "sum_fill_hit,sum_fill_free,sum_fill_unobs,n_vis_hit_thru,"
            // P-B: appended at the end, same convention.
            "n_nis_est_finite,sum_nis_est,sum_nis_est2,max_nis_est\n";
-    first = false;
   }
   ofs << a.scan_id << ',' << a.n_candidates << ',' << a.n_accepted << ','
       << a.n_dropped << ',' << a.n_nis_finite << ',' << a.sum_nis << ','
@@ -264,6 +274,7 @@ void flushCorrScan(CorrScanAccum& a)
       << a.n_vis_hit_thru << ','
       << a.n_nis_est_finite << ',' << a.sum_nis_est << ','
       << a.sum_nis_est2 << ',' << a.max_nis_est << '\n';
+  ofs.flush();
   a = CorrScanAccum{};
 }
 
