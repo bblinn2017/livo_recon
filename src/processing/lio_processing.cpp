@@ -97,6 +97,65 @@ void debugLogQhat(int scan_id, double t_abs, const Eigen::VectorXd& dx,
   ofs.flush();
 }
 
+// CQ-46: per-residual pair-correlation diagnostic. Mirrors voxelplane.cpp's
+// t_corr_buf/g_corr_with_covariates idiom exactly (thread_local append
+// buffer, one flush per thread after the OMP region's implicit barrier) for
+// the same reason: writing per-candidate, not just per-accepted-residual,
+// through a shared ofstream would serialize buildResiduals()'s
+// embarrassingly-parallel loop. Gated behind log_pair_corr_en (default
+// false) AND allow_consistency_log (true only on a scan's first IEKF
+// iteration, per estimateStateCorrection()'s own call site) -- neither
+// condition is met by any shipped config, so this is dead weight, not a
+// live cost, at every default.
+thread_local std::string t_pair_corr_buf;
+
+void appendPairCorrResidual(int scan_id, const Residual& res)
+{
+  std::ostringstream oss;
+  oss << std::setprecision(9)
+      << scan_id << ','
+      << res.world_point.x() << ',' << res.world_point.y() << ',' << res.world_point.z() << ','
+      << res.normal.x() << ',' << res.normal.y() << ',' << res.normal.z() << ','
+      << res.point_cross_normal.x() << ',' << res.point_cross_normal.y() << ',' << res.point_cross_normal.z() << ','
+      << reinterpret_cast<uint64_t>(res.plane_id) << ','
+      << res.r << ',' << res.floor_term << ',' << res.sigma_diag_squared << ','
+      << res.plane_var_term << ',' << res.s_prior_pose << '\n';
+  t_pair_corr_buf += oss.str();
+}
+
+void flushPairCorrLog()
+{
+  if (t_pair_corr_buf.empty()) return;
+  static PersistentLogStream log("cq46_residuals.txt");
+  bool first_call;
+  std::ofstream& ofs = log.stream(&first_call);
+  if (first_call)
+    ofs << "scan_id,px,py,pz,nx,ny,nz,jx,jy,jz,plane_id,r,floor_term,sigma_diag_squared,plane_var_term,s_prior_pose\n";
+  ofs << t_pair_corr_buf;
+  ofs.flush();
+  t_pair_corr_buf.clear();
+}
+
+void logPairCorrPrior(int scan_id, const Eigen::Matrix<double, 6, 6>& prior_cov_rp)
+{
+  static PersistentLogStream log("cq46_prior.txt");
+  bool first_call;
+  std::ofstream& ofs = log.stream(&first_call);
+  if (first_call) {
+    ofs << "scan_id";
+    for (int i = 0; i < 6; ++i)
+      for (int j = 0; j < 6; ++j)
+        ofs << ",p" << i << j;
+    ofs << "\n";
+  }
+  ofs << scan_id << std::setprecision(9);
+  for (int i = 0; i < 6; ++i)
+    for (int j = 0; j < 6; ++j)
+      ofs << ',' << prior_cov_rp(i, j);
+  ofs << "\n";
+  ofs.flush();
+}
+
 }  // namespace
 
 LioProc::LioProc(NodeContext& ctx)
@@ -116,6 +175,7 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "lio/ekf/min_norm_dt",     opts_.min_norm_dt,     0.0);
   paramWarn<double>(pnh, "lio/ekf/min_diff_error",  opts_.min_diff_error,  -1.0);
   paramWarn<bool>(pnh, "lio/log_debug_en",          opts_.log_debug_en,   false);
+  paramWarn<bool>(pnh, "lio/log_pair_corr_en",      opts_.log_pair_corr_en, false);
   paramWarn<bool>(pnh, "lio/log_consistency_scan_en", opts_.log_consistency_scan_en, false);
   paramWarn<bool>(pnh, "lio/log_nll_en", opts_.log_nll_en, false);
   paramWarn<int>(pnh, "lio/dry_run_point_filter_num", opts_.dry_run_point_filter_num, 0);
@@ -423,9 +483,12 @@ void LioProc::buildResiduals(
       bool had_converged_neighbor = false;
       if (voxel_map_->findPlaneResidual(pt_world, res, &tier0_had_plane, &had_converged_neighbor)) {
         res.point_cross_normal = pts[i].point.cross(state_->rot().transpose() * res.normal);
+        res.world_point = pt_world.point;
         res.sigma_squared += res.plane_var_term;
         res.t = pts[i].t;   // for the spline control-point refinement
         build_thread_residuals_[omp_get_thread_num()].push_back(res);
+        if (allow_consistency_log && opts_.log_pair_corr_en)
+          appendPairCorrResidual(voxel_map_->frame_idx_, res);
         tier0_missed = (res.match_tier != 0);
       } else {
         const int idx = had_converged_neighbor ? 1 : 0;
@@ -445,7 +508,12 @@ void LioProc::buildResiduals(
     // debugLogConsistencyCorr() (called from computeResidual(), same OMP
     // region) now buffers per-thread too. See voxelplane.h's doc comment.
     flushConsistencyCorrLog();
+    if (allow_consistency_log && opts_.log_pair_corr_en)
+      flushPairCorrLog();
   }
+
+  if (allow_consistency_log && opts_.log_pair_corr_en)
+    logPairCorrPrior(voxel_map_->frame_idx_, prior_cov_rp);
 
   residuals.clear();
   for (const auto& local : build_thread_residuals_)
