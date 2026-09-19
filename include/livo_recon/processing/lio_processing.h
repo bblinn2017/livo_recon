@@ -603,6 +603,16 @@ private:
   // decoupled path.
   V3D coupled_delta_v_ = V3D::Zero(), coupled_delta_bg_ = V3D::Zero(),
       coupled_delta_ba_ = V3D::Zero(), coupled_delta_g_ = V3D::Zero();
+  // Item 3e(v)/3f bug 2: as of the full [delta_x(t0) 18, c] solve,
+  // delta_phi(t0)/delta_p(t0) are no longer held at zero -- same
+  // reset-per-scan, accumulate-across-GN-iterations lifetime as the four
+  // above. Folded into propagateCoupled()'s rot0/pos0 arguments (right-
+  // multiplicative for phi0, additive for p0 -- see coupled_estimator.h).
+  // This is the one-scan fixed-lag smoother named in the card: the previous
+  // scan's published pose is genuinely revised by the converged value of
+  // these two, a real consequence (the map already built from the old pose
+  // is NOT retroactively updated) rather than something this fix hides.
+  V3D coupled_delta_phi0_ = V3D::Zero(), coupled_delta_pos0_ = V3D::Zero();
   V3D coupled_v0_pre_, coupled_bg0_pre_, coupled_ba0_pre_, coupled_g0_pre_;
   CoupledPropagation coupled_prop_;
   // Item 3d(i): this scan's own DC-component/bias-split diagnostics, filled

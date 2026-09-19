@@ -953,7 +953,9 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
   const double t1 = mg.image.t;
   const int n_c = opts_.estimator_n_c;
   const int ncol_c = 6 * n_c;
-  const int ncol_s = 12;   // [delta_v, delta_bg, delta_ba, delta_g]
+  // Item 3e(v)/3f bug 2: 18, not 12 -- [delta_phi0, delta_p0, delta_v,
+  // delta_bg, delta_ba, delta_g]. Pose included in both mean and covariance.
+  const int ncol_s = 18;
   const int ncol = ncol_s + ncol_c;
   // Item 4: sigma_a/sigma_g are the CALIBRATION-FLOOR SIGMA, not the
   // variance config/ntu_viral.yaml logs (acc=0.00434, gyr=0.0000636 are
@@ -970,32 +972,40 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
   // delta_v/delta_g on top of the pre-scan snapshot; delta_bg/delta_ba are
   // passed through and subtracted INSIDE propagateCoupled (see its header
   // comment) since they enter per-segment, not just the initial condition.
-  // rot0/pos0 are the raw chain's own, UNCHANGED (item 3c: delta_phi(t0) and
-  // delta_p(t0) are held at exactly zero, always). ----
+  // rot0/pos0: item 3e(v)/3f bug 2 -- fold in this scan's own accumulated
+  // delta_phi0/delta_p0 (right-multiplicative for phi0, matching
+  // StateGroup::applyDelta()'s own convention; additive for p0), no longer
+  // held at the raw chain's own t0 value unconditionally.
   propagateCoupled(mg.poses, state_propagat_.rot(), t1,
-                   mg.poses.front().rot, mg.poses.front().pos,
+                   mg.poses.front().rot * Exp(coupled_delta_phi0_),
+                   mg.poses.front().pos + coupled_delta_pos0_,
                    coupled_v0_pre_ + coupled_delta_v_,
-                   coupled_g0_pre_ + coupled_delta_g_,
+                   coupled_g0_pre_ + coupled_delta_g_, coupled_g0_pre_,
                    coupled_delta_bg_, coupled_delta_ba_,
                    coupled_c_acc_, coupled_c_gyr_, n_c, coupled_prop_);
 
-  // ---- DIAGNOSTIC (2026-09-19): finite-difference verification of
-  // Phi_x's own bg/ba/g/v0 columns against propagateCoupled() itself --
-  // does the analytic Gx block (coupled_estimator.cpp) actually agree with
-  // what perturbing each input and re-propagating produces? Central
-  // difference, one axis of each of the 4 blocks, scan 10 only, ONE GN
-  // iteration (coupled_iters_==0 on entry to this call). ----
+  // ---- DIAGNOSTIC (2026-09-19, extended for item 3e(v)/3f bug 2's 18-col
+  // Phi_x): finite-difference verification of Phi_x's own phi0/p0/v0/bg/
+  // ba/g columns against propagateCoupled() itself -- does the analytic Gx
+  // block (coupled_estimator.cpp) actually agree with what perturbing each
+  // input and re-propagating produces? Central difference, one axis of
+  // each of the 6 blocks, scan 10 only, ONE GN iteration (coupled_iters_==0
+  // on entry to this call). This is item 3e(iii)'s cheap pre-check, now
+  // POST-fix: phi0/p0's own columns (block 0/1) are the direct assertion
+  // that bug 2 landed -- expect ~identity-scale entries, not zero. ----
   if (voxel_map_->frame_idx_ == 10 && coupled_iters_ == 0) {
     static PersistentLogStream dbg("cq44_phix_fd_debug.txt");
     std::ofstream& ofs = dbg.stream();
     const double eps = 1e-6;
-    const Eigen::Matrix<double, 9, 12>& PhixAnalytic = coupled_prop_.phi_x_head.back();
-    auto endpoint9 = [&](const V3D& dv, const V3D& dbg_, const V3D& dba, const V3D& dg) {
+    const Eigen::Matrix<double, 9, 18>& PhixAnalytic = coupled_prop_.phi_x_head.back();
+    auto endpoint9 = [&](const V3D& dphi0, const V3D& dp0, const V3D& dv,
+                          const V3D& dbg_, const V3D& dba, const V3D& dg) {
       CoupledPropagation p2;
       propagateCoupled(mg.poses, state_propagat_.rot(), t1,
-                        mg.poses.front().rot, mg.poses.front().pos,
+                        mg.poses.front().rot * Exp(coupled_delta_phi0_ + dphi0),
+                        mg.poses.front().pos + coupled_delta_pos0_ + dp0,
                         coupled_v0_pre_ + coupled_delta_v_ + dv,
-                        coupled_g0_pre_ + coupled_delta_g_ + dg,
+                        coupled_g0_pre_ + coupled_delta_g_ + dg, coupled_g0_pre_,
                         coupled_delta_bg_ + dbg_, coupled_delta_ba_ + dba,
                         coupled_c_acc_, coupled_c_gyr_, n_c, p2);
       Eigen::Matrix<double, 9, 1> out;
@@ -1005,17 +1015,20 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
       out.segment<3>(6) = p2.vel1;
       return out;
     };
-    const Eigen::Matrix<double, 9, 1> base = endpoint9(V3D::Zero(), V3D::Zero(), V3D::Zero(), V3D::Zero());
+    const Eigen::Matrix<double, 9, 1> base = endpoint9(
+        V3D::Zero(), V3D::Zero(), V3D::Zero(), V3D::Zero(), V3D::Zero(), V3D::Zero());
     ofs << std::setprecision(8) << "scan=" << voxel_map_->frame_idx_ << "\n";
-    const char* names[4] = {"v0", "bg", "ba", "g"};
-    for (int blk = 0; blk < 4; ++blk) {
+    const char* names[6] = {"phi0", "p0", "v0", "bg", "ba", "g"};
+    for (int blk = 0; blk < 6; ++blk) {
       for (int axis = 0; axis < 3; ++axis) {
-        V3D dv = V3D::Zero(), dbg_ = V3D::Zero(), dba = V3D::Zero(), dg = V3D::Zero();
-        V3D* target = (blk == 0) ? &dv : (blk == 1) ? &dbg_ : (blk == 2) ? &dba : &dg;
+        V3D dphi0 = V3D::Zero(), dp0 = V3D::Zero(), dv = V3D::Zero();
+        V3D dbg_ = V3D::Zero(), dba = V3D::Zero(), dg = V3D::Zero();
+        V3D* target = (blk == 0) ? &dphi0 : (blk == 1) ? &dp0 : (blk == 2) ? &dv
+                    : (blk == 3) ? &dbg_ : (blk == 4) ? &dba : &dg;
         (*target)(axis) = eps;
-        const Eigen::Matrix<double, 9, 1> plus  = endpoint9(dv, dbg_, dba, dg);
+        const Eigen::Matrix<double, 9, 1> plus  = endpoint9(dphi0, dp0, dv, dbg_, dba, dg);
         (*target)(axis) = -eps;
-        const Eigen::Matrix<double, 9, 1> minus = endpoint9(dv, dbg_, dba, dg);
+        const Eigen::Matrix<double, 9, 1> minus = endpoint9(dphi0, dp0, dv, dbg_, dba, dg);
         const Eigen::Matrix<double, 9, 1> fd = (plus - minus) / (2.0 * eps);
         const Eigen::Matrix<double, 9, 1> an = PhixAnalytic.col(3 * blk + axis);
         ofs << "  block=" << names[blk] << " axis=" << axis
@@ -1049,16 +1062,17 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
   // re-deskewed above. ----
   buildResiduals(mg.points, residuals_, /*allow_consistency_log=*/false);
 
-  // ---- (4) the prior. TWO BLOCKS, per items 3c/3d/CORRECTED 2026-09-19:
-  // Lambda (the c prior, item 3b/4, UNCHANGED math) on the c-block, and
-  // Pi_ss -- the 12x12 SUB-BLOCK OF P(t0)^-1 at [idxV,idxBG,idxBA,idxG]
-  // (NOT the inverse of the sub-block of P(t0) -- those differ by a Schur
-  // complement and the second one throws away every correlation with the
-  // pose; item 3c is explicit that the FIRST is correct here, since
-  // delta_phi(t0)/delta_p(t0) are being conditioned to exactly zero, not
-  // marginalised out) -- on the s-block. No cross term: the prior itself
-  // does not correlate the two blocks (any correlation enters only through
-  // the shared LiDAR evidence, in the loop below). ----
+  // ---- (4) the prior. TWO BLOCKS, per items 3c/3d/3e(v)/3f REVISED
+  // 2026-09-19: Lambda (the c prior, item 3b/4, UNCHANGED math) on the
+  // c-block, and Pi_ss -- now the FULL 18x18 P(t0)^-1, at
+  // [idxR,idxP,idxV,idxBG,idxBA,idxG]. Bug 2's fix solves for ALL of
+  // delta_x(t0) jointly (nothing held fixed/conditioned any more), so this
+  // is no longer a Schur-complement sub-block trick -- these six blocks ARE
+  // the entire state, so Pi_ss is simply P(t0)^-1 itself (row/column
+  // order matched to this solve's own [phi0,p0,v,bg,ba,g] convention). No
+  // cross term with the c-block: the prior itself does not correlate the
+  // two blocks (any correlation enters only through the shared LiDAR
+  // evidence, in the loop below). ----
   Eigen::MatrixXd gram = Eigen::MatrixXd::Zero(n_c, n_c);
   for (const auto& pose : mg.poses) {
     std::vector<double> bw(n_c);
@@ -1077,9 +1091,10 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
   bool have_pi_ss = state_->idxBG() >= 0 && state_->idxBA() >= 0 && state_->idxG() >= 0;
   if (have_pi_ss) {
     const Eigen::MatrixXd Omega = state_->cov().inverse();  // information form of P(t0)
-    const int idx[4] = {StateGroup::idxV(), state_->idxBG(), state_->idxBA(), state_->idxG()};
-    for (int bi = 0; bi < 4; ++bi)
-      for (int bj = 0; bj < 4; ++bj)
+    const int idx[6] = {StateGroup::idxR(), StateGroup::idxP(), StateGroup::idxV(),
+                         state_->idxBG(), state_->idxBA(), state_->idxG()};
+    for (int bi = 0; bi < 6; ++bi)
+      for (int bj = 0; bj < 6; ++bj)
         Pi_ss.block<3, 3>(3 * bi, 3 * bj) = Omega.block<3, 3>(idx[bi], idx[bj]);
   }
   // Fallback (should not fire on any config with bias/gravity estimation
@@ -1094,11 +1109,15 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
     c_vec.segment<3>(3 * j) = coupled_c_acc_[j];
     c_vec.segment<3>(3 * n_c + 3 * j) = coupled_c_gyr_[j];
   }
+  // Item 3e(v)/3f bug 2: order [delta_phi0, delta_p0, delta_v, delta_bg,
+  // delta_ba, delta_g] -- matches phi_x_head's own column order exactly.
   Eigen::VectorXd s_vec(ncol_s);
-  s_vec.segment<3>(0) = coupled_delta_v_;
-  s_vec.segment<3>(3) = coupled_delta_bg_;
-  s_vec.segment<3>(6) = coupled_delta_ba_;
-  s_vec.segment<3>(9) = coupled_delta_g_;
+  s_vec.segment<3>(0)  = coupled_delta_phi0_;
+  s_vec.segment<3>(3)  = coupled_delta_pos0_;
+  s_vec.segment<3>(6)  = coupled_delta_v_;
+  s_vec.segment<3>(9)  = coupled_delta_bg_;
+  s_vec.segment<3>(12) = coupled_delta_ba_;
+  s_vec.segment<3>(15) = coupled_delta_g_;
 
   // ---- (5) normal equations, JOINTLY over [delta_s(t0), c] -- items
   // 3c/3d/CORRECTED 2026-09-19, replacing the old c-alone solve entirely
@@ -1124,7 +1143,7 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
     Eigen::Matrix<double, 1, 6> H;
     H.block<1, 3>(0, 0) = res.point_cross_normal.transpose();
     H.block<1, 3>(0, 3) = res.normal.transpose();
-    const Eigen::Matrix<double, 9, 12> Phix_pt = interpolatePhiX(coupled_prop_, res.t);
+    const Eigen::Matrix<double, 9, 18> Phix_pt = interpolatePhiX(coupled_prop_, res.t);
     const Eigen::Matrix<double, 9, Eigen::Dynamic> Phic_pt = interpolatePhi(coupled_prop_, res.t);
     Eigen::Matrix<double, 1, Eigen::Dynamic> Jrow(1, ncol);
     Jrow.segment(0, ncol_s) = H * Phix_pt.topRows(6);          // R,P rows only (item 3b/3c)
@@ -1208,10 +1227,13 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
 
   const Eigen::VectorXd delta_s = delta.segment(0, ncol_s);
   const Eigen::VectorXd delta_c = delta.segment(ncol_s, ncol_c);
-  coupled_delta_v_  += delta_s.segment<3>(0);
-  coupled_delta_bg_ += delta_s.segment<3>(3);
-  coupled_delta_ba_ += delta_s.segment<3>(6);
-  coupled_delta_g_  += delta_s.segment<3>(9);
+  // Item 3e(v)/3f bug 2: same [phi0,p0,v,bg,ba,g] order as s_vec above.
+  coupled_delta_phi0_ += delta_s.segment<3>(0);
+  coupled_delta_pos0_ += delta_s.segment<3>(3);
+  coupled_delta_v_    += delta_s.segment<3>(6);
+  coupled_delta_bg_   += delta_s.segment<3>(9);
+  coupled_delta_ba_   += delta_s.segment<3>(12);
+  coupled_delta_g_    += delta_s.segment<3>(15);
   for (int j = 0; j < n_c; ++j) {
     coupled_c_acc_[j] += delta_c.segment<3>(3 * j);
     coupled_c_gyr_[j] += delta_c.segment<3>(3 * n_c + 3 * j);
@@ -1234,9 +1256,10 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
   // exit) reflect what this step actually applied -- mirrors
   // estimateStateCorrection()'s own solve-then-apply contract. ----
   propagateCoupled(mg.poses, state_propagat_.rot(), t1,
-                   mg.poses.front().rot, mg.poses.front().pos,
+                   mg.poses.front().rot * Exp(coupled_delta_phi0_),
+                   mg.poses.front().pos + coupled_delta_pos0_,
                    coupled_v0_pre_ + coupled_delta_v_,
-                   coupled_g0_pre_ + coupled_delta_g_,
+                   coupled_g0_pre_ + coupled_delta_g_, coupled_g0_pre_,
                    coupled_delta_bg_, coupled_delta_ba_,
                    coupled_c_acc_, coupled_c_gyr_, n_c, coupled_prop_);
   state_->setPropagatedState(coupled_prop_.rot1, coupled_prop_.pos1, coupled_prop_.vel1);
@@ -2151,6 +2174,8 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       // accumulated delta on top of the SAME fixed base, never a moving one.
       coupled_delta_v_.setZero(); coupled_delta_bg_.setZero();
       coupled_delta_ba_.setZero(); coupled_delta_g_.setZero();
+      // Item 3e(v)/3f bug 2: the pose pair, same reset-per-scan lifetime.
+      coupled_delta_phi0_.setZero(); coupled_delta_pos0_.setZero();
       // mg.poses.front().vel (NOT state_->vel()), for consistency with
       // rot0/pos0 below -- all three come from the SAME raw-chain snapshot.
       coupled_v0_pre_ = mg.poses.empty() ? state_->vel() : mg.poses.front().vel;
@@ -2326,7 +2351,7 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     // basis bandwidth, bias random walk within this one scan), not a
     // structural double-count. Reported, not silently assumed away.
     if (opts_.estimatorCoupled() && any_solved
-        && coupled_last_A_.rows() == coupled_prop_.phi_head.back().cols() + 12
+        && coupled_last_A_.rows() == coupled_prop_.phi_head.back().cols() + 18
         && state_->idxBG() >= 0 && state_->idxBA() >= 0 && state_->idxG() >= 0)
     {
       Eigen::LDLT<Eigen::MatrixXd> ldlt_A(coupled_last_A_);
@@ -2335,40 +2360,45 @@ std::string LioProc::processLIO(MeasureGroup& mg)
         const Eigen::MatrixXd coeff_cov =
             ldlt_A.solve(Eigen::MatrixXd::Identity(coupled_last_A_.rows(), coupled_last_A_.rows()));
 
-        // ---- DIAGNOSTIC (2026-09-19): coeff_cov's own eigenstructure at
-        // scan 10, restricted to the 12x12 s-block -- which COMBINATION of
-        // [delta_v,delta_bg,delta_ba,delta_g] is actually collapsing, not
-        // just the diagonal magnitudes already logged elsewhere. ----
+        // ---- DIAGNOSTIC (2026-09-19, extended for item 3e(v)/3f bug 2):
+        // coeff_cov's own eigenstructure at scan 10, restricted to the
+        // 18x18 s-block ([phi0,p0,v,bg,ba,g]) -- which COMBINATION is
+        // actually collapsing, not just the diagonal magnitudes already
+        // logged elsewhere. ----
         if (voxel_map_->frame_idx_ == 10) {
           static PersistentLogStream dbg("cq44_coeffcov_eig_debug.txt");
           std::ofstream& ofs = dbg.stream();
-          const Eigen::MatrixXd cc_ss = coeff_cov.block(0, 0, ncol_s, ncol_s);
+          const Eigen::MatrixXd cc_ss = coeff_cov.block(0, 0, 18, 18);  // s-block is always 18-wide
           Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(cc_ss);
           ofs << std::setprecision(6) << "scan=" << voxel_map_->frame_idx_
               << " coeff_cov_ss_diag=" << cc_ss.diagonal().transpose() << "\n";
-          for (int k = 0; k < ncol_s; ++k) {
+          for (int k = 0; k < 18; ++k) {
             ofs << "  eig[" << k << "]=" << es.eigenvalues()(k)
                 << " vec=" << es.eigenvectors().col(k).transpose() << "\n";
           }
           ofs.flush();
         }
 
-        const Eigen::Matrix<double, 9, 12>& Jx = coupled_prop_.phi_x_head.back();
+        const Eigen::Matrix<double, 9, 18>& Jx = coupled_prop_.phi_x_head.back();
         const Eigen::Matrix<double, 9, Eigen::Dynamic>& Jc = coupled_prop_.phi_head.back();
-        // ONE consistent linear map from the full [delta_s, delta_c] joint
-        // posterior to the full 18-dim (R,P,V,BG,BA,G) state at t1 -- rows
-        // 0-8 are Jjoint (R,P,V's own sensitivity, mapped through the
-        // propagation, exactly as before); rows 9-17 are a pure SELECTOR
+        // Item 3e(v)/3f bug 2, REVISED: ONE consistent linear map from the
+        // full [delta_x(t0) 18, c] joint posterior to the full 18-dim
+        // (R,P,V,BG,BA,G) state at t1. Rows 0-8 are Jx/Jc -- Jx is now 9x18
+        // and carries DIRECT (R,P,V)-at-t1 sensitivity to delta_phi0/
+        // delta_p0 as well (the fix: these columns used to be simply
+        // ABSENT from M, which is what silently discarded
+        // Phi_pose*P_pose(t0)*Phi_pose^T -- all accumulated pose
+        // uncertainty -- every single scan). Rows 9-17 are a pure SELECTOR
         // picking out [delta_bg,delta_ba,delta_g] from the s-block columns
-        // (identity there, zero on delta_v and on the whole c-block) --
-        // those three are unchanged from t0 to t1 to this linearisation
-        // (ignoring the Q_unmodelled gap named below). Building the FULL
-        // 18x18 as M*coeff_cov*M^T in ONE product (not as two separately
-        // assigned diagonal blocks with the cross-covariance left stale)
-        // is what GUARANTEES the result is PSD (any M*Sigma*M^T with PSD
-        // Sigma is PSD) and internally consistent -- assigning the two
-        // diagonal blocks independently, an earlier version of this fix,
-        // left the CROSS-covariance between them at whatever
+        // (identity there, zero on delta_phi0/delta_p0/delta_v and on the
+        // whole c-block) -- those three are unchanged from t0 to t1 to this
+        // linearisation (ignoring the Q_unmodelled gap named below).
+        // Building the FULL 18x18 as M*coeff_cov*M^T in ONE product (not as
+        // two separately assigned diagonal blocks with the cross-covariance
+        // left stale) is what GUARANTEES the result is PSD (any M*Sigma*M^T
+        // with PSD Sigma is PSD) and internally consistent -- assigning the
+        // two diagonal blocks independently, an earlier version of this
+        // fix, left the CROSS-covariance between them at whatever
         // ImuProc::propagate()'s own F_x*P*F_x^T recursion had set it to
         // under the OLD (larger) diagonal, which is inconsistent with the
         // new (smaller) diagonal and reliably breaks positive-
@@ -2377,11 +2407,11 @@ std::string LioProc::processLIO(MeasureGroup& mg)
         // -1.58e18 by the run's end), a numerical catastrophe distinct
         // from the earlier "P only ever grows" bug this whole item-5
         // rewrite exists to fix.
-        Eigen::Matrix<double, 18, Eigen::Dynamic> M(18, 12 + Jc.cols());
+        Eigen::Matrix<double, 18, Eigen::Dynamic> M(18, 18 + Jc.cols());
         M.setZero();
-        M.topRows(9).leftCols(12) = Jx;
+        M.topRows(9).leftCols(18) = Jx;
         M.topRows(9).rightCols(Jc.cols()) = Jc;
-        M.block(9, 3, 9, 9) = Eigen::MatrixXd::Identity(9, 9);  // select [bg,ba,g]
+        M.block(9, 9, 9, 9) = Eigen::MatrixXd::Identity(9, 9);  // select [bg,ba,g]
         Eigen::MatrixXd posterior18 = M * coeff_cov * M.transpose();
         // Same explicit symmetrization ekf.h's own applyCovarianceUpdate()
         // uses before every state->covMut() write, mirrored here rather
@@ -2395,11 +2425,18 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       }
     }
 
-    // Item 3c: apply the FINAL converged delta_s(t0) to the real state,
-    // ONCE, mirroring estimateStateCorrection()'s own solve-then-apply-once
-    // contract -- v/bg/ba/g move by this scan's own solved correction;
-    // rot_/pos_ do not move (dx's R/P blocks are zero, applyDelta() leaves
-    // them exactly as Exp(0)=Identity/+=0).
+    // Item 3c, REVISED 3e(v)/3f bug 2: apply the FINAL converged delta_s(t0)
+    // to the real state, ONCE, mirroring estimateStateCorrection()'s own
+    // solve-then-apply-once contract -- v/bg/ba/g move by this scan's own
+    // solved correction. rot_/pos_ are NOT touched by an explicit dx here
+    // (their R/P blocks are deliberately absent below) because they are
+    // ALREADY the converged mean: estimateCoupledCorrection()'s own step 6
+    // re-propagates from mg.poses.front().rot*Exp(coupled_delta_phi0_)/
+    // pos+coupled_delta_pos0_ through to t1 and calls setPropagatedState()
+    // with the result, so state_->rot()/pos() already carry the full
+    // pose-included mean correction (this scan's own t0 revision, composed
+    // through the propagation to t1) -- applying dx's R/P blocks again here
+    // would double-count it, the same reason idxV() is left at zero below.
     if (opts_.estimatorCoupled() && any_solved
         && state_->idxBG() >= 0 && state_->idxBA() >= 0 && state_->idxG() >= 0)
     {

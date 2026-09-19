@@ -73,22 +73,30 @@ struct CoupledPropagation
   // + 1; the last entry is the sensitivity of (rot1,pos1,vel1) at t1.
   std::vector<Eigen::Matrix<double, 9, Eigen::Dynamic>> phi_head;
 
-  // CQ-44 items 3c/3d: phi_x_head[k], 9x12, the SAME (phi_R,p,v) state's
-  // sensitivity to delta_s(t0) = [delta_v0, delta_bg, delta_ba, delta_g]
-  // (column blocks of 3, in that order) -- delta_phi(t0) and delta_p(t0) are
-  // held at EXACTLY ZERO by construction (see the card: correcting this
-  // scan's OWN start pose would retro-correct the previous scan's already-
-  // committed, already-map-built-from end pose), so those two initial
-  // conditions never appear as columns here. Seeded at t0 with only the
-  // V<-delta_v0 block as identity (perturbing the initial velocity changes
-  // velocity immediately, everything else's t0 sensitivity is zero), then
-  // accumulated by the SAME Fx recursion phi_head uses, plus this segment's
-  // OWN direct bias/gravity sensitivity (the same R<-bg/V<-ba/V<-g/P<-g
-  // blocks ImuProc::propagate()'s own F_x already carries for covariance
+  // CQ-44 items 3c/3d, REVISED 2026-09-19 (item 3e(v)/3f bug 2 fix):
+  // phi_x_head[k], 9x18, the SAME (phi_R,p,v) state's sensitivity to the
+  // FULL delta_x(t0) = [delta_phi0, delta_p0, delta_v0, delta_bg, delta_ba,
+  // delta_g] (column blocks of 3, in that order). Item 3c originally held
+  // delta_phi(t0)/delta_p(t0) at exactly zero (correcting this scan's OWN
+  // start pose retro-corrects the previous scan's already-committed,
+  // already-map-built-from end pose) -- but item 3e/3f found that omitting
+  // their COLUMNS here (not just their mean) also removes
+  // Phi_pose*P_pose(t0)*Phi_pose^T from the covariance propagation, so every
+  // scan discarded ALL accumulated pose uncertainty (the P-collapse). The
+  // fix solves the full 18 in BOTH mean and covariance -- a one-scan
+  // fixed-lag smoother; the previous scan's published pose is genuinely
+  // revised by delta_phi0/delta_p0's converged value (named consequence,
+  // not silently absorbed -- the map already built from the old pose is NOT
+  // retroactively updated). Seeded at t0 with phi_R<-delta_phi0,
+  // p<-delta_p0 and v<-delta_v0 each as identity (their own initial
+  // condition, everything else's t0 sensitivity is zero), then accumulated
+  // by the SAME Fx recursion phi_head uses, plus this segment's OWN direct
+  // bias/gravity sensitivity (the same R<-bg/V<-ba/V<-g/P<-g blocks
+  // ImuProc::propagate()'s own F_x already carries for covariance
   // propagation, imu_processing.cpp:188-206 -- P<-ba is omitted for the
   // identical reason phi_head's own G omits any direct accel-correction
   // position term, see the file header). Same length/indexing as phi_head.
-  std::vector<Eigen::Matrix<double, 9, 12>> phi_x_head;
+  std::vector<Eigen::Matrix<double, 9, 18>> phi_x_head;
 };
 
 // Recompute the scan from (rot0,pos0,vel0) at raw_poses.front().t through to
@@ -106,12 +114,28 @@ struct CoupledPropagation
 // been updated by this amount before propagate() ran; `vel0`/`gravity`
 // likewise already have this iteration's delta_v0/delta_g folded in by the
 // caller (they are ordinary initial-condition/parameter inputs, no separate
-// "delta" plumbing needed for them).
+// "delta" plumbing needed for them). AS OF item 3e(v)/3f bug 2, `rot0`/`pos0`
+// ALSO already have this iteration's own accumulated delta_phi0/delta_p0
+// folded in by the caller (rot0 = raw_rot0 * Exp(delta_phi0), matching
+// StateGroup::applyDelta()'s own right-multiplicative body-frame convention;
+// pos0 = raw_pos0 + delta_p0) -- the pose is no longer held fixed at the raw
+// chain's own t0 value.
+// `gravity0` (CQ-44 item 3f, BUG 3) is the FIXED, pre-scan gravity that
+// raw_poses' own acc_head/acc_tail (Pose6D::acc_head is world-frame,
+// = R_head*a_body + g -- see data_wrappers.h) were originally built with
+// (i.e. LioProc's coupled_g0_pre_, the snapshot taken BEFORE this scan's own
+// delta_g accumulates) -- used ONLY to strip acc_head/acc_tail back to the
+// body-frame measurement. `gravity` (this iteration's g0_pre + delta_g) is
+// used ONLY to reconstitute the corrected world-frame accel. Stripping with
+// the CORRECTED gravity instead of the ORIGINAL one (the bug) makes
+// delta_g cancel to first order between the strip and the reconstitute
+// steps, leaving the trajectory with no real sensitivity to it even though
+// Gx's own P<-g/V<-g blocks claim it does.
 void propagateCoupled(const std::vector<Pose6D>& raw_poses,
                       const M3D& raw_rot1,
                       double scan_end_time,
                       const M3D& rot0, const V3D& pos0, const V3D& vel0,
-                      const V3D& gravity,
+                      const V3D& gravity, const V3D& gravity0,
                       const V3D& delta_bg, const V3D& delta_ba,
                       const std::vector<V3D>& c_acc, const std::vector<V3D>& c_gyr,
                       int n_c, CoupledPropagation& out);
@@ -126,8 +150,8 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
 Eigen::Matrix<double, 9, Eigen::Dynamic> interpolatePhi(
     const CoupledPropagation& prop, double t);
 
-// Same interpolation, for phi_x_head (items 3c/3d).
-Eigen::Matrix<double, 9, 12> interpolatePhiX(
+// Same interpolation, for phi_x_head (items 3c/3d, 18 columns per 3e(v)/3f).
+Eigen::Matrix<double, 9, 18> interpolatePhiX(
     const CoupledPropagation& prop, double t);
 
 }  // namespace livo_recon

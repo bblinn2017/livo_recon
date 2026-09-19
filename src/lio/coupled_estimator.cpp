@@ -48,7 +48,7 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
                       const M3D& raw_rot1,
                       double scan_end_time,
                       const M3D& rot0, const V3D& pos0, const V3D& vel0,
-                      const V3D& gravity,
+                      const V3D& gravity, const V3D& gravity0,
                       const V3D& delta_bg, const V3D& delta_ba,
                       const std::vector<V3D>& c_acc, const std::vector<V3D>& c_gyr,
                       int n_c, CoupledPropagation& out)
@@ -71,10 +71,15 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
   Phi.setZero();
   out.phi_head.push_back(Phi);
 
-  // Items 3c/3d: seed Phi_x(t0) with only the V<-delta_v0 block as identity
-  // (column order [delta_v0(3), delta_bg(3), delta_ba(3), delta_g(3)]).
-  Eigen::Matrix<double, 9, 12> Phix = Eigen::Matrix<double, 9, 12>::Zero();
-  Phix.block<3, 3>(6, 0) = M3D::Identity();
+  // Items 3c/3d, REVISED 3e(v)/3f bug 2: seed Phi_x(t0) with the R<-delta_phi0,
+  // P<-delta_p0 AND V<-delta_v0 blocks as identity (column order
+  // [delta_phi0(3), delta_p0(3), delta_v0(3), delta_bg(3), delta_ba(3),
+  // delta_g(3)]) -- each is its own initial condition, everything else's t0
+  // sensitivity is zero.
+  Eigen::Matrix<double, 9, 18> Phix = Eigen::Matrix<double, 9, 18>::Zero();
+  Phix.block<3, 3>(0, 0) = M3D::Identity();   // phi_R <- delta_phi0
+  Phix.block<3, 3>(3, 3) = M3D::Identity();   // p     <- delta_p0
+  Phix.block<3, 3>(6, 6) = M3D::Identity();   // v     <- delta_v0
   out.phi_x_head.push_back(Phix);
 
   for (int k = 0; k < N; ++k)
@@ -92,8 +97,11 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
     const M3D& R_tail_raw = (k + 1 < N) ? raw_poses[k + 1].rot : raw_rot1;
     // Items 3c/3d: subtract this GN iteration's own accumulated delta_ba on
     // top of the bias raw_poses already had baked in -- see header comment.
-    const V3D a_body_head = R_head_raw.transpose() * (seg.acc_head - gravity) - delta_ba;
-    const V3D a_body_tail = R_tail_raw.transpose() * (seg.acc_tail - gravity) - delta_ba;
+    // CQ-44 item 3f, BUG 3: strip with the ORIGINAL gravity0 (what
+    // seg.acc_head/acc_tail were actually built with), NOT the corrected
+    // `gravity` -- see propagateCoupled()'s own header comment.
+    const V3D a_body_head = R_head_raw.transpose() * (seg.acc_head - gravity0) - delta_ba;
+    const V3D a_body_tail = R_tail_raw.transpose() * (seg.acc_tail - gravity0) - delta_ba;
 
     // Basis weights at this segment's own head/tail times, per coefficient.
     // wa/wg[j] pairs (head,tail); the "_avr" convention (0.5*(head+tail))
@@ -151,7 +159,12 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
     const V3D acc_avr_body_head = a_body_head + delta_a_head;
     M3D acc_avr_skew; acc_avr_skew << SKEW_SYM_MATRX(acc_avr_body_head);
 
-    Eigen::Matrix<double, 9, 9> Fx = Eigen::Matrix<double, 9, 9>::Zero();
+    // CQ-44 item 3f, BUG 1: this must be seeded with the identity, matching
+    // imu_processing.cpp:187's F_x.setIdentity() -- otherwise the P<-P (3,3)
+    // and V<-V (6,6) blocks are left at zero and the Phi/Phix recursions
+    // (Phi_{k+1} = Fx*Phi_k + G_k) DISCARD everything accumulated so far at
+    // every IMU step instead of carrying it forward.
+    Eigen::Matrix<double, 9, 9> Fx = Eigen::Matrix<double, 9, 9>::Identity();
     Fx.block<3, 3>(0, 0) = Exp_f.transpose();                          // R<-R
     Fx.block<3, 3>(3, 6) = M3D::Identity() * dt;                       // P<-V
     Fx.block<3, 3>(3, 0) = -0.5 * R_head * acc_avr_skew * dt2;         // P<-R (2nd order)
@@ -181,14 +194,15 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
     // Gx's blocks mirror imu_processing.cpp's own F_x bias/gravity columns
     // exactly (idxR<-idxBG, idxV<-idxBA, idxV<-idxG, idxP<-idxG; idxP<-idxBA
     // omitted -- see header comment, same omission phi_head's own G makes).
-    // Column order [delta_v0(3,unused here -- v0's ONLY effect is the t0
-    // seed, propagated forward purely through Fx, so Gx's own v0 columns are
+    // Column order [delta_phi0(3,unused here), delta_p0(3,unused here),
+    // delta_v0(3,unused here -- these three's ONLY effect is the t0 seed,
+    // propagated forward purely through Fx, so Gx's own columns for them are
     // always zero), delta_bg(3), delta_ba(3), delta_g(3)]. ----
-    Eigen::Matrix<double, 9, 12> Gx = Eigen::Matrix<double, 9, 12>::Zero();
-    Gx.block<3, 3>(0, 3) = -M3D::Identity() * dt;         // R <- delta_bg
-    Gx.block<3, 3>(6, 6) = -R_head * dt;                  // V <- delta_ba
-    Gx.block<3, 3>(6, 9) = M3D::Identity() * dt;          // V <- delta_g
-    Gx.block<3, 3>(3, 9) = 0.5 * M3D::Identity() * dt2;   // P <- delta_g
+    Eigen::Matrix<double, 9, 18> Gx = Eigen::Matrix<double, 9, 18>::Zero();
+    Gx.block<3, 3>(0, 9)  = -M3D::Identity() * dt;         // R <- delta_bg
+    Gx.block<3, 3>(6, 12) = -R_head * dt;                  // V <- delta_ba
+    Gx.block<3, 3>(6, 15) = M3D::Identity() * dt;          // V <- delta_g
+    Gx.block<3, 3>(3, 15) = 0.5 * M3D::Identity() * dt2;   // P <- delta_g
     Phix = Fx * Phix + Gx;
     out.phi_x_head.push_back(Phix);
   }
@@ -219,12 +233,12 @@ Eigen::Matrix<double, 9, Eigen::Dynamic> interpolatePhi(
   return prop.phi_head.back();
 }
 
-Eigen::Matrix<double, 9, 12> interpolatePhiX(
+Eigen::Matrix<double, 9, 18> interpolatePhiX(
     const CoupledPropagation& prop, double t)
 {
   const int N = static_cast<int>(prop.poses.size());
   if (N == 0) return prop.phi_x_head.empty()
-      ? Eigen::Matrix<double, 9, 12>::Zero()
+      ? Eigen::Matrix<double, 9, 18>::Zero()
       : prop.phi_x_head[0];
   if (t <= prop.poses.front().t) return prop.phi_x_head.front();
   const double t1 = prop.poses.back().t + prop.poses.back().dt;
