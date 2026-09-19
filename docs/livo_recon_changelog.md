@@ -2560,3 +2560,28 @@ corrected value.
   // computing the identical frame get the identical HtH/Htz too.
 ```
 
+
+## include/livo_recon/lio/coupled_estimator.h
+
+### include/livo_recon/lio/coupled_estimator.h:16 (superseded 2026-09-19)
+
+<a id="include-livo_recon-lio-coupled_estimator.h-16"></a>
+
+```
+// position spline, and NOT tied to ScanSpline::n_cp/control_point_hz --
+// round-64 already measured that knob buys nothing (40-130Hz, flat ATE) and
+// item 2 of the card explicitly says not to reuse it.
+```
+
+Corrected 2026-09-19: this measurement predates the CQ-21 `valid_` bug fix
+that made `ScanSpline`'s control-point mechanism actually take effect (see
+`ad7eed3`, "critical `valid_` bug that made the whole mechanism inert"), so
+it does not establish anything about resolution sensitivity post-fix and
+should not be cited as supporting evidence. `n_c`'s independence from
+`control_point_hz` is still the right design (a differently-purposed basis
+-- a measurement correction over one scan, not a position/orientation
+trajectory), just not for that reason. The user's own follow-up request was
+to test the two modes at a comparable effective rate instead of relying on
+the retired claim (see `estimator/coupled/n_c=13`, matching decoupled's
+`n_cp` at the shipped `control_point_hz=100` default for a ~0.1s eee_01
+scan: `n_cp = round(100 * 0.1) + 3 = 13`).

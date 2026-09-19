@@ -16,15 +16,9 @@
 // position spline, and NOT tied to ScanSpline::n_cp/control_point_hz --
 // item 2 of the card explicitly says not to reuse it, since it's a separate
 // resolution knob for a differently-purposed basis (a measurement CORRECTION
-// over one scan, not a position/orientation trajectory). NOTE: an earlier
-// version of this comment cited round-64's finding that control_point_hz
-// "buys nothing" (flat ATE, 40-130Hz) as supporting evidence -- that
-// measurement predates the CQ-21 valid_ bug fix that made ScanSpline's own
-// mechanism actually take effect, so it does not establish anything about
-// resolution sensitivity post-fix and should not be treated as a validated
-// reason on its own. n_c's independence from control_point_hz is still the
-// right design (different basis, different purpose), just not for that
-// reason.
+// over one scan, not a position/orientation trajectory).
+// History (2026-09-19, a prior round-64-citing version of this comment): see
+// docs/livo_recon_changelog.md#include-livo_recon-lio-coupled_estimator.h-16
 //
 // propagateCoupled() re-integrates ONE scan's already-computed raw pose
 // chain (LioProc::processLIO()'s own mg.poses, i.e. ImuProc::propagate()'s
