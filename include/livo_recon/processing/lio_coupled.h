@@ -332,6 +332,13 @@ private:
   // RMS record has and coupled never had. sqrt(mean(r^2)), same units/scale
   // as a point-to-plane residual everywhere else in this codebase.
   double coupled_res_rms_ = -1.0;
+  // CQ-60 item 0a: arithmetic mean of res.sigma_squared over this scan's
+  // final-iteration residual set -- same definition lio_decoupled.cpp's own
+  // mean_sigma_squared uses (sum_sigma_squared/n), so the two paths are
+  // directly, identically comparable. sum_weight (already logged) is
+  // sum(1/sigma_squared) -- its reciprocal-scaled harmonic mean is NOT the
+  // same quantity and does not substitute for this one.
+  double coupled_mean_sigma_squared_ = -1.0;
 
   // CQ-53 item 5: gravity-leak falsifier -- world-frame integrated
   // acceleration magnitude (|acc_avr_world|, averaged over this scan's own

@@ -426,6 +426,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         << " last_delta_c_norm=" << coupled_last_delta_c_norm_
         // CQ-53 item 4: per-scan RMS residual (meters).
         << " res_rms=" << coupled_res_rms_
+        << " mean_sigma_squared=" << coupled_mean_sigma_squared_
         // CQ-53 item 5: gravity-leak falsifier.
         << " acc_world_mag=" << coupled_acc_world_mag_
         << " gravity_dir_err_deg=" << coupled_gravity_dir_err_deg_
@@ -715,6 +716,7 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // sum_S uses -- summed here so the coupled path reports the SAME
   // absolute-units denominator, never logged on this path before now.
   double sum_floor_S = 0.0, sum_sdiag_S = 0.0, sum_pvar_S = 0.0, sum_prior_pose_S = 0.0;
+  double sum_sigma_squared = 0.0;  // CQ-60 item 0a
   std::vector<double> hcol_reldiff;  // CQ-53 item 2
   hcol_reldiff.reserve(residuals_.size());
   // TQ-40 item 3: pure-LiDAR-info accumulation restricted to [delta_phi0,
@@ -803,6 +805,7 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     sum_abs_r += std::abs(res.r);
     sum_sq_r += res.r * res.r;
     sum_wr2 += w * res.r * res.r;  // CQ-54 item 4: reduced chi-square numerator
+    sum_sigma_squared += res.sigma_squared;  // CQ-60 item 0a
     // CQ-55 item 12: same accept/skip rule as lio_decoupled.cpp's own sum_S.
     if (res.floor_term >= 0.0 && res.sigma_diag_squared >= 0.0 && res.s_prior_pose >= 0.0) {
       sum_floor_S      += res.floor_term;
@@ -826,6 +829,7 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // CQ-53 items 2/4: RMS residual and hcol_reldiff distribution, overwritten
   // every iteration so the FINAL (converged) call's values survive.
   coupled_res_rms_ = residuals_.empty() ? -1.0 : std::sqrt(sum_sq_r / static_cast<double>(residuals_.size()));
+  coupled_mean_sigma_squared_ = residuals_.empty() ? -1.0 : sum_sigma_squared / static_cast<double>(residuals_.size());
   coupled_reduced_chi2_ = residuals_.empty() ? -1.0 : sum_wr2 / static_cast<double>(residuals_.size());
   {
     const double sum_S = sum_floor_S + sum_sdiag_S + sum_pvar_S + sum_prior_pose_S;
