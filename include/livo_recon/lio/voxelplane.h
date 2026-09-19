@@ -31,6 +31,19 @@ void flushPlaneFitStatsLog();
 // accepted ones, making the old per-call mutex+ofstream the dominant cost
 // whenever that mode is on).
 void flushConsistencyCorrLog();
+// CQ-60: same pattern, for the per-SCAN aggregate (corr_scan.csv,
+// debugAccumConsistencyCorr()) -- this one used to accumulate into a
+// single global struct under a mutex taken on EVERY CANDIDATE (thousands
+// per scan across every thread), not just once per thread. Now
+// accumulates into a thread_local struct with no lock, same as the two
+// above; call mergeCorrScanThreadLocal() once per thread from INSIDE the
+// parallel region (same obligation as flushVarianceShareLog() etc.), then
+// call flushCorrScanRow() exactly ONCE, single-threaded, AFTER the
+// parallel region has closed (the row needs every thread's contribution
+// merged first, unlike the other two which just concatenate per-thread
+// buffers independently).
+void mergeCorrScanThreadLocal();
+void flushCorrScanRow();
 
 class VoxelPlane
 {

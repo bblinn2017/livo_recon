@@ -225,9 +225,46 @@ struct CorrScanAccum {
   // reuses n_vis_{hit,free,unobs} as its own denominator.
   double sum_fill_hit = 0.0, sum_fill_free = 0.0, sum_fill_unobs = 0.0;
   long n_vis_hit_thru = 0;
+
+  // CQ-60: adds every additive field of `o` into `*this` (max_nis/
+  // max_nis_est take the max, not the sum -- everything else is a count
+  // or a sum, so += is correct). Used both to merge a thread's local
+  // accumulator into the shared per-scan total, and (if a future caller
+  // ever wants it) to combine two scans' totals.
+  void mergeAdd(const CorrScanAccum& o)
+  {
+    if (scan_id < 0) scan_id = o.scan_id;
+    n_candidates += o.n_candidates; n_accepted += o.n_accepted;
+    n_dropped += o.n_dropped; n_nis_finite += o.n_nis_finite;
+    sum_nis += o.sum_nis; sum_nis2 += o.sum_nis2; sum_log_nis += o.sum_log_nis;
+    max_nis = std::max(max_nis, o.max_nis);
+    n_nis_est_finite += o.n_nis_est_finite;
+    sum_nis_est += o.sum_nis_est; sum_nis_est2 += o.sum_nis_est2;
+    max_nis_est = std::max(max_nis_est, o.max_nis_est);
+    n_share += o.n_share; sum_share += o.sum_share;
+    sum_S += o.sum_S; sum_floor += o.sum_floor; sum_sdiag += o.sum_sdiag;
+    sum_pvar += o.sum_pvar; sum_prior_pose += o.sum_prior_pose; n_S += o.n_S;
+    n_vis_hit += o.n_vis_hit; n_vis_free += o.n_vis_free; n_vis_unobs += o.n_vis_unobs;
+    n_vis_hit_acc += o.n_vis_hit_acc; n_vis_free_acc += o.n_vis_free_acc;
+    n_vis_unobs_acc += o.n_vis_unobs_acc;
+    sum_age_hit += o.sum_age_hit; sum_age_free += o.sum_age_free; sum_age_unobs += o.sum_age_unobs;
+    n_age_hit += o.n_age_hit; n_age_free += o.n_age_free; n_age_unobs += o.n_age_unobs;
+    sum_fill_hit += o.sum_fill_hit; sum_fill_free += o.sum_fill_free; sum_fill_unobs += o.sum_fill_unobs;
+    n_vis_hit_thru += o.n_vis_hit_thru;
+  }
 };
 std::mutex g_corr_scan_mtx;
+// CQ-60: the shared, cross-thread-merged total for the scan currently
+// being finished -- only ever touched inside mergeCorrScanThreadLocal()
+// (under g_corr_scan_mtx, once per THREAD) and flushCorrScanRow() (single-
+// threaded, after the parallel region closes). Never touched per-candidate.
 CorrScanAccum g_corr_scan;
+// CQ-60: each thread's own running total for the scan currently being
+// built -- filled by debugAccumConsistencyCorr() with NO LOCK (this is
+// the whole point: thousands of per-candidate calls per scan, across
+// every thread, now touch only thread-local memory), drained into
+// g_corr_scan by mergeCorrScanThreadLocal().
+thread_local CorrScanAccum t_corr_scan;
 
 void flushCorrScan(CorrScanAccum& a)
 {
@@ -279,19 +316,22 @@ void flushCorrScan(CorrScanAccum& a)
 }
 
 // Called for EVERY candidate, always, regardless of the corr.csv stride.
-// Cheap: a few adds under a lock, no I/O except once per scan.
+// CQ-60: no lock at all now -- writes only into this thread's own
+// t_corr_scan. A scan_id change is no longer detected/flushed here (that
+// was ALSO the source of the item-0b iteration-blending caveat: coupled
+// calls buildResiduals() once per GN iteration with the SAME scan_id, so
+// the old scan-id-change-triggered flush silently summed every iteration
+// together). Each buildResiduals() call now produces exactly one merged
+// row, via mergeCorrScanThreadLocal()+flushCorrScanRow() below, called
+// once per call regardless of whether scan_id actually changed.
 void debugAccumConsistencyCorr(int scan_id, double nu, double S, int gated,
                                int dropped, double plane_share,
                                double floor_term, double sigma_diag_squared,
                                double plane_var_term, double s_prior_pose,
                                int vis_state, bool vis_thru, int vis_age, int vis_fill)
 {
-  std::lock_guard<std::mutex> lock(g_corr_scan_mtx);
-  if (scan_id != g_corr_scan.scan_id) {
-    flushCorrScan(g_corr_scan);
-    g_corr_scan.scan_id = scan_id;
-  }
-  auto& a = g_corr_scan;
+  if (t_corr_scan.scan_id < 0) t_corr_scan.scan_id = scan_id;
+  auto& a = t_corr_scan;
   a.n_candidates++;
   // P6a: counted for every non-dropped candidate regardless of gate()'s own
   // accept/reject -- visibility is about the ray, not the final residual.
@@ -380,6 +420,32 @@ void flushVarianceShareLog()
   ofs << t_variance_share_buf;
   ofs.flush();
   t_variance_share_buf.clear();
+}
+
+// CQ-60: merges THIS thread's t_corr_scan into the shared g_corr_scan
+// under one lock (once per thread per buildResiduals() call -- `threads`
+// mutex acquisitions instead of one per candidate), then resets
+// t_corr_scan for the next call. Must be called by every thread, from
+// inside the parallel region, same obligation as flushVarianceShareLog()
+// above. A thread that saw no candidates (t_corr_scan.scan_id still -1)
+// still calls this cheaply and skips the lock.
+void mergeCorrScanThreadLocal()
+{
+  if (t_corr_scan.scan_id < 0) return;
+  std::lock_guard<std::mutex> lock(g_corr_scan_mtx);
+  g_corr_scan.mergeAdd(t_corr_scan);
+  t_corr_scan = CorrScanAccum{};
+}
+
+// CQ-60: writes the fully-merged row and resets g_corr_scan for the next
+// call. Unlike mergeCorrScanThreadLocal() (once per thread, inside the
+// parallel region), this must be called exactly ONCE, single-threaded,
+// AFTER the parallel region has closed -- every thread's contribution
+// must already be merged in, and writing the row twice would double it.
+void flushCorrScanRow()
+{
+  std::lock_guard<std::mutex> lock(g_corr_scan_mtx);
+  flushCorrScan(g_corr_scan);
 }
 
 void flushPlaneFitStatsLog()

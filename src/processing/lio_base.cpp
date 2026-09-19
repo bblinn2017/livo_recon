@@ -318,12 +318,21 @@ void LioProcBase::buildResiduals(
     // debugLogConsistencyCorr() (called from computeResidual(), same OMP
     // region) now buffers per-thread too. See voxelplane.h's doc comment.
     flushConsistencyCorrLog();
+    // CQ-60: same once-per-thread obligation as flushVarianceShareLog()/
+    // flushConsistencyCorrLog() above -- merges this thread's t_corr_scan
+    // into the shared g_corr_scan, no lock held longer than one struct-add.
+    mergeCorrScanThreadLocal();
     if (allow_consistency_log && opts_.log_pair_corr_en)
       flushPairCorrLog();
   }
 
   if (allow_consistency_log && opts_.log_pair_corr_en)
     logPairCorrPrior(voxel_map_->frame_idx_, prior_cov_rp);
+  // CQ-60: single-threaded, after the parallel region above has fully
+  // closed -- every thread's contribution is merged into g_corr_scan by
+  // now (mergeCorrScanThreadLocal() ran for all of them, inside the
+  // region, before its implicit join). One row per buildResiduals() call.
+  flushCorrScanRow();
 
   residuals.clear();
   for (const auto& local : build_thread_residuals_)
