@@ -118,6 +118,64 @@ int main()
            ratio_dom, pass ? "PASS" : "FAIL");
   }
 
+  // CQ-53 item 0d: the FIRST check above only tests phi_x (state
+  // sensitivity, via delta_bg). It says NOTHING about phi_c (coefficient
+  // sensitivity, interpolatePhi()/phi_head) -- the half that actually
+  // carries c_acc/c_gyr into the measurement row at lio_coupled.cpp's
+  // Jrow.segment(ncol_s, ncol_c) = H * Phic_pt.topRows(6). A sign/scale/
+  // column-ordering bug in phi_c's gyro block would be INVISIBLE to the
+  // phi_x check above and would look exactly like what CQ-50/52 observed:
+  // the state half behaves, the coefficient half poisons the joint solve.
+  // Perturb c_gyr_j (rotation rows) and c_acc_j (position rows) at a low,
+  // middle, and high j, compare against interpolatePhi()'s own columns.
+  for (int j : {0, n_c / 2, n_c - 1})
+  {
+    // c_gyr_j -> rotation rows (0:3), column 3*n_c + 3*j in phi_head's
+    // [c_acc(3*n_c), c_gyr(3*n_c)] layout.
+    {
+      std::vector<V3D> c_gyr_pert = c_gyr;
+      c_gyr_pert[j] = V3D(0, 0, eps);  // z-axis perturbation, arbitrary but nonzero
+      CoupledPropagation prop1;
+      propagateCoupled(raw_poses, raw_rot1, scan_end_time, rot0, pos0, vel0,
+                        gravity, gravity0, delta_bg, delta_ba, c_acc, c_gyr_pert, n_c, prop1);
+      const double t_k = 0.6 * scan_end_time;
+      const M3D R0_tk = worldRotAt(prop0, t_k);
+      const M3D R1_tk = worldRotAt(prop1, t_k);
+      const V3D dtheta_numeric = Log(R0_tk.transpose() * R1_tk) / eps;
+      const Eigen::Matrix<double, 9, Eigen::Dynamic> Phic_tk = interpolatePhi(prop0, t_k);
+      const V3D phi_R_analytic = Phic_tk.block<3, 1>(0, 3 * n_c + 3 * j + 2);
+      const double ratio = phi_R_analytic.z() / (dtheta_numeric.z() + 1e-30);
+      const bool pass = std::abs(ratio - 1.0) < 0.05;
+      all_pass = all_pass && pass;
+      printf("c_gyr[j=%d,z]  dtheta_numeric=(%.6f %.6f %.6f)  phi_R_analytic=(%.6f %.6f %.6f)  "
+             "dominant_ratio=%.4f  %s\n",
+             j, dtheta_numeric.x(), dtheta_numeric.y(), dtheta_numeric.z(),
+             phi_R_analytic.x(), phi_R_analytic.y(), phi_R_analytic.z(), ratio, pass ? "PASS" : "FAIL");
+    }
+    // c_acc_j -> position rows (3:6), column 3*j.
+    {
+      std::vector<V3D> c_acc_pert = c_acc;
+      c_acc_pert[j] = V3D(0, 0, eps);
+      CoupledPropagation prop1;
+      propagateCoupled(raw_poses, raw_rot1, scan_end_time, rot0, pos0, vel0,
+                        gravity, gravity0, delta_bg, delta_ba, c_acc_pert, c_gyr, n_c, prop1);
+      // Numerical dp/dc_acc at the ENDPOINT (exact, no interpolation needed --
+      // simpler than probing an intermediate t_k, and still a real test of
+      // phi_c's position-row correctness since t1 is just another bracket
+      // point interpolatePhi() must get right).
+      const V3D dp_numeric = (prop1.pos1 - prop0.pos1) / eps;
+      const Eigen::Matrix<double, 9, Eigen::Dynamic> Phic_t1 = interpolatePhi(prop0, scan_end_time);
+      const V3D phi_P_analytic = Phic_t1.block<3, 1>(3, 3 * j + 2);
+      const double ratio = phi_P_analytic.z() / (dp_numeric.z() + 1e-30);
+      const bool pass = std::abs(ratio - 1.0) < 0.05;
+      all_pass = all_pass && pass;
+      printf("c_acc[j=%d,z]  dp_numeric=(%.6f %.6f %.6f)  phi_P_analytic=(%.6f %.6f %.6f)  "
+             "dominant_ratio=%.4f (at t1)  %s\n",
+             j, dp_numeric.x(), dp_numeric.y(), dp_numeric.z(),
+             phi_P_analytic.x(), phi_P_analytic.y(), phi_P_analytic.z(), ratio, pass ? "PASS" : "FAIL");
+    }
+  }
+
   // Also check t1 endpoint itself, as a sanity cross-check against the
   // known-working phi_at_scan_end path.
   {
