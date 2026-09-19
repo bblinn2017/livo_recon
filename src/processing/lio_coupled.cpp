@@ -249,7 +249,28 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       && state_->idxBG() >= 0 && state_->idxBA() >= 0 && state_->idxG() >= 0)
   {
     Eigen::LDLT<Eigen::MatrixXd> ldlt_A(coupled_last_A_);
-    if (ldlt_A.info() == Eigen::Success)
+    // CQ-57 item 5, RULE 58: info()==Success does NOT catch rank deficiency
+    // -- confirmed directly (CQ-55 arm (c) produced trP_pos_post=-4,629,615
+    // straight through this exact gate). spline.cpp/spline.h already
+    // document this same fact and use vectorD().minCoeff() instead (see
+    // e.g. coupled_joint_dmin_ a few hundred lines below, same technique,
+    // already in this file) -- a genuinely positive-definite LDLT has EVERY
+    // pivot strictly positive, which is what this checks directly, rather
+    // than trusting Eigen's own internal success flag. On failure: ABORT
+    // loudly (never a substitute covariance masquerading as a real one).
+    const double min_pivot = ldlt_A.vectorD().minCoeff();
+    if (min_pivot <= 0.0) {
+      std::ostringstream abort_msg;
+      abort_msg << "[FATAL] coupled covariance solve: LDLT(coupled_last_A_) is "
+                   "NOT positive-definite (min_pivot=" << min_pivot
+                << ", info()=" << (ldlt_A.info() == Eigen::Success ? "Success" : "NumericalIssue")
+                << ") -- scan_id=" << voxel_map_->frame_idx_
+                << " n_residuals=" << coupled_n_residuals_
+                << " n_c=" << copts_.n_c << " jacobian_time_mode=" << copts_.jacobian_time_mode
+                << " curvature_weight=" << copts_.curvature_weight
+                << " curvature_only=" << (copts_.curvature_only ? "true" : "false");
+      throw std::runtime_error(abort_msg.str());
+    }
     {
       const Eigen::MatrixXd coeff_cov =
           ldlt_A.solve(Eigen::MatrixXd::Identity(coupled_last_A_.rows(), coupled_last_A_.rows()));
@@ -269,6 +290,46 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       M.block(9, 9, 9, 9) = Eigen::MatrixXd::Identity(9, 9);  // select [bg,ba,g]
       Eigen::MatrixXd posterior18 = M * coeff_cov * M.transpose();
       posterior18 = 0.5 * (posterior18 + posterior18.transpose());
+
+      // CQ-57 item 1, THE CONSEQUENCE: report-only trace comparison, no
+      // behaviour change. trP_prior_in/trP_imu are the SAME quantity here
+      // (nothing writes covMut() between processIMU and this point within
+      // a scan -- see item 0's confirmed facts) but both are logged
+      // independently so that equality is a checked fact, not an assumed
+      // one. trP_phi = trace(Jx * P_prior_18x18 * Jx^T), the homogeneous
+      // map alone (no LiDAR update at all) -- position and rotation blocks
+      // reported separately throughout, per the card's own request.
+      if (opts_.log_debug_en) {
+        const Eigen::MatrixXd P_prior_full = state_->cov();
+        const int iP = StateGroup::idxP(), iR = StateGroup::idxR();
+        if (P_prior_full.rows() >= 18 && P_prior_full.cols() >= 18) {
+          const Eigen::MatrixXd P_prior_18 = P_prior_full.block(0, 0, 18, 18);
+          const Eigen::Matrix<double, 9, 9> P_phi9 = Jx * P_prior_18 * Jx.transpose();
+          const double trP_prior_in_pos = P_prior_full.block<3, 3>(iP, iP).trace();
+          const double trP_prior_in_rot = P_prior_full.block<3, 3>(iR, iR).trace();
+          const double trP_imu_pos = trP_prior_in_pos;  // same read; see comment above
+          const double trP_imu_rot = trP_prior_in_rot;
+          const double trP_phi_pos = P_phi9.block<3, 3>(3, 3).trace();  // Jx rows [R(3),P(3),V(3)]
+          const double trP_phi_rot = P_phi9.block<3, 3>(0, 0).trace();
+          const double trP_post_pos = posterior18.block<3, 3>(iP, iP).trace();
+          const double trP_post_rot = posterior18.block<3, 3>(iR, iR).trace();
+          static PersistentLogStream cov_trace_log("cov_trace.txt");
+          std::ofstream& ctofs = cov_trace_log.stream();
+          ctofs << std::setprecision(12)
+                << "scan_id=" << voxel_map_->frame_idx_
+                << " trP_prior_in_pos=" << trP_prior_in_pos
+                << " trP_prior_in_rot=" << trP_prior_in_rot
+                << " trP_phi_pos=" << trP_phi_pos
+                << " trP_phi_rot=" << trP_phi_rot
+                << " trP_post_pos=" << trP_post_pos
+                << " trP_post_rot=" << trP_post_rot
+                << " trP_imu_pos=" << trP_imu_pos
+                << " trP_imu_rot=" << trP_imu_rot
+                << "\n";
+          ctofs.flush();
+        }
+      }
+
       Eigen::MatrixXd P = state_->cov();
       P.block(0, 0, 18, 18) = posterior18;   // idxR=0..idxG()+3=18, contiguous
       state_->covMut() = P;
