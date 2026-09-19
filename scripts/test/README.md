@@ -81,3 +81,30 @@ worse is the signature. Two consequences, both now encoded in the defaults:
 
 Re-run this on real bags before trusting any `n_control_points` choice: the
 plateau's width is a property of the motion and the IMU rate, not a constant.
+
+## test_coupled_phi_fd — CQ-50, coupled estimator's phi_x_head/worldRotAt cross-check
+
+Standalone finite-difference verification of `propagateCoupled()`'s
+`phi_x_head` (the `phi_R` rows specifically) against a numerical
+re-integration, evaluated at an INTERMEDIATE scan time `t_k` (not just the
+scan endpoint `t1`). Perturbs `delta_bg` by epsilon on each axis with a
+synthetic 20-segment IMU chain, re-propagates, and compares the numerical
+rotation change (via `worldRotAt()` before/after) against `interpolatePhiX()`'s
+own analytic prediction.
+
+```sh
+g++ -std=c++17 -O2 -I include -I /usr/include/eigen3 \
+    scripts/test/test_coupled_phi_fd.cpp src/lio/coupled_estimator.cpp \
+    -o /tmp/test_coupled_phi_fd && /tmp/test_coupled_phi_fd
+```
+
+Refutes a specific sign/frame-convention hypothesis this session raised from
+`coupled_estimator.h`'s own (since-corrected) doc comment, which described
+`phi_R` as a "LEFT-tangent... `Log(R_true^T R_nominal)`" convention -- this
+test's own `dominant_ratio` comes out ~1.0000 (the STANDARD right/body-frame
+`dtheta` convention, `R_true = R_nominal * Exp(phi_R)`), not ~-1.0000. Also
+confirms `worldRotAt()` and `interpolatePhiX()` are mutually consistent --
+CQ-50's `h_at_point_time` real-fix attempt's incomplete result (full eee_01
+ATE ~60-66km, vs. the working `phi_at_scan_end` diagnostic's 0.025m) is
+therefore NOT explained by a sign/convention bug in this shared math; the
+cause was re-scoped into CQ-52 for further investigation.

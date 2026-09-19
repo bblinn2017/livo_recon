@@ -5,6 +5,7 @@
 #include "livo_recon/utils/algo/math.h"
 #include "livo_recon/map/voxelmap.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <fstream>
@@ -51,6 +52,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/phi_at_scan_end", copts_.phi_at_scan_end, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/h_at_point_time", copts_.h_at_point_time, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_jrow_leverage_en", copts_.log_jrow_leverage_en, false);
 
   // Every spline/* and adaptive_q/* key is unclaimed by this class by
   // construction -- refuseUnclaimed only needs to additionally cover
@@ -70,6 +72,7 @@ std::string LioProcCoupled::engagementReport() const
       << " disable_cgyr=" << (copts_.disable_cgyr ? "true" : "false")
       << " phi_at_scan_end=" << (copts_.phi_at_scan_end ? "true" : "false")
       << " h_at_point_time=" << (copts_.h_at_point_time ? "true" : "false")
+      << " log_jrow_leverage_en=" << (copts_.log_jrow_leverage_en ? "true" : "false")
       << " -- no spline/AdaptiveQ engagement to report (this class has "
          "neither)";
   return oss.str();
@@ -169,7 +172,10 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       iss << "t_abs=" << std::fixed << std::setprecision(6) << t_abs
           << "  iter=" << iter << "  n_residuals=" << residuals_.size()
           << "  avg_abs_r=" << std::scientific << std::setprecision(6) << error
-          << "  rel_diff=" << ((prev_error - error) / std::max(prev_error, 1e-6));
+          << "  rel_diff=" << ((prev_error - error) / std::max(prev_error, 1e-6))
+          // CQ-53 item 3: THIS iteration's own step norms.
+          << "  delta_s_norm=" << coupled_last_delta_s_norm_
+          << "  delta_c_norm=" << coupled_last_delta_c_norm_;
       static PersistentLogStream log("iter_error.txt");
       std::ofstream& ofs = log.stream();
       ofs << iss.str() << "\n";
@@ -248,6 +254,38 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
 
   const double total_dtheta_deg = total_dtheta.norm() * (180.0 / M_PI);
 
+  // CQ-53 item 5, gravity-leak falsifier: coupled_prop_.poses[k].acc_head/
+  // acc_tail are the CORRECTED world-frame accelerations (R*(a_body+
+  // correction)+gravity -- see Pose6D's own doc comment), so subtracting
+  // the JUST-UPDATED gravity_estimate leaves the net specific-force this
+  // scan actually integrated into velocity. At genuine rest (or constant
+  // velocity) this should be near zero; a persistent nonzero horizontal
+  // component here IS gravity leaking through a wrong attitude estimate --
+  // the mechanism CQ-52's own quadratic-position-growth derivation
+  // predicts (~7.7 m/s^2 for a ~52deg attitude error). gravity_dir_err_deg
+  // is a NAMED APPROXIMATION (no ground-truth stationary window is wired
+  // into LioProc) -- it compares the posterior gravity estimate's
+  // direction against the NEGATIVE of this scan's own mean measured
+  // acceleration direction, a self-consistency check rather than a true
+  // external reference.
+  {
+    const V3D gravity_estimate = state_->gravity();
+    V3D acc_net_sum = V3D::Zero(), acc_mean_sum = V3D::Zero();
+    for (const auto& pose : coupled_prop_.poses) {
+      const V3D acc_avr = 0.5 * (pose.acc_head + pose.acc_tail);
+      acc_net_sum += (acc_avr - gravity_estimate);
+      acc_mean_sum += acc_avr;
+    }
+    const double n_poses = static_cast<double>(coupled_prop_.poses.size());
+    if (n_poses > 0) {
+      coupled_acc_world_mag_ = (acc_net_sum / n_poses).norm();
+      const V3D acc_mean_dir = (acc_mean_sum / n_poses).normalized();
+      const V3D grav_dir = gravity_estimate.normalized();
+      const double cos_ang = std::clamp((-acc_mean_dir).dot(grav_dir), -1.0, 1.0);
+      coupled_gravity_dir_err_deg_ = std::acos(cos_ang) * (180.0 / M_PI);
+    }
+  }
+
   // nees_diag.txt -- same field format as the decoupled path's own write,
   // deliberately kept byte-compatible so the existing eps_pos analysis
   // scripts work unchanged against either. G1 (TQ-37/39's own eps_pos
@@ -290,7 +328,12 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         << " Prr_xx=" << P_rr(0, 0) << " Prr_xy=" << P_rr(0, 1) << " Prr_xz=" << P_rr(0, 2)
         << " Prr_yy=" << P_rr(1, 1) << " Prr_yz=" << P_rr(1, 2) << " Prr_zz=" << P_rr(2, 2)
         << " have_Ppp=" << (have_p ? 1 : 0) << " have_Prr=" << (have_r ? 1 : 0)
-        << " free_tail_d=" << -1.0
+        // CQ-53 item 6: NaN, not -1.0 -- this class has no free-tail
+        // mechanism at all (no spline), so a numeric -1.0 here reads as a
+        // real (if suspicious) measured value to a script that doesn't
+        // special-case it; NaN is unambiguously "not applicable", matching
+        // coupled_refusal_'s own quiet_NaN() convention just below.
+        << " free_tail_d=" << std::numeric_limits<double>::quiet_NaN()
         << " state_vx=" << state_->vel().x() << " state_vy=" << state_->vel().y()
         << " state_vz=" << state_->vel().z()
         << " Pvv_xx=" << P_vv(0, 0) << " Pvv_xy=" << P_vv(0, 1) << " Pvv_xz=" << P_vv(0, 2)
@@ -321,6 +364,25 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         << " delta_g_norm=" << coupled_delta_g_norm_
         << " trP_vel=" << coupled_trP_vel_ << " trP_grav=" << trP_grav_full
         << " iters=" << coupled_iters_ << " solve_ms=" << coupled_solve_ms_
+        // CQ-53 item 1: joint-matrix pivot diagnostics (see coupled_joint_dmin_'s
+        // own doc comment for the state-block/coeff-block split rationale).
+        << " joint_dmin=" << coupled_joint_dmin_ << " joint_dmax=" << coupled_joint_dmax_
+        << " state_dmin=" << coupled_state_dmin_ << " state_dmax=" << coupled_state_dmax_
+        << " coeff_dmin=" << coupled_coeff_dmin_ << " coeff_dmax=" << coupled_coeff_dmax_
+        << " pivot_guard=" << (coupled_pivot_guard_ ? 1 : 0)
+        // CQ-53 item 2: H(t1)-vs-H(t_k) relative-difference distribution.
+        << " hcol_reldiff_p10=" << coupled_hcol_reldiff_p10_
+        << " hcol_reldiff_p50=" << coupled_hcol_reldiff_p50_
+        << " hcol_reldiff_p90=" << coupled_hcol_reldiff_p90_
+        << " hcol_reldiff_max=" << coupled_hcol_reldiff_max_
+        // CQ-53 item 3: FINAL GN iteration's own step norms.
+        << " last_delta_s_norm=" << coupled_last_delta_s_norm_
+        << " last_delta_c_norm=" << coupled_last_delta_c_norm_
+        // CQ-53 item 4: per-scan RMS residual (meters).
+        << " res_rms=" << coupled_res_rms_
+        // CQ-53 item 5: gravity-leak falsifier.
+        << " acc_world_mag=" << coupled_acc_world_mag_
+        << " gravity_dir_err_deg=" << coupled_gravity_dir_err_deg_
         << "\n";
     ofs.flush();
   }
@@ -482,6 +544,9 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   b.segment(0, ncol_s) = -(Pi_ss * s_vec);
   b.segment(ncol_s, ncol_c) = -(Lambda * c_vec);
   double sum_abs_r = 0.0;
+  double sum_sq_r = 0.0;  // CQ-53 item 4
+  std::vector<double> hcol_reldiff;  // CQ-53 item 2
+  hcol_reldiff.reserve(residuals_.size());
   // TQ-40 item 3: pure-LiDAR-info accumulation restricted to [delta_phi0,
   // delta_p0] (columns 0-5), BEFORE the Pi_ss/Lambda prior is added --
   // see coupled_ask_'s own doc comment in the header for the approximation
@@ -498,9 +563,13 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     // (p1, R(t1)) replaced by (p(t_k), R(t_k)). The translation column
     // (normal itself) is frame-independent -- dr/dpos is n^T regardless of
     // which time's body frame p was expressed in -- so it is unaffected.
-    const V3D rot_jac_col = copts_.h_at_point_time
-        ? V3D(res.raw_body_point.cross(worldRotAt(coupled_prop_, res.t).transpose() * res.normal))
-        : res.point_cross_normal;
+    // CQ-53 item 2: computed for EVERY residual regardless of which arm is
+    // actually active below, so the two arms stay directly comparable on
+    // this number -- the permanent replacement for the deleted ad hoc debug
+    // print CQ-50's own filing cited a since-nonexistent "1-3%" figure from.
+    const V3D hk = V3D(res.raw_body_point.cross(worldRotAt(coupled_prop_, res.t).transpose() * res.normal));
+    hcol_reldiff.push_back((hk - res.point_cross_normal).norm() / std::max(res.point_cross_normal.norm(), 1e-9));
+    const V3D rot_jac_col = copts_.h_at_point_time ? hk : res.point_cross_normal;
     H.block<1, 3>(0, 0) = rot_jac_col.transpose();
     H.block<1, 3>(0, 3) = res.normal.transpose();
     // CQ-50 diagnostic: H above is built once from the DESKEWED point and
@@ -529,10 +598,33 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     // "rotation correction exactly as bounded as the decoupled path's own
     // EKF pose-block dtheta, no within-scan SHAPE parameterisation".
     if (copts_.disable_cgyr) Jrow.segment(ncol_s + 3 * n_c, 3 * n_c).setZero();
+    // CQ-53 item 6: committed diagnostic harness (was an ad hoc getenv
+    // print during CQ-50's own investigation) -- per-residual leverage on
+    // delta_phi0/delta_p0, binnable by the point's own capture-time
+    // fraction within the scan [0,1]. Refuted the "early-scan points get
+    // outsized delta_phi0 leverage under h_at_point_time" hypothesis when
+    // this was run manually: the frac-vs-leverage pattern came out nearly
+    // identical between phi_at_scan_end and h_at_point_time.
+    if (copts_.log_jrow_leverage_en) {
+      const double t0_local = coupled_prop_.poses.empty() ? 0.0 : coupled_prop_.poses.front().t;
+      const double t1_local = coupled_prop_.poses.empty() ? 1.0
+          : coupled_prop_.poses.back().t + coupled_prop_.poses.back().dt;
+      const double frac = (t1_local > t0_local) ? (res.t - t0_local) / (t1_local - t0_local) : -1.0;
+      static PersistentLogStream log("jrow_leverage.txt");
+      std::ofstream& ofs = log.stream();
+      ofs << "scan_id=" << voxel_map_->frame_idx_ << " frac=" << frac
+          << " phi0_lev=" << Jrow.segment(0, 3).norm()
+          << " p0_lev=" << Jrow.segment(3, 3).norm() << "\n";
+      // Deliberately NOT flushed per residual (unlike nees_diag.txt/
+      // iter_error.txt's per-scan/per-iteration writes) -- this fires once
+      // per RESIDUAL, potentially hundreds of thousands of times per run;
+      // relies on ofstream's own buffering + normal process exit to flush.
+    }
     const double w = 1.0 / res.sigma_squared;
     A.noalias() += w * (Jrow.transpose() * Jrow);
     b.noalias() -= w * Jrow.transpose() * res.r;
     sum_abs_r += std::abs(res.r);
+    sum_sq_r += res.r * res.r;
     // TQ-40 item 3: matches ekf_.HtH/Htz's own "+H'*W*r" convention exactly
     // (H here is the SAME 1x6 row, since Jrow.head(6) IS H*Phix_pt.topRows(6)
     // restricted to the phi0/p0 columns -- Phix_pt's own phi0/p0 columns are
@@ -546,6 +638,17 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   coupled_last_A_ = A;
   coupled_n_residuals_ = static_cast<int>(residuals_.size());
   coupled_sum_weight_ = sum_weight_this_iter;
+  // CQ-53 items 2/4: RMS residual and hcol_reldiff distribution, overwritten
+  // every iteration so the FINAL (converged) call's values survive.
+  coupled_res_rms_ = residuals_.empty() ? -1.0 : std::sqrt(sum_sq_r / static_cast<double>(residuals_.size()));
+  if (!hcol_reldiff.empty()) {
+    std::sort(hcol_reldiff.begin(), hcol_reldiff.end());
+    const size_t n = hcol_reldiff.size();
+    coupled_hcol_reldiff_p10_ = hcol_reldiff[static_cast<size_t>(0.10 * (n - 1))];
+    coupled_hcol_reldiff_p50_ = hcol_reldiff[static_cast<size_t>(0.50 * (n - 1))];
+    coupled_hcol_reldiff_p90_ = hcol_reldiff[static_cast<size_t>(0.90 * (n - 1))];
+    coupled_hcol_reldiff_max_ = hcol_reldiff.back();
+  }
   {
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3, 3>> es_pp6(HtH_pose_lidar.block<3, 3>(3, 3));
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3, 3>> es_rr6(HtH_pose_lidar.block<3, 3>(0, 0));
@@ -553,6 +656,32 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     coupled_h_rr_min_eig_ = es_rr6.eigenvalues()(0);
   }
 
+  // CQ-53 item 1: pivot diagnostics on the joint matrix, READ-ONLY (three
+  // SEPARATE diagnostic LDLTs, none of which feed the actual solve below --
+  // this project already learned, round 33 scan 3133 on the decoupled side,
+  // that ldlt.info()==Success does not rule out a rank-deficient matrix).
+  {
+    Eigen::LDLT<Eigen::MatrixXd> ldlt_joint(A);
+    if (ldlt_joint.info() == Eigen::Success) {
+      coupled_joint_dmin_ = ldlt_joint.vectorD().minCoeff();
+      coupled_joint_dmax_ = ldlt_joint.vectorD().maxCoeff();
+    }
+    Eigen::LDLT<Eigen::MatrixXd> ldlt_state(A.block(0, 0, ncol_s, ncol_s));
+    if (ldlt_state.info() == Eigen::Success) {
+      coupled_state_dmin_ = ldlt_state.vectorD().minCoeff();
+      coupled_state_dmax_ = ldlt_state.vectorD().maxCoeff();
+    }
+    Eigen::LDLT<Eigen::MatrixXd> ldlt_coeff(A.block(ncol_s, ncol_s, ncol_c, ncol_c));
+    if (ldlt_coeff.info() == Eigen::Success) {
+      coupled_coeff_dmin_ = ldlt_coeff.vectorD().minCoeff();
+      coupled_coeff_dmax_ = ldlt_coeff.vectorD().maxCoeff();
+    }
+    // Disabled-by-default (JOINT_PIVOT_MIN_FLOOR=-1.0, below any real pivot
+    // this system produces) -- exercises the refusal SHAPE without gating
+    // anything at its shipped value. No validated threshold exists yet
+    // (rule 26: a real numerics default is Bryce's call).
+    coupled_pivot_guard_ = (coupled_joint_dmin_ < LioProcCoupledOptions::JOINT_PIVOT_MIN_FLOOR);
+  }
 
   Eigen::VectorXd delta = Eigen::VectorXd::Zero(ncol);
   if (copts_.zero_mean) {
@@ -583,6 +712,10 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
 
   const Eigen::VectorXd delta_s = delta.segment(0, ncol_s);
   const Eigen::VectorXd delta_c = delta.segment(ncol_s, ncol_c);
+  // CQ-53 item 3: THIS iteration's own step norms (not the scan-accumulated
+  // total below).
+  coupled_last_delta_s_norm_ = delta_s.norm();
+  coupled_last_delta_c_norm_ = delta_c.norm();
   // Item 3e(v)/3f bug 2: same [phi0,p0,v,bg,ba,g] order as s_vec above.
   coupled_delta_phi0_ += delta_s.segment<3>(0);
   coupled_delta_pos0_ += delta_s.segment<3>(3);

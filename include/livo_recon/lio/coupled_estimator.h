@@ -69,8 +69,17 @@ struct CoupledPropagation
   V3D vel1 = V3D::Zero();
 
   // phi_head[k]: 9 x (6*n_c) sensitivity of (phi_R, p, v) -- phi_R the
-  // LEFT-tangent rotation error, i.e. d(Log(R_true^T R_nominal)) under a
-  // small perturbation of c -- AT poses[k].t (state BEFORE segment k is
+  // STANDARD right/body-frame rotation perturbation, i.e. d(Log(R_nominal^T
+  // R_true)) under R_true = R_nominal * Exp(phi_R), the same convention
+  // ImuProc::propagate()'s own F_x uses for its P recursion and
+  // point_cross_normal's H formula assumes. CORRECTED 2026-09-19: an
+  // earlier version of this comment called it the "LEFT-tangent... Log(
+  // R_true^T R_nominal)" convention, which is the NEGATIVE of what's
+  // documented now -- empirically refuted by a finite-difference check
+  // (perturb delta_bg by epsilon, compare the numerical rotation change at
+  // an intermediate time against interpolatePhiX()'s own phi_R prediction:
+  // ratio ~1.0000, not ~-1.0000). Sensitivity is under a small perturbation
+  // of c -- AT poses[k].t (state BEFORE segment k is
   // applied) to the coefficients, column order [c_acc_0..c_acc_{n_c-1} (3
   // each), c_gyr_0..c_gyr_{n_c-1} (3 each)]. phi_head.size() == poses.size()
   // + 1; the last entry is the sensitivity of (rot1,pos1,vel1) at t1.

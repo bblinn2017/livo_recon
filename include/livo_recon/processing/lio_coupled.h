@@ -56,6 +56,21 @@ struct LioProcCoupledOptions
   // (the existing, mismatched H(t1)*Phi(t_k) behavior) until this arm is
   // verified against phi_at_scan_end's own result and CQ-49's md5 pairs.
   bool h_at_point_time = false;
+  // CQ-53 item 1: disabled-by-default pivot floor on the joint matrix's own
+  // LDLT decomposition -- mirrors SplineOptions::PIVOT_MIN_FLOOR's shipped
+  // no-op default (-1.0, below any real pivot this system produces) exactly.
+  // No threshold has been validated for this system yet (rule 26: a real
+  // numerics default is Bryce's call, not this session's) -- this exists so
+  // the refusal PATH is exercised/testable, not to actually gate anything
+  // at its shipped value.
+  static constexpr double JOINT_PIVOT_MIN_FLOOR = -1.0;
+  // CQ-53 item 6: commits the second throwaway debug harness this session
+  // used (an env-var-gated print comparing each residual's delta_phi0/
+  // delta_p0 Jacobian-column magnitude against its own capture-time
+  // fraction within the scan) as a real, opt-in diagnostic instead of
+  // leaving it deleted. Off by default -- per-residual, so real cost when
+  // on. See jrow_leverage.txt's own write site for the exact columns.
+  bool log_jrow_leverage_en = false;
 };
 
 // CQ-49: the coupled estimator, reimplemented as its own class -- see
@@ -148,6 +163,65 @@ private:
   int    coupled_n_residuals_ = -1;
   double coupled_sum_weight_ = -1.0;
   double coupled_h_pp_min_eig_ = -1.0, coupled_h_rr_min_eig_ = -1.0;
+
+  // CQ-53 item 1: joint matrix's own LDLT pivot floor/ceiling (vectorD()
+  // min/max), plus the SAME diagnostic restricted to the state sub-block
+  // (A.block(0,0,ncol_s,ncol_s), a SEPARATE LDLT of that block alone, not a
+  // read of the joint LDLT's permuted D -- mirrors spline.cpp's own
+  // "separate LDLT of AtA alone" pattern, see its doc comment on why: the
+  // KKT/joint matrix's own permutation doesn't preserve block identity) and
+  // the coefficient sub-block (A.block(ncol_s,ncol_s,ncol_c,ncol_c)).
+  // Computed on every GN iteration's own A, overwritten each time so the
+  // FINAL (converged) iteration's values are what survives to nees_diag.txt
+  // -- same convention as the item-3d diagnostics above. -1.0 sentinel
+  // (never a real pivot) if the diagnostic LDLT itself fails.
+  double coupled_joint_dmin_ = -1.0, coupled_joint_dmax_ = -1.0;
+  double coupled_state_dmin_ = -1.0, coupled_state_dmax_ = -1.0;
+  double coupled_coeff_dmin_ = -1.0, coupled_coeff_dmax_ = -1.0;
+  // True the iteration coupled_joint_dmin_ < JOINT_PIVOT_MIN_FLOOR -- at the
+  // shipped -1.0 floor this can never fire; exists so the refusal SHAPE is
+  // present and testable ahead of an actual validated threshold.
+  bool   coupled_pivot_guard_ = false;
+
+  // CQ-53 item 2: relative difference between point_cross_normal (H built
+  // at t1) and the h_at_point_time formula (H built at each residual's own
+  // t_k), computed for EVERY residual regardless of which arm is actually
+  // active (h_at_point_time reads one side, phi_at_scan_end/default reads
+  // the other -- this column is diagnostic-only, read by neither), so the
+  // two arms stay directly comparable on this number. This REPLACES the
+  // ad hoc, since-deleted debug print this session used to produce the
+  // "1-3%" figure the CQ-50 filing cited -- that number no longer existed
+  // on disk anywhere once the print was reverted; this makes it a
+  // permanent, re-derivable column instead. p10/p50/p90/max over this
+  // iteration's own residual set, overwritten each iteration (final
+  // iteration survives).
+  double coupled_hcol_reldiff_p10_ = -1.0, coupled_hcol_reldiff_p50_ = -1.0;
+  double coupled_hcol_reldiff_p90_ = -1.0, coupled_hcol_reldiff_max_ = -1.0;
+
+  // CQ-53 item 3: this GN iteration's own STEP norms (not the scan's
+  // accumulated total, which coupled_delta_phi0_ etc. already track) --
+  // |delta_s| (the 18-dim state step) and |delta_c| (the 6*n_c coefficient
+  // step) from the joint solve, set at the end of estimateCoupledCorrection()
+  // each call and read by processLIO()'s own iter_error.txt write (which
+  // runs once per GN iteration already, right after the call).
+  double coupled_last_delta_s_norm_ = -1.0, coupled_last_delta_c_norm_ = -1.0;
+
+  // CQ-53 item 4: per-scan RMS (not mean-absolute -- sum_abs_r/error above
+  // is already mean-|r|) residual, in meters, over the FINAL GN iteration's
+  // own residual set -- the coupled-path analogue decoupled's own residual
+  // RMS record has and coupled never had. sqrt(mean(r^2)), same units/scale
+  // as a point-to-plane residual everywhere else in this codebase.
+  double coupled_res_rms_ = -1.0;
+
+  // CQ-53 item 5: gravity-leak falsifier -- world-frame integrated
+  // acceleration magnitude (|acc_avr_world|, averaged over this scan's own
+  // segments, truth is ~9.81 m/s^2 at rest and under pure translation) and
+  // the angle between the CURRENT posterior gravity estimate and this
+  // scan's own dominant measured-acceleration direction (a stationary-
+  // window proxy for "how much has gravity's direction rotated away from
+  // vertical in this estimator's own frame"). Set once per scan (not per
+  // iteration) from the FINAL converged coupled_prop_.
+  double coupled_acc_world_mag_ = -1.0, coupled_gravity_dir_err_deg_ = -1.0;
 
   // CQ-44 G0: forced to exactly 0.0 every scan -- there is no separate
   // spline t0 to compare against (this scan's own propagation start IS the

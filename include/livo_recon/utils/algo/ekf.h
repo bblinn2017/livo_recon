@@ -51,7 +51,7 @@ struct EkfUpdate
                           const StateGroup& propagat)
     {
         const int dim = state->dimState();
-        const int n = static_cast<int>(HtH.rows());  // 6 (R,P,V)
+        const int n = static_cast<int>(HtH.rows());  // 6 (R,P)
         last_H_full_ = Eigen::MatrixXd::Zero(dim, dim);
         // R,P,V are always CONTIGUOUS starting at idxR()=0, so this single
         // block assignment covers the full n=6 HtH block directly.
