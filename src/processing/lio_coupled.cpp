@@ -573,7 +573,17 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // ---- (3) residuals -- UNCHANGED (item 3): the exact same
   // buildResiduals() the decoupled path uses, over mg.points as just
   // re-deskewed above. ----
-  buildResiduals(mg.points, residuals_, /*allow_consistency_log=*/false);
+  // CQ-60 item 0b: was hardcoded false (never logged corr_scan.csv on this
+  // path at all) -- now passes through, matching decoupled's own pattern
+  // exactly (gated by the shared lio/log_pair_corr_en flag, default false,
+  // md5-inert). NOTE: unlike decoupled's "first-iteration-only" semantics,
+  // this call happens once per OUTER GN iteration (up to max_iterations
+  // times per scan, same scan_id each time) -- debugAccumConsistencyCorr's
+  // per-scan-id accumulator therefore SUMS n_candidates/n_accepted across
+  // every iteration rather than isolating the final one. The trend in their
+  // RATIO across scans is still meaningful; the absolute counts are inflated
+  // by up to a factor of max_iterations.
+  buildResiduals(mg.points, residuals_, /*allow_consistency_log=*/true);
 
   // ---- (4) the prior. TWO BLOCKS, per items 3c/3d/3e(v)/3f REVISED
   // 2026-09-19: Lambda (the c prior, item 3b/4, UNCHANGED math) on the
