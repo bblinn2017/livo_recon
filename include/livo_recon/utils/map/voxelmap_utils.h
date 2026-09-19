@@ -19,6 +19,12 @@ struct Residual
   double r;
   V3D normal;
 
+  // CQ-46: this residual's own world-frame point position, for the
+  // pair-correlation diagnostic's Euclidean-separation binning. Not used by
+  // any live estimator path -- purely a read of pt_world.point, copied in by
+  // LioProc::buildResiduals() right after the residual is accepted.
+  V3D world_point = V3D::Zero();
+
   // Capture time of the point this residual came from, copied straight from
   // PointXYZCov::t in LioProc::buildResiduals().  Only the scan-spline
   // control-point refinement reads it (lio/spline.h, refineWithLidar): a
