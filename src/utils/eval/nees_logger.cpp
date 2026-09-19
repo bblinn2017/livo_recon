@@ -19,19 +19,48 @@ NeesResult computeNeesPerDof(const M3D& R_est, const V3D& p_est,
   e.segment<3>(0) = Log(R_gt.transpose() * R_est);
   e.segment<3>(3) = p_est - p_gt;
 
-  Eigen::FullPivLU<Eigen::Matrix<double, 6, 6>> lu(P);
-  // rule 58: an impossible/singular P must abort loudly, never silently
-  // substitute a fallback covariance that would masquerade as a real
-  // measurement.
-  if (!lu.isInvertible()) return out;
+  // Force EXACT symmetry (see the earlier fix's own comment history) --
+  // still worth doing so SelfAdjointEigenSolver operates on the matrix the
+  // caller actually intended, not an accidental near-symmetric one.
+  const Eigen::Matrix<double, 6, 6> Psym = 0.5 * (P + P.transpose());
 
-  out.nees = e.transpose() * lu.inverse() * e;
-
-  Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es(P);
-  const Eigen::Matrix<double, 6, 1> eigvals = es.eigenvalues().cwiseMax(1e-18);
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es(Psym);
+  const Eigen::Matrix<double, 6, 1> raw_eigvals = es.eigenvalues();
+  out.max_eig = raw_eigvals.maxCoeff();
+  out.min_eig = raw_eigvals.minCoeff();
+  // CQ-60 item 2/5: coupled's own P is measurably non-PSD -- confirmed by
+  // direct measurement on the real binary: min_eig is NEGATIVE on every
+  // single scan across a 489-scan run (not an occasional outlier), ranging
+  // from ~-12% of max_eig on early scans down to ~-0.1% to -0.9% by
+  // mid/late-run, but never once crossing zero. A first attempt at this
+  // function clipped the negative eigenvalue to a small positive floor and
+  // computed NEES anyway -- WRONG: the resulting numbers (single-digit to
+  // multi-million NEES between ADJACENT scans, no physical trend) are
+  // floating-point noise amplified by dividing by a value indistinguishable
+  // from zero, not a real measurement. Rule 58 applies here precisely:
+  // this is an impossible condition (a Mahalanobis distance is undefined
+  // against a non-PSD "covariance"), and the correct response is to abort
+  // loudly and report the degeneracy itself -- min_eig/max_eig are ALWAYS
+  // logged raw (see logNeesPerDof) specifically so THIS finding (P is
+  // persistently non-PSD, not any particular NEES value) is what survives,
+  // rather than a fabricated number that looks like real data.
+  //
+  // This is a REAL property of the CURRENT (pre-CQ-57) binary's covariance
+  // construction, not a bug in this logger to paper over -- CQ-57 item 4
+  // (adopting decoupled's applyCovarianceUpdate() scheme in coupled too)
+  // is the actual fix, and it is EXPLICITLY BLOCKED until CQ-60 item 2
+  // captures its baseline on THIS binary, so this logger must not "fix"
+  // what it is supposed to be measuring.
+  if (out.min_eig <= 0.0) return out;  // out.valid stays false
+  const Eigen::Matrix<double, 6, 1> eigvals = raw_eigvals;
   const Eigen::Matrix<double, 6, 6> V = es.eigenvectors();
   const Eigen::Matrix<double, 6, 1> y = V.transpose() * e;
   out.per_dof_whitened_sq = y.cwiseProduct(y).cwiseQuotient(eigvals);
+  // Derived from the SAME eigendecomposition as per_dof_whitened_sq, not a
+  // separate matrix inverse -- guarantees out.nees == sum(per_dof_whitened_sq)
+  // by construction, rather than by hoping two different numerical paths
+  // agree on an ill-conditioned matrix (exactly the bug just described).
+  out.nees = out.per_dof_whitened_sq.sum();
   out.whitening_axes = V;
   out.valid = true;
   return out;
@@ -87,11 +116,11 @@ void logNeesPerDof(const char* channel, int scan_id, double t_abs, const NeesRes
   bool just_opened = false;
   std::ofstream& ofs = log.stream(&just_opened);
   if (just_opened)
-    ofs << "channel,scan_id,t_abs,valid,nees,"
+    ofs << "channel,scan_id,t_abs,valid,nees,min_eig,max_eig,"
            "whitened_sq_0,whitened_sq_1,whitened_sq_2,"
            "whitened_sq_3,whitened_sq_4,whitened_sq_5\n";
   ofs << channel << "," << scan_id << "," << std::setprecision(12) << t_abs << ","
-      << (r.valid ? 1 : 0) << "," << r.nees;
+      << (r.valid ? 1 : 0) << "," << r.nees << "," << r.min_eig << "," << r.max_eig;
   for (int i = 0; i < 6; ++i) ofs << "," << r.per_dof_whitened_sq(i);
   ofs << "\n";
   ofs.flush();

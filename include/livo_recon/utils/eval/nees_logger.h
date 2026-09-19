@@ -27,6 +27,7 @@ struct NeesResult
   Eigen::Matrix<double, 6, 1> per_dof_whitened_sq = Eigen::Matrix<double, 6, 1>::Constant(-1.0);
   Eigen::Matrix<double, 6, 6> whitening_axes = Eigen::Matrix<double, 6, 6>::Zero();
   bool valid = false;  // false if P was not invertible (rule 58: report, don't substitute)
+  double min_eig = -1.0, max_eig = -1.0;  // always populated, even when !valid
 };
 
 // e = [Log(R_gt^T * R_est); p_est - p_gt], whitened by P (see NeesResult's

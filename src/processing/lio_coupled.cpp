@@ -275,6 +275,34 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     }
   }
 
+  // CQ-60 item 5: Tier 1's shared NEES machinery. MUST run here, AFTER the
+  // posterior18 covMut() write above -- NOT inside estimateCoupledCorrection()
+  // (which runs once per GN ITERATION, before this scan's final,
+  // PSD-guaranteed covariance exists). A first attempt placed this hook at
+  // estimateCoupledCorrection()'s own nees_diag.txt write site and measured
+  // genuinely NEGATIVE eigenvalues in the resulting P6 -- not floating-point
+  // dust (up to ~12% of the largest eigenvalue) -- because it was reading
+  // an intermediate, not-yet-finalized covariance. The posterior18 write
+  // above IS mathematically guaranteed PSD by construction (M*coeff_cov*M^T
+  // for any M, given coeff_cov PSD, is PSD -- the same guarantee ekf.h's
+  // applyCovarianceUpdate() documents for the decoupled path's own scheme),
+  // so reading AFTER it lands should never reproduce that failure.
+  if (opts_.nees_per_dof_en) {
+    const Eigen::MatrixXd& P_final = state_->cov();
+    const int iP = StateGroup::idxP(), iR = StateGroup::idxR();
+    if (P_final.rows() >= iP + 3 && P_final.cols() >= iP + 3 &&
+        P_final.rows() >= iR + 3 && P_final.cols() >= iR + 3) {
+      Eigen::Matrix<double, 6, 6> P6;
+      P6.block<3, 3>(0, 0) = P_final.block<3, 3>(iR, iR);
+      P6.block<3, 3>(3, 3) = P_final.block<3, 3>(iP, iP);
+      P6.block<3, 3>(0, 3) = P_final.block<3, 3>(iR, iP);
+      P6.block<3, 3>(3, 0) = P_final.block<3, 3>(iP, iR).transpose();
+      const double t_abs_nees = mg.image.t + data_queues_->start_time;
+      coupled_tier1_nees_.addScan("tier1_coupled", voxel_map_->frame_idx_, t_abs_nees,
+                                   state_->rot(), state_->pos(), P6);
+    }
+  }
+
   // Item 3c: apply the FINAL converged delta_s(t0) to the real state, ONCE.
   // rot_/pos_ are NOT touched by an explicit dx here because they are
   // ALREADY the converged mean: estimateCoupledCorrection()'s own step 6
@@ -461,23 +489,6 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     ofs.flush();
   }
 
-  // CQ-60 item 5: Tier 1's shared NEES machinery -- independent of
-  // log_debug_en (only needs eval/nees_per_dof_en), so it works without
-  // paying for the rest of nees_diag.txt's own diagnostics.
-  if (opts_.nees_per_dof_en) {
-    const Eigen::MatrixXd& P = state_->cov();
-    const int iP = StateGroup::idxP(), iR = StateGroup::idxR();
-    if (P.rows() >= iP + 3 && P.cols() >= iP + 3 && P.rows() >= iR + 3 && P.cols() >= iR + 3) {
-      Eigen::Matrix<double, 6, 6> P6;
-      P6.block<3, 3>(0, 0) = P.block<3, 3>(iR, iR);
-      P6.block<3, 3>(3, 3) = P.block<3, 3>(iP, iP);
-      P6.block<3, 3>(0, 3) = P.block<3, 3>(iR, iP);
-      P6.block<3, 3>(3, 0) = P.block<3, 3>(iP, iR).transpose();
-      const double t_abs = mg.image.t + data_queues_->start_time;
-      coupled_tier1_nees_.addScan("tier1_coupled", voxel_map_->frame_idx_, t_abs,
-                                   state_->rot(), state_->pos(), P6);
-    }
-  }
 
   // CQ-44 G0: boundary_dpos_/boundary_drot_deg_ are forced to exactly 0.0
   // every scan -- there is no separate spline t0 to compare against; this
