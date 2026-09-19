@@ -340,6 +340,11 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     const bool have_r = P.rows() >= iR + 3 && P.cols() >= iR + 3;
     const M3D P_pp = have_p ? M3D(P.block<3, 3>(iP, iP)) : M3D::Zero();
     const M3D P_rr = have_r ? M3D(P.block<3, 3>(iR, iR)) : M3D::Zero();
+    // CQ-60 item 5: the R-P cross-block, missing until now -- Ppp/Prr alone
+    // are only the two diagonal 3x3 pieces of the full 6x6 pose covariance;
+    // a real 6-dof NEES/Mahalanobis computation needs this cross term too
+    // (state_->cov()'s R,P block is not actually block-diagonal).
+    const M3D P_rp = (have_p && have_r) ? M3D(P.block<3, 3>(iR, iP)) : M3D::Zero();
     const double t_abs = mg.image.t + data_queues_->start_time;
     const Eigen::Quaterniond state_q(state_->rot());
     // Motion-onset investigation (2026-09-19): same velocity/bias/gravity
@@ -368,6 +373,9 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         << " Ppp_yy=" << P_pp(1, 1) << " Ppp_yz=" << P_pp(1, 2) << " Ppp_zz=" << P_pp(2, 2)
         << " Prr_xx=" << P_rr(0, 0) << " Prr_xy=" << P_rr(0, 1) << " Prr_xz=" << P_rr(0, 2)
         << " Prr_yy=" << P_rr(1, 1) << " Prr_yz=" << P_rr(1, 2) << " Prr_zz=" << P_rr(2, 2)
+        << " Prp_00=" << P_rp(0, 0) << " Prp_01=" << P_rp(0, 1) << " Prp_02=" << P_rp(0, 2)
+        << " Prp_10=" << P_rp(1, 0) << " Prp_11=" << P_rp(1, 1) << " Prp_12=" << P_rp(1, 2)
+        << " Prp_20=" << P_rp(2, 0) << " Prp_21=" << P_rp(2, 1) << " Prp_22=" << P_rp(2, 2)
         << " have_Ppp=" << (have_p ? 1 : 0) << " have_Prr=" << (have_r ? 1 : 0)
         // CQ-53 item 6: NaN, not -1.0 -- this class has no free-tail
         // mechanism at all (no spline), so a numeric -1.0 here reads as a
