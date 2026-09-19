@@ -91,7 +91,19 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // own "mode != raw_imu" definition) instead of the deleted boolean key.
   std::string spline_mode = "raw_imu";
   paramWarn<std::string>(pnh, "spline/mode", spline_mode, std::string("raw_imu"));
-  opts_.keep_raw_samples = (spline_mode != "raw_imu");
+  // CQ-54 item 1: the coupled path always runs with spline/mode=raw_imu (it
+  // has no ScanSpline), so keep_raw_samples was always false there and
+  // mg.imu_samples_raw was never populated -- but adaptive_sigma/
+  // bias_freeze_on_vibration both need the raw, unaveraged IMU stream to
+  // measure vibration-inflated noise directly. Read independently here (the
+  // same "two classes, independent param-server reads" pattern spline/mode
+  // itself already uses above) rather than threading it through
+  // LioProcCoupled's own ConfigResolver claim -- coupled/* is claimed there
+  // separately; this is only about whether ImuProc keeps the samples.
+  bool coupled_adaptive_sigma = false, coupled_bias_freeze_on_vibration = false;
+  paramWarn<bool>(pnh, "estimator/coupled/adaptive_sigma", coupled_adaptive_sigma, false);
+  paramWarn<bool>(pnh, "estimator/coupled/bias_freeze_on_vibration", coupled_bias_freeze_on_vibration, false);
+  opts_.keep_raw_samples = (spline_mode != "raw_imu") || coupled_adaptive_sigma || coupled_bias_freeze_on_vibration;
   { std::lock_guard<std::mutex> lock(g_qhat_mtx); g_qhat_enabled = opts_.log_qhat_en; }
 
   std::ostringstream oss;

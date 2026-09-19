@@ -55,6 +55,9 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
                  {"legacy_mismatched", "end_time", "point_time"});
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_jrow_leverage_en", copts_.log_jrow_leverage_en, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/freeze_bg", copts_.freeze_bg, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/adaptive_sigma", copts_.adaptive_sigma, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_freeze_on_vibration", copts_.bias_freeze_on_vibration, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_anchor", copts_.bias_anchor, false);
 
   // Every spline/* and adaptive_q/* key is unclaimed by this class by
   // construction -- refuseUnclaimed only needs to additionally cover
@@ -75,6 +78,9 @@ std::string LioProcCoupled::engagementReport() const
       << " jacobian_time_mode=" << copts_.jacobian_time_mode
       << " log_jrow_leverage_en=" << (copts_.log_jrow_leverage_en ? "true" : "false")
       << " freeze_bg=" << (copts_.freeze_bg ? "true" : "false")
+      << " adaptive_sigma=" << (copts_.adaptive_sigma ? "true" : "false")
+      << " bias_freeze_on_vibration=" << (copts_.bias_freeze_on_vibration ? "true" : "false")
+      << " bias_anchor=" << (copts_.bias_anchor ? "true" : "false")
       << " -- no spline/AdaptiveQ engagement to report (this class has "
          "neither)";
   return oss.str();
@@ -196,6 +202,13 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     if ((prev - error) / std::max(prev, 1e-6) < opts_.min_diff_error)
       { stop = "rel_diff"; break; }
   }
+
+  // CQ-54 item 3: once per SCAN (not per GN iteration -- the loop above
+  // calls estimateCoupledCorrection() once per iteration, recomputing
+  // coupled_bias_freeze_active_ fresh each time), tally against the FINAL
+  // iteration's own assessment.
+  ++coupled_bias_freeze_scan_count_;
+  if (coupled_bias_freeze_active_) ++coupled_bias_freeze_active_count_;
 
   // CQ-44 item 5: P(t1) = [Phi_x(t1) Phi_c(t1)] * A^-1 * [Phi_x(t1) Phi_c(t1)]^T
   // + Q_unmodelled. REPLACES state_->cov() (does not add to it) -- A^-1
@@ -385,6 +398,24 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         // CQ-53 item 5: gravity-leak falsifier.
         << " acc_world_mag=" << coupled_acc_world_mag_
         << " gravity_dir_err_deg=" << coupled_gravity_dir_err_deg_
+        // CQ-54 item 1: sigma actually used this scan and its ratio to the
+        // calibration floor (~1 quiet, 15-55 through a vibration transient).
+        << " sigma_a_used=" << coupled_sigma_a_used_
+        << " sigma_g_used=" << coupled_sigma_g_used_
+        << " sigma_a_ratio=" << coupled_sigma_a_ratio_
+        << " sigma_g_ratio=" << coupled_sigma_g_ratio_
+        // CQ-54 item 3: this scan's bias_freeze_on_vibration state and the
+        // running active fraction over the process's life so far.
+        << " bias_freeze_active=" << (coupled_bias_freeze_active_ ? 1 : 0)
+        << " bias_freeze_active_frac=" << (coupled_bias_freeze_scan_count_ > 0
+            ? static_cast<double>(coupled_bias_freeze_active_count_) / coupled_bias_freeze_scan_count_
+            : -1.0)
+        // CQ-54 item 4: reduced chi-square (~1 = honest noise model).
+        << " reduced_chi2=" << coupled_reduced_chi2_
+        // CQ-54 item 5: angular-rate correction split, deg/s.
+        << " w_from_c_deg_s=" << coupled_w_from_c_deg_s_
+        << " w_from_bg_deg_s=" << coupled_w_from_bg_deg_s_
+        << " w_net_deg_s=" << coupled_w_net_deg_s_
         << "\n";
     ofs.flush();
   }
@@ -427,8 +458,51 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // state_->varAccFloor()/varGyrFloor() (the SAME calibration-floor
   // quantity TQ-34/TQ-38 both used) rather than a hardcoded literal, so a
   // different calibration run changes this automatically.
-  const double sigma_a = std::sqrt(state_->varAccFloor().mean());
-  const double sigma_g = std::sqrt(state_->varGyrFloor().mean());
+  const double sigma_a_floor = std::sqrt(state_->varAccFloor().mean());
+  const double sigma_g_floor = std::sqrt(state_->varGyrFloor().mean());
+  // CQ-54 item 1: sigma_a/sigma_g -- adaptive_sigma re-estimates them per
+  // scan from the raw IMU stream's own std dev (mg.imu_samples_raw, kept
+  // now that ImuProc::loadParameters() extends keep_raw_samples for this
+  // flag), floored at the calibration value so it can only INFLATE, never
+  // shrink below the sensor's own floor. Falls back to the floor itself
+  // (identical to the pre-CQ-54 behavior) when off or when too few raw
+  // samples are available to form an estimate.
+  double sigma_a = sigma_a_floor, sigma_g = sigma_g_floor;
+  if (copts_.adaptive_sigma && mg.imu_samples_raw.size() >= 3) {
+    double acc_mean = 0.0, gyr_mean = 0.0;
+    for (const auto& s : mg.imu_samples_raw) { acc_mean += s.acc.norm(); gyr_mean += s.gyro.norm(); }
+    acc_mean /= mg.imu_samples_raw.size();
+    gyr_mean /= mg.imu_samples_raw.size();
+    double acc_var = 0.0, gyr_var = 0.0;
+    for (const auto& s : mg.imu_samples_raw) {
+      const double da = s.acc.norm() - acc_mean, dg = s.gyro.norm() - gyr_mean;
+      acc_var += da * da; gyr_var += dg * dg;
+    }
+    acc_var /= (mg.imu_samples_raw.size() - 1);
+    gyr_var /= (mg.imu_samples_raw.size() - 1);
+    sigma_a = std::max(sigma_a_floor, std::sqrt(acc_var));
+    sigma_g = std::max(sigma_g_floor, std::sqrt(gyr_var));
+  }
+  coupled_sigma_a_used_ = sigma_a;
+  coupled_sigma_g_used_ = sigma_g;
+  coupled_sigma_a_ratio_ = sigma_a / std::max(sigma_a_floor, 1e-12);
+  coupled_sigma_g_ratio_ = sigma_g / std::max(sigma_g_floor, 1e-12);
+  // CQ-54 item 3: the cheaper guard -- freeze the bias only while the
+  // measured noise exceeds its calibration floor by more than the stated
+  // factor, using the SAME rolling-window estimate above regardless of
+  // whether adaptive_sigma itself is also on (the two options are
+  // independent -- CQ-54 item 2's 2x2 grid runs all four combinations).
+  coupled_bias_freeze_active_ = false;
+  if (copts_.bias_freeze_on_vibration && mg.imu_samples_raw.size() >= 3) {
+    double acc_mean = 0.0;
+    for (const auto& s : mg.imu_samples_raw) acc_mean += s.acc.norm();
+    acc_mean /= mg.imu_samples_raw.size();
+    double acc_var = 0.0;
+    for (const auto& s : mg.imu_samples_raw) { const double da = s.acc.norm() - acc_mean; acc_var += da * da; }
+    acc_var /= (mg.imu_samples_raw.size() - 1);
+    const double ratio = std::sqrt(acc_var) / std::max(sigma_a_floor, 1e-12);
+    coupled_bias_freeze_active_ = (ratio > LioProcCoupledOptions::BIAS_FREEZE_VIBRATION_FACTOR_DEFAULT);
+  }
 
   // ---- (1) re-propagate with the CURRENT coefficient AND delta_s estimate
   // -- items 3c/3d. vel0/gravity fold this scan's own accumulated
@@ -520,7 +594,7 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // exists; only bg's own column is driven toward zero regardless of what
   // the LiDAR evidence below would otherwise push it to. Column 3*3=9 in
   // the [phi0,p0,v,bg,ba,g] layout (bi=3 in the idx[6] array above).
-  if (copts_.freeze_bg) Pi_ss.block<3, 3>(9, 9) += M3D::Identity() * 1e12;
+  if (copts_.freeze_bg || coupled_bias_freeze_active_) Pi_ss.block<3, 3>(9, 9) += M3D::Identity() * 1e12;
 
   Eigen::VectorXd c_vec(ncol_c);
   for (int j = 0; j < n_c; ++j) {
@@ -556,8 +630,25 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   Eigen::VectorXd b = Eigen::VectorXd::Zero(ncol);
   b.segment(0, ncol_s) = -(Pi_ss * s_vec);
   b.segment(ncol_s, ncol_c) = -(Lambda * c_vec);
+  // CQ-54 item 6: the existing Pi_ss/s_vec term above penalises delta_bg
+  // against ZERO, i.e. against wherever the bias already is at t0 -- so a
+  // sequence of individually-cheap per-scan increments accumulates without
+  // anything ever pricing the TOTAL departure from calibration (the
+  // ratchet). bias_anchor adds a SEPARATE quadratic penalty on the total
+  // (state_->biasGyr() + coupled_delta_bg_ - coupled_bg_calib_), independent
+  // of Pi_ss's own (state-covariance-derived) local-increment prior. Only
+  // touches the bg 3x3 diagonal block of A and its own 3 rows of b -- every
+  // other block (phi0/p0/v/ba/g, and the c-block via Lambda) is unaffected.
+  if (copts_.bias_anchor) {
+    if (!coupled_bg_calib_set_) { coupled_bg_calib_ = state_->biasGyr(); coupled_bg_calib_set_ = true; }
+    const double sigma_anchor = LioProcCoupledOptions::BIAS_ANCHOR_SIGMA_RAD_S_DEFAULT;
+    const M3D Pi_anchor = M3D::Identity() / (sigma_anchor * sigma_anchor);
+    A.block<3, 3>(9, 9) += Pi_anchor;
+    b.segment<3>(9) += Pi_anchor * (coupled_bg_calib_ - state_->biasGyr());
+  }
   double sum_abs_r = 0.0;
   double sum_sq_r = 0.0;  // CQ-53 item 4
+  double sum_wr2 = 0.0;   // CQ-54 item 4
   std::vector<double> hcol_reldiff;  // CQ-53 item 2
   hcol_reldiff.reserve(residuals_.size());
   // TQ-40 item 3: pure-LiDAR-info accumulation restricted to [delta_phi0,
@@ -645,6 +736,7 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     b.noalias() -= w * Jrow.transpose() * res.r;
     sum_abs_r += std::abs(res.r);
     sum_sq_r += res.r * res.r;
+    sum_wr2 += w * res.r * res.r;  // CQ-54 item 4: reduced chi-square numerator
     // TQ-40 item 3: matches ekf_.HtH/Htz's own "+H'*W*r" convention exactly
     // (H here is the SAME 1x6 row, since Jrow.head(6) IS H*Phix_pt.topRows(6)
     // restricted to the phi0/p0 columns -- Phix_pt's own phi0/p0 columns are
@@ -661,6 +753,7 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // CQ-53 items 2/4: RMS residual and hcol_reldiff distribution, overwritten
   // every iteration so the FINAL (converged) call's values survive.
   coupled_res_rms_ = residuals_.empty() ? -1.0 : std::sqrt(sum_sq_r / static_cast<double>(residuals_.size()));
+  coupled_reduced_chi2_ = residuals_.empty() ? -1.0 : sum_wr2 / static_cast<double>(residuals_.size());
   if (!hcol_reldiff.empty()) {
     std::sort(hcol_reldiff.begin(), hcol_reldiff.end());
     const size_t n = hcol_reldiff.size();
@@ -789,6 +882,21 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     coupled_c_gyr_over_sigma_ = std::sqrt(sq_gyr / static_cast<double>(n_c)) / sigma_g;
     coupled_delta_v_norm_ = coupled_delta_v_.norm();
     coupled_delta_g_norm_ = coupled_delta_g_.norm();
+    // CQ-54 item 5: the angular-rate correction actually used is
+    // seg.gyr - delta_bg + delta_w (coupled_estimator.cpp's angvel_avr) --
+    // ONE physical quantity split across two independently-priced
+    // parameters. c_gyr_dc (just computed above) is the within-scan
+    // correction's own DC/mean contribution, the same sense as delta_w;
+    // coupled_delta_bg_ enters with a MINUS sign in angvel_avr, so its own
+    // contribution to angular rate is -coupled_delta_bg_. Logged as norms
+    // (deg/s) plus their net (vector sum, deg/s) -- a small net despite two
+    // large opposing parts is the "paying twice for nothing" signature the
+    // card's own item 5 asks to check for.
+    const double rad2deg = 180.0 / M_PI;
+    const V3D w_from_bg = -coupled_delta_bg_;
+    coupled_w_from_c_deg_s_ = c_gyr_dc.norm() * rad2deg;
+    coupled_w_from_bg_deg_s_ = w_from_bg.norm() * rad2deg;
+    coupled_w_net_deg_s_ = (c_gyr_dc + w_from_bg).norm() * rad2deg;
   }
 
   // ---- (6) re-propagate ONCE MORE with the updated c AND delta_s, so

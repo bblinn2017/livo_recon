@@ -83,6 +83,48 @@ struct LioProcCoupledOptions
   // time's incomplete fix is the forcing's form or the accumulator
   // compounding a persistent one-sided error into a walk. Default false.
   bool freeze_bg = false;
+  // CQ-54 item 1, the fix: sigma_a/sigma_g (which set Lambda's prior
+  // stiffness, item 0c) are read ONCE from the pre-flight calibration
+  // window and never revised -- during a vibration transient (e.g. drone
+  // motor spin-up) the true IMU noise runs 15-55x that floor, so Lambda is
+  // ~225-3000x too stiff exactly when the within-scan correction most needs
+  // to absorb the inflated residuals, and the (exactly degenerate, item 0d)
+  // signal is routed entirely into the persistent gyro bias instead. When
+  // true, sigma_a/sigma_g are re-estimated per scan from a rolling window of
+  // mg.imu_samples_raw (see ImuProc::loadParameters()'s keep_raw_samples
+  // extension), floored at the calibration value (can only inflate, never
+  // shrink below the sensor's own floor -- ImuProc's own calibration is
+  // still trusted as the noise-floor lower bound). Default false, no-op
+  // (md5-inert at defaults).
+  bool adaptive_sigma = false;
+  // CQ-54 item 3, the cheaper guard: when true, applies the SAME Pi_ss
+  // inflation freeze_bg uses (see :523 in the .cpp), but only for scans
+  // where the rolling-window IMU noise exceeds its calibration floor by
+  // more than bias_freeze_vibration_factor -- released once the noise
+  // settles, rather than held for the whole run the way freeze_bg is.
+  // Physically: a gyro bias is a slow thermal drift with no reason to
+  // update during a brief vibration transient, which is exactly the window
+  // where the data cannot distinguish bias from noise (item 0d's
+  // degeneracy). Default false.
+  bool bias_freeze_on_vibration = false;
+  // Threshold for bias_freeze_on_vibration, disabled-by-default in effect
+  // since the guard itself defaults off -- no validated threshold exists
+  // yet (rule 26: a real numerics default is Bryce's call), mirrors
+  // JOINT_PIVOT_MIN_FLOOR's own shipped-inert-until-validated pattern.
+  static constexpr double BIAS_FREEZE_VIBRATION_FACTOR_DEFAULT = 3.0;
+  // CQ-54 item 6: penalises the TOTAL departure of the gyro bias from its
+  // calibration value (state_->biasGyr() + coupled_delta_bg_ -
+  // coupled_bg_calib_), separately from Pi_ss's own per-scan-increment
+  // prior, which never prices the accumulated total (the ratchet item 6
+  // names). Default false, no-op at defaults.
+  bool bias_anchor = false;
+  // Provisional precision for bias_anchor, disabled-by-default in effect
+  // since the flag itself defaults off -- no validated in-run bias-drift
+  // bound exists yet (rule 26). Set generously above the quoted MEMS
+  // in-run stability (~10 deg/hr = 0.0028 deg/s) at 0.05 deg/s (=
+  // 8.72665e-4 rad/s) as a starting point for item 6's own run to react
+  // against, not a validated physical spec.
+  static constexpr double BIAS_ANCHOR_SIGMA_RAD_S_DEFAULT = 8.72665e-4;
 };
 
 // CQ-49: the coupled estimator, reimplemented as its own class -- see
@@ -240,6 +282,38 @@ private:
   // previous scan's own coupled endpoint, by construction).
   double boundary_dpos_ = 0.0;
   double boundary_drot_deg_ = 0.0;
+
+  // CQ-54 item 1: the sigma actually used this scan (== the calibration
+  // floor unless adaptive_sigma inflated it) and its ratio to that floor --
+  // the instrument item (1) asks for, ~1 while quiet, 15-55 through a
+  // vibration transient.
+  double coupled_sigma_a_used_ = -1.0, coupled_sigma_g_used_ = -1.0;
+  double coupled_sigma_a_ratio_ = -1.0, coupled_sigma_g_ratio_ = -1.0;
+  // CQ-54 item 3: whether bias_freeze_on_vibration's guard was active THIS
+  // scan, and the running fraction of scans it has been active over the
+  // process's life (active_count_/scan_count_, both accumulated here since
+  // this options struct is not otherwise per-scan-reset).
+  bool coupled_bias_freeze_active_ = false;
+  long coupled_bias_freeze_active_count_ = 0, coupled_bias_freeze_scan_count_ = 0;
+  // CQ-54 item 5: the within-scan correction's and the bias's own
+  // contributions to angular rate (angvel_avr = seg.gyr - delta_bg +
+  // delta_w), logged as norms in deg/s, plus their net -- overwritten every
+  // GN iteration so the final converged call's values survive.
+  double coupled_w_from_c_deg_s_ = -1.0, coupled_w_from_bg_deg_s_ = -1.0, coupled_w_net_deg_s_ = -1.0;
+
+  // CQ-54 item 6: the gyro bias's calibration-time value, snapshotted once
+  // (lazily, on the first scan bias_anchor is active) and never revised --
+  // the anchor target for the whole run.
+  V3D coupled_bg_calib_ = V3D::Zero();
+  bool coupled_bg_calib_set_ = false;
+
+  // CQ-54 item 4: reduced chi-square this scan -- mean(w_k * r_k^2) over the
+  // final GN iteration's residual set, i.e. how big the residuals actually
+  // are relative to how big the filter's own (possibly IMU-noise-blind,
+  // item 0e) measurement-noise model says they should be. ~1 means the
+  // model is honest; item 4 predicts a rise toward ~4 through a vibration
+  // transient the weights never see.
+  double coupled_reduced_chi2_ = -1.0;
 };
 
 }  // namespace livo_recon
