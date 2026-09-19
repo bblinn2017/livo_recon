@@ -3,6 +3,7 @@
 #include "livo_recon/processing/lio_base.h"
 #include "livo_recon/lio/spline.h"
 #include "livo_recon/lio/adaptive_q.h"
+#include "livo_recon/utils/eval/nees_logger.h"
 
 #include <array>
 
@@ -59,6 +60,10 @@ private:
   void runDryRunShadowPass(const MeasureGroup& mg);
 
   LioProcDecoupledOptions dopts_;
+  // CQ-60 item 5, Tier 1: see lio_coupled.h's own copy of this field for
+  // the full doc comment -- constructed with opts_.nees_tier1_window_scans
+  // once loadParameters() has run.
+  Tier1NeesBuffer decoupled_tier1_nees_{0};
 
   // ── Scan-spline state, all per-frame ────────────────────────────────────
   ScanSpline spline_;

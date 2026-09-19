@@ -110,6 +110,7 @@ add_executable(livo_recon_node
   src/utils/data/measures.cpp
   src/utils/log/debug_log_dir.cpp
   src/utils/log/consistency_log.cpp
+  src/utils/eval/nees_logger.cpp
   src/main.cpp
   src/livo_recon_node.cpp
   src/node_context.cpp

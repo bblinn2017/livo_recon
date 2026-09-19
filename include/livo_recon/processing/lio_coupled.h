@@ -2,6 +2,7 @@
 
 #include "livo_recon/processing/lio_base.h"
 #include "livo_recon/lio/coupled_estimator.h"
+#include "livo_recon/utils/eval/nees_logger.h"
 
 #include <limits>
 
@@ -261,6 +262,10 @@ private:
   // directions -- report-only, computed independent of
   // bias_observable_only's own confidence-weighted correction.
   double coupled_bg_var_degenerate_ = -1.0, coupled_bg_var_observed_ = -1.0;
+  // CQ-60 item 5, Tier 1: constructed with copts_.nees_tier1_window_scans
+  // once loadParameters() has run (see the constructor) -- one-shot,
+  // inert after the bag's own stationary prefix has been consumed.
+  Tier1NeesBuffer coupled_tier1_nees_{0};
   double coupled_delta_v_norm_ = -1.0, coupled_delta_g_norm_ = -1.0;
   // Item G1(a)/(c): velocity- and gravity-block posterior trace.
   double coupled_trP_vel_ = -1.0, coupled_trP_grav_ = -1.0;

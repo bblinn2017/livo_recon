@@ -52,6 +52,17 @@ struct LioProcOptions
   // History (30-50): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-30
   int    dry_run_point_filter_num = 0;
 
+  // CQ-60 item 5: the shared per-dof NEES logger (utils/eval/nees_logger.h)
+  // -- report-only, default false, shared by both estimator paths (unlike
+  // most of this struct's coupled-vs-decoupled-specific fields, this one
+  // key is genuinely common, hence read once here via loadSharedParameters()
+  // rather than duplicated into each path's own options struct).
+  bool nees_per_dof_en = false;
+  // Tier 1's window size in scans -- default 489, matching the bag's own
+  // 48.9s stationary prefix (the same window CQ-55 item 10's Allan-
+  // deviation figure and this card's own item 2 both already use).
+  int nees_tier1_window_scans = 489;
+
   // A per-residual reweighting mechanism (LioProcBase::applyResidualWeighting(),
   // LioProcOptions::residual_weighting) was investigated (2026-08) as a way
   // to correct for correlated/redundant residuals (many points hitting the

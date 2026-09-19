@@ -112,6 +112,7 @@ std::string LioProcDecoupled::loadParameters(ros::NodeHandle& pnh)
   ConfigResolver cfg(pnh);
 
   loadSharedParameters(cfg, pnh);
+  decoupled_tier1_nees_ = Tier1NeesBuffer(opts_.nees_per_dof_en ? opts_.nees_tier1_window_scans : 0);
 
   // ── scan spline ──────────────────────────────────────────────────────
   // Everything from here down goes through ConfigResolver, not paramWarn:
@@ -2095,6 +2096,23 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
       dbg << "]";
 
       debugLogLio(dbg.str());
+    }
+
+    // CQ-60 item 5: Tier 1's shared NEES machinery -- independent of
+    // log_debug_en, mirrors LioProcCoupled's own hook exactly.
+    if (opts_.nees_per_dof_en) {
+      const Eigen::MatrixXd& P = state_->cov();
+      const int iP = StateGroup::idxP(), iR = StateGroup::idxR();
+      if (P.rows() >= iP + 3 && P.cols() >= iP + 3 && P.rows() >= iR + 3 && P.cols() >= iR + 3) {
+        Eigen::Matrix<double, 6, 6> P6;
+        P6.block<3, 3>(0, 0) = P.block<3, 3>(iR, iR);
+        P6.block<3, 3>(3, 3) = P.block<3, 3>(iP, iP);
+        P6.block<3, 3>(0, 3) = P.block<3, 3>(iR, iP);
+        P6.block<3, 3>(3, 0) = P.block<3, 3>(iP, iR).transpose();
+        const double t_abs_nees = mg.image.t + data_queues_->start_time;
+        decoupled_tier1_nees_.addScan("tier1_decoupled", voxel_map_->frame_idx_, t_abs_nees,
+                                       state_->rot(), state_->pos(), P6);
+      }
     }
 
     return oss.str();

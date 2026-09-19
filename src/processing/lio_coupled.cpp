@@ -76,6 +76,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/curvature_only", copts_.curvature_only, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/dc_weight", copts_.dc_weight, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_bg_projection_en", copts_.log_bg_projection_en, false);
+  coupled_tier1_nees_ = Tier1NeesBuffer(opts_.nees_per_dof_en ? opts_.nees_tier1_window_scans : 0);
 
   // Every spline/* and adaptive_q/* key is unclaimed by this class by
   // construction -- refuseUnclaimed only needs to additionally cover
@@ -458,6 +459,24 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         << " w_net_deg_s=" << coupled_w_net_deg_s_
         << "\n";
     ofs.flush();
+  }
+
+  // CQ-60 item 5: Tier 1's shared NEES machinery -- independent of
+  // log_debug_en (only needs eval/nees_per_dof_en), so it works without
+  // paying for the rest of nees_diag.txt's own diagnostics.
+  if (opts_.nees_per_dof_en) {
+    const Eigen::MatrixXd& P = state_->cov();
+    const int iP = StateGroup::idxP(), iR = StateGroup::idxR();
+    if (P.rows() >= iP + 3 && P.cols() >= iP + 3 && P.rows() >= iR + 3 && P.cols() >= iR + 3) {
+      Eigen::Matrix<double, 6, 6> P6;
+      P6.block<3, 3>(0, 0) = P.block<3, 3>(iR, iR);
+      P6.block<3, 3>(3, 3) = P.block<3, 3>(iP, iP);
+      P6.block<3, 3>(0, 3) = P.block<3, 3>(iR, iP);
+      P6.block<3, 3>(3, 0) = P.block<3, 3>(iP, iR).transpose();
+      const double t_abs = mg.image.t + data_queues_->start_time;
+      coupled_tier1_nees_.addScan("tier1_coupled", voxel_map_->frame_idx_, t_abs,
+                                   state_->rot(), state_->pos(), P6);
+    }
   }
 
   // CQ-44 G0: boundary_dpos_/boundary_drot_deg_ are forced to exactly 0.0
