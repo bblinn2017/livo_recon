@@ -157,4 +157,15 @@ Eigen::Matrix<double, 9, Eigen::Dynamic> interpolatePhi(
 Eigen::Matrix<double, 9, 18> interpolatePhiX(
     const CoupledPropagation& prop, double t);
 
+// CQ-50: the NOMINAL world rotation at an arbitrary time t within the scan,
+// exact (not linearly interpolated) -- R(t) = poses[k].rot * Exp(poses[k].
+// gyr, t - poses[k].t) for the bracketing segment k, the SAME constant-
+// angular-velocity-per-segment model deskewPoints()'s own R_rel construction
+// already assumes (deskew.cpp), just expressed in world frame directly
+// instead of relative to R_end. Used to build a per-point Jacobian row at
+// the point's own capture time (raw_body_point.cross(worldRotAt(t).
+// transpose()*normal)) instead of mismatching a t1-built H against a t_k
+// Phi (CQ-50's own diagnosis).
+M3D worldRotAt(const CoupledPropagation& prop, double t);
+
 }  // namespace livo_recon

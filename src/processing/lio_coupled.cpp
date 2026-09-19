@@ -49,6 +49,8 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/n_c", copts_.n_c, 4);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/phi_at_scan_end", copts_.phi_at_scan_end, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/h_at_point_time", copts_.h_at_point_time, false);
 
   // Every spline/* and adaptive_q/* key is unclaimed by this class by
   // construction -- refuseUnclaimed only needs to additionally cover
@@ -66,6 +68,8 @@ std::string LioProcCoupled::engagementReport() const
   oss << "[engagement] estimator=coupled n_c=" << copts_.n_c
       << " zero_mean=" << (copts_.zero_mean ? "true" : "false")
       << " disable_cgyr=" << (copts_.disable_cgyr ? "true" : "false")
+      << " phi_at_scan_end=" << (copts_.phi_at_scan_end ? "true" : "false")
+      << " h_at_point_time=" << (copts_.h_at_point_time ? "true" : "false")
       << " -- no spline/AdaptiveQ engagement to report (this class has "
          "neither)";
   return oss.str();
@@ -487,10 +491,29 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   double sum_weight_this_iter = 0.0;
   for (const auto& res : residuals_) {
     Eigen::Matrix<double, 1, 6> H;
-    H.block<1, 3>(0, 0) = res.point_cross_normal.transpose();
+    // CQ-50 item (d), the real fix: build the rotation-Jacobian column at
+    // this point's OWN capture time t_k, using raw_body_point (the body
+    // point before deskew's warp to t1) and worldRotAt(t_k) -- the SAME
+    // formula point_cross_normal itself uses (p.cross(R^T*n)), just with
+    // (p1, R(t1)) replaced by (p(t_k), R(t_k)). The translation column
+    // (normal itself) is frame-independent -- dr/dpos is n^T regardless of
+    // which time's body frame p was expressed in -- so it is unaffected.
+    const V3D rot_jac_col = copts_.h_at_point_time
+        ? V3D(res.raw_body_point.cross(worldRotAt(coupled_prop_, res.t).transpose() * res.normal))
+        : res.point_cross_normal;
+    H.block<1, 3>(0, 0) = rot_jac_col.transpose();
     H.block<1, 3>(0, 3) = res.normal.transpose();
-    const Eigen::Matrix<double, 9, 18> Phix_pt = interpolatePhiX(coupled_prop_, res.t);
-    const Eigen::Matrix<double, 9, Eigen::Dynamic> Phic_pt = interpolatePhi(coupled_prop_, res.t);
+    // CQ-50 diagnostic: H above is built once from the DESKEWED point and
+    // the SCAN-END state_->rot() (lio_base.cpp's buildResiduals()), never
+    // re-evaluated per point -- so interpolating Phi at each point's own
+    // capture time res.t chains a t1-pose derivative through a t_k
+    // sensitivity, which is not a valid chain rule except at rest (t_k==t1
+    // by coincidence). phi_at_scan_end forces the same t1 evaluation Phi
+    // uses too, for a consistent (if within-scan-blind) derivative.
+    const Eigen::Matrix<double, 9, 18> Phix_pt =
+        copts_.phi_at_scan_end ? coupled_prop_.phi_x_head.back() : interpolatePhiX(coupled_prop_, res.t);
+    const Eigen::Matrix<double, 9, Eigen::Dynamic> Phic_pt =
+        copts_.phi_at_scan_end ? coupled_prop_.phi_head.back() : interpolatePhi(coupled_prop_, res.t);
     Eigen::Matrix<double, 1, Eigen::Dynamic> Jrow(1, ncol);
     Jrow.segment(0, ncol_s) = H * Phix_pt.topRows(6);          // R,P rows only (item 3b/3c)
     Jrow.segment(ncol_s, ncol_c) = H * Phic_pt.topRows(6);

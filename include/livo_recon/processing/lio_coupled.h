@@ -31,6 +31,31 @@ struct LioProcCoupledOptions
   // (a single rigid per-scan gyro-bias correction) as the only rotation
   // correction mechanism. Default false.
   bool disable_cgyr = false;
+  // CQ-50 diagnostic toggle: when true, every residual's Jacobian row uses
+  // Phix_pt/Phic_pt evaluated at the SCAN-END time t1 (coupled_prop_.
+  // phi_x_head.back()/phi_head.back()) instead of interpolatePhiX/
+  // interpolatePhi at the point's own capture time res.t. This matches the
+  // mismatch already baked into H itself (built once from the deskewed
+  // point + the scan-end state_->rot(), never re-evaluated per point -- see
+  // lio_base.cpp's buildResiduals()), so at true the whole Jrow becomes a
+  // consistent (if within-scan-blind) derivative w.r.t. the SAME t1 pose
+  // throughout, rather than H(t1) chained through Phi(t_k). Purely
+  // diagnostic: confirming the prediction collapses the motion-onset
+  // divergence is expected to make within-scan sensitivity structurally
+  // useless (every point's Jrow becomes identical up to H), not a fix in
+  // its own right. Default false (the existing, mismatched behavior).
+  bool phi_at_scan_end = false;
+  // CQ-50 item (d), the real fix (not merely diagnostic, unlike
+  // phi_at_scan_end above): builds H's rotation-Jacobian column at each
+  // point's OWN capture time t_k -- raw_body_point.cross(worldRotAt(t_k)^T *
+  // normal) -- instead of point_cross_normal (built once at t1 from the
+  // deskewed point + state_->rot()). Phix_pt/Phic_pt stay interpolated at
+  // t_k as before (unlike phi_at_scan_end, this keeps within-scan
+  // sensitivity rather than discarding it): H_k*Phi(t_k) is now a valid
+  // chain rule throughout, not merely a coincidence at rest. Default false
+  // (the existing, mismatched H(t1)*Phi(t_k) behavior) until this arm is
+  // verified against phi_at_scan_end's own result and CQ-49's md5 pairs.
+  bool h_at_point_time = false;
 };
 
 // CQ-49: the coupled estimator, reimplemented as its own class -- see

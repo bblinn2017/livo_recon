@@ -60,6 +60,7 @@ void deskewPoints(
     for (size_t i = 0; i < points.size(); ++i) {
       points_out[i] = PointXYZCov{ state->lidarToImu(points[i].p), M3D::Zero() };
       points_out[i].t = points[i].t;
+      points_out[i].raw_body_point = points_out[i].point;  // no motion to compensate
     }
     return;
   }
@@ -107,6 +108,7 @@ void deskewPoints(
 
     PointXYZCov out{ p_imu_end, cov_imu_end };
     out.t = pt.t;
+    out.raw_body_point = p_imu_i;  // CQ-50: pre-warp, own-capture-time body point
     return out;
   };
 

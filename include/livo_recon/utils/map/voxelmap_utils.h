@@ -37,6 +37,17 @@ struct Residual
   // Rotation Jacobian: point.cross(R1^T*normal), the R1 (rotation)
   // Jacobian column (lio_accumulator.cpp's accumulateLioResiduals()).
   V3D point_cross_normal;
+  // CQ-50: this point's body-frame position at ITS OWN capture time t
+  // (above), before deskew's per-point warp to the scan-end (t1) reference
+  // -- copied straight from PointXYZCov::raw_body_point in buildResiduals().
+  // point_cross_normal above is built at t1 (the deskewed point + the
+  // scan-end state_->rot()); this field lets a consumer build the ANALOGOUS
+  // cross product at t_k instead (raw_body_point.cross(R(t_k)^T*normal)),
+  // for chaining honestly with a per-point-time Jacobian rather than
+  // mismatching a t1 derivative against a t_k sensitivity. Zero on any path
+  // that predates this field. Not read by buildResiduals()'s own H or by
+  // the decoupled estimator -- see PointXYZCov::raw_body_point's doc.
+  V3D raw_body_point = V3D::Zero();
   // VARIANCE (not standard deviation), despite the name -- independent
   // (sensor+pose) noise, plus this plane's own fit uncertainty
   // (plane_var_term below) folded in directly. Used as 1/sigma_squared,

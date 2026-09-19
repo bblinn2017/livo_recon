@@ -295,6 +295,7 @@ void LioProcBase::buildResiduals(
         res.world_point = pt_world.point;
         res.sigma_squared += res.plane_var_term;
         res.t = pts[i].t;   // for the spline control-point refinement
+        res.raw_body_point = pts[i].raw_body_point;  // CQ-50
         build_thread_residuals_[omp_get_thread_num()].push_back(res);
         if (allow_consistency_log && opts_.log_pair_corr_en)
           appendPairCorrResidual(voxel_map_->frame_idx_, res);

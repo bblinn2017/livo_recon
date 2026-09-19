@@ -81,6 +81,19 @@ struct PointXYZCov {
   // sensor_cov/pose_cov/total() pattern, which already got this right.
   M3D pos_cov = M3D::Zero();
 
+  // CQ-50: the IMU/body-frame point BEFORE deskew's per-point rotation/
+  // translation warp to the scan-end reference (deskew.cpp's own p_imu_i,
+  // i.e. state->lidarToImu(raw sensor-frame point) -- a fixed extrinsic
+  // transform, not time-compensated). `point` above is p_imu_i re-expressed
+  // in the scan-end (t1) body frame; this is the SAME physical point still
+  // expressed at its own capture time's body frame, which is what a
+  // Jacobian evaluated honestly at that capture time (rather than at t1)
+  // needs. Zero for any path that predates this field or never calls
+  // deskewPoints() (mirrors `t`'s own zero-default convention). Unused by
+  // the decoupled estimator and by buildResiduals()'s existing (t1) H --
+  // only a future per-point-time coupled Jacobian reads it.
+  V3D raw_body_point = V3D::Zero();
+
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
   PointXYZCov() = default;

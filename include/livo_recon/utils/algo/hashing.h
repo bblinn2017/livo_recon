@@ -86,16 +86,25 @@ void voxelDownsample(
     V3D sum_point = V3D::Zero();
     M3D sum_sensor_cov = M3D::Zero();
     M3D sum_pos_cov    = M3D::Zero();
+    // CQ-50: sum_raw_body_point is only ever nonzero for PointXYZCov (the
+    // one PointType this template is actually instantiated with that
+    // declares the field) -- summed unconditionally below via the same
+    // p->raw_body_point access every other field uses, since raw_body_point
+    // defaults to V3D::Zero() and this template is not instantiated for any
+    // point type lacking it.
+    V3D sum_raw_body_point = V3D::Zero();
     for (const auto* p : pts) {
       sum_point += p->point;
       sum_sensor_cov += p->sensor_cov;
       sum_pos_cov    += p->pos_cov;
+      sum_raw_body_point += p->raw_body_point;
     }
     const double n = static_cast<double>(pts.size());
     PointType out_pt{};
     out_pt.point = sum_point / n;
     out_pt.sensor_cov = sum_sensor_cov / n;
     out_pt.pos_cov    = sum_pos_cov / n;
+    out_pt.raw_body_point = sum_raw_body_point / n;
     // Mean capture time, to match the mean position.  Previously left at
     // the default-constructed 0, which silently mislabelled every averaged
     // point as "scan start" for any consumer that reads the timestamp.

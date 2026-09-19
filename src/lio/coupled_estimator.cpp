@@ -256,4 +256,21 @@ Eigen::Matrix<double, 9, 18> interpolatePhiX(
   return prop.phi_x_head.back();
 }
 
+M3D worldRotAt(const CoupledPropagation& prop, double t)
+{
+  const int N = static_cast<int>(prop.poses.size());
+  if (N == 0) return prop.rot1;
+  if (t <= prop.poses.front().t) return prop.poses.front().rot;
+  const double t1 = prop.poses.back().t + prop.poses.back().dt;
+  if (t >= t1) return prop.rot1;
+
+  for (int k = 0; k < N; ++k)
+  {
+    const double th = prop.poses[k].t, tt = th + prop.poses[k].dt;
+    if (t >= th && t <= tt)
+      return prop.poses[k].rot * Exp(prop.poses[k].gyr, t - th);
+  }
+  return prop.rot1;
+}
+
 }  // namespace livo_recon
