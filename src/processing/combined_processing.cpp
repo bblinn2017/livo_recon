@@ -1,7 +1,7 @@
 #include "livo_recon/processing/combined_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/consistency_log.h"
-#include "livo_recon/processing/lio_processing.h"
+#include "livo_recon/processing/lio_base.h"
 #include "livo_recon/processing/vio_processing.h"
 
 #include <iomanip>
@@ -42,7 +42,7 @@ std::string CombinedProc::loadParameters(ros::NodeHandle& pnh)
   return oss.str();
 }
 
-std::string CombinedProc::processCombined(MeasureGroup& mg, LioProc& lio_proc, VioProc& vio_proc)
+std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_proc, VioProc& vio_proc)
 {
   TimedScope ts(profiler_, "combined/ekf");
 

@@ -118,7 +118,8 @@ add_executable(livo_recon_node
   src/processing/calib_processing.cpp
   src/processing/imu_processing.cpp
   src/processing/vio_processing.cpp
-  src/processing/lio_processing.cpp
+  src/processing/lio_base.cpp
+  src/processing/lio_decoupled.cpp
   src/processing/combined_processing.cpp
   src/processing/evo_processing.cpp
   src/lio/voxelplane.cpp

@@ -5,7 +5,7 @@
 #include "livo_recon/processing/pub_processing.h"
 #include "livo_recon/processing/calib_processing.h"
 #include "livo_recon/processing/imu_processing.h"
-#include "livo_recon/processing/lio_processing.h"
+#include "livo_recon/processing/lio_decoupled.h"
 #include "livo_recon/processing/vio_processing.h"
 #include "livo_recon/processing/combined_processing.h"
 #include "livo_recon/processing/evo_processing.h"
@@ -75,7 +75,10 @@ private:
   PubProc   pub_proc_;
   CalibProc calib_proc_;
   ImuProc   imu_proc_;
-  LioProc      lio_proc_;
+  // CQ-49: LioProcDecoupled for now -- the coupled estimator, reimplemented
+  // fresh as its own LioProcCoupled class, follows this split (see
+  // lio_base.h's own doc comment).
+  LioProcDecoupled lio_proc_;
   VioProc      vio_proc_;
   CombinedProc combined_proc_;
   EvoProc      evo_proc_;

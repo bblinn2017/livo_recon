@@ -1,4 +1,4 @@
-#include "livo_recon/processing/lio_processing.h"
+#include "livo_recon/processing/lio_decoupled.h"
 #include "livo_recon/processing/imu_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/config_resolve.h"
@@ -99,11 +99,11 @@ void debugLogQhat(int scan_id, double t_abs, const Eigen::VectorXd& dx,
 
 }  // namespace
 
-LioProc::LioProc(NodeContext& ctx)
-  : state_(ctx.state), voxel_map_(ctx.voxel_map), profiler_(ctx.profiler), data_queues_(ctx.data_queues)
+LioProcDecoupled::LioProcDecoupled(NodeContext& ctx)
+  : LioProcBase(ctx)
 {}
 
-std::string LioProc::loadParameters(ros::NodeHandle& pnh)
+std::string LioProcDecoupled::loadParameters(ros::NodeHandle& pnh)
 {
   // One resolver for the whole function: modes validated against a named
   // set, nested keys read only inside a live scope and REFUSED if set into a
@@ -111,24 +111,8 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   // requested one.  See config_resolve.h.
   ConfigResolver cfg(pnh);
 
-  paramWarn<int>(pnh, "lio/ekf/max_iterations",     opts_.max_iterations,  5);
-  paramWarn<double>(pnh, "lio/ekf/min_norm_dtheta", opts_.min_norm_dtheta, 0.0);
-  paramWarn<double>(pnh, "lio/ekf/min_norm_dt",     opts_.min_norm_dt,     0.0);
-  paramWarn<double>(pnh, "lio/ekf/min_diff_error",  opts_.min_diff_error,  -1.0);
-  paramWarn<bool>(pnh, "lio/log_debug_en",          opts_.log_debug_en,   false);
-  paramWarn<bool>(pnh, "lio/log_consistency_scan_en", opts_.log_consistency_scan_en, false);
-  paramWarn<bool>(pnh, "lio/log_nll_en", opts_.log_nll_en, false);
-  paramWarn<int>(pnh, "lio/dry_run_point_filter_num", opts_.dry_run_point_filter_num, 0);
-  paramWarn<bool>(pnh, "cuda/enable",               cuda_enable_,          false);
+  loadSharedParameters(cfg, pnh);
 
-  // History (134-136): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-134
-  double range_err;
-  paramWarn<double>(pnh, "imu/sensor/range_err", range_err, 0.05);
-  opts_.deskew.sigma_r2 = range_err * range_err;
-  double angle_err_deg;
-  paramWarn<double>(pnh, "imu/sensor/angle_err_deg", angle_err_deg, 0.2);
-  const double sin_angle_err = std::sin(std::max(1e-6, angle_err_deg * M_PI / 180.0));
-  opts_.deskew.sigma_a2 = sin_angle_err * sin_angle_err;
   // ── scan spline ──────────────────────────────────────────────────────
   // Everything from here down goes through ConfigResolver, not paramWarn:
   // nested keys are read only inside a live scope and REFUSED if set into a
@@ -139,47 +123,47 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   // spline/boundary_anchor_mode (three levels).  At "raw_imu" every other
   // spline/* key -- and every adaptive_q/* key -- is REFUSED at startup
   // rather than silently ignored, which is what `sp` gates below.
-  cfg.mode("spline/mode", opts_.spline.mode, "spline",
+  cfg.mode("spline/mode", dopts_.spline.mode, "spline",
            { "raw_imu", "spline", "spline+refine" });
-  const bool sp = opts_.spline.splineOn();
+  const bool sp = dopts_.spline.splineOn();
 
   // Control-point RATE is the only control-point knob: n_cp is derived from
   // it and the scan duration, so the axis is comparable across sequences.
   cfg.nested<double>(sp, "spline/mode", "spline/control_points/hz",
-                     opts_.spline.control_point_hz, 100.0);
+                     dopts_.spline.control_point_hz, 100.0);
 
-  cfg.nested<int>(sp && opts_.spline.refineOn(), "spline/mode=spline+refine",
+  cfg.nested<int>(sp && dopts_.spline.refineOn(), "spline/mode=spline+refine",
                   "spline/refine/iters",
-                  opts_.spline.lidar_refine_iters, 1);
+                  dopts_.spline.lidar_refine_iters, 1);
   // CQ-41 follow-up: see SplineOptions::refine_curvature_weight's own doc
   // comment for the A/B numbers. Default 0.0 (off) preserves prior behavior.
-  cfg.nested<double>(sp && opts_.spline.refineOn(), "spline/mode=spline+refine",
+  cfg.nested<double>(sp && dopts_.spline.refineOn(), "spline/mode=spline+refine",
                      "spline/refine/curvature_weight",
-                     opts_.spline.refine_curvature_weight, 0.0);
+                     dopts_.spline.refine_curvature_weight, 0.0);
   // CQ-41 follow-up, third term: see SplineOptions::refine_imu_acc_weight's
   // own doc comment. Default 0.0 (off) preserves prior behavior.
-  cfg.nested<double>(sp && opts_.spline.refineOn(), "spline/mode=spline+refine",
+  cfg.nested<double>(sp && dopts_.spline.refineOn(), "spline/mode=spline+refine",
                      "spline/refine/imu_acc_weight",
-                     opts_.spline.refine_imu_acc_weight, 0.0);
+                     dopts_.spline.refine_imu_acc_weight, 0.0);
   // Bryce, 2026-09-18: diagnostic experiment -- see
   // SplineOptions::refine_imu_acc_solve_bias's own doc comment.
-  cfg.nested<bool>(sp && opts_.spline.refineOn() && opts_.spline.refine_imu_acc_weight > 0.0,
+  cfg.nested<bool>(sp && dopts_.spline.refineOn() && dopts_.spline.refine_imu_acc_weight > 0.0,
                    "spline/refine/imu_acc_weight>0",
                    "spline/refine/imu_acc_solve_bias",
-                   opts_.spline.refine_imu_acc_solve_bias, false);
+                   dopts_.spline.refine_imu_acc_solve_bias, false);
   // CQ-43 item (2): see SplineOptions::final_pass's own doc comment.
   // DEFAULT false, per item (6) -- do not change this from this card's
   // own numbers, whatever they show.
-  cfg.nested<bool>(sp && opts_.spline.refineOn(), "spline/mode=spline+refine",
+  cfg.nested<bool>(sp && dopts_.spline.refineOn(), "spline/mode=spline+refine",
                    "spline/refine/final_pass",
-                   opts_.spline.final_pass, false);
+                   dopts_.spline.final_pass, false);
   // TQ-38 item (4): see SplineOptions::diag_free_tail_imu_acc_weight's own
   // doc comment -- diagnostic only, never read by the real refinement path.
   cfg.nested<double>(sp, "spline/mode",
                      "spline/refine/diag_free_tail_imu_acc_weight",
-                     opts_.spline.diag_free_tail_imu_acc_weight, 1.0);
+                     dopts_.spline.diag_free_tail_imu_acc_weight, 1.0);
 
-  cfg.nested<bool>(sp, "spline/mode", "spline/log_en", opts_.spline.log_en, false);
+  cfg.nested<bool>(sp, "spline/mode", "spline/log_en", dopts_.spline.log_en, false);
   // CQ-41, Bryce 2026-09-18: DEFAULT true, authorised by Bryce in the
   // message that requested this item -- see SplineOptions::
   // end_constraint_velocity's own doc comment. Rule 26 item 1 (a numerics
@@ -187,145 +171,40 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   // naming the default he wants, so no further authorization is needed for
   // this one default -- do not extend that to any other default.
   cfg.nested<bool>(sp, "spline/mode", "spline/end_constraint/velocity",
-                   opts_.spline.end_constraint_velocity, true);
+                   dopts_.spline.end_constraint_velocity, true);
   // Analysis-only dense trajectory dump -- see SplineOptions::traj_log_mode.
   cfg.nestedMode(sp, "spline/mode", "spline/trajectory_log/mode",
-                 opts_.spline.traj_log_mode, "off", { "off", "dense" });
-  cfg.nested<double>(sp && opts_.spline.trajLogOn(),
+                 dopts_.spline.traj_log_mode, "off", { "off", "dense" });
+  cfg.nested<double>(sp && dopts_.spline.trajLogOn(),
                      "spline/trajectory_log/mode=dense",
-                     "spline/trajectory_log/hz", opts_.spline.traj_log_hz, 200.0);
+                     "spline/trajectory_log/hz", dopts_.spline.traj_log_hz, 200.0);
 
   // ── live process-noise estimation ────────────────────────────────────
   // The statistic IS the spline-vs-IMU residual, so this scope is nested
   // under the spline rather than merely warned about.
   cfg.nested<bool>(sp, "spline/mode", "adaptive_q/enable",
-                   opts_.adaptive_q.enable, false);
-  const bool aq = sp && opts_.adaptive_q.enable;
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/beta_acc", opts_.adaptive_q.beta_acc, 0.3);
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/beta_gyr", opts_.adaptive_q.beta_gyr, 0.3);
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/z_rate_limit", opts_.adaptive_q.z_rate_limit, 0.02);
+                   dopts_.adaptive_q.enable, false);
+  const bool aq = sp && dopts_.adaptive_q.enable;
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/beta_acc", dopts_.adaptive_q.beta_acc, 0.3);
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/beta_gyr", dopts_.adaptive_q.beta_gyr, 0.3);
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/z_rate_limit", dopts_.adaptive_q.z_rate_limit, 0.02);
   // CQ-35: kept in sync with AdaptiveQOptions::acf1_max's own default
   // (adaptive_q.h) -- this call's own literal is the REAL effective default
   // whenever the YAML doesn't set the key (the common case), since it
   // overwrites whatever the struct member was already initialised to.
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/acf1_max", opts_.adaptive_q.acf1_max, 1.00);
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/bounds/max_ratio", opts_.adaptive_q.max_ratio, 100.0);
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/bounds/min_ratio", opts_.adaptive_q.min_ratio, 0.01);
-  cfg.nested<int>(aq, "adaptive_q/enable", "adaptive_q/warmup_frames", opts_.adaptive_q.warmup_frames, 20);
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/ema", opts_.adaptive_q.ema, 0.9);
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/acf1_max", dopts_.adaptive_q.acf1_max, 1.00);
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/bounds/max_ratio", dopts_.adaptive_q.max_ratio, 100.0);
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/bounds/min_ratio", dopts_.adaptive_q.min_ratio, 0.01);
+  cfg.nested<int>(aq, "adaptive_q/enable", "adaptive_q/warmup_frames", dopts_.adaptive_q.warmup_frames, 20);
+  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/ema", dopts_.adaptive_q.ema, 0.9);
   cfg.nestedMode(aq, "adaptive_q/enable", "adaptive_q/noise_floor/mode",
                  adaptive_q_floor_mode_, "allan", { "allan", "off" });
-  opts_.adaptive_q.use_noise_floor = (adaptive_q_floor_mode_ == "allan");
-  cfg.nested<double>(aq && opts_.adaptive_q.use_noise_floor,
+  dopts_.adaptive_q.use_noise_floor = (adaptive_q_floor_mode_ == "allan");
+  cfg.nested<double>(aq && dopts_.adaptive_q.use_noise_floor,
                      "adaptive_q/noise_floor/mode=allan",
-                     "adaptive_q/noise_floor/scale", opts_.adaptive_q.noise_floor_scale, 1.0);
-  cfg.nested<bool>(aq, "adaptive_q/enable", "adaptive_q/log_en", opts_.adaptive_q.log_en, false);
-  adaptive_q_.configure(opts_.adaptive_q);
-
-  // CQ-28: re-lands "woodbury_plane_correction" (see LioProcOptions'
-  // historical comment and residual_redundancy.h) as a standalone,
-  // config-gated, inert-by-default mode. CQ-31: "woodbury_divpos" retired
-  // (it cannot satisfy its own preservation criterion -- see
-  // residual_redundancy.h) and replaced by two exactly-satisfiable modes.
-  cfg.mode("lio/residual_redundancy/mode", opts_.residual_redundancy.mode, "off",
-           { "off", "woodbury", "woodbury_rescale", "woodbury_directional" });
-  const bool rr = opts_.residual_redundancy.mode != "off";
-  cfg.nested<double>(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/rho",
-                     opts_.residual_redundancy.rho, 1.0);
-  cfg.nested<double>(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/max_discount",
-                     opts_.residual_redundancy.max_discount, 0.9);
-
-  // CQ-37 axis A (residual-set reduction) and axis B (per-residual
-  // reweight) -- see residual_weighting.h. Independent keys, not one enum
-  // with axis C above, because they act at different points in the
-  // pipeline (item 1) and are not exclusive with each other in general.
-  cfg.mode("lio/residual_weighting/collapse", opts_.residual_weighting.collapse, "off",
-           { "off", "plane_averaged" });
-  cfg.mode("lio/residual_weighting/per_residual", opts_.residual_weighting.per_residual, "off",
-           { "off", "count_weighted", "count_weighted_renorm", "info_gain" });
-  // Item 1b: plane_averaged collapses every plane group to exactly one
-  // residual (k==1 everywhere afterward), which makes count_weighted*'s
-  // k-scaling and axis C's group.size()<2 guard both no-ops -- refuse the
-  // composition rather than silently running a degenerate combination
-  // whose flags claim to be doing something they cannot.
-  if (opts_.residual_weighting.collapse == "plane_averaged" &&
-      (opts_.residual_weighting.per_residual == "count_weighted" ||
-       opts_.residual_weighting.per_residual == "count_weighted_renorm" ||
-       opts_.residual_redundancy.mode != "off"))
-    cfg.requireCombination(
-        "lio/residual_weighting/collapse=plane_averaged collapses every plane "
-        "group to exactly one residual, which makes lio/residual_weighting/"
-        "per_residual=count_weighted* (k-scaling; k==1 everywhere after "
-        "collapsing) and lio/residual_redundancy/mode!=off (group.size()<2 "
-        "guard) both no-ops -- an inert flag left set is a lie about what "
-        "the run did (CQ-37 item 1b, the use_bins/redund_groups lesson). Set "
-        "per_residual to off or info_gain, and residual_redundancy/mode to "
-        "off, when collapsing -- or drop the collapse.");
-
-  // CQ-31 item 5: three independently-switchable scalar P controls, all
-  // default-identity -- see residual_redundancy.h's PriorScalarOptions.
-  cfg.get<double>("lio/p_inflate/alpha", opts_.prior_scalar.p_inflate_alpha, 1.0);
-  cfg.get<double>("lio/p_floor/min_eig", opts_.prior_scalar.p_floor_min_eig, 0.0);
-  cfg.get<double>("lio/p_fading/lambda", opts_.prior_scalar.p_fading_lambda, 1.0);
-
-  // Downsampling is one axis with three states, not a mode plus a magic
-  // zero.  "ds_leaf_size = 0.0 means off" made imu/ds/mode silently INERT
-  // whenever downsampling was disabled -- and LD-1's R4 rung turns
-  // downsampling off deliberately, so that cell would have carried a mode
-  // setting nothing consumed.  Off is now a value of the mode, and the leaf
-  // size is a sub-option of it being on.
-  cfg.mode("imu/ds/mode", opts_.ds_mode, "first", { "off", "first", "average" });
-  cfg.nested<double>(opts_.dsOn(), "imu/ds/mode != off",
-                     "imu/ds/ds_leaf_size", opts_.ds_leaf_size, 0.15);
-  if (!opts_.dsOn()) opts_.ds_leaf_size = 0.0;
-  else if (!(opts_.ds_leaf_size > 0.0))
-    cfg.requireCombination(
-        "imu/ds/ds_leaf_size must be > 0 when imu/ds/mode is '" + opts_.ds_mode +
-        "' -- a zero leaf under an ON mode is the sentinel this mode set "
-        "exists to remove; write imu/ds/mode: off instead");
-  cfg.mode("imu/undistort/time_based_process_noise",
-           opts_.deskew.time_based_process_noise, "var_acc",
-           { "none", "state", "var_acc" });
-  // CQ-37 axis D: ONE global scalar on every residual's sigma_squared,
-  // BEFORE accumulation -- SUBSUMES the former standalone
-  // lio/ekf/density_sigma_mode/density_sigma_ref (unchanged shape, renamed
-  // levels below) and CQ-36's proposed standalone sigma_calibration_mode
-  // (now level "chi2") into one enum, exclusive by construction (item 1).
-  cfg.refuseIfSet("lio/ekf/density_sigma_mode",
-      "RENAMED under CQ-37 axis D: use lio/ekf/sigma_scale_mode with level "
-      "'density_linear' (old 'linear'), 'density_sqrt' (old 'sqrt') or "
-      "'density_quadratic' (old 'quadratic') -- the shape is unchanged, "
-      "only the key/level names moved so this axis no longer shares a "
-      "namespace with a name describing only one of its five levels.");
-  cfg.refuseIfSet("lio/ekf/density_sigma_ref",
-      "RENAMED under CQ-37 axis D: use lio/ekf/sigma_scale/density_ref, "
-      "nested under sigma_scale_mode = density_*.");
-  cfg.mode("lio/ekf/sigma_scale_mode", opts_.sigma_scale.mode, "off",
-           { "off", "density_linear", "density_sqrt", "density_quadratic",
-             "info_gain_derived", "chi2" });
-  const bool ssm_density = opts_.sigma_scale.densityOn();
-  cfg.nested<double>(ssm_density, "lio/ekf/sigma_scale_mode=density_*",
-                     "lio/ekf/sigma_scale/density_ref", opts_.sigma_scale.density_ref, 0.0);
-  if (!ssm_density) opts_.sigma_scale.density_ref = 0.0;
-  else if (!(opts_.sigma_scale.density_ref > 0.0))
-    cfg.requireCombination(
-        "lio/ekf/sigma_scale/density_ref must be > 0 when lio/ekf/sigma_scale_mode "
-        "is '" + opts_.sigma_scale.mode + "' -- otherwise the mode is inert");
-  // CQ-36 item 4b: bounds/min_ratio,max_ratio are shared by info_gain_derived
-  // and chi2 -- and chi2 MUST be able to go below 1.0 (reduced_chi2 < 1
-  // means sigma_squared is currently too LARGE), unlike density_* above,
-  // which only ever grows sigma_squared. Do not reuse density's max(1,.)
-  // clamp for either of these two levels.
-  const bool ssm_bounded = opts_.sigma_scale.infoGainDerivedOn() || opts_.sigma_scale.chi2On();
-  cfg.nested<double>(ssm_bounded, "lio/ekf/sigma_scale_mode=info_gain_derived|chi2",
-                     "lio/ekf/sigma_scale/bounds/min_ratio", opts_.sigma_scale.min_ratio, 0.01);
-  cfg.nested<double>(ssm_bounded, "lio/ekf/sigma_scale_mode=info_gain_derived|chi2",
-                     "lio/ekf/sigma_scale/bounds/max_ratio", opts_.sigma_scale.max_ratio, 100.0);
-  const bool ssm_chi2 = opts_.sigma_scale.chi2On();
-  cfg.nested<double>(ssm_chi2, "lio/ekf/sigma_scale_mode=chi2",
-                     "lio/ekf/sigma_scale/chi2/ema", opts_.sigma_scale.chi2_ema, 0.9);
-  cfg.nested<int>(ssm_chi2, "lio/ekf/sigma_scale_mode=chi2",
-                  "lio/ekf/sigma_scale/chi2/warmup_frames", opts_.sigma_scale.chi2_warmup_frames, 20);
+                     "adaptive_q/noise_floor/scale", dopts_.adaptive_q.noise_floor_scale, 1.0);
+  cfg.nested<bool>(aq, "adaptive_q/enable", "adaptive_q/log_en", dopts_.adaptive_q.log_en, false);
+  adaptive_q_.configure(dopts_.adaptive_q);
 
   // Every spline/* and adaptive_q/* key is read by the resolver above and by
   // nothing else, so anything left over in those namespaces is a key nobody
@@ -334,305 +213,12 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   // read by paramWarn() in voxelmap.cpp, so they are unclaimed here and would
   // be reported as dead when they are merely read elsewhere. Widen this only
   // as those move onto a resolver.
-  cfg.refuseUnclaimed({ "spline", "adaptive_q" });
-
-  // The build's accumulation precision, recorded rather than assumed. The
-  // CUDA path returns float-precision HtH/Htz, so nll.txt is NOT comparable
-  // between a CPU and a GPU build -- an alpha ladder run half on each is a
-  // ladder with a step in it. The bug ledger's complaint was that this has to
-  // be pinned and is nowhere documented; documenting it in the run's own
-  // effective config is the cheap half of the fix.
-  cfg.derived("build/accumulation_precision",
-              cuda_enable_ ? "float (CUDA HtH/Htz) -- nll.txt NOT comparable "
-                             "with a CPU build"
-                           : "double (CPU HtH/Htz)");
-
-  // The EFFECTIVE configuration, not the requested one -- and a hard refusal
-  // if any key was set into a scope that cannot read it.  A sweep cell that
-  // cannot mean what it says fails here rather than producing a duplicate
-  // forty minutes later.
-  if (!cfg.ok())
-  {
-    ROS_FATAL_STREAM("\n" << cfg.report());
-    throw std::runtime_error(
-        "[config] refused: " + std::to_string(cfg.errors().size()) +
-        " option(s) set into a dead scope or outside their allowed set -- "
-        "see the [config/REFUSED] block above");
-  }
-  return cfg.report();
-}
-
-// Residual and EKF code
-void LioProc::buildResiduals(
-  const std::vector<PointXYZCov>& pts,
-  std::vector<Residual>& residuals,
-  bool allow_consistency_log) const {
-  // Single-threaded, before the OMP region starts below -- see
-  // VoxelMap::setAllowConsistencyLog()'s doc comment.
-  if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get()))
-    vm->setAllowConsistencyLog(allow_consistency_log);
-
-  const int n = (int)pts.size();
-  const int threads = cappedOmpThreads();
-
-  build_thread_residuals_.resize(threads);
-  for (auto& v : build_thread_residuals_) v.clear();
-  build_thread_miss_.assign(threads, {0, 0});
-  build_thread_tier0_miss_.assign(threads, {0, 0});
-
-  // Frame-constant context for T0-D's corr.csv S column (H P- H^T + R) --
-  // see WorldPointCov::body_point/rot_transpose/prior_cov_rp's doc
-  // comment. Computed once here (not per point) and copied onto every
-  // pt_world below; cheap regardless of whether logging is actually on
-  // this call, so no separate gate is needed.
-  const M3D rot_transpose = state_->rot().transpose();
-  Eigen::Matrix<double, 6, 6> prior_cov_rp = Eigen::Matrix<double, 6, 6>::Zero();
-  if (prior_cov_.rows() >= StateGroup::idxR() + 6 && prior_cov_.cols() >= StateGroup::idxR() + 6)
-    prior_cov_rp = prior_cov_.block<6, 6>(StateGroup::idxR(), StateGroup::idxR());
-
-  // CQ-35: an explicit `omp parallel` region wrapping an `omp for`, rather
-  // than a combined `omp parallel for`, so that flushVarianceShareLog() can
-  // be called once per thread AFTER the implicit barrier at the end of
-  // `omp for` -- every thread is guaranteed to have finished its share of
-  // the loop (and therefore finished appending to its own thread_local
-  // buffer) before any thread reaches the flush call, and it is still the
-  // SAME team of threads that did the logging, so draining "this thread's
-  // buffer" here is well-defined (see voxelplane.h's doc comment on why
-  // this must be called from inside the same parallel region).
-  #pragma omp parallel num_threads(threads)
-  {
-    #pragma omp for schedule(static)
-    for (int i = 0; i < n; ++i)
-    {
-      const PointXYZCov sensor_world = state_->toWorld(pts[i]);
-      WorldPointCov pt_world{
-          sensor_world.point, sensor_world.sensor_cov, state_->poseCovAt(pts[i].point)};
-      pt_world.body_point = pts[i].point;
-      pt_world.rot_transpose = rot_transpose;
-      pt_world.prior_cov_rp = prior_cov_rp;
-      Residual res{};
-      bool tier0_had_plane = false;
-      bool tier0_missed = true;
-      // had_converged_neighbor: was a duplicate hasConvergedNeighbor(pt_world.point)
-      // call on the else branch below (a second full neighborhood_size box
-      // scan of the SAME box findPlaneResidual()'s own tier1/tier2 fallback
-      // just scanned to look for a match) -- findPlaneResidual() now
-      // accumulates the identical answer for free from cells it already
-      // visits, via this out-param, instead of scanning the box twice on
-      // every total miss.
-      bool had_converged_neighbor = false;
-      if (voxel_map_->findPlaneResidual(pt_world, res, &tier0_had_plane, &had_converged_neighbor)) {
-        res.point_cross_normal = pts[i].point.cross(state_->rot().transpose() * res.normal);
-        res.sigma_squared += res.plane_var_term;
-        res.t = pts[i].t;   // for the spline control-point refinement
-        build_thread_residuals_[omp_get_thread_num()].push_back(res);
-        tier0_missed = (res.match_tier != 0);
-      } else {
-        const int idx = had_converged_neighbor ? 1 : 0;
-        ++build_thread_miss_[omp_get_thread_num()][idx];
-      }
-      if (tier0_missed) {
-        const int idx0 = tier0_had_plane ? 1 : 0;
-        ++build_thread_tier0_miss_[omp_get_thread_num()][idx0];
-      }
-    }
-    // Implicit barrier at the end of `omp for` above already happened --
-    // every thread's residual-building work (and its diagnostic logging,
-    // gated behind log_variance_shares_en) is done by the time any thread
-    // reaches here.
-    flushVarianceShareLog();
-    // CQ-38: same call-site reasoning as flushVarianceShareLog() above --
-    // debugLogConsistencyCorr() (called from computeResidual(), same OMP
-    // region) now buffers per-thread too. See voxelplane.h's doc comment.
-    flushConsistencyCorrLog();
-  }
-
-  residuals.clear();
-  for (const auto& local : build_thread_residuals_)
-    residuals.insert(residuals.end(), local.begin(), local.end());
-
-  n_miss_coverage_ = 0;
-  n_miss_mismatch_ = 0;
-  for (const auto& m : build_thread_miss_) {
-    n_miss_coverage_ += m[0];
-    n_miss_mismatch_ += m[1];
-  }
-
-  n_tier0_miss_coverage_ = 0;
-  n_tier0_miss_mismatch_ = 0;
-  for (const auto& m : build_thread_tier0_miss_) {
-    n_tier0_miss_coverage_ += m[0];
-    n_tier0_miss_mismatch_ += m[1];
-  }
-}
-
-// History (242-246): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-242
-void LioProc::solveSystem_cuda(const std::vector<Residual>& residuals) const {
-  accumulateLioResidualsCuda(residuals, ekf_, cuda_buf_);
-  // CQ-34: called UNCONDITIONALLY -- residual_redundancy.h's own header
-  // already promises this is safe at mode=="off" (the module's internal
-  // gate on ekf.HtH/Htz mutation is what keeps "off" byte-identical, not
-  // this call site). The prior ternary here skipped the call entirely at
-  // mode=="off", which silently left redund_groups/naive_info_gain/etc at
-  // their default-constructed zero -- indistinguishable from a genuine
-  // zero-groups measurement. See CQ-34.
-  // CQ-34 item 2/CQ-35: this call was PREVIOUSLY SKIPPED ENTIRELY at
-  // mode=="off" -- now it runs every IEKF iteration, every frame, and had
-  // no profiler coverage anywhere before this TimedScope, so its wall-clock
-  // cost was invisible even to a profiled run. Reported per CQ-34 item 2.
-  { TimedScope ts(profiler_, "lio/ekf/redundancy");
-    redundancy_stats_ = applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_); }
-  ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
-}
-
-void LioProc::solveSystem(const std::vector<Residual>& residuals) const {
-  accumulateLioResiduals(residuals, ekf_);
-
-  // CQ-34: see solveSystem_cuda()'s comment above -- same fix, same reason.
-  { TimedScope ts(profiler_, "lio/ekf/redundancy");
-    redundancy_stats_ = applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_); }
-
-  // Mean-only update against the frame's FIXED prior (prior_cov_/
-  // state_propagat_, snapshotted once in processLIO() before this frame's
-  // iteration loop began) -- does not touch state_->cov(). Both this CPU
-  // path and solveSystem_cuda() now delegate to the same ekf_
-  // applyMeanUpdate()/applyCovarianceUpdate() machinery instead of each
-  // inlining/duplicating the blend math themselves (see ekf.h for why the
-  // old per-call state_->covMut() = P_new here was a correctness bug).
-  ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
-}
-
-// CQ-37 axis D.  See LioProcOptions::SigmaScaleOptions's own doc comment for
-// each level's formula. Replaces the two duplicated density_sigma_mode
-// blocks that used to live at this function's two call sites.
-void LioProc::applySigmaScale(std::vector<Residual>& residuals) const
-{
-  if (!opts_.sigma_scale.on() || residuals.empty()) return;
-
-  double scale = 1.0;
-  if (opts_.sigma_scale.densityOn()) {
-    const double x = residuals.size() / opts_.sigma_scale.density_ref;
-    scale = x;
-    if (opts_.sigma_scale.mode == "density_sqrt")      scale = std::sqrt(x);
-    else if (opts_.sigma_scale.mode == "density_quadratic") scale = x * x;
-    scale = std::max(1.0, scale);  // unchanged from the former density_sigma_mode: never shrinks below baseline
-  } else if (opts_.sigma_scale.infoGainDerivedOn()) {
-    // One-frame lag, documented in SigmaScaleOptions's own comment: axis D
-    // runs before accumulation, so THIS frame's redund_n_raw/n_eff do not
-    // exist yet -- redundancy_stats_ still holds the PREVIOUS frame's
-    // values at this point in the call sequence (it is only overwritten
-    // later, inside solveSystem()/solveSystem_cuda(), after this call).
-    if (redundancy_stats_.redund_n_raw > 0 && redundancy_stats_.redund_n_eff > 0)
-      scale = static_cast<double>(redundancy_stats_.redund_n_raw) /
-              static_cast<double>(redundancy_stats_.redund_n_eff);
-    scale = std::min(std::max(scale, opts_.sigma_scale.min_ratio), opts_.sigma_scale.max_ratio);
-  } else if (opts_.sigma_scale.chi2On()) {
-    // CQ-36 M4 fix: chi2_scale_ is the persistent, multiplicatively-
-    // accumulated state (updated post-solve, see processLIO()) -- NOT the
-    // raw chi2_ema_ reading. See chi2_scale_'s own declaration for why a
-    // direct assignment there has the wrong fixed point. Not clamped to
-    // >= 1 (CQ-36 item 4b): reduced_chi2 < 1 means sigma_squared is too
-    // large, and the scale must be free to shrink it.
-    scale = std::min(std::max(chi2_scale_, opts_.sigma_scale.min_ratio), opts_.sigma_scale.max_ratio);
-  }
-
-  for (auto& r : residuals) {
-    r.sigma_squared *= scale;
-    // Item 1c: buildResiduals() has already folded plane_var_term into
-    // sigma_squared by this point, so the two must move together or the S
-    // = floor_term + sigma_diag_squared + plane_var_term + s_prior_pose
-    // decomposition frame_stats.txt reports becomes internally
-    // inconsistent (this is the correctness bug the former
-    // density_sigma_mode carried silently, harmless only because nothing
-    // ever composed it with axis C -- see CQ-37 item 1c).
-    if (r.plane_var_term > 0.0) r.plane_var_term *= scale;
-  }
-  last_density_scale_ = scale;
-}
-
-double LioProc::estimateStateCorrection(
-  const std::vector<PointXYZCov>& pts,
-  V3D &dtheta,
-  V3D &dt,
-  bool allow_consistency_log) {
-
-  {
-    TimedScope ts(profiler_, "lio/ekf/build_residuals");
-    buildResiduals(pts, residuals_, allow_consistency_log);
-  }
-  if (residuals_.empty())
-    return 0.0;
-
-  // CQ-37: axes A (collapse) and B (per_residual) run first -- A changes
-  // WHICH residuals exist, B then reweights whatever A left -- axis D
-  // (applySigmaScale) applies its one global scalar last. All three are
-  // no-ops at their "off" defaults.
-  if (opts_.residual_weighting.collapseOn())
-    collapse_stats_ = applyResidualCollapse(residuals_);
-  else
-    collapse_stats_ = CollapseStats{};
-  if (opts_.residual_weighting.perResidualOn())
-    per_residual_stats_ = applyPerResidualReweight(residuals_, opts_.residual_weighting.per_residual);
-  else
-    per_residual_stats_ = PerResidualStats{};
-  applySigmaScale(residuals_);
-
-  double avg_res = 0.0;
-  for (const auto& r : residuals_)
-    avg_res += std::abs(r.r);
-  avg_res /= residuals_.size();
-
-  {
-    TimedScope ts(profiler_, "lio/ekf/solve");
-    if (cuda_enable_)
-      solveSystem_cuda(residuals_);
-    else
-      solveSystem(residuals_);
-    dtheta = ekf_.dtheta;
-    dt     = ekf_.dt;
-  }
-
-  return avg_res;
-}
-
-bool LioProc::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, double& avg_res)
-{
-  if (voxel_map_->isEmpty()) return false;
-
-  {
-    TimedScope ts(profiler_, "lio/ekf/build_residuals");
-    buildResiduals(mg.points, residuals_);
-  }
-  if (residuals_.empty()) return false;
-
-  if (opts_.residual_weighting.collapseOn())
-    collapse_stats_ = applyResidualCollapse(residuals_);
-  else
-    collapse_stats_ = CollapseStats{};
-  if (opts_.residual_weighting.perResidualOn())
-    per_residual_stats_ = applyPerResidualReweight(residuals_, opts_.residual_weighting.per_residual);
-  else
-    per_residual_stats_ = PerResidualStats{};
-  applySigmaScale(residuals_);
-
-  avg_res = 0.0;
-  for (const auto& r : residuals_)
-    avg_res += std::abs(r.r);
-  avg_res /= residuals_.size();
-
-  {
-    TimedScope ts(profiler_, "lio/ekf/accumulate_combined");
-    if (cuda_enable_)
-      accumulateLioResidualsCuda(residuals_, out, cuda_buf_);
-    else
-      accumulateLioResiduals(residuals_, out);
-  }
-  return true;
+  return finalizeConfig(cfg, { "spline", "adaptive_q" });
 }
 
 // LIO Processing
 
-void LioProc::deskewAndDownsample(MeasureGroup& mg)
+void LioProcDecoupled::deskewAndDownsample(MeasureGroup& mg)
 {
   TimedScope ts(profiler_, "lio/deskew");
 
@@ -656,7 +242,7 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
   spline_frame_bias_gyr_ = state_->biasGyr();
   spline_frame_gravity_  = state_->gravity();
   spline_.resetRefineStats();
-  if (opts_.spline.splineOn() && !mg.poses.empty())
+  if (dopts_.spline.splineOn() && !mg.poses.empty())
   {
     TimedScope ts_fit(profiler_, "lio/spline/fit");
     spline_frame_count_++;
@@ -671,7 +257,7 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
         prev_scan_end_valid_ ? SplineOptions::N_FROZEN_CP : 0,
         prev_scan_end_pos_, prev_scan_end_rot_, prev_scan_end_vel_,
         state_->pos(), state_->rot(), state_->vel());
-    spline_ok_ = spline_.fit(mg.poses, mg.poses.front().t, mg.image.t, opts_.spline);
+    spline_ok_ = spline_.fit(mg.poses, mg.poses.front().t, mg.image.t, dopts_.spline);
     if (!spline_ok_)
     {
       // Never substitute a bad spline for a working deskew.  Count the
@@ -741,14 +327,14 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
     // the whole cell and the re-deskew re-averages it.  Output is bit-identical
     // to voxelDownsample() in the matching mode -- see
     // voxelDownsampleIndexedCsr()'s doc comment.
-    if (spline_ok_ && opts_.spline.splineOn())
+    if (spline_ok_ && dopts_.spline.splineOn())
       voxelDownsampleIndexedCsr(deskewed, mg.points, ds_offsets_, ds_members_,
                                 PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
     else
       voxelDownsample(deskewed, mg.points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
   } else {
     mg.points = std::move(deskewed);
-    if (spline_ok_ && opts_.spline.splineOn()) {
+    if (spline_ok_ && dopts_.spline.splineOn()) {
       ds_members_.resize(mg.points.size());
       ds_offsets_.resize(mg.points.size() + 1);
       for (size_t i = 0; i < ds_members_.size(); ++i) {
@@ -777,9 +363,9 @@ void LioProc::deskewAndDownsample(MeasureGroup& mg)
 }
 
 
-bool LioProc::redeskewFromSpline(MeasureGroup& mg)
+bool LioProcDecoupled::redeskewFromSpline(MeasureGroup& mg)
 {
-  if (!spline_ok_ || !opts_.spline.splineOn()) return false;
+  if (!spline_ok_ || !dopts_.spline.splineOn()) return false;
 
   // CARRY THE IEKF'S CORRECTION IN BY MOVING THE TAIL CLAMP, not by rigidly
   // transforming the spline.  anchorTo() applied ONE correction to the point
@@ -825,9 +411,9 @@ bool LioProc::redeskewFromSpline(MeasureGroup& mg)
 // only the interior shape; it reaches the endpoint only indirectly, by
 // changing where the points land and therefore what the next residual build
 // reports.
-bool LioProc::refineSplineFromResiduals(const MeasureGroup& mg)
+bool LioProcDecoupled::refineSplineFromResiduals(const MeasureGroup& mg)
 {
-  if (!spline_ok_ || !opts_.spline.refineOn() || residuals_.empty()) return false;
+  if (!spline_ok_ || !dopts_.spline.refineOn() || residuals_.empty()) return false;
 
   TimedScope ts_ref(profiler_, "lio/spline/refine");
   lidar_obs_.clear();
@@ -851,16 +437,16 @@ bool LioProc::refineSplineFromResiduals(const MeasureGroup& mg)
   // CQ-41 follow-up: imu_samples_raw/spline_frame_bias_acc_/
   // spline_frame_gravity_/varAccFloor() are the same four inputs
   // computeSplineImuResidual() already uses -- only consulted by
-  // refineWithLidar() when opts_.spline.refine_imu_acc_weight > 0.
-  return spline_.refineWithLidar(lidar_obs_, opts_.spline, mg.imu_samples_raw,
+  // refineWithLidar() when dopts_.spline.refine_imu_acc_weight > 0.
+  return spline_.refineWithLidar(lidar_obs_, dopts_.spline, mg.imu_samples_raw,
                                  spline_frame_bias_acc_, spline_frame_gravity_,
                                  state_->varAccFloor().mean(), state_->covBiasAcc(),
                                  opts_.log_debug_en);
 }
 
-void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
+void LioProcDecoupled::finalizeSplineAndQ(MeasureGroup& mg)
 {
-  if (!opts_.spline.splineOn()) return;
+  if (!dopts_.spline.splineOn()) return;
 
   last_spline_stats_ = SplineImuResidualStats{};
 
@@ -910,7 +496,7 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
       Eigen::MatrixXd cp_free_unused;
       double fit_res_pos_free_unused = 0.0;
       const bool free_tail_ok = spline_.diagnosticFreeTailFit(
-          lidar_obs_, opts_.spline, mg.imu_samples_raw, spline_frame_bias_acc_,
+          lidar_obs_, dopts_.spline, mg.imu_samples_raw, spline_frame_bias_acc_,
           spline_frame_gravity_, state_->varAccFloor().mean(), mg.poses,
           pos1_free, vel1_free, acc1_free, cov_pos1_free,
           cp_free_unused, fit_res_pos_free_unused);
@@ -980,7 +566,7 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
 
       // item (5): free_tail_d, using diagnosticFreeTailFit() with the
       // regularizers FORCED ON (curvature_weight=1.0, imu_acc_weight=1.0)
-      // regardless of this run's own opts_.spline -- the card's own
+      // regardless of this run's own dopts_.spline -- the card's own
       // instruction ("with the regularisers on"), decoupled from whatever
       // the main fit's shipped config happens to use (still 0.0/off by
       // default as of CQ-41's own filing).
@@ -991,9 +577,9 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
       // diagnostic's forced weight without touching the run's own shipped
       // refine_imu_acc_weight (a different field, read by the REAL
       // refinement path, refineWithLidar()).
-      SplineOptions forced_opts = opts_.spline;
+      SplineOptions forced_opts = dopts_.spline;
       forced_opts.refine_curvature_weight = 1.0;
-      forced_opts.refine_imu_acc_weight   = opts_.spline.diag_free_tail_imu_acc_weight;
+      forced_opts.refine_imu_acc_weight   = dopts_.spline.diag_free_tail_imu_acc_weight;
       V3D ft_pos1 = V3D::Zero(), ft_vel1 = V3D::Zero(), ft_acc1 = V3D::Zero();
       M3D ft_cov = M3D::Zero();
       Eigen::MatrixXd ft_cp_free;
@@ -1216,7 +802,7 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
     }
   }
 
-  if (opts_.adaptive_q.enable)
+  if (dopts_.adaptive_q.enable)
   {
     if (!adaptive_q_primed_)
     {
@@ -1251,20 +837,20 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
   // honest check on how continuous this "continuous-time" trajectory is, and
   // nothing has ever measured it.
   //
-  // opts_.spline.trajLogOn() (traj_log_mode != "off") is already the real
+  // dopts_.spline.trajLogOn() (traj_log_mode != "off") is already the real
   // gate here; the outer log_en check this used to have was dangling (no
   // braces) and bound only to this one inner if, not to the spline_q.csv
   // block below -- braced explicitly so that's no longer ambiguous to read.
-  if (opts_.spline.log_en || opts_.adaptive_q.log_en)
+  if (dopts_.spline.log_en || dopts_.adaptive_q.log_en)
   {
-  if (spline_ok_ && opts_.spline.trajLogOn())
+  if (spline_ok_ && dopts_.spline.trajLogOn())
   {
     static bool traj_first = true;
     std::ofstream tofs(debugLogPath("spline_traj.csv"),
                        traj_first ? std::ios::trunc : std::ios::app);
     if (traj_first) { tofs << "scan_id,t,px,py,pz,qx,qy,qz,qw\n"; traj_first = false; }
     const double t_off = data_queues_->start_time;
-    const double hz = std::max(1.0, opts_.spline.traj_log_hz);
+    const double hz = std::max(1.0, dopts_.spline.traj_log_hz);
     const double step = 1.0 / hz;
     const double a = spline_.t0(), b = spline_.t1();
     tofs << std::setprecision(12);
@@ -1279,7 +865,7 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
   }
 
   // spline_q.csv is written UNCONDITIONALLY, every scan, regardless of
-  // opts_.spline.log_en/opts_.adaptive_q.log_en -- deliberately, not an
+  // dopts_.spline.log_en/dopts_.adaptive_q.log_en -- deliberately, not an
   // oversight (C-8): rule 8 already retains this file by name across every
   // batch this project runs, and every AdaptiveQ/spline diagnostic reader
   // (DX-2's SERIES blocks, C-7's time-axis join, D-1R) assumes it always
@@ -1322,7 +908,7 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
         // mechanism actually moved things this frame.  A cell with
         // per_iteration naming a step whose magnitude column is 0 across the
         // whole run is an INERT cell, not a null result.
-        << opts_.spline.mode << ','
+        << dopts_.spline.mode << ','
         << (spline_ok_ ? spline_.refineDcpMax() : 0.0) << ','
         << (spline_ok_ ? spline_.refineDcpRms() : 0.0) << ','
         << redeskew_calls_ << ',' << redeskew_dp_rms_ << ','
@@ -1354,7 +940,7 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
     run_refine_rejects_ += spline_.refineRejects();
     run_refine_dcp_max_ = std::max(run_refine_dcp_max_, spline_.refineDcpMax());
   }
-  if (opts_.adaptive_q.enable && adaptive_q_.active())
+  if (dopts_.adaptive_q.enable && adaptive_q_.active())
   {
     ++run_aq_ok_frames_;
     const double aa = adaptive_q_.varAcc(), ag = adaptive_q_.varGyr();
@@ -1376,16 +962,16 @@ void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
 // ── Engagement report ──────────────────────────────────────────────────────
 // See the declaration in lio_processing.h.  One line per toggle; a flag that
 // was ON with a zero counter prints INERT.
-LioProc::~LioProc()
+LioProcDecoupled::~LioProcDecoupled()
 {
-  if (!opts_.spline.splineOn()) return;
+  if (!dopts_.spline.splineOn()) return;
   const std::string rep = engagementReport();
   ROS_WARN_STREAM("\n" << rep);
   std::ofstream ofs(debugLogPath("engagement.txt"), std::ios::trunc);
   if (ofs) ofs << rep << '\n';
 }
 
-std::string LioProc::engagementReport() const
+std::string LioProcDecoupled::engagementReport() const
 {
   std::ostringstream o;
   o << "[engagement]  did each flag actually do anything?  frames="
@@ -1403,17 +989,17 @@ std::string LioProc::engagementReport() const
         << " times and moved nothing";
   };
 
-  o << "\n  spline/mode = " << opts_.spline.mode;
-  line("  redeskew          ", opts_.spline.splineOn(), run_redeskew_calls_,
+  o << "\n  spline/mode = " << dopts_.spline.mode;
+  line("  redeskew          ", dopts_.spline.splineOn(), run_redeskew_calls_,
        "max_dp_rms_m", run_redeskew_dp_max_);
-  line("  refine            ", opts_.spline.refineOn(), run_refine_applied_,
+  line("  refine            ", dopts_.spline.refineOn(), run_refine_applied_,
        "max_dcp_m", run_refine_dcp_max_);
-  if (opts_.spline.refineOn())
+  if (dopts_.spline.refineOn())
     o << " rejects=" << run_refine_rejects_;
 
   o << "\n  adaptive_q/enable = "
-    << (opts_.adaptive_q.enable ? "true" : "false");
-  if (opts_.adaptive_q.enable)
+    << (dopts_.adaptive_q.enable ? "true" : "false");
+  if (dopts_.adaptive_q.enable)
   {
     o << "\n    applied frames=" << run_aq_ok_frames_
       << "  var_acc [" << run_aq_applied_min_acc_ << ", "
@@ -1453,13 +1039,13 @@ std::string LioProc::engagementReport() const
       << vm->opts()->weight_floor_mode;
   }
 
-  o << "\n  spline/mode = " << opts_.spline.mode
-    << "\n  control_points/hz = " << opts_.spline.control_point_hz;
+  o << "\n  spline/mode = " << dopts_.spline.mode
+    << "\n  control_points/hz = " << dopts_.spline.control_point_hz;
 
   // CQ-22 item (4): the fit-fail breakdown by cause; CQ-23 made
   // "chart_guard" (the hard ceiling) a real, live cause again, separate
   // from the soft warning count below -- see ScanSpline::FitFailCause.
-  if (opts_.spline.splineOn())
+  if (dopts_.spline.splineOn())
   {
     static const char* kCauseNames[] = {
       "none", "too_few_poses", "bad_window", "too_few_samples",
@@ -1483,7 +1069,7 @@ std::string LioProc::engagementReport() const
 
 // See LioProcOptions::dry_run_point_filter_num's doc comment and this
 // method's declaration in lio_processing.h.
-void LioProc::runDryRunShadowPass(const MeasureGroup& mg)
+void LioProcDecoupled::runDryRunShadowPass(const MeasureGroup& mg)
 {
   if (mg.dry_run_points.empty()) return;
 
@@ -1663,7 +1249,7 @@ void LioProc::runDryRunShadowPass(const MeasureGroup& mg)
   state_propagat_ = real_state_propagat;
 }
 
-std::string LioProc::processLIO(MeasureGroup& mg)
+std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
 {
   // P8.  Seed prior_* to the CURRENT (pre-frame) state before any early
   // return below can skip the real snapshot further down. Without this, an
@@ -1743,7 +1329,7 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       // finding). -1 sentinels (lastTailMoveDpNorm()'s own convention) mean
       // this scan had no boundary (n_frozen_cp_<=0) and are left as -1
       // rather than coerced to 0, matching that function's own distinction.
-      if (opts_.log_debug_en && spline_ok_ && opts_.spline.splineOn() && iter > 0) {
+      if (opts_.log_debug_en && spline_ok_ && dopts_.spline.splineOn() && iter > 0) {
         std::ofstream& ofs = cq43_tailmove_log.stream();
         const double dp = spline_.lastTailMoveDpNorm();
         ofs << "scan_id=" << voxel_map_->frame_idx_ << " iter=" << iter
@@ -1856,7 +1442,7 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     // question. iter (loop-scope, still in scope here) is this scan's
     // total iteration count, for the "distribution of iteration count per
     // scan" part of item 0.
-    if (opts_.log_debug_en && spline_ok_ && opts_.spline.splineOn()) {
+    if (opts_.log_debug_en && spline_ok_ && dopts_.spline.splineOn()) {
       std::ofstream& ofs = cq43_tailmove_log.stream();
       const double dp = spline_.lastTailMoveDpNorm();
       ofs << "scan_id=" << voxel_map_->frame_idx_ << " iter=" << iter
@@ -1881,7 +1467,7 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     // skipped, so item (0)'s own log gets one more is_final=1-shaped row
     // for this scan if log_debug_en is on; harmless, and left visible
     // rather than special-cased out).
-    if (opts_.spline.splineOn() && opts_.spline.final_pass && spline_ok_) {
+    if (dopts_.spline.splineOn() && dopts_.spline.final_pass && spline_ok_) {
       const V3D pos_before = state_->pos();
       buildResiduals(mg.points, residuals_, /*allow_consistency_log=*/false);
       refineSplineFromResiduals(mg);
@@ -2167,12 +1753,12 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       diag.boundary_drot_deg = boundary_drot_deg_;
       // CQ-19(c): AdaptiveQ's own gate state -- adaptive_q_.update() (also
       // above this diag block, earlier in this same processLIO() call) has
-      // already run this frame whenever opts_.adaptive_q.enable is set, so
+      // already run this frame whenever dopts_.adaptive_q.enable is set, so
       // its state is current here regardless of residuals_. Left at their
       // NaN/false defaults when disabled, per LioFrameDiag's own doc
       // comment -- cov_acc/cov_gyr stay config-invariant either way, but
       // these five are the columns that actually distinguish live from off.
-      if (opts_.adaptive_q.enable) {
+      if (dopts_.adaptive_q.enable) {
         // CQ-26: NaN until the channel's gate has actually passed once (see
         // zAccOrNaN()/zGyrOrNaN()'s doc comment) -- was zAcc()/zGyr()
         // directly, which default to 0.0 (a real excursion value) and so
