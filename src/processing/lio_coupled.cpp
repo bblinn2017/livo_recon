@@ -80,6 +80,12 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "imu/q_alpha_gyr", copts_.repro_q_alpha_gyr, 1.0);
   paramWarn<double>(pnh, "imu/q_alpha_acc", copts_.repro_q_alpha_acc, 1.0);
   paramWarn<bool>(pnh, "imu/second_order", copts_.repro_second_order, true);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/q_bias_rw_en", copts_.q_bias_rw_en, false);
+  paramWarn<double>(pnh, "imu/q_alpha_bias", copts_.q_alpha_bias, 1.0);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/q_out_of_band_en", copts_.q_out_of_band_en, false);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/q_out_of_band_scale", copts_.q_out_of_band_scale, 1.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/q_out_of_band_fraction_acc", copts_.q_out_of_band_fraction_acc, 0.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/q_out_of_band_fraction_gyr", copts_.q_out_of_band_fraction_gyr, 0.0);
   coupled_tier1_nees_ = Tier1NeesBuffer(opts_.nees_per_dof_en ? opts_.nees_tier1_window_scans : 0);
 
   // Every spline/* and adaptive_q/* key is unclaimed by this class by
@@ -294,6 +300,45 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       M.block(9, 9, 9, 9) = Eigen::MatrixXd::Identity(9, 9);  // select [bg,ba,g]
       Eigen::MatrixXd posterior18 = M * coeff_cov * M.transpose();
       posterior18 = 0.5 * (posterior18 + posterior18.transpose());
+
+      // CQ-57 item 3a: the joint solve carries ONE bias correction at t0;
+      // the line above reports the bias at t1 exactly as well known as at
+      // t0, no random-walk growth over the scan's own duration. Adds
+      // q_alpha_bias*covBiasGyr()*dt / *covBiasAcc()*dt to the bg/ba
+      // diagonal blocks -- dt is the WHOLE scan duration (t1-t0), the gap
+      // this item names, using the SAME rate imu_processing.cpp's own
+      // cov_w already uses for its own (per-IMU-step) bg/ba noise. A pure
+      // diagonal addition can only increase variance, so this cannot
+      // break the M*C*M^T construction's own PSD guarantee above.
+      if (copts_.q_bias_rw_en && state_->idxBG() >= 0 && state_->idxBA() >= 0) {
+        const double dt_scan = mg.image.t - mg.poses.front().t;
+        if (dt_scan > 0.0) {
+          posterior18.block<3, 3>(state_->idxBG(), state_->idxBG()).diagonal() +=
+              copts_.q_alpha_bias * state_->covBiasGyr() * dt_scan;
+          posterior18.block<3, 3>(state_->idxBA(), state_->idxBA()).diagonal() +=
+              copts_.q_alpha_bias * state_->covBiasAcc() * dt_scan;
+        }
+      }
+
+      // CQ-57 item 3b: add out-of-band IMU noise power (see this option's
+      // own header doc comment for the measured fractions) into the V and
+      // P blocks -- integrated over the scan's own duration, using the
+      // SAME sigma_a/sigma_g this scan already calibrated (coupled_sigma_a_used_/
+      // coupled_sigma_g_used_), not a separate model.
+      if (copts_.q_out_of_band_en) {
+        const double dt_scan = mg.image.t - mg.poses.front().t;
+        if (dt_scan > 0.0) {
+          const double var_acc_oob = copts_.q_out_of_band_scale * copts_.q_out_of_band_fraction_acc
+              * coupled_sigma_a_used_ * coupled_sigma_a_used_ * dt_scan;
+          const int iV = StateGroup::idxV(), iP = StateGroup::idxP();
+          posterior18.block<3, 3>(iV, iV).diagonal().array() += var_acc_oob;
+          posterior18.block<3, 3>(iP, iP).diagonal().array() += var_acc_oob * dt_scan * dt_scan;
+          const double var_gyr_oob = copts_.q_out_of_band_scale * copts_.q_out_of_band_fraction_gyr
+              * coupled_sigma_g_used_ * coupled_sigma_g_used_ * dt_scan;
+          const int iR = StateGroup::idxR();
+          posterior18.block<3, 3>(iR, iR).diagonal().array() += var_gyr_oob;
+        }
+      }
 
       // CQ-57 item 1, THE CONSEQUENCE: report-only trace comparison, no
       // behaviour change. trP_prior_in/trP_imu are the SAME quantity here

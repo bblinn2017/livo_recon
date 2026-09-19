@@ -175,6 +175,37 @@ struct LioProcCoupledOptions
   // Only used when log_cov_repropagation_en is true.
   double repro_q_alpha_gyr = 1.0, repro_q_alpha_acc = 1.0;
   bool repro_second_order = true;
+  // CQ-57 item 3a: report-only... no, THIS one changes behaviour (adds
+  // process noise to the written posterior) -- default false, md5-inert.
+  // The joint solve carries ONE bias correction at t0; M*A^-1*M^T reports
+  // the bias at t1 as exactly as well known as at t0, with no random-walk
+  // growth over the scan's own duration. Adds q_alpha_bias*covBiasGyr()*dt
+  // / q_alpha_bias*covBiasAcc()*dt (dt = the WHOLE scan duration, t1-t0 --
+  // the gap this item names) to posterior18's own bg/ba diagonal blocks
+  // before it is written, using the SAME imu/q_alpha_bias rate
+  // imu_processing.cpp's own cov_w already uses (state.cpp:259-269's own
+  // comment on why a per-axis RATE, not the initial-covariance value, is
+  // the right quantity here).
+  bool q_bias_rw_en = false;
+  double q_alpha_bias = 1.0;  // imu/q_alpha_bias, same key imu_processing.cpp reads.
+  // CQ-57 item 3b: default false/0.0, md5-inert. The correction spline can
+  // represent corrections up to roughly n_c/(2*T_scan) Hz; IMU noise power
+  // ABOVE that band contributes no column to A (hence no variance to
+  // A^-1/posterior18) while being real error in the integrated
+  // trajectory. Report-computed fractions (measured directly from the
+  // bag's own raw IMU spectrum, NOT from a model -- see the card's own
+  // "REPORT, DO NOT TUNE" instruction): eee_01, fs=197.55Hz (NOT the
+  // 385Hz the card assumed -- corrected here), band_edge=20.0Hz at n_c=4/
+  // 65.0Hz at n_c=13. Gyro out-of-band fraction is negligible at both
+  // (0.05-1.8%); accel out-of-band fraction is LARGE at n_c=4 (31-69% per
+  // axis) and small at n_c=13 (2.4-4.0%). These two fields are
+  // config-SUPPLIED (not live-FFT-computed in this build -- that is
+  // future work, out of this item's own scope) so a caller can inject the
+  // already-measured fraction; default 0.0 (inert) leaves the shipped
+  // behaviour unchanged regardless of q_out_of_band_en.
+  bool q_out_of_band_en = false;
+  double q_out_of_band_scale = 1.0;
+  double q_out_of_band_fraction_acc = 0.0, q_out_of_band_fraction_gyr = 0.0;
 };
 
 // CQ-49: the coupled estimator, reimplemented as its own class -- see
