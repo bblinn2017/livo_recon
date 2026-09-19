@@ -2122,20 +2122,36 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     // The joint Jacobian now covers R,P,V,BG,BA,G -- not just R,P,V --
     // since Phi_x(t1) has nonzero sensitivity on exactly those bias/gravity
     // rows (item 3c's whole point: they get DIRECT measurement information
-    // for the first time). The amendment names this as REPLACING the old
-    // decoupled-approximation form (J_x P(t0) J_x^T + J_c(...)^-1 J_c^T,
-    // which drops the delta_s(t0)/c cross-covariance) rather than adding to
-    // it -- but since Q_unmodelled (the part ImuProc::propagate()'s own
-    // cov_w contributes this frame) is not separately isolated by this
-    // implementation, this ADDS the joint posterior term on top of
-    // whatever ImuProc::propagate() already left in state_->cov() this
-    // frame (its own F_x*P*F_x^T+cov_w recursion, unconditional, every
-    // frame), same ADD convention the prior (unamended) version used for
-    // its narrower 9x9 block. NAMED, NOT RESOLVED, same as before: this
-    // means some information is double-counted (the deterministic
-    // F_x*P(t0)*F_x^T term is present in BOTH the existing state_->cov()
-    // AND, implicitly, in A's own Pi_ss prior block) -- a real limitation,
-    // reported rather than silently claimed fixed.
+    // for the first time).
+    //
+    // REPLACE, NOT ADD -- a real bug found and fixed during verification,
+    // not merely a named limitation. An earlier version of this block ADDED
+    // the joint posterior term to whatever ImuProc::propagate() already
+    // left in state_->cov() this frame. That is correct for the OLD
+    // c-alone formula (there, c never touches the persistent V/BG/BA/G
+    // state at all, so P(t1)'s (R,P,V) block genuinely has no other source
+    // of reduction to apply -- ADD is the only sensible operation). It is
+    // WRONG here: now that s=[delta_v,delta_bg,delta_ba,delta_g] is a REAL
+    // Bayesian update of P(t0)'s own uncertainty (Pi_ss IS P(t0)^-1's own
+    // sub-block), A^-1 already correctly COMBINES that prior with this
+    // scan's LiDAR evidence -- mapping it to t1 gives the true posterior,
+    // and adding it on top of the naively-propagated P double-counts the
+    // prior and only ever GROWS P. Confirmed empirically: with ADD, Pi_ss's
+    // own diagonal (the velocity/bias/gravity PRIOR PRECISION) monotonically
+    // SHRANK scan-over-scan (52 -> 6.9 -> 0.91 -> 0.27 -> 0.115 by scan 200),
+    // eventually leaving later scans' delta_s essentially unconstrained by
+    // any prior and free to swing on LiDAR-Jacobian noise alone (observed:
+    // delta_v reaching ~8 m/s within a single 100ms scan at scan 200) --
+    // exactly the mechanism behind this branch's own divergence. REPLACING
+    // instead keeps the prior honest every scan.
+    //
+    // Q_unmodelled (ImuProc::propagate()'s own cov_w contribution this
+    // frame) is still NOT separately isolated and added back -- a real,
+    // named simplification, not the same bug as above: it means this
+    // implementation is missing the SMALL residual uncertainty the
+    // correction basis genuinely cannot represent (process noise above the
+    // basis bandwidth, bias random walk within this one scan), not a
+    // structural double-count. Reported, not silently assumed away.
     if (opts_.estimatorCoupled() && any_solved
         && coupled_last_A_.rows() == coupled_prop_.phi_head.back().cols() + 12
         && state_->idxBG() >= 0 && state_->idxBA() >= 0 && state_->idxG() >= 0)
@@ -2147,23 +2163,42 @@ std::string LioProc::processLIO(MeasureGroup& mg)
             ldlt_A.solve(Eigen::MatrixXd::Identity(coupled_last_A_.rows(), coupled_last_A_.rows()));
         const Eigen::Matrix<double, 9, 12>& Jx = coupled_prop_.phi_x_head.back();
         const Eigen::Matrix<double, 9, Eigen::Dynamic>& Jc = coupled_prop_.phi_head.back();
-        Eigen::Matrix<double, 9, Eigen::Dynamic> Jjoint(9, 12 + Jc.cols());
-        Jjoint.leftCols(12) = Jx;
-        Jjoint.rightCols(Jc.cols()) = Jc;
-        const Eigen::MatrixXd added = Jjoint * coeff_cov * Jjoint.transpose();  // 9x9 (R,P,V)
+        // ONE consistent linear map from the full [delta_s, delta_c] joint
+        // posterior to the full 18-dim (R,P,V,BG,BA,G) state at t1 -- rows
+        // 0-8 are Jjoint (R,P,V's own sensitivity, mapped through the
+        // propagation, exactly as before); rows 9-17 are a pure SELECTOR
+        // picking out [delta_bg,delta_ba,delta_g] from the s-block columns
+        // (identity there, zero on delta_v and on the whole c-block) --
+        // those three are unchanged from t0 to t1 to this linearisation
+        // (ignoring the Q_unmodelled gap named below). Building the FULL
+        // 18x18 as M*coeff_cov*M^T in ONE product (not as two separately
+        // assigned diagonal blocks with the cross-covariance left stale)
+        // is what GUARANTEES the result is PSD (any M*Sigma*M^T with PSD
+        // Sigma is PSD) and internally consistent -- assigning the two
+        // diagonal blocks independently, an earlier version of this fix,
+        // left the CROSS-covariance between them at whatever
+        // ImuProc::propagate()'s own F_x*P*F_x^T recursion had set it to
+        // under the OLD (larger) diagonal, which is inconsistent with the
+        // new (smaller) diagonal and reliably breaks positive-
+        // semi-definiteness -- confirmed empirically: that version made
+        // P's own trace go NEGATIVE within one run (trP_pos_pre reaching
+        // -1.58e18 by the run's end), a numerical catastrophe distinct
+        // from the earlier "P only ever grows" bug this whole item-5
+        // rewrite exists to fix.
+        Eigen::Matrix<double, 18, Eigen::Dynamic> M(18, 12 + Jc.cols());
+        M.setZero();
+        M.topRows(9).leftCols(12) = Jx;
+        M.topRows(9).rightCols(Jc.cols()) = Jc;
+        M.block(9, 3, 9, 9) = Eigen::MatrixXd::Identity(9, 9);  // select [bg,ba,g]
+        Eigen::MatrixXd posterior18 = M * coeff_cov * M.transpose();
+        // Same explicit symmetrization ekf.h's own applyCovarianceUpdate()
+        // uses before every state->covMut() write, mirrored here rather
+        // than assumed unnecessary -- floating-point roundoff in the
+        // M*coeff_cov*M^T product can leave a result that is PSD in exact
+        // arithmetic measurably asymmetric in practice.
+        posterior18 = 0.5 * (posterior18 + posterior18.transpose());
         Eigen::MatrixXd P = state_->cov();
-        // R,P,V (idxR=0,idxP=3,idxV=6, contiguous) get the full 9x9 added
-        // block; BG,BA,G each get their own 3x3 diagonal sub-block of it
-        // (Jjoint's own rows are R,P,V only -- item 3c's Phi_x/Phi_c are
-        // BOTH defined as the sensitivity of the (R,P,V) state, so this
-        // added term's own rows/cols are R,P,V-only BY CONSTRUCTION; the
-        // BG/BA/G diagonal blocks of P are therefore left as ImuProc::
-        // propagate()'s own cov_w set them, not further reduced by this
-        // scan's LiDAR evidence -- a real, named simplification: the
-        // solve DOES use BG/BA/G as free variables and DOES correct their
-        // MEANS via state_->applyDelta() below, but this P update does not
-        // reduce their OWN posterior variance, only R/P/V's).
-        P.block(0, 0, 9, 9) += added;
+        P.block(0, 0, 18, 18) = posterior18;   // idxR=0..idxG()+3=18, contiguous
         state_->covMut() = P;
       }
     }
