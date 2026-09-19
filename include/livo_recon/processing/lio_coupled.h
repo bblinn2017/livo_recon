@@ -192,7 +192,13 @@ class LioProcCoupled : public LioProcBase
 {
 public:
   explicit LioProcCoupled(NodeContext& ctx);
-  ~LioProcCoupled() override = default;
+  // CQ-55 "effective-config report" standing requirement (CQ-54 item 8):
+  // prints engagementReport() at shutdown and writes it to
+  // debugLogPath("engagement.txt"), mirroring LioProcDecoupled's own
+  // destructor exactly (see lio_decoupled.cpp) -- previously declared
+  // =default here, so this class's own engagementReport() string was dead
+  // code, never actually printed anywhere.
+  ~LioProcCoupled() override;
 
   std::string loadParameters(ros::NodeHandle& pnh) override;
   std::string engagementReport() const override;

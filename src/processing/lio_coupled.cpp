@@ -20,6 +20,18 @@ LioProcCoupled::LioProcCoupled(NodeContext& ctx)
   : LioProcBase(ctx)
 {}
 
+// CQ-55 "effective-config report" standing requirement -- mirrors
+// LioProcDecoupled::~LioProcDecoupled() exactly (lio_decoupled.cpp), minus
+// the splineOn() gate (this class has no spline at all, so it always has an
+// engagement report worth printing).
+LioProcCoupled::~LioProcCoupled()
+{
+  const std::string rep = engagementReport();
+  ROS_WARN_STREAM("\n" << rep);
+  std::ofstream ofs(debugLogPath("engagement.txt"), std::ios::trunc);
+  if (ofs) ofs << rep << '\n';
+}
+
 std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
 {
   ConfigResolver cfg(pnh);
