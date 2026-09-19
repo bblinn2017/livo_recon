@@ -911,6 +911,55 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
                    coupled_delta_bg_, coupled_delta_ba_,
                    coupled_c_acc_, coupled_c_gyr_, n_c, coupled_prop_);
 
+  // ---- DIAGNOSTIC (2026-09-19): finite-difference verification of
+  // Phi_x's own bg/ba/g/v0 columns against propagateCoupled() itself --
+  // does the analytic Gx block (coupled_estimator.cpp) actually agree with
+  // what perturbing each input and re-propagating produces? Central
+  // difference, one axis of each of the 4 blocks, scan 10 only, ONE GN
+  // iteration (coupled_iters_==0 on entry to this call). ----
+  if (voxel_map_->frame_idx_ == 10 && coupled_iters_ == 0) {
+    static PersistentLogStream dbg("cq44_phix_fd_debug.txt");
+    std::ofstream& ofs = dbg.stream();
+    const double eps = 1e-6;
+    const Eigen::Matrix<double, 9, 12>& PhixAnalytic = coupled_prop_.phi_x_head.back();
+    auto endpoint9 = [&](const V3D& dv, const V3D& dbg_, const V3D& dba, const V3D& dg) {
+      CoupledPropagation p2;
+      propagateCoupled(mg.poses, state_propagat_.rot(), t1,
+                        mg.poses.front().rot, mg.poses.front().pos,
+                        coupled_v0_pre_ + coupled_delta_v_ + dv,
+                        coupled_g0_pre_ + coupled_delta_g_ + dg,
+                        coupled_delta_bg_ + dbg_, coupled_delta_ba_ + dba,
+                        coupled_c_acc_, coupled_c_gyr_, n_c, p2);
+      Eigen::Matrix<double, 9, 1> out;
+      const M3D R_a = mg.poses.front().rot;  // anchor for phi_R, matches Phi's own left-tangent def
+      out.segment<3>(0) = V3D(Log(M3D(R_a.transpose() * p2.rot1)));
+      out.segment<3>(3) = p2.pos1;
+      out.segment<3>(6) = p2.vel1;
+      return out;
+    };
+    const Eigen::Matrix<double, 9, 1> base = endpoint9(V3D::Zero(), V3D::Zero(), V3D::Zero(), V3D::Zero());
+    ofs << std::setprecision(8) << "scan=" << voxel_map_->frame_idx_ << "\n";
+    const char* names[4] = {"v0", "bg", "ba", "g"};
+    for (int blk = 0; blk < 4; ++blk) {
+      for (int axis = 0; axis < 3; ++axis) {
+        V3D dv = V3D::Zero(), dbg_ = V3D::Zero(), dba = V3D::Zero(), dg = V3D::Zero();
+        V3D* target = (blk == 0) ? &dv : (blk == 1) ? &dbg_ : (blk == 2) ? &dba : &dg;
+        (*target)(axis) = eps;
+        const Eigen::Matrix<double, 9, 1> plus  = endpoint9(dv, dbg_, dba, dg);
+        (*target)(axis) = -eps;
+        const Eigen::Matrix<double, 9, 1> minus = endpoint9(dv, dbg_, dba, dg);
+        const Eigen::Matrix<double, 9, 1> fd = (plus - minus) / (2.0 * eps);
+        const Eigen::Matrix<double, 9, 1> an = PhixAnalytic.col(3 * blk + axis);
+        ofs << "  block=" << names[blk] << " axis=" << axis
+            << " fd="       << fd.transpose()
+            << " analytic=" << an.transpose()
+            << " maxabsdiff=" << (fd - an).cwiseAbs().maxCoeff()
+            << "\n";
+      }
+    }
+    ofs.flush();
+  }
+
   // ---- (2) re-deskew the FULL raw point set against this corrected
   // trajectory, then downsample. Not CSR-optimized (re-downsamples every
   // GN iteration rather than re-placing a fixed membership set the way
@@ -2217,6 +2266,25 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       {
         const Eigen::MatrixXd coeff_cov =
             ldlt_A.solve(Eigen::MatrixXd::Identity(coupled_last_A_.rows(), coupled_last_A_.rows()));
+
+        // ---- DIAGNOSTIC (2026-09-19): coeff_cov's own eigenstructure at
+        // scan 10, restricted to the 12x12 s-block -- which COMBINATION of
+        // [delta_v,delta_bg,delta_ba,delta_g] is actually collapsing, not
+        // just the diagonal magnitudes already logged elsewhere. ----
+        if (voxel_map_->frame_idx_ == 10) {
+          static PersistentLogStream dbg("cq44_coeffcov_eig_debug.txt");
+          std::ofstream& ofs = dbg.stream();
+          const Eigen::MatrixXd cc_ss = coeff_cov.block(0, 0, ncol_s, ncol_s);
+          Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(cc_ss);
+          ofs << std::setprecision(6) << "scan=" << voxel_map_->frame_idx_
+              << " coeff_cov_ss_diag=" << cc_ss.diagonal().transpose() << "\n";
+          for (int k = 0; k < ncol_s; ++k) {
+            ofs << "  eig[" << k << "]=" << es.eigenvalues()(k)
+                << " vec=" << es.eigenvectors().col(k).transpose() << "\n";
+          }
+          ofs.flush();
+        }
+
         const Eigen::Matrix<double, 9, 12>& Jx = coupled_prop_.phi_x_head.back();
         const Eigen::Matrix<double, 9, Eigen::Dynamic>& Jc = coupled_prop_.phi_head.back();
         // ONE consistent linear map from the full [delta_s, delta_c] joint
