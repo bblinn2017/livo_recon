@@ -282,9 +282,6 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       throw std::runtime_error(abort_msg.str());
     }
     {
-      const Eigen::MatrixXd coeff_cov =
-          ldlt_A.solve(Eigen::MatrixXd::Identity(coupled_last_A_.rows(), coupled_last_A_.rows()));
-
       const Eigen::Matrix<double, 9, 18>& Jx = coupled_prop_.phi_x_head.back();
       const Eigen::Matrix<double, 9, Eigen::Dynamic>& Jc = coupled_prop_.phi_head.back();
       // ONE consistent linear map from the full [delta_x(t0) 18, c] joint
@@ -293,13 +290,22 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       // [delta_bg,delta_ba,delta_g] from the s-block columns. Building the
       // FULL 18x18 as M*coeff_cov*M^T in ONE product is what GUARANTEES the
       // result is PSD.
-      Eigen::Matrix<double, 18, Eigen::Dynamic> M(18, 18 + Jc.cols());
+      Eigen::MatrixXd M(18, 18 + Jc.cols());
       M.setZero();
       M.topRows(9).leftCols(18) = Jx;
       M.topRows(9).rightCols(Jc.cols()) = Jc;
       M.block(9, 9, 9, 9) = Eigen::MatrixXd::Identity(9, 9);  // select [bg,ba,g]
-      Eigen::MatrixXd posterior18 = M * coeff_cov * M.transpose();
-      posterior18 = 0.5 * (posterior18 + posterior18.transpose());
+      // CQ-57 item 4: shared with EkfUpdate::applyCovarianceUpdate() (the
+      // decoupled path) -- see solveCovarianceFromA()'s own doc comment.
+      // ldlt_A was already computed above for item 5's own rank-deficiency
+      // guard (min_pivot check); solveCovarianceFromA() builds its own
+      // fresh LDLT internally rather than reusing that one, so this is not
+      // the cheapest possible version, but it IS the same shared, single-
+      // definition solve-and-symmetrize path decoupled itself now goes
+      // through -- numerically identical to what this file computed by
+      // hand before this refactor (both are ldlt.solve(Identity), then
+      // M*(...)*M^T, then symmetrize -- just no longer duplicated).
+      Eigen::MatrixXd posterior18 = solveCovarianceFromA(coupled_last_A_, &M);
 
       // CQ-57 item 3a: the joint solve carries ONE bias correction at t0;
       // the line above reports the bias at t1 exactly as well known as at

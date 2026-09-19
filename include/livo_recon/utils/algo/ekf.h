@@ -4,6 +4,30 @@
 
 namespace livo_recon {
 
+// CQ-57 item 4: ONE COVARIANCE UPDATE, NOT TWO COPIES. The shared "solve
+// A^-1 directly, then symmetrize" core both EkfUpdate::applyCovarianceUpdate()
+// (decoupled) and LioProcCoupled's own posterior18 construction (coupled)
+// need -- computing the inverse directly rather than P -= G*P avoids the
+// catastrophic cancellation that yields non-SPD covariances when G
+// approaches identity (EkfUpdate::applyCovarianceUpdate()'s own original
+// comment on why). When M is non-null, projects A^-1 through it first
+// (M*A^-1*M^T is PSD for any M given a PSD A^-1 -- coupled's own use case,
+// projecting its larger [delta_s,c] joint solve down to the physical
+// state). Callers are responsible for their OWN rank-deficiency guard
+// before calling this (see LioProcCoupled's own vectorD().minCoeff() check
+// -- NOT added here, since adding it to this shared path would also change
+// decoupled's existing behaviour, and item 4's own 4/4 decoupled-md5
+// requirement means decoupled's output must stay byte-identical).
+inline Eigen::MatrixXd solveCovarianceFromA(const Eigen::MatrixXd& A,
+                                             const Eigen::MatrixXd* M = nullptr)
+{
+    Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
+    const Eigen::MatrixXd coeff_cov = ldlt.solve(Eigen::MatrixXd::Identity(A.rows(), A.rows()));
+    Eigen::MatrixXd P_new = M ? Eigen::MatrixXd((*M) * coeff_cov * M->transpose()) : coeff_cov;
+    P_new = 0.5 * (P_new + P_new.transpose());
+    return P_new;
+}
+
 struct EkfUpdate
 {
     // History (9-13): see docs/livo_recon_changelog.md#include-livo_recon-utils-algo-ekf.h-9
@@ -95,16 +119,14 @@ struct EkfUpdate
     void applyCovarianceUpdate(const StateGroupPtr& state, const Eigen::MatrixXd& prior_cov)
     {
         Eigen::MatrixXd A = last_H_full_ + prior_cov.inverse();
-        ldlt_.compute(A);
-        // Compute P_new = (H + P^{-1})^{-1} = A^{-1} directly, rather than via
-        // P -= G*P (G = A^{-1}*H). The latter suffers catastrophic
-        // cancellation and yields non-SPD covariances when G approaches
-        // identity (a confident measurement) -- see the identical fix/comment
-        // in lio_processing.cpp's CPU solveSystem() (now itself just calling
-        // through to applyMeanUpdate()/applyCovarianceUpdate()).
-        Eigen::MatrixXd P_new = ldlt_.solve(Eigen::MatrixXd::Identity(A.rows(), A.rows()));
-        P_new = 0.5 * (P_new + P_new.transpose());
-        state->covMut() = P_new;
+        // CQ-57 item 4: shared with LioProcCoupled's own posterior18
+        // construction -- see solveCovarianceFromA()'s own doc comment.
+        // M=nullptr here reproduces the EXACT prior behaviour (P_new = A^-1
+        // directly, then symmetrize) -- this class's own ldlt_ member is no
+        // longer used for this step (solveCovarianceFromA builds its own
+        // local LDLT), which is numerically identical, just no longer
+        // caching the factorization on the instance.
+        state->covMut() = solveCovarianceFromA(A);
     }
 
     // History (114-150): see docs/livo_recon_changelog.md#include-livo_recon-utils-algo-ekf.h-114
