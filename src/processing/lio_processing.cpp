@@ -1139,6 +1139,13 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
   b.segment(0, ncol_s) = -(Pi_ss * s_vec);
   b.segment(ncol_s, ncol_c) = -(Lambda * c_vec);
   double sum_abs_r = 0.0;
+  // TQ-40 item 3: pure-LiDAR-info accumulation restricted to [delta_phi0,
+  // delta_p0] (columns 0-5), BEFORE the Pi_ss/Lambda prior is added --
+  // see coupled_ask_'s own doc comment in the header for the approximation
+  // this makes (no marginalisation over v/bg/ba/g/c).
+  Eigen::Matrix<double, 6, 6> HtH_pose_lidar = Eigen::Matrix<double, 6, 6>::Zero();
+  Eigen::Matrix<double, 6, 1> Htz_pose_lidar = Eigen::Matrix<double, 6, 1>::Zero();
+  double sum_weight_this_iter = 0.0;
   for (const auto& res : residuals_) {
     Eigen::Matrix<double, 1, 6> H;
     H.block<1, 3>(0, 0) = res.point_cross_normal.transpose();
@@ -1164,8 +1171,25 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
     A.noalias() += w * (Jrow.transpose() * Jrow);
     b.noalias() -= w * Jrow.transpose() * res.r;
     sum_abs_r += std::abs(res.r);
+    // TQ-40 item 3: matches ekf_.HtH/Htz's own "+H'*W*r" convention exactly
+    // (H here is the SAME 1x6 row, since Jrow.head(6) IS H*Phix_pt.topRows(6)
+    // restricted to the phi0/p0 columns -- Phix_pt's own phi0/p0 columns are
+    // Identity at t0 and only decay via Fx's own accumulation to t_k, so
+    // this is genuinely "how much does THIS residual constrain phi0/p0").
+    const Eigen::Matrix<double, 1, 6> H6 = Jrow.segment(0, 6);
+    HtH_pose_lidar.noalias() += w * (H6.transpose() * H6);
+    Htz_pose_lidar.noalias() += w * H6.transpose() * res.r;
+    sum_weight_this_iter += w;
   }
   coupled_last_A_ = A;
+  coupled_n_residuals_ = static_cast<int>(residuals_.size());
+  coupled_sum_weight_ = sum_weight_this_iter;
+  {
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3, 3>> es_pp6(HtH_pose_lidar.block<3, 3>(3, 3));
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3, 3>> es_rr6(HtH_pose_lidar.block<3, 3>(0, 0));
+    coupled_h_pp_min_eig_ = es_pp6.eigenvalues()(0);
+    coupled_h_rr_min_eig_ = es_rr6.eigenvalues()(0);
+  }
 
   if (voxel_map_->frame_idx_ >= 8 && voxel_map_->frame_idx_ <= 12) {
     static PersistentLogStream dbg("cq44_infomag_debug.txt");
@@ -1239,6 +1263,28 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
     coupled_c_gyr_[j] += delta_c.segment<3>(3 * n_c + 3 * j);
   }
 
+  // TQ-40 item 3: ask/got/refusal, THIS iteration's own [delta_phi0,delta_p0]
+  // against the pure-LiDAR-info accumulated above -- same eigenbasis-solve
+  // convention ekf.h's own P1 diagnostic uses (drop modes below a relative
+  // tolerance rather than inverting a possibly-singular 6x6).
+  {
+    Eigen::Matrix<double, 6, 1> dxv_pose;
+    dxv_pose << delta_s.segment<3>(0), delta_s.segment<3>(3);
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es6c(HtH_pose_lidar);
+    const auto& ev6 = es6c.eigenvalues();
+    const double tol6 = 1e-12 * std::max(1.0, ev6(5));
+    const Eigen::Matrix<double, 6, 1> z6 = es6c.eigenvectors().transpose() * Htz_pose_lidar;
+    const Eigen::Matrix<double, 6, 1> y6 = es6c.eigenvectors().transpose() * dxv_pose;
+    double ask6 = 0.0, got6 = 0.0;
+    for (int i = 0; i < 6; ++i) if (ev6(i) > tol6) {
+      ask6 += z6(i) * z6(i) / ev6(i);
+      got6 += ev6(i) * y6(i) * y6(i);
+    }
+    coupled_ask_ = ask6;
+    coupled_got_ = got6;
+    coupled_refusal_ = (ask6 > 0.0) ? (1.0 - got6 / ask6) : std::numeric_limits<double>::quiet_NaN();
+  }
+
   // Item 3d(i): DC-component/bias-split diagnostics, overwritten every
   // iteration so the FINAL (converged) call's values are what survives.
   {
@@ -1249,6 +1295,15 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
     coupled_c_gyr_dc_over_sigma_ = c_gyr_dc.norm() / sigma_g;
     coupled_dba_over_sigma_ = coupled_delta_ba_.norm() / sigma_a;
     coupled_dbg_over_sigma_ = coupled_delta_bg_.norm() / sigma_g;
+    // TQ-40 item 4: the FULL vector norms (not just the DC/mean component
+    // above), RMS-per-coefficient over n_c so the number is comparable
+    // across n_c the same way the DC ones already are.
+    double sq_acc = 0.0, sq_gyr = 0.0;
+    for (int j = 0; j < n_c; ++j) { sq_acc += coupled_c_acc_[j].squaredNorm(); sq_gyr += coupled_c_gyr_[j].squaredNorm(); }
+    coupled_c_acc_over_sigma_ = std::sqrt(sq_acc / static_cast<double>(n_c)) / sigma_a;
+    coupled_c_gyr_over_sigma_ = std::sqrt(sq_gyr / static_cast<double>(n_c)) / sigma_g;
+    coupled_delta_v_norm_ = coupled_delta_v_.norm();
+    coupled_delta_g_norm_ = coupled_delta_g_.norm();
   }
 
   // ---- (6) re-propagate ONCE MORE with the updated c AND delta_s, so
@@ -2499,6 +2554,25 @@ std::string LioProc::processLIO(MeasureGroup& mg)
           << " Prr_yy=" << P_rr(1, 1) << " Prr_yz=" << P_rr(1, 2) << " Prr_zz=" << P_rr(2, 2)
           << " have_Ppp=" << (have_p ? 1 : 0) << " have_Prr=" << (have_r ? 1 : 0)
           << " free_tail_d=" << -1.0
+          // TQ-40: coupled-arm items 3/4, appended to the same schema
+          // (decoupled's own write below never sets these, so they read as
+          // -1/NaN there -- distinguishable from a real coupled value).
+          << " ask=" << coupled_ask_ << " got=" << coupled_got_
+          << " refusal=" << coupled_refusal_
+          << " n_residuals=" << coupled_n_residuals_
+          << " sum_weight=" << coupled_sum_weight_
+          << " h_pp_min_eig=" << coupled_h_pp_min_eig_
+          << " h_rr_min_eig=" << coupled_h_rr_min_eig_
+          << " c_acc_over_sigma=" << coupled_c_acc_over_sigma_
+          << " c_gyr_over_sigma=" << coupled_c_gyr_over_sigma_
+          << " c_acc_dc_over_sigma=" << coupled_c_acc_dc_over_sigma_
+          << " c_gyr_dc_over_sigma=" << coupled_c_gyr_dc_over_sigma_
+          << " dba_over_sigma=" << coupled_dba_over_sigma_
+          << " dbg_over_sigma=" << coupled_dbg_over_sigma_
+          << " delta_v_norm=" << coupled_delta_v_norm_
+          << " delta_g_norm=" << coupled_delta_g_norm_
+          << " trP_vel=" << coupled_trP_vel_ << " trP_grav=" << coupled_trP_grav_
+          << " iters=" << coupled_iters_ << " solve_ms=" << coupled_solve_ms_
           << "\n";
       ofs.flush();
     }

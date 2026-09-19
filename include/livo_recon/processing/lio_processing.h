@@ -15,6 +15,7 @@
 #include "livo_recon/lio/residual_weighting.h"
 
 #include <array>
+#include <limits>
 
 namespace livo_recon
 {
@@ -627,6 +628,27 @@ private:
   // after the loop converges, against the FINAL linearisation, rather than
   // re-solved from scratch.
   Eigen::MatrixXd coupled_last_A_;
+
+  // TQ-40 item 3: the coupled-arm equivalent of ekf_.HtH/Htz's own
+  // ask/got/refusal discriminator (refs/update-level-diagnostics section 3),
+  // restricted to the [delta_phi0, delta_p0] 6-dim sub-block of the FINAL
+  // GN iteration's pure-LiDAR-info accumulation (i.e. BEFORE the Pi_ss/
+  // Lambda prior terms are added) -- a NAMED APPROXIMATION: unlike
+  // decoupled's HtH (which IS the full solved block, since decoupled solves
+  // ONLY the pose block), this sub-block has NOT been marginalised over
+  // v/bg/ba/g/c, so it overstates the information actually available to
+  // phi0/p0 alone by whatever those directions correlate away. Filed as
+  // such rather than silently presented as identical in meaning.
+  double coupled_ask_ = -1.0, coupled_got_ = -1.0, coupled_refusal_ = std::numeric_limits<double>::quiet_NaN();
+  int    coupled_n_residuals_ = -1;
+  double coupled_sum_weight_ = -1.0;
+  double coupled_h_pp_min_eig_ = -1.0, coupled_h_rr_min_eig_ = -1.0;
+  // TQ-40 item 4: this scan's own FINAL converged correction magnitudes, in
+  // sigma units where the card asks for them -- ||c_acc||/sigma_a and
+  // ||c_gyr||/sigma_g are the FULL vector norm (not item 3d(i)'s DC-only
+  // component above), plus ||delta_v|| (m/s) and ||delta_g|| (m/s^2) raw.
+  double coupled_c_acc_over_sigma_ = -1.0, coupled_c_gyr_over_sigma_ = -1.0;
+  double coupled_delta_v_norm_ = -1.0, coupled_delta_g_norm_ = -1.0;
 
   // Fixed IEKF prior (mean + covariance), snapshotted ONCE per frame (top
   // of processLIO()'s inner iteration loop, before any solveSystem()/
