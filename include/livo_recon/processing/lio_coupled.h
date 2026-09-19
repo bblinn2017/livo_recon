@@ -161,6 +161,20 @@ struct LioProcCoupledOptions
   // engaged. Default false (the extra ncol x ncol inverse this requires is
   // not free enough to run unconditionally).
   bool log_bg_projection_en = false;
+  // CQ-57 item 2: report-only, default false. Re-propagates a SECOND
+  // covariance (R,P,V 9x9 only) alongside the corrected trajectory's own
+  // Phi/Phix, WITH proper process-noise reinjection at each step (unlike
+  // Phix's own bare propagation) -- answers "how far apart are the raw
+  // (imu_processing.cpp) and corrected covariance propagations." Never
+  // written into state_->covMut(). See coupled_estimator.h's propagateCoupled()
+  // doc comment for the actual math.
+  bool log_cov_repropagation_en = false;
+  // Same imu/* keys imu_processing.cpp itself reads (imu/q_alpha_gyr,
+  // imu/q_alpha_acc, imu/second_order) -- read again here (not shared)
+  // since this class has no reference to ImuProc's own options struct.
+  // Only used when log_cov_repropagation_en is true.
+  double repro_q_alpha_gyr = 1.0, repro_q_alpha_acc = 1.0;
+  bool repro_second_order = true;
 };
 
 // CQ-49: the coupled estimator, reimplemented as its own class -- see

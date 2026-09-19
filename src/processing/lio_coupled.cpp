@@ -76,6 +76,10 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/curvature_only", copts_.curvature_only, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/dc_weight", copts_.dc_weight, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_bg_projection_en", copts_.log_bg_projection_en, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_cov_repropagation_en", copts_.log_cov_repropagation_en, false);
+  paramWarn<double>(pnh, "imu/q_alpha_gyr", copts_.repro_q_alpha_gyr, 1.0);
+  paramWarn<double>(pnh, "imu/q_alpha_acc", copts_.repro_q_alpha_acc, 1.0);
+  paramWarn<bool>(pnh, "imu/second_order", copts_.repro_second_order, true);
   coupled_tier1_nees_ = Tier1NeesBuffer(opts_.nees_per_dof_en ? opts_.nees_tier1_window_scans : 0);
 
   // Every spline/* and adaptive_q/* key is unclaimed by this class by
@@ -325,6 +329,10 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
                 << " trP_post_rot=" << trP_post_rot
                 << " trP_imu_pos=" << trP_imu_pos
                 << " trP_imu_rot=" << trP_imu_rot
+                // CQ-57 item 2: -1/-1 when log_cov_repropagation_en is off
+                // (out.has_repro stays false in that case).
+                << " repro_trP_pos=" << (coupled_prop_.has_repro ? coupled_prop_.repro_trP_pos : -1.0)
+                << " repro_trP_rot=" << (coupled_prop_.has_repro ? coupled_prop_.repro_trP_rot : -1.0)
                 << "\n";
           ctofs.flush();
         }
@@ -1158,13 +1166,29 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // state_ and mg.points (via the caller's next iteration, or the loop
   // exit) reflect what this step actually applied -- mirrors
   // estimateStateCorrection()'s own solve-then-apply contract. ----
+  // CQ-57 item 2: build the R,P,V 9x9 seed (SAME P this scan's Pi_ss was
+  // built from -- see item 0c/item 1) only when the diagnostic is on; kept
+  // as a local so the pointer below is null (default, existing behaviour)
+  // whenever it's off.
+  Eigen::Matrix<double, 9, 9> repro_P0;
+  const Eigen::Matrix<double, 9, 9>* repro_P0_ptr = nullptr;
+  const V3D var_gyr = state_->varGyr(), var_acc = state_->varAcc();
+  if (copts_.log_cov_repropagation_en) {
+    const Eigen::MatrixXd& P0_full = state_->cov();
+    if (P0_full.rows() >= 9 && P0_full.cols() >= 9) {
+      repro_P0 = P0_full.block<9, 9>(0, 0);  // idxR=0,idxP=3,idxV=6, contiguous
+      repro_P0_ptr = &repro_P0;
+    }
+  }
   propagateCoupled(mg.poses, state_propagat_.rot(), t1,
                    mg.poses.front().rot * Exp(coupled_delta_phi0_),
                    mg.poses.front().pos + coupled_delta_pos0_,
                    coupled_v0_pre_ + coupled_delta_v_,
                    coupled_g0_pre_ + coupled_delta_g_, coupled_g0_pre_,
                    coupled_delta_bg_, coupled_delta_ba_,
-                   coupled_c_acc_, coupled_c_gyr_, n_c, coupled_prop_);
+                   coupled_c_acc_, coupled_c_gyr_, n_c, coupled_prop_,
+                   repro_P0_ptr, copts_.repro_q_alpha_gyr, copts_.repro_q_alpha_acc,
+                   &var_gyr, &var_acc, copts_.repro_second_order);
   state_->setPropagatedState(coupled_prop_.rot1, coupled_prop_.pos1, coupled_prop_.vel1);
 
   // Outer-loop convergence read: the ENDPOINT state change THIS STEP

@@ -51,11 +51,22 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
                       const V3D& gravity, const V3D& gravity0,
                       const V3D& delta_bg, const V3D& delta_ba,
                       const std::vector<V3D>& c_acc, const std::vector<V3D>& c_gyr,
-                      int n_c, CoupledPropagation& out)
+                      int n_c, CoupledPropagation& out,
+                      const Eigen::Matrix<double, 9, 9>* repro_P0_rpv,
+                      double repro_q_alpha_gyr, double repro_q_alpha_acc,
+                      const V3D* repro_var_gyr_diag,
+                      const V3D* repro_var_acc_diag,
+                      bool repro_second_order)
 {
   out.poses.clear();
   out.phi_head.clear();
   out.phi_x_head.clear();
+  out.has_repro = false;
+  out.repro_trP_pos = -1.0;
+  out.repro_trP_rot = -1.0;
+  Eigen::Matrix<double, 9, 9> P_repro;
+  const bool do_repro = repro_P0_rpv != nullptr && repro_var_gyr_diag != nullptr && repro_var_acc_diag != nullptr;
+  if (do_repro) P_repro = *repro_P0_rpv;
   const int N = static_cast<int>(raw_poses.size());
   out.poses.reserve(N);
   out.phi_head.reserve(N + 1);
@@ -170,6 +181,26 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
     Fx.block<3, 3>(3, 0) = -0.5 * R_head * acc_avr_skew * dt2;         // P<-R (2nd order)
     Fx.block<3, 3>(6, 0) = -R_head * acc_avr_skew * dt;                // V<-R
 
+    // CQ-57 item 2: cov_w for THIS segment, on the corrected trajectory --
+    // mirrors imu_processing.cpp's own rotation-gyro and velocity-accel
+    // noise terms (lines ~222-227 there) plus, when repro_second_order,
+    // the position-noise/cross terms (~243-245 there). R_head here is the
+    // CORRECTED rotation (this function's own R, not seg.rot/R_head_raw)
+    // -- "cov_w's world-frame rotation taken from the corrected R" per the
+    // card's own instruction.
+    if (do_repro) {
+      Eigen::Matrix<double, 9, 9> cov_w9 = Eigen::Matrix<double, 9, 9>::Zero();
+      cov_w9.block<3, 3>(0, 0).diagonal() = repro_q_alpha_gyr * (*repro_var_gyr_diag) * dt2;
+      const M3D acc_noise_world = R_head * repro_var_acc_diag->asDiagonal() * R_head.transpose();
+      cov_w9.block<3, 3>(6, 6) = repro_q_alpha_acc * acc_noise_world * dt2;
+      if (repro_second_order) {
+        cov_w9.block<3, 3>(3, 3) = repro_q_alpha_acc * 0.25 * dt2 * dt2 * acc_noise_world;
+        cov_w9.block<3, 3>(3, 6) = repro_q_alpha_acc * 0.5 * dt * dt2 * acc_noise_world;
+        cov_w9.block<3, 3>(6, 3) = repro_q_alpha_acc * 0.5 * dt * dt2 * acc_noise_world;
+      }
+      P_repro = Fx * P_repro * Fx.transpose() + cov_w9;
+    }
+
     Eigen::Matrix<double, 9, Eigen::Dynamic> G(9, ncol);
     G.setZero();
     for (int j = 0; j < n_c; ++j)
@@ -208,6 +239,11 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
   }
 
   out.rot1 = R; out.pos1 = p; out.vel1 = v;
+  if (do_repro) {
+    out.has_repro = true;
+    out.repro_trP_rot = P_repro.block<3, 3>(0, 0).trace();
+    out.repro_trP_pos = P_repro.block<3, 3>(3, 3).trace();
+  }
 }
 
 Eigen::Matrix<double, 9, Eigen::Dynamic> interpolatePhi(

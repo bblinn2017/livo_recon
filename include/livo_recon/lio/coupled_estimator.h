@@ -109,6 +109,18 @@ struct CoupledPropagation
   // identical reason phi_head's own G omits any direct accel-correction
   // position term, see the file header). Same length/indexing as phi_head.
   std::vector<Eigen::Matrix<double, 9, 18>> phi_x_head;
+
+  // CQ-57 item 2: report-only, populated ONLY when propagateCoupled() is
+  // called with repro_cov_w_gyr/repro_cov_w_acc non-null (see that
+  // function's own doc comment). Traces of the R,P,V 9x9 sub-block of
+  // P <- Fx*P*Fx^T + cov_w, recursed on the SAME per-segment Fx already
+  // built for phi_head/phi_x_head above, but WITH noise reinjected at
+  // every step (unlike phi_x_head's own bare propagation, which injects
+  // none) -- answers "how far apart are the raw (imu_processing.cpp) and
+  // corrected (this trajectory) covariance propagations." Never written
+  // into state_->covMut() by any caller -- report-only by construction.
+  bool has_repro = false;
+  double repro_trP_pos = -1.0, repro_trP_rot = -1.0;
 };
 
 // Recompute the scan from (rot0,pos0,vel0) at raw_poses.front().t through to
@@ -143,6 +155,19 @@ struct CoupledPropagation
 // delta_g cancel to first order between the strip and the reconstitute
 // steps, leaving the trajectory with no real sensitivity to it even though
 // Gx's own P<-g/V<-g blocks claim it does.
+// CQ-57 item 2 (report-only, all default null/false -- existing callers
+// unaffected): when repro_P0_rpv is non-null, ALSO recurse a 9x9 (R,P,V)
+// covariance alongside phi_head/phi_x_head, using the SAME per-segment Fx,
+// seeded from *repro_P0_rpv (the SAME prior the raw imu_processing.cpp
+// pass was seeded from -- pass its R,P,V 9x9 sub-block). cov_w is rebuilt
+// each segment from THIS corrected trajectory's own R_head/angvel_avr
+// (mirrors imu_processing.cpp's own cov_w formula for the rotation-gyro
+// and velocity-accel noise terms, second_order position-noise terms
+// included when repro_second_order is true) -- q_alpha_gyr/q_alpha_acc/
+// var_gyr_diag/var_acc_diag supply the same noise-model inputs
+// imu_processing.cpp itself reads from opts_/state_, which this free
+// function has no access to. Result written to out.repro_trP_pos/rot
+// (out.has_repro=true); NEVER written into any state_->covMut().
 void propagateCoupled(const std::vector<Pose6D>& raw_poses,
                       const M3D& raw_rot1,
                       double scan_end_time,
@@ -150,7 +175,12 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
                       const V3D& gravity, const V3D& gravity0,
                       const V3D& delta_bg, const V3D& delta_ba,
                       const std::vector<V3D>& c_acc, const std::vector<V3D>& c_gyr,
-                      int n_c, CoupledPropagation& out);
+                      int n_c, CoupledPropagation& out,
+                      const Eigen::Matrix<double, 9, 9>* repro_P0_rpv = nullptr,
+                      double repro_q_alpha_gyr = 0.0, double repro_q_alpha_acc = 0.0,
+                      const V3D* repro_var_gyr_diag = nullptr,
+                      const V3D* repro_var_acc_diag = nullptr,
+                      bool repro_second_order = false);
 
 // Linear interpolation of phi_head at an arbitrary time t (used to build the
 // per-point residual Jacobian dr/dc -- a point's own capture time almost
