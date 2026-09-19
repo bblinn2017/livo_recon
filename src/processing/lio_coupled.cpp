@@ -86,6 +86,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/q_out_of_band_scale", copts_.q_out_of_band_scale, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/q_out_of_band_fraction_acc", copts_.q_out_of_band_fraction_acc, 0.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/q_out_of_band_fraction_gyr", copts_.q_out_of_band_fraction_gyr, 0.0);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_cp_constraint_en", copts_.log_cp_constraint_en, false);
   coupled_tier1_nees_ = Tier1NeesBuffer(opts_.nees_per_dof_en ? opts_.nees_tier1_window_scans : 0);
 
   // Every spline/* and adaptive_q/* key is unclaimed by this class by
@@ -306,6 +307,89 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       // hand before this refactor (both are ldlt.solve(Identity), then
       // M*(...)*M^T, then symmetrize -- just no longer duplicated).
       Eigen::MatrixXd posterior18 = solveCovarianceFromA(coupled_last_A_, &M);
+
+      // CQ-58: per-control-point 6-dof constraint report. Reuses ldlt_A
+      // (already computed above for item 5's rank-deficiency guard, already
+      // confirmed PD by the min_pivot check) rather than paying for a
+      // second ncol x ncol solve -- the same sharing item 4's own text asks
+      // for, applied to the covariance-update LDLT instead of the
+      // bias-projection one (that one lives inside estimateCoupledCorrection()
+      // and is a DIFFERENT solve; this reuses the one already sitting here).
+      if (copts_.log_cp_constraint_en
+          && coupled_last_Lambda_.rows() == 6 * copts_.n_c
+          && coupled_last_delta_c_.size() == 6 * copts_.n_c) {
+        const int n_c = copts_.n_c;
+        const int ncol_s = 18;  // same convention as M's own 18 rows above
+        const Eigen::MatrixXd Ainv =
+            ldlt_A.solve(Eigen::MatrixXd::Identity(coupled_last_A_.rows(), coupled_last_A_.rows()));
+        static PersistentLogStream cp_log("cp_constraint.csv");
+        std::ofstream& cp_ofs = cp_log.stream();
+        static bool cp_header_written = false;
+        if (!cp_header_written) {
+          cp_ofs << "scan_id,cp,"
+                     "c_acc_x,c_acc_y,c_acc_z,c_gyr_x,c_gyr_y,c_gyr_z,"
+                     "c_acc_over_sigma_x,c_acc_over_sigma_y,c_acc_over_sigma_z,"
+                     "c_gyr_over_sigma_x,c_gyr_over_sigma_y,c_gyr_over_sigma_z,"
+                     "dc_acc_x,dc_acc_y,dc_acc_z,dc_gyr_x,dc_gyr_y,dc_gyr_z,"
+                     "dc_acc_over_sigma_x,dc_acc_over_sigma_y,dc_acc_over_sigma_z,"
+                     "dc_gyr_over_sigma_x,dc_gyr_over_sigma_y,dc_gyr_over_sigma_z,"
+                     "marg_sigma_acc_x,marg_sigma_acc_y,marg_sigma_acc_z,"
+                     "marg_sigma_gyr_x,marg_sigma_gyr_y,marg_sigma_gyr_z,"
+                     "info_eig_min,info_eig_max,info_ratio\n";
+          cp_header_written = true;
+        }
+        const double sig_a = std::max(coupled_sigma_a_used_, 1e-12);
+        const double sig_g = std::max(coupled_sigma_g_used_, 1e-12);
+        for (int j = 0; j < n_c; ++j) {
+          const int ai = ncol_s + 3 * j;
+          const int gi = ncol_s + 3 * n_c + 3 * j;
+          // 2a INFORMATION: the residual-only contribution to this control
+          // point's own 6x6 block -- A already holds Lambda(prior) + every
+          // residual's outer product summed in; subtracting Lambda's own
+          // (i=j) block recovers "how hard do the POINTS pin this control
+          // point" without a second accumulation pass.
+          Eigen::Matrix<double, 6, 6> Ij;
+          Ij.block<3, 3>(0, 0) = coupled_last_A_.block<3, 3>(ai, ai)
+                                - coupled_last_Lambda_.block<3, 3>(3 * j, 3 * j);
+          Ij.block<3, 3>(0, 3) = coupled_last_A_.block<3, 3>(ai, gi)
+                                - coupled_last_Lambda_.block<3, 3>(3 * j, 3 * n_c + 3 * j);
+          Ij.block<3, 3>(3, 0) = Ij.block<3, 3>(0, 3).transpose();
+          Ij.block<3, 3>(3, 3) = coupled_last_A_.block<3, 3>(gi, gi)
+                                - coupled_last_Lambda_.block<3, 3>(3 * n_c + 3 * j, 3 * n_c + 3 * j);
+          Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es_info(Ij);
+          const double eig_min = es_info.eigenvalues()(0);
+          const double eig_max = es_info.eigenvalues()(5);
+          const double info_ratio = (eig_min > 1e-12) ? eig_max / eig_min
+                                                        : std::numeric_limits<double>::infinity();
+          // 2b MARGINAL: A^-1's own diagonal at this control point's rows,
+          // as standard deviations -- "how uncertain once everything this
+          // control point is coupled to (other cp's, delta_bg via Lambda's
+          // connectivity, ...) is accounted for."
+          const V3D marg_sigma_acc(std::sqrt(Ainv(ai, ai)), std::sqrt(Ainv(ai + 1, ai + 1)),
+                                    std::sqrt(Ainv(ai + 2, ai + 2)));
+          const V3D marg_sigma_gyr(std::sqrt(Ainv(gi, gi)), std::sqrt(Ainv(gi + 1, gi + 1)),
+                                    std::sqrt(Ainv(gi + 2, gi + 2)));
+          const V3D c_acc = coupled_c_acc_[j];
+          const V3D c_gyr = coupled_c_gyr_[j];
+          const V3D dc_acc = coupled_last_delta_c_.segment<3>(3 * j);
+          const V3D dc_gyr = coupled_last_delta_c_.segment<3>(3 * n_c + 3 * j);
+          cp_ofs << voxel_map_->frame_idx_ << "," << j << ","
+                 << c_acc.x() << "," << c_acc.y() << "," << c_acc.z() << ","
+                 << c_gyr.x() << "," << c_gyr.y() << "," << c_gyr.z() << ","
+                 << c_acc.x() / sig_a << "," << c_acc.y() / sig_a << "," << c_acc.z() / sig_a << ","
+                 << c_gyr.x() / sig_g << "," << c_gyr.y() / sig_g << "," << c_gyr.z() / sig_g << ","
+                 << dc_acc.x() << "," << dc_acc.y() << "," << dc_acc.z() << ","
+                 << dc_gyr.x() << "," << dc_gyr.y() << "," << dc_gyr.z() << ","
+                 << dc_acc.x() / sig_a << "," << dc_acc.y() / sig_a << "," << dc_acc.z() / sig_a << ","
+                 << dc_gyr.x() / sig_g << "," << dc_gyr.y() / sig_g << "," << dc_gyr.z() / sig_g << ","
+                 << marg_sigma_acc.x() << "," << marg_sigma_acc.y() << "," << marg_sigma_acc.z() << ","
+                 << marg_sigma_gyr.x() << "," << marg_sigma_gyr.y() << "," << marg_sigma_gyr.z() << ","
+                 << eig_min << "," << eig_max << "," << info_ratio << "\n";
+        }
+        // Buffered, not flushed per line (n_c lines/scan, ~45k over a full
+        // n_c=13 run) -- same convention log_jrow_leverage_en uses: relies
+        // on ofstream's own buffering plus normal process exit to flush.
+      }
 
       // CQ-57 item 3a: the joint solve carries ONE bias correction at t0;
       // the line above reports the bias at t1 exactly as well known as at
@@ -992,6 +1076,7 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     sum_weight_this_iter += w;
   }
   coupled_last_A_ = A;
+  if (copts_.log_cp_constraint_en) coupled_last_Lambda_ = Lambda;
   coupled_n_residuals_ = static_cast<int>(residuals_.size());
   coupled_sum_weight_ = sum_weight_this_iter;
   // CQ-53 items 2/4: RMS residual and hcol_reldiff distribution, overwritten
@@ -1083,6 +1168,7 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // c_vec above.
   coupled_last_delta_c_acc_norm_ = delta_c.segment(0, 3 * n_c).norm();
   coupled_last_delta_c_gyr_norm_ = delta_c.segment(3 * n_c, 3 * n_c).norm();
+  if (copts_.log_cp_constraint_en) coupled_last_delta_c_ = delta_c;
   // Item 3e(v)/3f bug 2: same [phi0,p0,v,bg,ba,g] order as s_vec above.
   coupled_delta_phi0_ += delta_s.segment<3>(0);
   coupled_delta_pos0_ += delta_s.segment<3>(3);

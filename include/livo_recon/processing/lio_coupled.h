@@ -206,6 +206,14 @@ struct LioProcCoupledOptions
   bool q_out_of_band_en = false;
   double q_out_of_band_scale = 1.0;
   double q_out_of_band_fraction_acc = 0.0, q_out_of_band_fraction_gyr = 0.0;
+  // CQ-58: report-only, free -- per-control-point 6-dof constraint report
+  // (cp_constraint.csv). Reuses the SAME A^-1 inversion bias_observable_only/
+  // log_bg_projection_en already pay for when either is also on; computes
+  // its own if neither is (see estimateCoupledCorrection()'s shared-inversion
+  // comment). One line per control point per scan -- n_c*n_scans lines,
+  // buffered rather than flushed per line (same convention
+  // log_jrow_leverage_en uses). Default false.
+  bool log_cp_constraint_en = false;
 };
 
 // CQ-49: the coupled estimator, reimplemented as its own class -- see
@@ -317,6 +325,12 @@ private:
   // The LAST GN iteration's own joint A matrix, kept so the item-5
   // covariance term can be applied ONCE after the loop converges.
   Eigen::MatrixXd coupled_last_A_;
+  // CQ-58 item 2a: the c-block's PRIOR alone (Lambda, as added to A before
+  // any residual accumulates into it) -- kept so the residual-only
+  // information block I_j = A.block(j,j) - Lambda.block(j,j) can be
+  // recovered without a second accumulation pass. Only meaningful when
+  // log_cp_constraint_en is on; left default-empty otherwise.
+  Eigen::MatrixXd coupled_last_Lambda_;
 
   // TQ-40 item 3: the coupled-arm equivalent of the decoupled path's own
   // ask/got/refusal discriminator, restricted to the [delta_phi0, delta_p0]
@@ -375,6 +389,13 @@ private:
   // their combined norm, which can't distinguish "acc coefficients moved a
   // lot, gyr didn't" from the reverse.
   double coupled_last_delta_c_acc_norm_ = -1.0, coupled_last_delta_c_gyr_norm_ = -1.0;
+  // CQ-58 item 3: the FULL per-iteration delta_c vector (not just its norm
+  // above) -- layout [c_acc(3*n_c), c_gyr(3*n_c)], same as coupled_c_acc_/
+  // coupled_c_gyr_'s own accumulation. Only meaningful when
+  // log_cp_constraint_en is on; overwritten every GN iteration so the
+  // post-loop cp_constraint.csv write (processLIO(), after the loop) sees
+  // the FINAL iteration's own step.
+  Eigen::VectorXd coupled_last_delta_c_;
 
   // CQ-53 item 4: per-scan RMS (not mean-absolute -- sum_abs_r/error above
   // is already mean-|r|) residual, in meters, over the FINAL GN iteration's
