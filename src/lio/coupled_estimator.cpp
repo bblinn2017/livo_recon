@@ -49,14 +49,17 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
                       double scan_end_time,
                       const M3D& rot0, const V3D& pos0, const V3D& vel0,
                       const V3D& gravity,
+                      const V3D& delta_bg, const V3D& delta_ba,
                       const std::vector<V3D>& c_acc, const std::vector<V3D>& c_gyr,
                       int n_c, CoupledPropagation& out)
 {
   out.poses.clear();
   out.phi_head.clear();
+  out.phi_x_head.clear();
   const int N = static_cast<int>(raw_poses.size());
   out.poses.reserve(N);
   out.phi_head.reserve(N + 1);
+  out.phi_x_head.reserve(N + 1);
 
   const double t0 = N > 0 ? raw_poses.front().t : scan_end_time;
   const double t1 = scan_end_time;
@@ -67,6 +70,12 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
   Eigen::Matrix<double, 9, Eigen::Dynamic> Phi(9, ncol);
   Phi.setZero();
   out.phi_head.push_back(Phi);
+
+  // Items 3c/3d: seed Phi_x(t0) with only the V<-delta_v0 block as identity
+  // (column order [delta_v0(3), delta_bg(3), delta_ba(3), delta_g(3)]).
+  Eigen::Matrix<double, 9, 12> Phix = Eigen::Matrix<double, 9, 12>::Zero();
+  Phix.block<3, 3>(6, 0) = M3D::Identity();
+  out.phi_x_head.push_back(Phix);
 
   for (int k = 0; k < N; ++k)
   {
@@ -81,8 +90,10 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
     // last segment) the raw chain's own endpoint, raw_rot1.
     const M3D& R_head_raw = seg.rot;
     const M3D& R_tail_raw = (k + 1 < N) ? raw_poses[k + 1].rot : raw_rot1;
-    const V3D a_body_head = R_head_raw.transpose() * (seg.acc_head - gravity);
-    const V3D a_body_tail = R_tail_raw.transpose() * (seg.acc_tail - gravity);
+    // Items 3c/3d: subtract this GN iteration's own accumulated delta_ba on
+    // top of the bias raw_poses already had baked in -- see header comment.
+    const V3D a_body_head = R_head_raw.transpose() * (seg.acc_head - gravity) - delta_ba;
+    const V3D a_body_tail = R_tail_raw.transpose() * (seg.acc_tail - gravity) - delta_ba;
 
     // Basis weights at this segment's own head/tail times, per coefficient.
     // wa/wg[j] pairs (head,tail); the "_avr" convention (0.5*(head+tail))
@@ -105,7 +116,9 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
       delta_w_head += wg_head[j] * c_gyr[j];
       delta_w_tail += wg_tail[j] * c_gyr[j];
     }
-    const V3D angvel_avr = seg.gyr + 0.5 * (delta_w_head + delta_w_tail);
+    // Items 3c/3d: subtract this GN iteration's own accumulated delta_bg,
+    // same convention as delta_ba above.
+    const V3D angvel_avr = seg.gyr - delta_bg + 0.5 * (delta_w_head + delta_w_tail);
 
     // ---- nominal (corrected) propagation, mirroring imu_processing.cpp ----
     const M3D Exp_f = Exp(angvel_avr, dt);
@@ -163,6 +176,21 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
 
     Phi = Fx * Phi + G;
     out.phi_head.push_back(Phi);
+
+    // ---- items 3c/3d: Phix_{k+1} = Fx * Phix_k + Gx_k, SAME Fx as above.
+    // Gx's blocks mirror imu_processing.cpp's own F_x bias/gravity columns
+    // exactly (idxR<-idxBG, idxV<-idxBA, idxV<-idxG, idxP<-idxG; idxP<-idxBA
+    // omitted -- see header comment, same omission phi_head's own G makes).
+    // Column order [delta_v0(3,unused here -- v0's ONLY effect is the t0
+    // seed, propagated forward purely through Fx, so Gx's own v0 columns are
+    // always zero), delta_bg(3), delta_ba(3), delta_g(3)]. ----
+    Eigen::Matrix<double, 9, 12> Gx = Eigen::Matrix<double, 9, 12>::Zero();
+    Gx.block<3, 3>(0, 3) = -M3D::Identity() * dt;         // R <- delta_bg
+    Gx.block<3, 3>(6, 6) = -R_head * dt;                  // V <- delta_ba
+    Gx.block<3, 3>(6, 9) = M3D::Identity() * dt;          // V <- delta_g
+    Gx.block<3, 3>(3, 9) = 0.5 * M3D::Identity() * dt2;   // P <- delta_g
+    Phix = Fx * Phix + Gx;
+    out.phi_x_head.push_back(Phix);
   }
 
   out.rot1 = R; out.pos1 = p; out.vel1 = v;
@@ -189,6 +217,29 @@ Eigen::Matrix<double, 9, Eigen::Dynamic> interpolatePhi(
     }
   }
   return prop.phi_head.back();
+}
+
+Eigen::Matrix<double, 9, 12> interpolatePhiX(
+    const CoupledPropagation& prop, double t)
+{
+  const int N = static_cast<int>(prop.poses.size());
+  if (N == 0) return prop.phi_x_head.empty()
+      ? Eigen::Matrix<double, 9, 12>::Zero()
+      : prop.phi_x_head[0];
+  if (t <= prop.poses.front().t) return prop.phi_x_head.front();
+  const double t1 = prop.poses.back().t + prop.poses.back().dt;
+  if (t >= t1) return prop.phi_x_head.back();
+
+  for (int k = 0; k < N; ++k)
+  {
+    const double th = prop.poses[k].t, tt = th + prop.poses[k].dt;
+    if (t >= th && t <= tt)
+    {
+      const double alpha = (prop.poses[k].dt > 1e-12) ? (t - th) / prop.poses[k].dt : 0.0;
+      return (1.0 - alpha) * prop.phi_x_head[k] + alpha * prop.phi_x_head[k + 1];
+    }
+  }
+  return prop.phi_x_head.back();
 }
 
 }  // namespace livo_recon

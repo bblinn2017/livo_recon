@@ -206,6 +206,16 @@ struct LioProcOptions
   // n_c control points for the correction basis (item 2: NOT
   // control_point_hz -- a separate resolution knob for a different spline).
   int estimator_n_c = 4;
+  // Item 3d(ii): the DC-component/bias split is exactly rank-deficient by 6
+  // (a constant delta_a and a constant -delta_ba are indistinguishable over
+  // one scan, same for delta_omega/delta_bg) and solvable only via the
+  // Lambda-vs-bias-prior ratio unless this is set. When true, constrains
+  // sum_samples beta(t)^T c = 0 per axis (6 linear equality rows) via a
+  // KKT-bordered solve, giving c the within-scan SHAPE only and the bias the
+  // offset -- an IDENTIFIABLE decomposition rather than a prior-determined
+  // one. Default false (the un-constrained, prior-determined arm); both are
+  // run and compared per the card, neither presumed correct.
+  bool estimator_zero_mean = false;
 };
 
 
@@ -559,7 +569,27 @@ private:
   // processLIO() each frame); NOT carried scan-to-scan -- c_prior = 0 every
   // scan (item 4).
   std::vector<V3D> coupled_c_acc_, coupled_c_gyr_;
+  // CQ-44 items 3c/3d: this scan's own ACCUMULATED delta_s(t0) =
+  // [delta_v, delta_bg, delta_ba, delta_g] across GN iterations (reset to
+  // zero at the top of each scan, same lifetime as coupled_c_acc_/
+  // coupled_c_gyr_ above) -- these are added ON TOP OF state_'s own
+  // pre-scan v/bg/ba/g (captured once at scan start, coupled_v0_pre_/
+  // coupled_bg0_pre_/coupled_ba0_pre_/coupled_g0_pre_) to form this
+  // iteration's propagateCoupled() inputs; state_->applyDelta() is called
+  // with the FINAL converged delta at the end of the GN loop, once, mirroring
+  // estimateStateCorrection()'s own solve-then-apply-once contract for the
+  // decoupled path.
+  V3D coupled_delta_v_ = V3D::Zero(), coupled_delta_bg_ = V3D::Zero(),
+      coupled_delta_ba_ = V3D::Zero(), coupled_delta_g_ = V3D::Zero();
+  V3D coupled_v0_pre_, coupled_bg0_pre_, coupled_ba0_pre_, coupled_g0_pre_;
   CoupledPropagation coupled_prop_;
+  // Item 3d(i): this scan's own DC-component/bias-split diagnostics, filled
+  // by the final GN iteration, read by debugLogFrameStats()/nees_diag.txt.
+  double coupled_c_acc_dc_over_sigma_ = -1.0, coupled_c_gyr_dc_over_sigma_ = -1.0;
+  double coupled_dba_over_sigma_ = -1.0, coupled_dbg_over_sigma_ = -1.0;
+  // Item G1(a)/(c): velocity- and gravity-block posterior trace, read the
+  // same frame they're computed (coupled mode only).
+  double coupled_trP_vel_ = -1.0, coupled_trP_grav_ = -1.0;
   // The LAST GN iteration's own (Lambda + J'R^-1 J), kept so the item-5
   // covariance term ((Lambda+J'R^-1J)^-1, via J_c) can be applied ONCE
   // after the loop converges, against the FINAL linearisation, rather than

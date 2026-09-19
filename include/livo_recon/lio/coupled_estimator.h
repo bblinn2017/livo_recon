@@ -72,6 +72,23 @@ struct CoupledPropagation
   // each), c_gyr_0..c_gyr_{n_c-1} (3 each)]. phi_head.size() == poses.size()
   // + 1; the last entry is the sensitivity of (rot1,pos1,vel1) at t1.
   std::vector<Eigen::Matrix<double, 9, Eigen::Dynamic>> phi_head;
+
+  // CQ-44 items 3c/3d: phi_x_head[k], 9x12, the SAME (phi_R,p,v) state's
+  // sensitivity to delta_s(t0) = [delta_v0, delta_bg, delta_ba, delta_g]
+  // (column blocks of 3, in that order) -- delta_phi(t0) and delta_p(t0) are
+  // held at EXACTLY ZERO by construction (see the card: correcting this
+  // scan's OWN start pose would retro-correct the previous scan's already-
+  // committed, already-map-built-from end pose), so those two initial
+  // conditions never appear as columns here. Seeded at t0 with only the
+  // V<-delta_v0 block as identity (perturbing the initial velocity changes
+  // velocity immediately, everything else's t0 sensitivity is zero), then
+  // accumulated by the SAME Fx recursion phi_head uses, plus this segment's
+  // OWN direct bias/gravity sensitivity (the same R<-bg/V<-ba/V<-g/P<-g
+  // blocks ImuProc::propagate()'s own F_x already carries for covariance
+  // propagation, imu_processing.cpp:188-206 -- P<-ba is omitted for the
+  // identical reason phi_head's own G omits any direct accel-correction
+  // position term, see the file header). Same length/indexing as phi_head.
+  std::vector<Eigen::Matrix<double, 9, 12>> phi_x_head;
 };
 
 // Recompute the scan from (rot0,pos0,vel0) at raw_poses.front().t through to
@@ -81,12 +98,21 @@ struct CoupledPropagation
 // recovered from it) and `raw_rot1` (the raw chain's own tail-most
 // rotation, needed for the LAST segment's tail term -- LioProc's own
 // state_propagat_.rot(), captured right after ImuProc::propagate() and
-// before any correction).
+// before any correction). `delta_bg`/`delta_ba` (CQ-44 items 3c/3d) are this
+// GN iteration's own accumulated bias correction ON TOP OF the bias already
+// baked into raw_poses by ImuProc::propagate() -- i.e. subtracted from the
+// raw chain's own (already-bias-corrected) body-frame measurements, exactly
+// as a further "-delta_bg"/"-delta_ba" would if the bias state itself had
+// been updated by this amount before propagate() ran; `vel0`/`gravity`
+// likewise already have this iteration's delta_v0/delta_g folded in by the
+// caller (they are ordinary initial-condition/parameter inputs, no separate
+// "delta" plumbing needed for them).
 void propagateCoupled(const std::vector<Pose6D>& raw_poses,
                       const M3D& raw_rot1,
                       double scan_end_time,
                       const M3D& rot0, const V3D& pos0, const V3D& vel0,
                       const V3D& gravity,
+                      const V3D& delta_bg, const V3D& delta_ba,
                       const std::vector<V3D>& c_acc, const std::vector<V3D>& c_gyr,
                       int n_c, CoupledPropagation& out);
 
@@ -98,6 +124,10 @@ void propagateCoupled(const std::vector<Pose6D>& raw_poses,
 // (deskew.cpp), so the two never disagree about which segment a point time
 // falls in.
 Eigen::Matrix<double, 9, Eigen::Dynamic> interpolatePhi(
+    const CoupledPropagation& prop, double t);
+
+// Same interpolation, for phi_x_head (items 3c/3d).
+Eigen::Matrix<double, 9, 12> interpolatePhiX(
     const CoupledPropagation& prop, double t);
 
 }  // namespace livo_recon

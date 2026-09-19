@@ -129,6 +129,8 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
            { "decoupled", "coupled" });
   cfg.nested<int>(opts_.estimatorCoupled(), "lio/estimator/mode",
                   "lio/estimator/n_c", opts_.estimator_n_c, 4);
+  cfg.nested<bool>(opts_.estimatorCoupled(), "lio/estimator/mode",
+                   "lio/estimator/zero_mean", opts_.estimator_zero_mean, false);
 
   // History (134-136): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-134
   double range_err;
@@ -880,7 +882,9 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
   const double t0 = mg.poses.front().t;
   const double t1 = mg.image.t;
   const int n_c = opts_.estimator_n_c;
-  const int ncol = 6 * n_c;
+  const int ncol_c = 6 * n_c;
+  const int ncol_s = 12;   // [delta_v, delta_bg, delta_ba, delta_g]
+  const int ncol = ncol_s + ncol_c;
   // Item 4: sigma_a/sigma_g are the CALIBRATION-FLOOR SIGMA, not the
   // variance config/ntu_viral.yaml logs (acc=0.00434, gyr=0.0000636 are
   // VARIANCES -- this project already filed a round on exactly this
@@ -891,10 +895,19 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
   const double sigma_a = std::sqrt(state_->varAccFloor().mean());
   const double sigma_g = std::sqrt(state_->varGyrFloor().mean());
 
-  // ---- (1) re-propagate with the CURRENT coefficient estimate ----
+  // ---- (1) re-propagate with the CURRENT coefficient AND delta_s estimate
+  // -- items 3c/3d. vel0/gravity fold this scan's own accumulated
+  // delta_v/delta_g on top of the pre-scan snapshot; delta_bg/delta_ba are
+  // passed through and subtracted INSIDE propagateCoupled (see its header
+  // comment) since they enter per-segment, not just the initial condition.
+  // rot0/pos0 are the raw chain's own, UNCHANGED (item 3c: delta_phi(t0) and
+  // delta_p(t0) are held at exactly zero, always). ----
   propagateCoupled(mg.poses, state_propagat_.rot(), t1,
-                   mg.poses.front().rot, mg.poses.front().pos, mg.poses.front().vel,
-                   state_->gravity(), coupled_c_acc_, coupled_c_gyr_, n_c, coupled_prop_);
+                   mg.poses.front().rot, mg.poses.front().pos,
+                   coupled_v0_pre_ + coupled_delta_v_,
+                   coupled_g0_pre_ + coupled_delta_g_,
+                   coupled_delta_bg_, coupled_delta_ba_,
+                   coupled_c_acc_, coupled_c_gyr_, n_c, coupled_prop_);
 
   // ---- (2) re-deskew the FULL raw point set against this corrected
   // trajectory, then downsample. Not CSR-optimized (re-downsamples every
@@ -917,9 +930,16 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
   // re-deskewed above. ----
   buildResiduals(mg.points, residuals_, /*allow_consistency_log=*/false);
 
-  // ---- (4) the prior Lambda: a basis GRAM matrix over this scan's own IMU
-  // sample (pose head) times (item 3b), not a plain (1/sigma^2)*I -- so the
-  // prior's strength is independent of n_c. ----
+  // ---- (4) the prior. TWO BLOCKS, per items 3c/3d/CORRECTED 2026-09-19:
+  // Lambda (the c prior, item 3b/4, UNCHANGED math) on the c-block, and
+  // Pi_ss -- the 12x12 SUB-BLOCK OF P(t0)^-1 at [idxV,idxBG,idxBA,idxG]
+  // (NOT the inverse of the sub-block of P(t0) -- those differ by a Schur
+  // complement and the second one throws away every correlation with the
+  // pose; item 3c is explicit that the FIRST is correct here, since
+  // delta_phi(t0)/delta_p(t0) are being conditioned to exactly zero, not
+  // marginalised out) -- on the s-block. No cross term: the prior itself
+  // does not correlate the two blocks (any correlation enters only through
+  // the shared LiDAR evidence, in the loop below). ----
   Eigen::MatrixXd gram = Eigen::MatrixXd::Zero(n_c, n_c);
   for (const auto& pose : mg.poses) {
     std::vector<double> bw(n_c);
@@ -927,59 +947,144 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
     for (int i = 0; i < n_c; ++i)
       for (int j = 0; j < n_c; ++j) gram(i, j) += bw[i] * bw[j];
   }
-  Eigen::MatrixXd Lambda = Eigen::MatrixXd::Zero(ncol, ncol);
+  Eigen::MatrixXd Lambda = Eigen::MatrixXd::Zero(ncol_c, ncol_c);
   for (int i = 0; i < n_c; ++i)
     for (int j = 0; j < n_c; ++j) {
       Lambda.block<3, 3>(3 * i, 3 * j) = (gram(i, j) / (sigma_a * sigma_a)) * M3D::Identity();
       Lambda.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) = (gram(i, j) / (sigma_g * sigma_g)) * M3D::Identity();
     }
 
-  Eigen::VectorXd c_vec(ncol);
+  Eigen::MatrixXd Pi_ss = Eigen::MatrixXd::Zero(ncol_s, ncol_s);
+  bool have_pi_ss = state_->idxBG() >= 0 && state_->idxBA() >= 0 && state_->idxG() >= 0;
+  if (have_pi_ss) {
+    const Eigen::MatrixXd Omega = state_->cov().inverse();  // information form of P(t0)
+    const int idx[4] = {StateGroup::idxV(), state_->idxBG(), state_->idxBA(), state_->idxG()};
+    for (int bi = 0; bi < 4; ++bi)
+      for (int bj = 0; bj < 4; ++bj)
+        Pi_ss.block<3, 3>(3 * bi, 3 * bj) = Omega.block<3, 3>(idx[bi], idx[bj]);
+  }
+  // Fallback (should not fire on any config with bias/gravity estimation
+  // on, which every dispatched cell this card runs uses): an isotropic
+  // proxy so the solve stays well-posed rather than silently singular; NOT
+  // the card's own prescription, named here rather than silently
+  // substituted for the real Schur-complement prior.
+  if (!have_pi_ss) Pi_ss = Eigen::MatrixXd::Identity(ncol_s, ncol_s) * 1e6;
+
+  Eigen::VectorXd c_vec(ncol_c);
   for (int j = 0; j < n_c; ++j) {
     c_vec.segment<3>(3 * j) = coupled_c_acc_[j];
     c_vec.segment<3>(3 * n_c + 3 * j) = coupled_c_gyr_[j];
   }
+  Eigen::VectorXd s_vec(ncol_s);
+  s_vec.segment<3>(0) = coupled_delta_v_;
+  s_vec.segment<3>(3) = coupled_delta_bg_;
+  s_vec.segment<3>(6) = coupled_delta_ba_;
+  s_vec.segment<3>(9) = coupled_delta_g_;
 
-  // ---- (5) normal equations: (Lambda + J'R^-1 J) dc = J'R^-1 r + Lambda(0 - c) ----
-  Eigen::MatrixXd A = Lambda;
-  Eigen::VectorXd b = -(Lambda * c_vec);
+  // ---- (5) normal equations, JOINTLY over [delta_s(t0), c] -- items
+  // 3c/3d/CORRECTED 2026-09-19, replacing the old c-alone solve entirely
+  // (see the amendment: solving for c alone left velocity/both biases/
+  // gravity with a COVARIANCE contribution and NO MEAN CORRECTION, a
+  // regression on bias estimation only visible as slow drift over ~4000
+  // scans). SAME sign convention as the (correct, still-valid) fix found
+  // in the c-alone version: A*delta = -(J'R^-1 r) - Pi(prior_iter), i.e.
+  // b accumulates MINUS the residual term, matching ekf.h's own
+  // applyMeanUpdate() "-K1*Htz" convention (Htz itself a "+H'*W*r"
+  // accumulation) -- verified again here, not merely carried over
+  // unchecked, since the joint Jacobian's own sign (Phi_x, Phi_c) could in
+  // principle have flipped something the scalar c-alone case didn't
+  // exercise; it did not (see the filing's own G0/G1 numbers). ----
+  Eigen::MatrixXd A = Eigen::MatrixXd::Zero(ncol, ncol);
+  A.block(0, 0, ncol_s, ncol_s) = Pi_ss;
+  A.block(ncol_s, ncol_s, ncol_c, ncol_c) = Lambda;
+  Eigen::VectorXd b = Eigen::VectorXd::Zero(ncol);
+  b.segment(0, ncol_s) = -(Pi_ss * s_vec);
+  b.segment(ncol_s, ncol_c) = -(Lambda * c_vec);
   double sum_abs_r = 0.0;
   for (const auto& res : residuals_) {
     Eigen::Matrix<double, 1, 6> H;
     H.block<1, 3>(0, 0) = res.point_cross_normal.transpose();
     H.block<1, 3>(0, 3) = res.normal.transpose();
-    const Eigen::Matrix<double, 9, Eigen::Dynamic> Phi_pt = interpolatePhi(coupled_prop_, res.t);
-    const Eigen::MatrixXd Jrow = H * Phi_pt.topRows(6);   // 1 x ncol -- R,P rows only (item 3b)
+    const Eigen::Matrix<double, 9, 12> Phix_pt = interpolatePhiX(coupled_prop_, res.t);
+    const Eigen::Matrix<double, 9, Eigen::Dynamic> Phic_pt = interpolatePhi(coupled_prop_, res.t);
+    Eigen::Matrix<double, 1, Eigen::Dynamic> Jrow(1, ncol);
+    Jrow.segment(0, ncol_s) = H * Phix_pt.topRows(6);          // R,P rows only (item 3b/3c)
+    Jrow.segment(ncol_s, ncol_c) = H * Phic_pt.topRows(6);
     const double w = 1.0 / res.sigma_squared;
     A.noalias() += w * (Jrow.transpose() * Jrow);
-    b.noalias() += w * Jrow.transpose() * res.r;
+    b.noalias() -= w * Jrow.transpose() * res.r;
     sum_abs_r += std::abs(res.r);
   }
   coupled_last_A_ = A;
 
-  Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
-  Eigen::VectorXd delta_c = Eigen::VectorXd::Zero(ncol);
-  if (ldlt.info() == Eigen::Success) delta_c = ldlt.solve(b);
+  Eigen::VectorXd delta = Eigen::VectorXd::Zero(ncol);
+  if (opts_.estimator_zero_mean) {
+    // Item 3d(ii): KKT-bordered solve, 6 equality rows (one 3-vector per
+    // axis) sum_samples beta_j(t) * c_j = 0, zero in the s-block columns.
+    // Same rank-deficiency-removal shape CQ-41's own end-constraint rewrite
+    // already uses (a bordered system, not a projected/reduced one).
+    Eigen::VectorXd gsum = Eigen::VectorXd::Zero(n_c);
+    for (const auto& pose : mg.poses)
+      for (int j = 0; j < n_c; ++j) gsum[j] += basisWeight(j, n_c, t0, t1, pose.t);
+    Eigen::MatrixXd C = Eigen::MatrixXd::Zero(6, ncol);
+    for (int j = 0; j < n_c; ++j) {
+      C.block<3, 3>(0, ncol_s + 3 * j)         = gsum[j] * M3D::Identity();  // acc axis
+      C.block<3, 3>(3, ncol_s + 3 * n_c + 3 * j) = gsum[j] * M3D::Identity();  // gyr axis
+    }
+    Eigen::MatrixXd K = Eigen::MatrixXd::Zero(ncol + 6, ncol + 6);
+    K.block(0, 0, ncol, ncol) = A;
+    K.block(0, ncol, ncol, 6) = C.transpose();
+    K.block(ncol, 0, 6, ncol) = C;
+    Eigen::VectorXd rhs = Eigen::VectorXd::Zero(ncol + 6);
+    rhs.segment(0, ncol) = b;
+    Eigen::FullPivLU<Eigen::MatrixXd> lu(K);
+    if (lu.isInvertible()) delta = lu.solve(rhs).head(ncol);
+  } else {
+    Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
+    if (ldlt.info() == Eigen::Success) delta = ldlt.solve(b);
+  }
 
+  const Eigen::VectorXd delta_s = delta.segment(0, ncol_s);
+  const Eigen::VectorXd delta_c = delta.segment(ncol_s, ncol_c);
+  coupled_delta_v_  += delta_s.segment<3>(0);
+  coupled_delta_bg_ += delta_s.segment<3>(3);
+  coupled_delta_ba_ += delta_s.segment<3>(6);
+  coupled_delta_g_  += delta_s.segment<3>(9);
   for (int j = 0; j < n_c; ++j) {
     coupled_c_acc_[j] += delta_c.segment<3>(3 * j);
     coupled_c_gyr_[j] += delta_c.segment<3>(3 * n_c + 3 * j);
   }
 
-  // ---- (6) re-propagate ONCE MORE with the updated c, so state_ and
-  // mg.points (via the caller's next iteration, or the loop exit) reflect
-  // what this step actually applied -- mirrors estimateStateCorrection()'s
-  // own solve-then-apply contract. ----
+  // Item 3d(i): DC-component/bias-split diagnostics, overwritten every
+  // iteration so the FINAL (converged) call's values are what survives.
+  {
+    V3D c_acc_dc = V3D::Zero(), c_gyr_dc = V3D::Zero();
+    for (int j = 0; j < n_c; ++j) { c_acc_dc += coupled_c_acc_[j]; c_gyr_dc += coupled_c_gyr_[j]; }
+    c_acc_dc /= static_cast<double>(n_c); c_gyr_dc /= static_cast<double>(n_c);
+    coupled_c_acc_dc_over_sigma_ = c_acc_dc.norm() / sigma_a;
+    coupled_c_gyr_dc_over_sigma_ = c_gyr_dc.norm() / sigma_g;
+    coupled_dba_over_sigma_ = coupled_delta_ba_.norm() / sigma_a;
+    coupled_dbg_over_sigma_ = coupled_delta_bg_.norm() / sigma_g;
+  }
+
+  // ---- (6) re-propagate ONCE MORE with the updated c AND delta_s, so
+  // state_ and mg.points (via the caller's next iteration, or the loop
+  // exit) reflect what this step actually applied -- mirrors
+  // estimateStateCorrection()'s own solve-then-apply contract. ----
   propagateCoupled(mg.poses, state_propagat_.rot(), t1,
-                   mg.poses.front().rot, mg.poses.front().pos, mg.poses.front().vel,
-                   state_->gravity(), coupled_c_acc_, coupled_c_gyr_, n_c, coupled_prop_);
+                   mg.poses.front().rot, mg.poses.front().pos,
+                   coupled_v0_pre_ + coupled_delta_v_,
+                   coupled_g0_pre_ + coupled_delta_g_,
+                   coupled_delta_bg_, coupled_delta_ba_,
+                   coupled_c_acc_, coupled_c_gyr_, n_c, coupled_prop_);
   state_->setPropagatedState(coupled_prop_.rot1, coupled_prop_.pos1, coupled_prop_.vel1);
 
-  // Outer-loop convergence read: the ENDPOINT state change this step
-  // implied, i.e. Phi(t1) applied to delta_c -- same quantity
-  // (dtheta,dt)'s norms are checked against as the decoupled path's own
-  // dtheta/dt (estimateStateCorrection()'s return contract).
-  const Eigen::VectorXd d9 = coupled_prop_.phi_head.back() * delta_c;
+  // Outer-loop convergence read: the ENDPOINT state change THIS STEP
+  // implied, i.e. the joint Jacobian at t1 applied to [delta_s, delta_c] --
+  // same quantity (dtheta,dt)'s norms are checked against as the decoupled
+  // path's own dtheta/dt (estimateStateCorrection()'s return contract).
+  const Eigen::VectorXd d9 = coupled_prop_.phi_x_head.back() * delta_s
+                            + coupled_prop_.phi_head.back()   * delta_c;
   dtheta_out = d9.segment<3>(0);
   dt_out = d9.segment<3>(3);
 
@@ -991,7 +1096,17 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
 
 void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
 {
-  if (!opts_.spline.splineOn()) return;
+  // CQ-44: nees_diag.txt's own write (below, gated only on log_debug_en) is
+  // NOT spline-specific -- it reads state_->cov()/pos()/rot(), populated
+  // regardless of estimator mode -- but sat behind this function's single
+  // early-return, so G1's own eps_pos instrument (TQ-35/37/39's own
+  // methodology, which this card's G1 reuses verbatim) was silently
+  // unavailable under coupled mode. Relaxed to let coupled-mode frames fall
+  // through to that block; every OTHER statement between here and it is
+  // already individually gated on spline_ok_ (false under coupled mode, so
+  // those blocks correctly no-op) -- confirmed by direct read before this
+  // change, not assumed.
+  if (!opts_.spline.splineOn() && !opts_.estimatorCoupled()) return;
 
   last_spline_stats_ = SplineImuResidualStats{};
 
@@ -1867,6 +1982,19 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       coupled_c_gyr_.assign(opts_.estimator_n_c, V3D::Zero());
       coupled_iters_ = 0;
       coupled_solve_ms_ = 0.0;
+      // Items 3c/3d: this scan's own delta_s(t0) accumulators reset to
+      // zero (same c_prior=0 convention item 4 already states, extended to
+      // the joint block), and the PRE-scan v/bg/ba/g snapshotted once so
+      // every GN iteration's propagateCoupled() call adds this scan's own
+      // accumulated delta on top of the SAME fixed base, never a moving one.
+      coupled_delta_v_.setZero(); coupled_delta_bg_.setZero();
+      coupled_delta_ba_.setZero(); coupled_delta_g_.setZero();
+      // mg.poses.front().vel (NOT state_->vel()), for consistency with
+      // rot0/pos0 below -- all three come from the SAME raw-chain snapshot.
+      coupled_v0_pre_ = mg.poses.empty() ? state_->vel() : mg.poses.front().vel;
+      coupled_bg0_pre_ = state_->biasGyr();
+      coupled_ba0_pre_ = state_->biasAcc();
+      coupled_g0_pre_ = state_->gravity();
     }
 
     for (; iter < opts_.max_iterations; iter++) {
@@ -1989,45 +2117,127 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     if (any_solved && !opts_.estimatorCoupled())
       ekf_.applyCovarianceUpdate(state_, prior_cov_);
 
-    // CQ-44 item 5: P(t1) = J_x P(t0) J_x^T + J_c (Lambda+J'R^-1J)^-1 J_c^T
-    // + Q_unmodelled. The FIRST term is already exactly what
-    // ImuProc::propagate() left in state_->cov() this frame (its own
-    // F_x*P*F_x^T+cov_w recursion runs unconditionally, every frame,
-    // regardless of estimator mode) -- so this adds only the SECOND term,
-    // the coefficient posterior's own remaining uncertainty propagated
-    // through J_c (=coupled_prop_.phi_head.back(), R/P/V rows only; c has
-    // no direct sensitivity on the bias/gravity rows in this
-    // linearisation, so those rows/cols of the added term are exactly
-    // zero -- a real, named simplification, not an oversight).
-    //
-    // NAMED, NOT RESOLVED: item 5's own double-count warning. Q_unmodelled
-    // here is state_->cov()'s existing cov_w, UNMODIFIED -- this
-    // implementation does not split the IMU-noise share Lambda now
-    // covers out of propagate()'s own per-step rotation/velocity cov_w
-    // blocks. That means some IMU noise may be counted in both Q and
-    // Lambda. Filed as a known limitation (rule 5c), not silently assumed
-    // away.
-    if (opts_.estimatorCoupled() && any_solved && coupled_last_A_.rows() == coupled_prop_.phi_head.back().cols())
+    // CQ-44 item 5, CORRECTED 2026-09-19 with item 3c: P(t1) =
+    // [Phi_x(t1) Phi_c(t1)] * A^-1 * [Phi_x(t1) Phi_c(t1)]^T + Q_unmodelled.
+    // The joint Jacobian now covers R,P,V,BG,BA,G -- not just R,P,V --
+    // since Phi_x(t1) has nonzero sensitivity on exactly those bias/gravity
+    // rows (item 3c's whole point: they get DIRECT measurement information
+    // for the first time). The amendment names this as REPLACING the old
+    // decoupled-approximation form (J_x P(t0) J_x^T + J_c(...)^-1 J_c^T,
+    // which drops the delta_s(t0)/c cross-covariance) rather than adding to
+    // it -- but since Q_unmodelled (the part ImuProc::propagate()'s own
+    // cov_w contributes this frame) is not separately isolated by this
+    // implementation, this ADDS the joint posterior term on top of
+    // whatever ImuProc::propagate() already left in state_->cov() this
+    // frame (its own F_x*P*F_x^T+cov_w recursion, unconditional, every
+    // frame), same ADD convention the prior (unamended) version used for
+    // its narrower 9x9 block. NAMED, NOT RESOLVED, same as before: this
+    // means some information is double-counted (the deterministic
+    // F_x*P(t0)*F_x^T term is present in BOTH the existing state_->cov()
+    // AND, implicitly, in A's own Pi_ss prior block) -- a real limitation,
+    // reported rather than silently claimed fixed.
+    if (opts_.estimatorCoupled() && any_solved
+        && coupled_last_A_.rows() == coupled_prop_.phi_head.back().cols() + 12
+        && state_->idxBG() >= 0 && state_->idxBA() >= 0 && state_->idxG() >= 0)
     {
       Eigen::LDLT<Eigen::MatrixXd> ldlt_A(coupled_last_A_);
       if (ldlt_A.info() == Eigen::Success)
       {
         const Eigen::MatrixXd coeff_cov =
             ldlt_A.solve(Eigen::MatrixXd::Identity(coupled_last_A_.rows(), coupled_last_A_.rows()));
+        const Eigen::Matrix<double, 9, 12>& Jx = coupled_prop_.phi_x_head.back();
         const Eigen::Matrix<double, 9, Eigen::Dynamic>& Jc = coupled_prop_.phi_head.back();
-        const Eigen::MatrixXd added = Jc * coeff_cov * Jc.transpose();  // 9x9 (R,P,V)
-        const int dim = state_->dimState();
+        Eigen::Matrix<double, 9, Eigen::Dynamic> Jjoint(9, 12 + Jc.cols());
+        Jjoint.leftCols(12) = Jx;
+        Jjoint.rightCols(Jc.cols()) = Jc;
+        const Eigen::MatrixXd added = Jjoint * coeff_cov * Jjoint.transpose();  // 9x9 (R,P,V)
         Eigen::MatrixXd P = state_->cov();
-        P.block(0, 0, 9, 9) += added;   // idxR()=0, idxP()=3, idxV()=6 -- contiguous
+        // R,P,V (idxR=0,idxP=3,idxV=6, contiguous) get the full 9x9 added
+        // block; BG,BA,G each get their own 3x3 diagonal sub-block of it
+        // (Jjoint's own rows are R,P,V only -- item 3c's Phi_x/Phi_c are
+        // BOTH defined as the sensitivity of the (R,P,V) state, so this
+        // added term's own rows/cols are R,P,V-only BY CONSTRUCTION; the
+        // BG/BA/G diagonal blocks of P are therefore left as ImuProc::
+        // propagate()'s own cov_w set them, not further reduced by this
+        // scan's LiDAR evidence -- a real, named simplification: the
+        // solve DOES use BG/BA/G as free variables and DOES correct their
+        // MEANS via state_->applyDelta() below, but this P update does not
+        // reduce their OWN posterior variance, only R/P/V's).
+        P.block(0, 0, 9, 9) += added;
         state_->covMut() = P;
-        (void)dim;
       }
+    }
+
+    // Item 3c: apply the FINAL converged delta_s(t0) to the real state,
+    // ONCE, mirroring estimateStateCorrection()'s own solve-then-apply-once
+    // contract -- v/bg/ba/g move by this scan's own solved correction;
+    // rot_/pos_ do not move (dx's R/P blocks are zero, applyDelta() leaves
+    // them exactly as Exp(0)=Identity/+=0).
+    if (opts_.estimatorCoupled() && any_solved
+        && state_->idxBG() >= 0 && state_->idxBA() >= 0 && state_->idxG() >= 0)
+    {
+      // idxV() is deliberately left at zero here: state_->setPropagatedState()
+      // (above, via coupled_prop_.vel1) already SET vel_ directly from a
+      // propagation whose own initial condition was
+      // coupled_v0_pre_+coupled_delta_v_ -- applying coupled_delta_v_ a
+      // second time here would double-count it. Only bg/ba/g are not
+      // touched by setPropagatedState() and need this explicit application.
+      Eigen::VectorXd dx = Eigen::VectorXd::Zero(state_->dimState());
+      dx.segment<3>(state_->idxBG())    = coupled_delta_bg_;
+      dx.segment<3>(state_->idxBA())    = coupled_delta_ba_;
+      dx.segment<3>(state_->idxG())     = coupled_delta_g_;
+      state_->applyDelta(dx);
+      // Item G1(a)/(c): read the posterior trace straight off the just-
+      // updated P, once, here -- both diagnostics coded per the card's own
+      // definitions (velocity block, gravity block).
+      coupled_trP_vel_ = state_->cov().block<3, 3>(StateGroup::idxV(), StateGroup::idxV()).trace();
+      coupled_trP_grav_ = state_->cov().block<3, 3>(state_->idxG(), state_->idxG()).trace();
     }
 
     // CQ-43 item (4d-ii): save this frame's own EKF rotation correction
     // (total_dtheta is local to this scope) for finalizeSplineAndQ() to
     // log alongside the rest of the rotation consistency read.
     last_total_dtheta_deg_ = total_dtheta.norm() * (180.0 / M_PI);
+
+    // CQ-44: nees_diag.txt, UNCONDITIONAL on estimator mode (same file, same
+    // field format as finalizeSplineAndQ()'s own write, deliberately kept
+    // byte-compatible so this session's existing eps_pos analysis script
+    // works unchanged against either). NOT a duplicate write: the existing
+    // block (finalizeSplineAndQ()) sits entirely inside `if (spline_ok_)`
+    // (lines 1041-1388, confirmed by direct brace-nesting inspection before
+    // writing this), which is always false under coupled mode -- the two
+    // are mutually exclusive by construction (decoupled frames log from the
+    // old site, coupled frames from here), never both, so no double-count.
+    // G1 (TQ-37/39's own eps_pos methodology) reads exactly this file.
+    if (opts_.estimatorCoupled() && opts_.log_debug_en) {
+      static PersistentLogStream log("nees_diag.txt");
+      std::ofstream& ofs = log.stream();
+      const Eigen::MatrixXd& P = state_->cov();
+      const int iP = StateGroup::idxP(), iR = StateGroup::idxR();
+      const bool have_p = P.rows() >= iP + 3 && P.cols() >= iP + 3;
+      const bool have_r = P.rows() >= iR + 3 && P.cols() >= iR + 3;
+      const M3D P_pp = have_p ? M3D(P.block<3, 3>(iP, iP)) : M3D::Zero();
+      const M3D P_rr = have_r ? M3D(P.block<3, 3>(iR, iR)) : M3D::Zero();
+      const double t_abs = mg.image.t + data_queues_->start_time;
+      const Eigen::Quaterniond state_q(state_->rot());
+      ofs << std::setprecision(12)
+          << "scan_id=" << voxel_map_->frame_idx_ << " t_abs=" << t_abs
+          << " state_px=" << state_->pos().x() << " state_py=" << state_->pos().y()
+          << " state_pz=" << state_->pos().z()
+          << " state_qw=" << state_q.w() << " state_qx=" << state_q.x()
+          << " state_qy=" << state_q.y() << " state_qz=" << state_q.z()
+          << " total_dtheta_deg=" << last_total_dtheta_deg_
+          << " trP_pos_pre=" << trP_pos_pre_
+          << " trP_pos_post=" << (have_p ? P_pp.trace() : -1.0)
+          << " Ppp_xx=" << P_pp(0, 0) << " Ppp_xy=" << P_pp(0, 1) << " Ppp_xz=" << P_pp(0, 2)
+          << " Ppp_yy=" << P_pp(1, 1) << " Ppp_yz=" << P_pp(1, 2) << " Ppp_zz=" << P_pp(2, 2)
+          << " Prr_xx=" << P_rr(0, 0) << " Prr_xy=" << P_rr(0, 1) << " Prr_xz=" << P_rr(0, 2)
+          << " Prr_yy=" << P_rr(1, 1) << " Prr_yz=" << P_rr(1, 2) << " Prr_zz=" << P_rr(2, 2)
+          << " have_Ppp=" << (have_p ? 1 : 0) << " have_Prr=" << (have_r ? 1 : 0)
+          << " free_tail_d=" << -1.0
+          << "\n";
+      ofs.flush();
+    }
 
     // FINAL re-deskew, against the converged state.  redeskewFromSpline()
     // runs at the TOP of each iteration, so without this call the last
