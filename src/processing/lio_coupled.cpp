@@ -50,8 +50,9 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/n_c", copts_.n_c, 4);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
-  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/phi_at_scan_end", copts_.phi_at_scan_end, false);
-  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/h_at_point_time", copts_.h_at_point_time, false);
+  cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/jacobian_time_mode",
+                 copts_.jacobian_time_mode, "legacy_mismatched",
+                 {"legacy_mismatched", "end_time", "point_time"});
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_jrow_leverage_en", copts_.log_jrow_leverage_en, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/freeze_bg", copts_.freeze_bg, false);
 
@@ -71,8 +72,7 @@ std::string LioProcCoupled::engagementReport() const
   oss << "[engagement] estimator=coupled n_c=" << copts_.n_c
       << " zero_mean=" << (copts_.zero_mean ? "true" : "false")
       << " disable_cgyr=" << (copts_.disable_cgyr ? "true" : "false")
-      << " phi_at_scan_end=" << (copts_.phi_at_scan_end ? "true" : "false")
-      << " h_at_point_time=" << (copts_.h_at_point_time ? "true" : "false")
+      << " jacobian_time_mode=" << copts_.jacobian_time_mode
       << " log_jrow_leverage_en=" << (copts_.log_jrow_leverage_en ? "true" : "false")
       << " freeze_bg=" << (copts_.freeze_bg ? "true" : "false")
       << " -- no spline/AdaptiveQ engagement to report (this class has "
@@ -582,20 +582,27 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     // print CQ-50's own filing cited a since-nonexistent "1-3%" figure from.
     const V3D hk = V3D(res.raw_body_point.cross(worldRotAt(coupled_prop_, res.t).transpose() * res.normal));
     hcol_reldiff.push_back((hk - res.point_cross_normal).norm() / std::max(res.point_cross_normal.norm(), 1e-9));
-    const V3D rot_jac_col = copts_.h_at_point_time ? hk : res.point_cross_normal;
+    // jacobian_time_mode: H and Phi must be evaluated at the SAME time for
+    // H_k*Phi(t_k) to be a valid chain rule (CQ-50's original diagnosis was
+    // exactly this mismatch -- H built once from the DESKEWED point and the
+    // SCAN-END state_->rot() in lio_base.cpp's buildResiduals(), chained
+    // against Phi interpolated at each residual's own t_k, valid only at
+    // rest by coincidence). "point_time" pulls H back to t_k to meet Phi
+    // there (real within-scan resolution preserved); "end_time" pushes Phi
+    // forward to t1 to meet H there (resolution collapsed, but consistent);
+    // "legacy_mismatched" (default) reproduces the original mismatch
+    // unchanged, so this refactor changes no one's numerics by default
+    // (rule 26 item 1 -- see the header's own doc comment for the full
+    // 4-combination table this collapses).
+    const bool point_time = (copts_.jacobian_time_mode == "point_time");
+    const bool end_time = (copts_.jacobian_time_mode == "end_time");
+    const V3D rot_jac_col = point_time ? hk : res.point_cross_normal;
     H.block<1, 3>(0, 0) = rot_jac_col.transpose();
     H.block<1, 3>(0, 3) = res.normal.transpose();
-    // CQ-50 diagnostic: H above is built once from the DESKEWED point and
-    // the SCAN-END state_->rot() (lio_base.cpp's buildResiduals()), never
-    // re-evaluated per point -- so interpolating Phi at each point's own
-    // capture time res.t chains a t1-pose derivative through a t_k
-    // sensitivity, which is not a valid chain rule except at rest (t_k==t1
-    // by coincidence). phi_at_scan_end forces the same t1 evaluation Phi
-    // uses too, for a consistent (if within-scan-blind) derivative.
     const Eigen::Matrix<double, 9, 18> Phix_pt =
-        copts_.phi_at_scan_end ? coupled_prop_.phi_x_head.back() : interpolatePhiX(coupled_prop_, res.t);
+        end_time ? coupled_prop_.phi_x_head.back() : interpolatePhiX(coupled_prop_, res.t);
     const Eigen::Matrix<double, 9, Eigen::Dynamic> Phic_pt =
-        copts_.phi_at_scan_end ? coupled_prop_.phi_head.back() : interpolatePhi(coupled_prop_, res.t);
+        end_time ? coupled_prop_.phi_head.back() : interpolatePhi(coupled_prop_, res.t);
     Eigen::Matrix<double, 1, Eigen::Dynamic> Jrow(1, ncol);
     Jrow.segment(0, ncol_s) = H * Phix_pt.topRows(6);          // R,P rows only (item 3b/3c)
     Jrow.segment(ncol_s, ncol_c) = H * Phic_pt.topRows(6);
@@ -615,9 +622,9 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     // print during CQ-50's own investigation) -- per-residual leverage on
     // delta_phi0/delta_p0, binnable by the point's own capture-time
     // fraction within the scan [0,1]. Refuted the "early-scan points get
-    // outsized delta_phi0 leverage under h_at_point_time" hypothesis when
-    // this was run manually: the frac-vs-leverage pattern came out nearly
-    // identical between phi_at_scan_end and h_at_point_time.
+    // outsized delta_phi0 leverage under jacobian_time_mode=point_time"
+    // hypothesis when this was run manually: the frac-vs-leverage pattern
+    // came out nearly identical between end_time and point_time.
     if (copts_.log_jrow_leverage_en) {
       const double t0_local = coupled_prop_.poses.empty() ? 0.0 : coupled_prop_.poses.front().t;
       const double t1_local = coupled_prop_.poses.empty() ? 1.0

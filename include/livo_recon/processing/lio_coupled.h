@@ -31,31 +31,36 @@ struct LioProcCoupledOptions
   // (a single rigid per-scan gyro-bias correction) as the only rotation
   // correction mechanism. Default false.
   bool disable_cgyr = false;
-  // CQ-50 diagnostic toggle: when true, every residual's Jacobian row uses
-  // Phix_pt/Phic_pt evaluated at the SCAN-END time t1 (coupled_prop_.
-  // phi_x_head.back()/phi_head.back()) instead of interpolatePhiX/
-  // interpolatePhi at the point's own capture time res.t. This matches the
-  // mismatch already baked into H itself (built once from the deskewed
-  // point + the scan-end state_->rot(), never re-evaluated per point -- see
-  // lio_base.cpp's buildResiduals()), so at true the whole Jrow becomes a
-  // consistent (if within-scan-blind) derivative w.r.t. the SAME t1 pose
-  // throughout, rather than H(t1) chained through Phi(t_k). Purely
-  // diagnostic: confirming the prediction collapses the motion-onset
-  // divergence is expected to make within-scan sensitivity structurally
-  // useless (every point's Jrow becomes identical up to H), not a fix in
-  // its own right. Default false (the existing, mismatched behavior).
-  bool phi_at_scan_end = false;
-  // CQ-50 item (d), the real fix (not merely diagnostic, unlike
-  // phi_at_scan_end above): builds H's rotation-Jacobian column at each
-  // point's OWN capture time t_k -- raw_body_point.cross(worldRotAt(t_k)^T *
-  // normal) -- instead of point_cross_normal (built once at t1 from the
-  // deskewed point + state_->rot()). Phix_pt/Phic_pt stay interpolated at
-  // t_k as before (unlike phi_at_scan_end, this keeps within-scan
-  // sensitivity rather than discarding it): H_k*Phi(t_k) is now a valid
-  // chain rule throughout, not merely a coincidence at rest. Default false
-  // (the existing, mismatched H(t1)*Phi(t_k) behavior) until this arm is
-  // verified against phi_at_scan_end's own result and CQ-49's md5 pairs.
-  bool h_at_point_time = false;
+  // CQ-50/CQ-52 addendum: H's rotation-Jacobian column and Phix_pt/Phic_pt
+  // (the state/coefficient sensitivity) must be evaluated at the SAME time
+  // for H_k*Phi(t_k) to be a valid chain rule -- CQ-50's original diagnosis
+  // was exactly this mismatch (H built once from the deskewed point + the
+  // scan-end state_->rot() in lio_base.cpp's buildResiduals(), chained
+  // against Phi interpolated at each residual's own capture time res.t;
+  // valid only by coincidence at rest). phi_at_scan_end and h_at_point_time
+  // used to be two INDEPENDENT booleans, which made all four combinations
+  // reachable even though only two are ever meaningful -- both false is the
+  // original mismatch (H@t1, Phi@t_k) and both true is an equally invalid,
+  // never-used mirror-image mismatch (H@t_k, Phi@t1). Collapsed into one
+  // mode, following the project's own standing rule (CQ-44 item 4c: "mutually
+  // exclusive options are one mode, never two flags that can express a
+  // meaningless combination"):
+  //   "legacy_mismatched" (DEFAULT, unchanged from the prior bool defaults'
+  //     shipped behavior -- H@t1, Phi@t_k -- kept as the default so this
+  //     refactor changes no one's numerics without Bryce's say-so, rule 26
+  //     item 1) -- the ORIGINAL bug CQ-50 diagnosed.
+  //   "end_time" (was phi_at_scan_end=true): both H and Phi forced to the
+  //     scan-end time t1 -- restores a valid chain rule, but every residual
+  //     now shares the identical Phi, so all within-scan resolution is
+  //     destroyed. CQ-52 item 1 found this INERT (correction magnitudes
+  //     near-zero relative to sensor noise) -- consistent, but useless.
+  //   "point_time" (was h_at_point_time=true): both H and Phi evaluated at
+  //     each residual's own capture time t_k -- H via raw_body_point.cross(
+  //     worldRotAt(t_k)^T * normal) instead of point_cross_normal (built
+  //     once at t1). Valid chain rule AND genuine within-scan resolution
+  //     preserved -- architecturally the correct fix, verified against
+  //     CQ-49's md5 pairs.
+  std::string jacobian_time_mode = "legacy_mismatched";
   // CQ-53 item 1: disabled-by-default pivot floor on the joint matrix's own
   // LDLT decomposition -- mirrors SplineOptions::PIVOT_MIN_FLOOR's shipped
   // no-op default (-1.0, below any real pivot this system produces) exactly.
@@ -191,11 +196,11 @@ private:
   bool   coupled_pivot_guard_ = false;
 
   // CQ-53 item 2: relative difference between point_cross_normal (H built
-  // at t1) and the h_at_point_time formula (H built at each residual's own
-  // t_k), computed for EVERY residual regardless of which arm is actually
-  // active (h_at_point_time reads one side, phi_at_scan_end/default reads
-  // the other -- this column is diagnostic-only, read by neither), so the
-  // two arms stay directly comparable on this number. This REPLACES the
+  // at t1) and the "point_time" formula (H built at each residual's own
+  // t_k), computed for EVERY residual regardless of which jacobian_time_mode
+  // is actually active (this column is diagnostic-only, read by none of the
+  // modes), so every mode stays directly comparable on this number. This
+  // REPLACES the
   // ad hoc, since-deleted debug print this session used to produce the
   // "1-3%" figure the CQ-50 filing cited -- that number no longer existed
   // on disk anywhere once the print was reverted; this makes it a
