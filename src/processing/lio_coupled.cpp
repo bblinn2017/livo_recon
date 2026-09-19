@@ -58,6 +58,8 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/adaptive_sigma", copts_.adaptive_sigma, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_freeze_on_vibration", copts_.bias_freeze_on_vibration, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_anchor", copts_.bias_anchor, false);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/curvature_weight", copts_.curvature_weight, 0.0);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_observable_only", copts_.bias_observable_only, false);
 
   // Every spline/* and adaptive_q/* key is unclaimed by this class by
   // construction -- refuseUnclaimed only needs to additionally cover
@@ -81,6 +83,8 @@ std::string LioProcCoupled::engagementReport() const
       << " adaptive_sigma=" << (copts_.adaptive_sigma ? "true" : "false")
       << " bias_freeze_on_vibration=" << (copts_.bias_freeze_on_vibration ? "true" : "false")
       << " bias_anchor=" << (copts_.bias_anchor ? "true" : "false")
+      << " curvature_weight=" << copts_.curvature_weight
+      << " bias_observable_only=" << (copts_.bias_observable_only ? "true" : "false")
       << " -- no spline/AdaptiveQ engagement to report (this class has "
          "neither)";
   return oss.str();
@@ -561,11 +565,27 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     for (int i = 0; i < n_c; ++i)
       for (int j = 0; j < n_c; ++j) gram(i, j) += bw[i] * bw[j];
   }
+  // CQ-55 item 6: gram is built from basis VALUES only -- nothing penalises
+  // the correction's SHAPE, which is why the prior's connectivity collapses
+  // to a chain at n_c=13 (adjacent-only support overlap) instead of the
+  // fully-dense n_c=4 case (item 9's gram[0][12]=0 vs gram[0][3]!=0
+  // finding). Curv = D^T D for the second-difference operator D (row k:
+  // +1,-2,+1 at columns k,k+1,k+2) adds an EXPLICIT connectivity term
+  // between every control point pair within 2 of each other, independent
+  // of whether their basis supports overlap -- default 0.0, so shipped
+  // behavior is unchanged and this is provably md5-inert at that default.
+  Eigen::MatrixXd Curv = Eigen::MatrixXd::Zero(n_c, n_c);
+  if (copts_.curvature_weight > 0.0 && n_c >= 3) {
+    Eigen::MatrixXd D = Eigen::MatrixXd::Zero(n_c - 2, n_c);
+    for (int k = 0; k < n_c - 2; ++k) { D(k, k) = 1.0; D(k, k + 1) = -2.0; D(k, k + 2) = 1.0; }
+    Curv = D.transpose() * D;
+  }
   Eigen::MatrixXd Lambda = Eigen::MatrixXd::Zero(ncol_c, ncol_c);
   for (int i = 0; i < n_c; ++i)
     for (int j = 0; j < n_c; ++j) {
-      Lambda.block<3, 3>(3 * i, 3 * j) = (gram(i, j) / (sigma_a * sigma_a)) * M3D::Identity();
-      Lambda.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) = (gram(i, j) / (sigma_g * sigma_g)) * M3D::Identity();
+      const double curv_ij = copts_.curvature_weight * Curv(i, j);
+      Lambda.block<3, 3>(3 * i, 3 * j) = (gram(i, j) / (sigma_a * sigma_a) + curv_ij) * M3D::Identity();
+      Lambda.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) = (gram(i, j) / (sigma_g * sigma_g) + curv_ij) * M3D::Identity();
     }
 
   Eigen::MatrixXd Pi_ss = Eigen::MatrixXd::Zero(ncol_s, ncol_s);
@@ -833,7 +853,48 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   coupled_delta_phi0_ += delta_s.segment<3>(0);
   coupled_delta_pos0_ += delta_s.segment<3>(3);
   coupled_delta_v_    += delta_s.segment<3>(6);
-  coupled_delta_bg_   += delta_s.segment<3>(9);
+  // CQ-55 item 11(b): the principled fix, no threshold. A is regularised by
+  // Pi_ss/Lambda everywhere, so it is never actually singular along the
+  // degenerate bg/c_gyr direction even though the DATA says nothing there
+  // -- A^-1 (hence P(t1)) is then SMALL along it, and the filter reports
+  // having learned the split when it only inherited the prior's own
+  // assumption (item 11's own diagnosis). Decompose THIS iteration's raw
+  // bg increment into the eigenbasis of A^-1's own bg-marginal covariance;
+  // scale each component by a continuous confidence = 1 - min(1,
+  // posterior_var/prior_var) along that direction (0 = no info gained at
+  // all, 1 = fully data-determined) BEFORE folding it into the persistent
+  // bias. Only the persistent accumulator is touched -- c_vec's own
+  // increment (reset to zero every scan regardless) is untouched, so this
+  // cannot itself remove the c_gyr/bg degeneracy, only stop the PERSISTENT
+  // half of it from accumulating an unearned point estimate.
+  V3D delta_bg_this_iter = delta_s.segment<3>(9);
+  if (copts_.bias_observable_only) {
+    Eigen::LDLT<Eigen::MatrixXd> ldlt_full(A);
+    if (ldlt_full.info() == Eigen::Success) {
+      const Eigen::MatrixXd Ainv = ldlt_full.solve(Eigen::MatrixXd::Identity(ncol, ncol));
+      const M3D P_bg = Ainv.block<3, 3>(9, 9);
+      const M3D Pi_bg = Pi_ss.block<3, 3>(9, 9);
+      Eigen::FullPivLU<M3D> lu_pi(Pi_bg);
+      // Average prior variance along the bg block (trace(Pi_bg^-1)/3) --
+      // what P_bg WOULD be with no data at all this scan. Falls back to a
+      // large (effectively "fully unconstrained") value if Pi_bg happens
+      // to be singular, so an unavailable prior never masquerades as
+      // "fully observed" (rule 58: a fallback on an impossible condition
+      // must not look like a successful one -- this is the not-invertible
+      // case, made explicit rather than silently dividing by a near-zero).
+      const double prior_var = lu_pi.isInvertible()
+          ? std::max(lu_pi.inverse().trace() / 3.0, 1e-12) : 1e12;
+      Eigen::SelfAdjointEigenSolver<M3D> es(P_bg);
+      V3D filtered = V3D::Zero();
+      for (int k = 0; k < 3; ++k) {
+        const double conf = 1.0 - std::min(1.0, std::max(0.0, es.eigenvalues()(k) / prior_var));
+        const V3D v = es.eigenvectors().col(k);
+        filtered += conf * (v.dot(delta_bg_this_iter)) * v;
+      }
+      delta_bg_this_iter = filtered;
+    }
+  }
+  coupled_delta_bg_   += delta_bg_this_iter;
   coupled_delta_ba_   += delta_s.segment<3>(12);
   coupled_delta_g_    += delta_s.segment<3>(15);
   for (int j = 0; j < n_c; ++j) {

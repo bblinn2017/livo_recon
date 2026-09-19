@@ -125,6 +125,15 @@ struct LioProcCoupledOptions
   // 8.72665e-4 rad/s) as a starting point for item 6's own run to react
   // against, not a validated physical spec.
   static constexpr double BIAS_ANCHOR_SIGMA_RAD_S_DEFAULT = 8.72665e-4;
+  // CQ-55 item 6: second-difference curvature penalty weight on the
+  // correction coefficients, added to Lambda alongside (not instead of)
+  // the existing basis-Gram value term. Default 0.0 -- md5-inert.
+  double curvature_weight = 0.0;
+  // CQ-55 item 11(b): the principled, threshold-free alternative to
+  // freeze_bg/bias_freeze_on_vibration -- see estimateCoupledCorrection()'s
+  // own comment at the accumulation site for the full mechanism. Default
+  // false.
+  bool bias_observable_only = false;
 };
 
 // CQ-49: the coupled estimator, reimplemented as its own class -- see

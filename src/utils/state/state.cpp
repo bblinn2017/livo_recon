@@ -256,8 +256,22 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "state/cov/gyr", var_gyr, 1e-4);
   var_acc_ = V3D::Constant(var_acc);
   var_gyr_ = V3D::Constant(var_gyr);
-  cov_bias_acc_ = V3D::Constant(cov_ba);
-  cov_bias_gyr_ = V3D::Constant(cov_bg);
+  // CQ-55 item 10: state/cov/bg and state/cov/ba used to seed BOTH the
+  // initial covariance (units rad^2/s^2, "we just calibrated and are not
+  // sure") AND the random-walk RATE (units rad^2/s^3, imu_processing.cpp's
+  // q_alpha_bias*covBiasGyr()*dt term) -- two independent physical facts
+  // that cannot correctly share one value. Measured: with the initial
+  // value (1e-5 in config/ntu_viral.yaml) used as the rate, the licensed
+  // 1-sigma gyro-bias walk over a 69.4s window is 543x a MEMS sensor's own
+  // quoted in-run stability. Split into their own keys, each DEFAULTING TO
+  // THE SAME VALUE the (still-present) initial-covariance key uses, so this
+  // is provably md5-inert unless a config explicitly sets the new key --
+  // rule 26 item 1, no new default chosen here.
+  double bias_gyr_rw = cov_bg, bias_acc_rw = cov_ba;
+  paramWarn<double>(pnh, "imu/bias_gyr_rw", bias_gyr_rw, cov_bg);
+  paramWarn<double>(pnh, "imu/bias_acc_rw", bias_acc_rw, cov_ba);
+  cov_bias_acc_ = V3D::Constant(bias_acc_rw);
+  cov_bias_gyr_ = V3D::Constant(bias_gyr_rw);
 
   std::ostringstream oss;
   oss << "[params/transform]"
