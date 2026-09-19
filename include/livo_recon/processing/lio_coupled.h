@@ -214,6 +214,13 @@ private:
   double coupled_c_acc_dc_over_sigma_ = -1.0, coupled_c_gyr_dc_over_sigma_ = -1.0;
   double coupled_dba_over_sigma_ = -1.0, coupled_dbg_over_sigma_ = -1.0;
   double coupled_c_acc_over_sigma_ = -1.0, coupled_c_gyr_over_sigma_ = -1.0;
+  // CQ-56 (spline-magnitude diagnostics): the SAME RMS-per-coefficient
+  // accumulated c_acc/c_gyr magnitude as the _over_sigma pair above, but in
+  // RAW physical units (m/s^2 for c_acc, rad/s for c_gyr) rather than
+  // sigma-normalized -- lets the "how much curvature_weight suppresses the
+  // spline" comparison be read directly, without needing sigma_a/sigma_g
+  // from the same run to de-normalize it back out.
+  double coupled_c_acc_total_norm_ = -1.0, coupled_c_gyr_total_norm_ = -1.0;
   double coupled_delta_v_norm_ = -1.0, coupled_delta_g_norm_ = -1.0;
   // Item G1(a)/(c): velocity- and gravity-block posterior trace.
   double coupled_trP_vel_ = -1.0, coupled_trP_grav_ = -1.0;
@@ -273,6 +280,11 @@ private:
   // each call and read by processLIO()'s own iter_error.txt write (which
   // runs once per GN iteration already, right after the call).
   double coupled_last_delta_s_norm_ = -1.0, coupled_last_delta_c_norm_ = -1.0;
+  // CQ-56: the SAME per-iteration step, split into its c_acc (position
+  // spline) and c_gyr (rotation spline) halves -- delta_c_norm above is
+  // their combined norm, which can't distinguish "acc coefficients moved a
+  // lot, gyr didn't" from the reverse.
+  double coupled_last_delta_c_acc_norm_ = -1.0, coupled_last_delta_c_gyr_norm_ = -1.0;
 
   // CQ-53 item 4: per-scan RMS (not mean-absolute -- sum_abs_r/error above
   // is already mean-|r|) residual, in meters, over the FINAL GN iteration's

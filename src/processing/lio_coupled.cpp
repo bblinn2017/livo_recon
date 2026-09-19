@@ -189,7 +189,9 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           << "  rel_diff=" << ((prev_error - error) / std::max(prev_error, 1e-6))
           // CQ-53 item 3: THIS iteration's own step norms.
           << "  delta_s_norm=" << coupled_last_delta_s_norm_
-          << "  delta_c_norm=" << coupled_last_delta_c_norm_;
+          << "  delta_c_norm=" << coupled_last_delta_c_norm_
+          << "  delta_c_acc_norm=" << coupled_last_delta_c_acc_norm_
+          << "  delta_c_gyr_norm=" << coupled_last_delta_c_gyr_norm_;
       static PersistentLogStream log("iter_error.txt");
       std::ofstream& ofs = log.stream();
       ofs << iss.str() << "\n";
@@ -377,6 +379,8 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         << " h_rr_min_eig=" << coupled_h_rr_min_eig_
         << " c_acc_over_sigma=" << coupled_c_acc_over_sigma_
         << " c_gyr_over_sigma=" << coupled_c_gyr_over_sigma_
+        << " c_acc_total_norm=" << coupled_c_acc_total_norm_
+        << " c_gyr_total_norm=" << coupled_c_gyr_total_norm_
         << " c_acc_dc_over_sigma=" << coupled_c_acc_dc_over_sigma_
         << " c_gyr_dc_over_sigma=" << coupled_c_gyr_dc_over_sigma_
         << " dba_over_sigma=" << coupled_dba_over_sigma_
@@ -851,6 +855,11 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // total below).
   coupled_last_delta_s_norm_ = delta_s.norm();
   coupled_last_delta_c_norm_ = delta_c.norm();
+  // CQ-56: split THIS iteration's step into its c_acc/c_gyr halves --
+  // delta_c's own layout is [c_acc(3*n_c), c_gyr(3*n_c)], same order as
+  // c_vec above.
+  coupled_last_delta_c_acc_norm_ = delta_c.segment(0, 3 * n_c).norm();
+  coupled_last_delta_c_gyr_norm_ = delta_c.segment(3 * n_c, 3 * n_c).norm();
   // Item 3e(v)/3f bug 2: same [phi0,p0,v,bg,ba,g] order as s_vec above.
   coupled_delta_phi0_ += delta_s.segment<3>(0);
   coupled_delta_pos0_ += delta_s.segment<3>(3);
@@ -943,6 +952,12 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     for (int j = 0; j < n_c; ++j) { sq_acc += coupled_c_acc_[j].squaredNorm(); sq_gyr += coupled_c_gyr_[j].squaredNorm(); }
     coupled_c_acc_over_sigma_ = std::sqrt(sq_acc / static_cast<double>(n_c)) / sigma_a;
     coupled_c_gyr_over_sigma_ = std::sqrt(sq_gyr / static_cast<double>(n_c)) / sigma_g;
+    // CQ-56: the same RMS-per-coefficient totals, in raw physical units
+    // (m/s^2, rad/s) rather than sigma-normalized -- directly comparable
+    // across runs with different sigma_a/sigma_g (e.g. adaptive_sigma on
+    // vs off) without needing to de-normalize.
+    coupled_c_acc_total_norm_ = std::sqrt(sq_acc / static_cast<double>(n_c));
+    coupled_c_gyr_total_norm_ = std::sqrt(sq_gyr / static_cast<double>(n_c));
     coupled_delta_v_norm_ = coupled_delta_v_.norm();
     coupled_delta_g_norm_ = coupled_delta_g_.norm();
     // CQ-54 item 5: the angular-rate correction actually used is
