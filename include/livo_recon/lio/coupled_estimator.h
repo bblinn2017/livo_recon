@@ -14,8 +14,17 @@
 // same uniform-cubic-B-spline basis shape as ScanSpline's own (see basisU(),
 // spline.cpp), but parameterising the IMU correction directly rather than a
 // position spline, and NOT tied to ScanSpline::n_cp/control_point_hz --
-// round-64 already measured that knob buys nothing (40-130Hz, flat ATE) and
-// item 2 of the card explicitly says not to reuse it.
+// item 2 of the card explicitly says not to reuse it, since it's a separate
+// resolution knob for a differently-purposed basis (a measurement CORRECTION
+// over one scan, not a position/orientation trajectory). NOTE: an earlier
+// version of this comment cited round-64's finding that control_point_hz
+// "buys nothing" (flat ATE, 40-130Hz) as supporting evidence -- that
+// measurement predates the CQ-21 valid_ bug fix that made ScanSpline's own
+// mechanism actually take effect, so it does not establish anything about
+// resolution sensitivity post-fix and should not be treated as a validated
+// reason on its own. n_c's independence from control_point_hz is still the
+// right design (different basis, different purpose), just not for that
+// reason.
 //
 // propagateCoupled() re-integrates ONE scan's already-computed raw pose
 // chain (LioProc::processLIO()'s own mg.poses, i.e. ImuProc::propagate()'s

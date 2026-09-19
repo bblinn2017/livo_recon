@@ -564,6 +564,23 @@ void LioProcDecoupled::finalizeSplineAndQ(MeasureGroup& mg)
       const M3D P_rr = have_r ? M3D(P.block<3, 3>(iR, iR)) : M3D::Zero();
       const double t_abs = mg.image.t + data_queues_->start_time;
 
+      // Motion-onset investigation (2026-09-19): velocity + bias/gravity
+      // state and covariance blocks, previously not logged at all for
+      // either estimator -- needed to compare decoupled vs coupled beyond
+      // position/rotation. idxV() is always valid (velocity is always
+      // estimated); idxBG()/idxBA()/idxG() are -1 when that state isn't
+      // estimated, same have_* guard convention as have_p/have_r above.
+      const int iV = StateGroup::idxV();
+      const bool have_v = P.rows() >= iV + 3 && P.cols() >= iV + 3;
+      const M3D P_vv = have_v ? M3D(P.block<3, 3>(iV, iV)) : M3D::Zero();
+      const int iBG = state_->idxBG(), iBA = state_->idxBA(), iGr = state_->idxG();
+      const bool have_bg = iBG >= 0 && P.rows() >= iBG + 3 && P.cols() >= iBG + 3;
+      const bool have_ba = iBA >= 0 && P.rows() >= iBA + 3 && P.cols() >= iBA + 3;
+      const bool have_gr = iGr >= 0 && P.rows() >= iGr + 3 && P.cols() >= iGr + 3;
+      const double trP_bg = have_bg ? P.block<3, 3>(iBG, iBG).trace() : -1.0;
+      const double trP_ba = have_ba ? P.block<3, 3>(iBA, iBA).trace() : -1.0;
+      const double trP_grav = have_gr ? P.block<3, 3>(iGr, iGr).trace() : -1.0;
+
       // item (5): free_tail_d, using diagnosticFreeTailFit() with the
       // regularizers FORCED ON (curvature_weight=1.0, imu_acc_weight=1.0)
       // regardless of this run's own dopts_.spline -- the card's own
@@ -622,6 +639,20 @@ void LioProcDecoupled::finalizeSplineAndQ(MeasureGroup& mg)
           << " Prr_yy=" << P_rr(1, 1) << " Prr_yz=" << P_rr(1, 2) << " Prr_zz=" << P_rr(2, 2)
           << " have_Ppp=" << (have_p ? 1 : 0) << " have_Prr=" << (have_r ? 1 : 0)
           << " free_tail_d=" << free_tail_d
+          << " state_vx=" << state_->vel().x() << " state_vy=" << state_->vel().y()
+          << " state_vz=" << state_->vel().z()
+          << " Pvv_xx=" << P_vv(0, 0) << " Pvv_xy=" << P_vv(0, 1) << " Pvv_xz=" << P_vv(0, 2)
+          << " Pvv_yy=" << P_vv(1, 1) << " Pvv_yz=" << P_vv(1, 2) << " Pvv_zz=" << P_vv(2, 2)
+          << " have_Pvv=" << (have_v ? 1 : 0)
+          << " state_bgx=" << state_->biasGyr().x() << " state_bgy=" << state_->biasGyr().y()
+          << " state_bgz=" << state_->biasGyr().z()
+          << " state_bax=" << state_->biasAcc().x() << " state_bay=" << state_->biasAcc().y()
+          << " state_baz=" << state_->biasAcc().z()
+          << " state_gx=" << state_->gravity().x() << " state_gy=" << state_->gravity().y()
+          << " state_gz=" << state_->gravity().z()
+          << " trP_bg=" << trP_bg << " trP_ba=" << trP_ba << " trP_grav=" << trP_grav
+          << " have_Pbg=" << (have_bg ? 1 : 0) << " have_Pba=" << (have_ba ? 1 : 0)
+          << " have_Pgrav=" << (have_gr ? 1 : 0)
           << "\n";
       ofs.flush();
 
