@@ -216,6 +216,18 @@ struct LioProcOptions
   // one. Default false (the un-constrained, prior-determined arm); both are
   // run and compared per the card, neither presumed correct.
   bool estimator_zero_mean = false;
+  // Diagnostic toggle, 2026-09-19: drops c_gyr (the within-scan rotation
+  // CORRECTION basis) out of the joint solve entirely, leaving delta_bg
+  // (a single rigid per-scan gyro-bias correction) as the only rotation
+  // correction mechanism -- mirrors what the DECOUPLED path implicitly
+  // does (refineWithLidar() never touches cp_phi_ at all; the EKF's own
+  // bounded pose-block dtheta is the only rotation correction that
+  // exists there). Testing whether c_gyr's own strong cross-correlation
+  // with delta_bg (found empirically: cross_bg_cgyr comparable in
+  // magnitude to their own diagonal information, condition number
+  // 4-6e5) is the P-collapse mechanism, independent of the zero_mean
+  // fix (which did not resolve it). Default false.
+  bool estimator_disable_cgyr = false;
 };
 
 

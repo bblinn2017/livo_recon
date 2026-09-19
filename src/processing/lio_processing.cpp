@@ -131,6 +131,8 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
                   "lio/estimator/n_c", opts_.estimator_n_c, 4);
   cfg.nested<bool>(opts_.estimatorCoupled(), "lio/estimator/mode",
                    "lio/estimator/zero_mean", opts_.estimator_zero_mean, false);
+  cfg.nested<bool>(opts_.estimatorCoupled(), "lio/estimator/mode",
+                   "lio/estimator/disable_cgyr", opts_.estimator_disable_cgyr, false);
 
   // History (134-136): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-134
   double range_err;
@@ -1010,12 +1012,55 @@ double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D
     Eigen::Matrix<double, 1, Eigen::Dynamic> Jrow(1, ncol);
     Jrow.segment(0, ncol_s) = H * Phix_pt.topRows(6);          // R,P rows only (item 3b/3c)
     Jrow.segment(ncol_s, ncol_c) = H * Phic_pt.topRows(6);
+    // Diagnostic toggle: zero c_gyr's own columns (the last 3*n_c of the
+    // c-block, per coupled_estimator.h's own documented column order
+    // [c_acc(3*n_c), c_gyr(3*n_c)]) AFTER computing them, so c_gyr gets NO
+    // LiDAR information at all -- its posterior then equals its prior
+    // (Lambda) exactly, i.e. c_gyr never moves and never correlates with
+    // anything else in A (the cross term with delta_bg this toggle exists
+    // to test is a Jrow-column product, and one factor is now identically
+    // zero). delta_bg (the ONLY rotation-correction path left active) is
+    // untouched -- this is not "no rotation correction at all", it is
+    // "rotation correction exactly as bounded as the decoupled path's own
+    // EKF pose-block dtheta, no within-scan SHAPE parameterisation".
+    if (opts_.estimator_disable_cgyr) Jrow.segment(ncol_s + 3 * n_c, 3 * n_c).setZero();
     const double w = 1.0 / res.sigma_squared;
     A.noalias() += w * (Jrow.transpose() * Jrow);
     b.noalias() -= w * Jrow.transpose() * res.r;
     sum_abs_r += std::abs(res.r);
   }
   coupled_last_A_ = A;
+
+  if (voxel_map_->frame_idx_ >= 8 && voxel_map_->frame_idx_ <= 12) {
+    static PersistentLogStream dbg("cq44_infomag_debug.txt");
+    std::ofstream& ofs = dbg.stream();
+    Eigen::MatrixXd info_only_s = A.block(0, 0, ncol_s, ncol_s) - Pi_ss;  // pure Sum(w*Jx'*Jx)
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(info_only_s);
+    // Cross block between s (rows 0-11) and c (cols 12..) -- the mechanism
+    // item 3d names (DC(c) vs bias degeneracy) would show up here as large
+    // entries connecting the bg rows (3-5) to the c_gyr columns specifically.
+    const Eigen::MatrixXd cross_bg_cgyr = A.block(3, ncol_s + 3 * n_c, 3, 3 * n_c);
+    // c-block's own info vs its prior (Lambda), split acc/gyr halves --
+    // tests whether c_gyr specifically is unusually informed/ill-conditioned
+    // relative to c_acc, independent of the bg cross-coupling above.
+    Eigen::MatrixXd info_only_c = A.block(ncol_s, ncol_s, ncol_c, ncol_c) - Lambda;
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_cacc(info_only_c.block(0, 0, 3 * n_c, 3 * n_c));
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_cgyr(info_only_c.block(3 * n_c, 3 * n_c, 3 * n_c, 3 * n_c));
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_full(A);
+    ofs << std::setprecision(6)
+        << "scan=" << voxel_map_->frame_idx_ << " n_res=" << residuals_.size()
+        << " info_only_s_diag=" << info_only_s.diagonal().transpose()
+        << " Pi_ss_diag=" << Pi_ss.diagonal().transpose()
+        << " cross_bg_cgyr_norm=" << cross_bg_cgyr.norm()
+        << " cross_bg_cgyr_maxabs=" << cross_bg_cgyr.cwiseAbs().maxCoeff()
+        << " info_only_cacc_eig=" << es_cacc.eigenvalues().transpose()
+        << " info_only_cgyr_eig=" << es_cgyr.eigenvalues().transpose()
+        << " Lambda_acc_diag0=" << Lambda(0,0) << " Lambda_gyr_diag0=" << Lambda(3*n_c,3*n_c)
+        << " A_full_eig_minmax=" << es_full.eigenvalues().minCoeff() << "/" << es_full.eigenvalues().maxCoeff()
+        << " A_full_cond=" << es_full.eigenvalues().maxCoeff()/std::max(std::abs(es_full.eigenvalues().minCoeff()),1e-300)
+        << "\n";
+    ofs.flush();
+  }
 
   Eigen::VectorXd delta = Eigen::VectorXd::Zero(ncol);
   if (opts_.estimator_zero_mean) {
@@ -2045,6 +2090,17 @@ std::string LioProc::processLIO(MeasureGroup& mg)
         // is the whole reason this sits here and not at the top of the next
         // iteration (Bryce, 2026-09-06).
         refineSplineFromResiduals(mg);
+
+        if (voxel_map_->frame_idx_ >= 8 && voxel_map_->frame_idx_ <= 12) {
+          static PersistentLogStream dbg("cq44_infomag_debug.txt");
+          std::ofstream& ofs = dbg.stream();
+          ofs << std::setprecision(6)
+              << "DECOUPLED scan=" << voxel_map_->frame_idx_ << " iter=" << iter
+              << " n_res=" << residuals_.size()
+              << " HtH_diag=" << ekf_.HtH.diagonal().transpose()
+              << "\n";
+          ofs.flush();
+        }
       }
       if (!residuals_.empty()) any_solved = true;
       total_dtheta += dtheta;
