@@ -139,6 +139,27 @@ struct LioProcCoupledOptions
   // own comment at the accumulation site for the full mechanism. Default
   // false.
   bool bias_observable_only = false;
+  // CQ-55 item 8, arm (c): when true, the basis-Gram value term
+  // (gram(i,j)/sigma^2) is REPLACED (not supplemented) by curvature_weight's
+  // second-difference term plus an explicit DC-only prior (dc_weight below)
+  // -- see estimateCoupledCorrection()'s Lambda-construction comment for why
+  // a pure curvature penalty alone is an invalid configuration (its 2D null
+  // space per axis -- constant AND linear -- leaves the bias-degenerate
+  // constant direction completely unpriced; the DC term prices exactly
+  // that one direction back). Default false, no-op (curvature_weight's own
+  // existing value+curvature behavior is unchanged when this is off).
+  bool curvature_only = false;
+  // Precision (relative to 1/sigma^2, same scale the removed gram term
+  // used) of the explicit DC/mean-direction-only prior arm (c) adds back.
+  // Only read when curvature_only is true. Default 0.0 -- no validated
+  // value exists yet (rule 26); a test run must set this explicitly.
+  double dc_weight = 0.0;
+  // CQ-55 item 11(a): report-only, free -- log each scan's bg-block
+  // posterior covariance eigenvalues (degenerate vs. well-observed
+  // directions), independent of whether bias_observable_only itself is
+  // engaged. Default false (the extra ncol x ncol inverse this requires is
+  // not free enough to run unconditionally).
+  bool log_bg_projection_en = false;
 };
 
 // CQ-49: the coupled estimator, reimplemented as its own class -- see
@@ -221,6 +242,19 @@ private:
   // spline" comparison be read directly, without needing sigma_a/sigma_g
   // from the same run to de-normalize it back out.
   double coupled_c_acc_total_norm_ = -1.0, coupled_c_gyr_total_norm_ = -1.0;
+  // CQ-55 item 12: S = floor_term + sigma_diag_squared + plane_var_term +
+  // s_prior_pose per residual, summed over this scan's accepted residuals
+  // -- the absolute-units denominator the floor/sdiag/pvar/prior_pose
+  // SHARES (elsewhere, decoupled-only so far) have always been reported as
+  // fractions of, with the absolute magnitude itself never logged before
+  // now, on EITHER path.
+  double coupled_sum_S_ = -1.0;
+  // CQ-55 item 11(a): this scan's bg-block posterior covariance (P_bg =
+  // A^-1's 9:12,9:12 block), split into its "degenerate" (largest
+  // eigenvalue, least-observed) and "well-observed" (smallest eigenvalue)
+  // directions -- report-only, computed independent of
+  // bias_observable_only's own confidence-weighted correction.
+  double coupled_bg_var_degenerate_ = -1.0, coupled_bg_var_observed_ = -1.0;
   double coupled_delta_v_norm_ = -1.0, coupled_delta_g_norm_ = -1.0;
   // Item G1(a)/(c): velocity- and gravity-block posterior trace.
   double coupled_trP_vel_ = -1.0, coupled_trP_grav_ = -1.0;

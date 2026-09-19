@@ -61,6 +61,9 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_anchor", copts_.bias_anchor, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/curvature_weight", copts_.curvature_weight, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_observable_only", copts_.bias_observable_only, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/curvature_only", copts_.curvature_only, false);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/dc_weight", copts_.dc_weight, 0.0);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_bg_projection_en", copts_.log_bg_projection_en, false);
 
   // Every spline/* and adaptive_q/* key is unclaimed by this class by
   // construction -- refuseUnclaimed only needs to additionally cover
@@ -87,6 +90,9 @@ std::string LioProcCoupled::engagementReport() const
       << " bias_anchor=" << (copts_.bias_anchor ? "true" : "false")
       << " curvature_weight=" << copts_.curvature_weight
       << " bias_observable_only=" << (copts_.bias_observable_only ? "true" : "false")
+      << " curvature_only=" << (copts_.curvature_only ? "true" : "false")
+      << " dc_weight=" << copts_.dc_weight
+      << " log_bg_projection_en=" << (copts_.log_bg_projection_en ? "true" : "false")
       << " -- no spline/AdaptiveQ engagement to report (this class has "
          "neither)";
   return oss.str();
@@ -381,6 +387,9 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         << " c_gyr_over_sigma=" << coupled_c_gyr_over_sigma_
         << " c_acc_total_norm=" << coupled_c_acc_total_norm_
         << " c_gyr_total_norm=" << coupled_c_gyr_total_norm_
+        << " sum_S=" << coupled_sum_S_
+        << " bg_var_degenerate=" << coupled_bg_var_degenerate_
+        << " bg_var_observed=" << coupled_bg_var_observed_
         << " c_acc_dc_over_sigma=" << coupled_c_acc_dc_over_sigma_
         << " c_gyr_dc_over_sigma=" << coupled_c_gyr_dc_over_sigma_
         << " dba_over_sigma=" << coupled_dba_over_sigma_
@@ -586,12 +595,26 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     for (int k = 0; k < n_c - 2; ++k) { D(k, k) = 1.0; D(k, k + 1) = -2.0; D(k, k + 2) = 1.0; }
     Curv = D.transpose() * D;
   }
+  // CQ-55 item 8, arm (c): curvature_only REPLACES the gram/sigma^2 value
+  // term with curvature_weight's shape penalty plus an explicit DC-only
+  // prior (dc_weight/sigma^2, applied UNIFORMLY to every (i,j) pair -- a
+  // rank-1 all-ones contribution whose quadratic form for c is exactly
+  // dc_weight/sigma^2 * n_c * ||mean(c)||^2, pricing the mean/constant
+  // direction only). A pure curvature penalty's 2D null space per axis
+  // (constant AND linear both map to zero under [1,-2,1]) would otherwise
+  // leave the bias-degenerate constant direction completely unpriced --
+  // this term is what keeps arm (c) a valid configuration at all. Default
+  // false: arm (a)/(b)'s existing value(+curvature) behavior is unchanged.
   Eigen::MatrixXd Lambda = Eigen::MatrixXd::Zero(ncol_c, ncol_c);
   for (int i = 0; i < n_c; ++i)
     for (int j = 0; j < n_c; ++j) {
       const double curv_ij = copts_.curvature_weight * Curv(i, j);
-      Lambda.block<3, 3>(3 * i, 3 * j) = (gram(i, j) / (sigma_a * sigma_a) + curv_ij) * M3D::Identity();
-      Lambda.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) = (gram(i, j) / (sigma_g * sigma_g) + curv_ij) * M3D::Identity();
+      const double value_acc = copts_.curvature_only ? 0.0 : gram(i, j) / (sigma_a * sigma_a);
+      const double value_gyr = copts_.curvature_only ? 0.0 : gram(i, j) / (sigma_g * sigma_g);
+      const double dc_acc = copts_.curvature_only ? copts_.dc_weight / (sigma_a * sigma_a) : 0.0;
+      const double dc_gyr = copts_.curvature_only ? copts_.dc_weight / (sigma_g * sigma_g) : 0.0;
+      Lambda.block<3, 3>(3 * i, 3 * j) = (value_acc + curv_ij + dc_acc) * M3D::Identity();
+      Lambda.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) = (value_gyr + curv_ij + dc_gyr) * M3D::Identity();
     }
 
   Eigen::MatrixXd Pi_ss = Eigen::MatrixXd::Zero(ncol_s, ncol_s);
@@ -675,6 +698,11 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   double sum_abs_r = 0.0;
   double sum_sq_r = 0.0;  // CQ-53 item 4
   double sum_wr2 = 0.0;   // CQ-54 item 4
+  // CQ-55 item 12: S = floor_term + sigma_diag_squared + plane_var_term +
+  // s_prior_pose per residual, same definition lio_decoupled.cpp's own
+  // sum_S uses -- summed here so the coupled path reports the SAME
+  // absolute-units denominator, never logged on this path before now.
+  double sum_floor_S = 0.0, sum_sdiag_S = 0.0, sum_pvar_S = 0.0, sum_prior_pose_S = 0.0;
   std::vector<double> hcol_reldiff;  // CQ-53 item 2
   hcol_reldiff.reserve(residuals_.size());
   // TQ-40 item 3: pure-LiDAR-info accumulation restricted to [delta_phi0,
@@ -763,6 +791,13 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     sum_abs_r += std::abs(res.r);
     sum_sq_r += res.r * res.r;
     sum_wr2 += w * res.r * res.r;  // CQ-54 item 4: reduced chi-square numerator
+    // CQ-55 item 12: same accept/skip rule as lio_decoupled.cpp's own sum_S.
+    if (res.floor_term >= 0.0 && res.sigma_diag_squared >= 0.0 && res.s_prior_pose >= 0.0) {
+      sum_floor_S      += res.floor_term;
+      sum_sdiag_S      += res.sigma_diag_squared;
+      sum_pvar_S       += res.plane_var_term;
+      sum_prior_pose_S += res.s_prior_pose;
+    }
     // TQ-40 item 3: matches ekf_.HtH/Htz's own "+H'*W*r" convention exactly
     // (H here is the SAME 1x6 row, since Jrow.head(6) IS H*Phix_pt.topRows(6)
     // restricted to the phi0/p0 columns -- Phix_pt's own phi0/p0 columns are
@@ -780,6 +815,10 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // every iteration so the FINAL (converged) call's values survive.
   coupled_res_rms_ = residuals_.empty() ? -1.0 : std::sqrt(sum_sq_r / static_cast<double>(residuals_.size()));
   coupled_reduced_chi2_ = residuals_.empty() ? -1.0 : sum_wr2 / static_cast<double>(residuals_.size());
+  {
+    const double sum_S = sum_floor_S + sum_sdiag_S + sum_pvar_S + sum_prior_pose_S;
+    coupled_sum_S_ = (sum_S > 0.0) ? sum_S : -1.0;
+  }
   if (!hcol_reldiff.empty()) {
     std::sort(hcol_reldiff.begin(), hcol_reldiff.end());
     const size_t n = hcol_reldiff.size();
@@ -879,30 +918,43 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // cannot itself remove the c_gyr/bg degeneracy, only stop the PERSISTENT
   // half of it from accumulating an unearned point estimate.
   V3D delta_bg_this_iter = delta_s.segment<3>(9);
-  if (copts_.bias_observable_only) {
+  // CQ-55 item 11(a): report-only bg-projection logging shares the SAME
+  // A^-1 inversion bias_observable_only needs, computed once if either is
+  // engaged -- avoids paying for a second ncol x ncol solve when both are
+  // on, while item 11(a) stays available independent of 11(b)'s own flag.
+  if (copts_.bias_observable_only || copts_.log_bg_projection_en) {
     Eigen::LDLT<Eigen::MatrixXd> ldlt_full(A);
     if (ldlt_full.info() == Eigen::Success) {
       const Eigen::MatrixXd Ainv = ldlt_full.solve(Eigen::MatrixXd::Identity(ncol, ncol));
       const M3D P_bg = Ainv.block<3, 3>(9, 9);
-      const M3D Pi_bg = Pi_ss.block<3, 3>(9, 9);
-      Eigen::FullPivLU<M3D> lu_pi(Pi_bg);
-      // Average prior variance along the bg block (trace(Pi_bg^-1)/3) --
-      // what P_bg WOULD be with no data at all this scan. Falls back to a
-      // large (effectively "fully unconstrained") value if Pi_bg happens
-      // to be singular, so an unavailable prior never masquerades as
-      // "fully observed" (rule 58: a fallback on an impossible condition
-      // must not look like a successful one -- this is the not-invertible
-      // case, made explicit rather than silently dividing by a near-zero).
-      const double prior_var = lu_pi.isInvertible()
-          ? std::max(lu_pi.inverse().trace() / 3.0, 1e-12) : 1e12;
       Eigen::SelfAdjointEigenSolver<M3D> es(P_bg);
-      V3D filtered = V3D::Zero();
-      for (int k = 0; k < 3; ++k) {
-        const double conf = 1.0 - std::min(1.0, std::max(0.0, es.eigenvalues()(k) / prior_var));
-        const V3D v = es.eigenvectors().col(k);
-        filtered += conf * (v.dot(delta_bg_this_iter)) * v;
+      if (copts_.log_bg_projection_en) {
+        // Eigenvalues ascending (SelfAdjointEigenSolver's convention): (0)
+        // is the smallest posterior variance (best-observed direction),
+        // (2) the largest (the degenerate/least-observed direction).
+        coupled_bg_var_observed_   = es.eigenvalues()(0);
+        coupled_bg_var_degenerate_ = es.eigenvalues()(2);
       }
-      delta_bg_this_iter = filtered;
+      if (copts_.bias_observable_only) {
+        const M3D Pi_bg = Pi_ss.block<3, 3>(9, 9);
+        Eigen::FullPivLU<M3D> lu_pi(Pi_bg);
+        // Average prior variance along the bg block (trace(Pi_bg^-1)/3) --
+        // what P_bg WOULD be with no data at all this scan. Falls back to a
+        // large (effectively "fully unconstrained") value if Pi_bg happens
+        // to be singular, so an unavailable prior never masquerades as
+        // "fully observed" (rule 58: a fallback on an impossible condition
+        // must not look like a successful one -- this is the not-invertible
+        // case, made explicit rather than silently dividing by a near-zero).
+        const double prior_var = lu_pi.isInvertible()
+            ? std::max(lu_pi.inverse().trace() / 3.0, 1e-12) : 1e12;
+        V3D filtered = V3D::Zero();
+        for (int k = 0; k < 3; ++k) {
+          const double conf = 1.0 - std::min(1.0, std::max(0.0, es.eigenvalues()(k) / prior_var));
+          const V3D v = es.eigenvectors().col(k);
+          filtered += conf * (v.dot(delta_bg_this_iter)) * v;
+        }
+        delta_bg_this_iter = filtered;
+      }
     }
   }
   coupled_delta_bg_   += delta_bg_this_iter;
