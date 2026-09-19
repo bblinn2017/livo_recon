@@ -9,6 +9,7 @@
 #include "livo_recon/utils/log/profiler.h"
 #include "livo_recon/lio/deskew.h"
 #include "livo_recon/lio/spline.h"
+#include "livo_recon/lio/coupled_estimator.h"
 #include "livo_recon/lio/adaptive_q.h"
 #include "livo_recon/lio/residual_redundancy.h"
 #include "livo_recon/lio/residual_weighting.h"
@@ -192,6 +193,19 @@ struct LioProcOptions
 
   // History (194-222): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-194
   bool log_nll_en = false;
+
+  // CQ-44: "decoupled" (DEFAULT, the shipped path -- estimateStateCorrection()
+  // + refineSplineFromResiduals() as today) or "coupled" (the new estimator:
+  // one basis-parameterised IMU-measurement correction, replacing the LiDAR
+  // pose-block update rather than adding to it -- see lio/coupled_estimator.h).
+  // At "decoupled" not one new line executes; behaviour is byte-identical to
+  // before this option existed (verified via the item-0 md5 check in the
+  // CQ-44 filing, not merely asserted here).
+  std::string estimator_mode = "decoupled";
+  bool estimatorCoupled() const { return estimator_mode == "coupled"; }
+  // n_c control points for the correction basis (item 2: NOT
+  // control_point_hz -- a separate resolution knob for a different spline).
+  int estimator_n_c = 4;
 };
 
 
@@ -236,6 +250,19 @@ public:
   // just accumulated, before the same residuals are used to solve.  Both
   // clamps are frozen in the solve, so it owns the interior only.
   bool refineSplineFromResiduals(const MeasureGroup& mg);
+
+  // CQ-44: ONE Gauss-Newton step of the coupled estimator. Re-propagates
+  // mg.poses with the current coefficient estimate (lio/coupled_estimator.h),
+  // re-deskews mg.points against that corrected trajectory, rebuilds
+  // residuals (buildResiduals() -- UNCHANGED, item 3), solves the normal
+  // equations for (Λ + JᵀR⁻¹J) δc = JᵀR⁻¹r + Λ(0 - c), and applies δc. Does
+  // NOT touch state_'s pose block and does NOT call refineSplineFromResiduals()
+  // -- see the .cpp for the in-code assertion this card's item 3 requires.
+  // Called from processLIO()'s own iteration loop in place of
+  // estimateStateCorrection() whenever opts_.estimatorCoupled(). Returns the
+  // scalar error metric processLIO()'s own convergence check already expects
+  // (mirrors estimateStateCorrection()'s own return contract).
+  double estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out);
 
   // Raw IMU + the CURRENT biases/gravity for the fit's optional acc/gyro term.
   // The samples pointer is left null unless a weight is actually non-zero, so
@@ -518,6 +545,26 @@ private:
   // failed) -- read by debugLogFrameStats() the same frame it's computed.
   double boundary_dpos_ = -1.0;
   double boundary_drot_deg_ = -1.0;
+
+  // CQ-44 G0: under estimator_mode=="coupled" these are forced to exactly
+  // 0.0 every scan (never -1.0) -- see estimateCoupledCorrection()'s own
+  // comment for the structural argument (there is no separate spline t0 to
+  // compare against; this scan's own propagation start IS the previous
+  // scan's own coupled endpoint, by construction, so no discrepancy can
+  // exist to measure).
+  double coupled_c_acc_over_sigma_p50_ = -1.0;   // diagnostic only (item 8)
+  double coupled_solve_ms_ = -1.0;
+  int    coupled_iters_ = 0;
+  // Persisted across this scan's own GN iterations (reset at the top of
+  // processLIO() each frame); NOT carried scan-to-scan -- c_prior = 0 every
+  // scan (item 4).
+  std::vector<V3D> coupled_c_acc_, coupled_c_gyr_;
+  CoupledPropagation coupled_prop_;
+  // The LAST GN iteration's own (Lambda + J'R^-1 J), kept so the item-5
+  // covariance term ((Lambda+J'R^-1J)^-1, via J_c) can be applied ONCE
+  // after the loop converges, against the FINAL linearisation, rather than
+  // re-solved from scratch.
+  Eigen::MatrixXd coupled_last_A_;
 
   // Fixed IEKF prior (mean + covariance), snapshotted ONCE per frame (top
   // of processLIO()'s inner iteration loop, before any solveSystem()/

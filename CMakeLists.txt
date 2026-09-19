@@ -126,6 +126,7 @@ add_executable(livo_recon_node
   src/lio/lio_accumulator.cpp
   src/lio/deskew.cpp
   src/lio/spline.cpp
+  src/lio/coupled_estimator.cpp
   src/lio/adaptive_q.cpp
   src/lio/residual_redundancy.cpp
   src/lio/residual_weighting.cpp

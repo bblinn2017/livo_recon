@@ -13,6 +13,7 @@
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <stdexcept>
 #include <cstdlib>
@@ -120,6 +121,14 @@ std::string LioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "lio/log_nll_en", opts_.log_nll_en, false);
   paramWarn<int>(pnh, "lio/dry_run_point_filter_num", opts_.dry_run_point_filter_num, 0);
   paramWarn<bool>(pnh, "cuda/enable",               cuda_enable_,          false);
+
+  // CQ-44: the ONE new mode key. "decoupled" is the DEFAULT and reproduces
+  // today's path exactly; "coupled" is the new estimator. n_c is read only
+  // inside the live scope, per config_resolve.h convention.
+  cfg.mode("lio/estimator/mode", opts_.estimator_mode, "decoupled",
+           { "decoupled", "coupled" });
+  cfg.nested<int>(opts_.estimatorCoupled(), "lio/estimator/mode",
+                  "lio/estimator/n_c", opts_.estimator_n_c, 4);
 
   // History (134-136): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-134
   double range_err;
@@ -856,6 +865,128 @@ bool LioProc::refineSplineFromResiduals(const MeasureGroup& mg)
                                  spline_frame_bias_acc_, spline_frame_gravity_,
                                  state_->varAccFloor().mean(), state_->covBiasAcc(),
                                  opts_.log_debug_en);
+}
+
+// CQ-44: one Gauss-Newton step of the coupled estimator. See
+// lio/coupled_estimator.h for the propagation/Jacobian math this calls into.
+double LioProc::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out)
+{
+  dtheta_out = V3D::Zero();
+  dt_out = V3D::Zero();
+  if (mg.poses.empty()) return 0.0;
+
+  const auto t_start = std::chrono::steady_clock::now();
+
+  const double t0 = mg.poses.front().t;
+  const double t1 = mg.image.t;
+  const int n_c = opts_.estimator_n_c;
+  const int ncol = 6 * n_c;
+  // Item 4: sigma_a/sigma_g are the CALIBRATION-FLOOR SIGMA, not the
+  // variance config/ntu_viral.yaml logs (acc=0.00434, gyr=0.0000636 are
+  // VARIANCES -- this project already filed a round on exactly this
+  // mistake; the sigma is sqrt(), 14.7x larger). Read once here from
+  // state_->varAccFloor()/varGyrFloor() (the SAME calibration-floor
+  // quantity TQ-34/TQ-38 both used) rather than a hardcoded literal, so a
+  // different calibration run changes this automatically.
+  const double sigma_a = std::sqrt(state_->varAccFloor().mean());
+  const double sigma_g = std::sqrt(state_->varGyrFloor().mean());
+
+  // ---- (1) re-propagate with the CURRENT coefficient estimate ----
+  propagateCoupled(mg.poses, state_propagat_.rot(), t1,
+                   mg.poses.front().rot, mg.poses.front().pos, mg.poses.front().vel,
+                   state_->gravity(), coupled_c_acc_, coupled_c_gyr_, n_c, coupled_prop_);
+
+  // ---- (2) re-deskew the FULL raw point set against this corrected
+  // trajectory, then downsample. Not CSR-optimized (re-downsamples every
+  // GN iteration rather than re-placing a fixed membership set the way
+  // redeskewFromSpline()'s per-iteration path does) -- a real scope/cost
+  // choice, named here and in the filing rather than silently assumed away;
+  // solve_ms_per_scan_p50 (below) is what it actually costs. ----
+  state_->setPropagatedState(coupled_prop_.rot1, coupled_prop_.pos1, coupled_prop_.vel1);
+  std::vector<PointXYZCov> deskewed;
+  deskewPoints(state_, coupled_prop_.poses, t1, mg.lidar_points, opts_.deskew, deskewed);
+  if (opts_.dsOn()) {
+    DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
+    voxelDownsample(deskewed, mg.points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
+  } else {
+    mg.points = std::move(deskewed);
+  }
+
+  // ---- (3) residuals -- UNCHANGED (item 3): the exact same
+  // buildResiduals() the decoupled path uses, over mg.points as just
+  // re-deskewed above. ----
+  buildResiduals(mg.points, residuals_, /*allow_consistency_log=*/false);
+
+  // ---- (4) the prior Lambda: a basis GRAM matrix over this scan's own IMU
+  // sample (pose head) times (item 3b), not a plain (1/sigma^2)*I -- so the
+  // prior's strength is independent of n_c. ----
+  Eigen::MatrixXd gram = Eigen::MatrixXd::Zero(n_c, n_c);
+  for (const auto& pose : mg.poses) {
+    std::vector<double> bw(n_c);
+    for (int j = 0; j < n_c; ++j) bw[j] = basisWeight(j, n_c, t0, t1, pose.t);
+    for (int i = 0; i < n_c; ++i)
+      for (int j = 0; j < n_c; ++j) gram(i, j) += bw[i] * bw[j];
+  }
+  Eigen::MatrixXd Lambda = Eigen::MatrixXd::Zero(ncol, ncol);
+  for (int i = 0; i < n_c; ++i)
+    for (int j = 0; j < n_c; ++j) {
+      Lambda.block<3, 3>(3 * i, 3 * j) = (gram(i, j) / (sigma_a * sigma_a)) * M3D::Identity();
+      Lambda.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) = (gram(i, j) / (sigma_g * sigma_g)) * M3D::Identity();
+    }
+
+  Eigen::VectorXd c_vec(ncol);
+  for (int j = 0; j < n_c; ++j) {
+    c_vec.segment<3>(3 * j) = coupled_c_acc_[j];
+    c_vec.segment<3>(3 * n_c + 3 * j) = coupled_c_gyr_[j];
+  }
+
+  // ---- (5) normal equations: (Lambda + J'R^-1 J) dc = J'R^-1 r + Lambda(0 - c) ----
+  Eigen::MatrixXd A = Lambda;
+  Eigen::VectorXd b = -(Lambda * c_vec);
+  double sum_abs_r = 0.0;
+  for (const auto& res : residuals_) {
+    Eigen::Matrix<double, 1, 6> H;
+    H.block<1, 3>(0, 0) = res.point_cross_normal.transpose();
+    H.block<1, 3>(0, 3) = res.normal.transpose();
+    const Eigen::Matrix<double, 9, Eigen::Dynamic> Phi_pt = interpolatePhi(coupled_prop_, res.t);
+    const Eigen::MatrixXd Jrow = H * Phi_pt.topRows(6);   // 1 x ncol -- R,P rows only (item 3b)
+    const double w = 1.0 / res.sigma_squared;
+    A.noalias() += w * (Jrow.transpose() * Jrow);
+    b.noalias() += w * Jrow.transpose() * res.r;
+    sum_abs_r += std::abs(res.r);
+  }
+  coupled_last_A_ = A;
+
+  Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
+  Eigen::VectorXd delta_c = Eigen::VectorXd::Zero(ncol);
+  if (ldlt.info() == Eigen::Success) delta_c = ldlt.solve(b);
+
+  for (int j = 0; j < n_c; ++j) {
+    coupled_c_acc_[j] += delta_c.segment<3>(3 * j);
+    coupled_c_gyr_[j] += delta_c.segment<3>(3 * n_c + 3 * j);
+  }
+
+  // ---- (6) re-propagate ONCE MORE with the updated c, so state_ and
+  // mg.points (via the caller's next iteration, or the loop exit) reflect
+  // what this step actually applied -- mirrors estimateStateCorrection()'s
+  // own solve-then-apply contract. ----
+  propagateCoupled(mg.poses, state_propagat_.rot(), t1,
+                   mg.poses.front().rot, mg.poses.front().pos, mg.poses.front().vel,
+                   state_->gravity(), coupled_c_acc_, coupled_c_gyr_, n_c, coupled_prop_);
+  state_->setPropagatedState(coupled_prop_.rot1, coupled_prop_.pos1, coupled_prop_.vel1);
+
+  // Outer-loop convergence read: the ENDPOINT state change this step
+  // implied, i.e. Phi(t1) applied to delta_c -- same quantity
+  // (dtheta,dt)'s norms are checked against as the decoupled path's own
+  // dtheta/dt (estimateStateCorrection()'s return contract).
+  const Eigen::VectorXd d9 = coupled_prop_.phi_head.back() * delta_c;
+  dtheta_out = d9.segment<3>(0);
+  dt_out = d9.segment<3>(3);
+
+  const auto t_end = std::chrono::steady_clock::now();
+  coupled_solve_ms_ += std::chrono::duration<double, std::milli>(t_end - t_start).count();
+
+  return residuals_.empty() ? 0.0 : sum_abs_r / static_cast<double>(residuals_.size());
 }
 
 void LioProc::finalizeSplineAndQ(MeasureGroup& mg)
@@ -1725,6 +1856,19 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     mg.prior_vel = state_propagat_.vel();
     bool any_solved = false;
 
+    // CQ-44 item 4: c_prior = 0 EVERY scan -- reset here, not carried
+    // scan-to-scan (unlike the position spline's control points, which the
+    // decoupled path re-anchors from the previous scan's own converged
+    // shape). n_c is fixed for the life of the process (loadParameters()),
+    // so resizing (not reallocating) each frame is cheap and avoids a
+    // stale coefficient count if opts_ were ever hot-reloaded.
+    if (opts_.estimatorCoupled()) {
+      coupled_c_acc_.assign(opts_.estimator_n_c, V3D::Zero());
+      coupled_c_gyr_.assign(opts_.estimator_n_c, V3D::Zero());
+      coupled_iters_ = 0;
+      coupled_solve_ms_ = 0.0;
+    }
+
     for (; iter < opts_.max_iterations; iter++) {
       // Re-place every kept point against the spline, re-anchored to
       // whatever the previous iteration corrected the state to.  Skipped on
@@ -1756,12 +1900,24 @@ std::string LioProc::processLIO(MeasureGroup& mg)
       // innovation only -- later iterations relinearize at an
       // already-partially-corrected state, which is not the quantity NIS
       // is defined over.
-      double error = estimateStateCorrection(mg.points, dtheta, dt, /*allow_consistency_log=*/iter == 0);
-      // SHAPE, from the SAME residuals that solve just used.  Refinement and
-      // the state update are therefore linearised at one trajectory, which
-      // is the whole reason this sits here and not at the top of the next
-      // iteration (Bryce, 2026-09-06).
-      refineSplineFromResiduals(mg);
+      double error;
+      // CQ-44 item 3, ASSERTED IN CODE: under coupled mode, this branch
+      // NEVER reaches estimateStateCorrection() (which would run the IEKF
+      // update on the pose block) or refineSplineFromResiduals() (the
+      // disjoint spline refinement) -- one set of points, one update, per
+      // the card's own requirement. estimateCoupledCorrection() is the only
+      // update this scan gets.
+      if (opts_.estimatorCoupled()) {
+        error = estimateCoupledCorrection(mg, dtheta, dt);
+        ++coupled_iters_;
+      } else {
+        error = estimateStateCorrection(mg.points, dtheta, dt, /*allow_consistency_log=*/iter == 0);
+        // SHAPE, from the SAME residuals that solve just used.  Refinement and
+        // the state update are therefore linearised at one trajectory, which
+        // is the whole reason this sits here and not at the top of the next
+        // iteration (Bryce, 2026-09-06).
+        refineSplineFromResiduals(mg);
+      }
       if (!residuals_.empty()) any_solved = true;
       total_dtheta += dtheta;
       total_dt     += dt;
@@ -1823,8 +1979,50 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     // accumulated this frame (ekf_'s H_full would be stale from a previous
     // frame), so there's nothing to blend and state_->cov() should stay
     // exactly as it was going into this frame.
-    if (any_solved)
+    //
+    // CQ-44: under coupled mode ekf_'s own HtH/Htz are NEVER accumulated
+    // (estimateStateCorrection()/solveSystem() are never called -- see the
+    // in-loop assert above), so calling applyCovarianceUpdate() here would
+    // blend state_->cov() against STALE information from whatever frame
+    // last ran the decoupled path. estimateCoupledCorrection() applies
+    // item 5's own covariance term directly, once, on its own last call.
+    if (any_solved && !opts_.estimatorCoupled())
       ekf_.applyCovarianceUpdate(state_, prior_cov_);
+
+    // CQ-44 item 5: P(t1) = J_x P(t0) J_x^T + J_c (Lambda+J'R^-1J)^-1 J_c^T
+    // + Q_unmodelled. The FIRST term is already exactly what
+    // ImuProc::propagate() left in state_->cov() this frame (its own
+    // F_x*P*F_x^T+cov_w recursion runs unconditionally, every frame,
+    // regardless of estimator mode) -- so this adds only the SECOND term,
+    // the coefficient posterior's own remaining uncertainty propagated
+    // through J_c (=coupled_prop_.phi_head.back(), R/P/V rows only; c has
+    // no direct sensitivity on the bias/gravity rows in this
+    // linearisation, so those rows/cols of the added term are exactly
+    // zero -- a real, named simplification, not an oversight).
+    //
+    // NAMED, NOT RESOLVED: item 5's own double-count warning. Q_unmodelled
+    // here is state_->cov()'s existing cov_w, UNMODIFIED -- this
+    // implementation does not split the IMU-noise share Lambda now
+    // covers out of propagate()'s own per-step rotation/velocity cov_w
+    // blocks. That means some IMU noise may be counted in both Q and
+    // Lambda. Filed as a known limitation (rule 5c), not silently assumed
+    // away.
+    if (opts_.estimatorCoupled() && any_solved && coupled_last_A_.rows() == coupled_prop_.phi_head.back().cols())
+    {
+      Eigen::LDLT<Eigen::MatrixXd> ldlt_A(coupled_last_A_);
+      if (ldlt_A.info() == Eigen::Success)
+      {
+        const Eigen::MatrixXd coeff_cov =
+            ldlt_A.solve(Eigen::MatrixXd::Identity(coupled_last_A_.rows(), coupled_last_A_.rows()));
+        const Eigen::Matrix<double, 9, Eigen::Dynamic>& Jc = coupled_prop_.phi_head.back();
+        const Eigen::MatrixXd added = Jc * coeff_cov * Jc.transpose();  // 9x9 (R,P,V)
+        const int dim = state_->dimState();
+        Eigen::MatrixXd P = state_->cov();
+        P.block(0, 0, 9, 9) += added;   // idxR()=0, idxP()=3, idxV()=6 -- contiguous
+        state_->covMut() = P;
+        (void)dim;
+      }
+    }
 
     // CQ-43 item (4d-ii): save this frame's own EKF rotation correction
     // (total_dtheta is local to this scope) for finalizeSplineAndQ() to
@@ -1903,6 +2101,26 @@ std::string LioProc::processLIO(MeasureGroup& mg)
     // see finalizeSplineAndQ()'s own doc comment for why measuring earlier
     // would contaminate the statistic with this frame's correction error.
     finalizeSplineAndQ(mg);
+
+    // CQ-44 G0: finalizeSplineAndQ() returns immediately when
+    // !opts_.spline.splineOn() (true for every coupled-mode job -- coupled
+    // mode does not fit the position spline at all) and never touches
+    // boundary_dpos_/boundary_drot_deg_, which would otherwise silently
+    // carry whatever they were left at (their -1.0 "unavailable" default,
+    // or a stale value from a previous decoupled frame on the same
+    // process). Under coupled mode there is no separate spline t0 to
+    // compare against next scan: this scan's own propagation start
+    // (mg.poses.front(), i.e. rot0/pos0/vel0 in estimateCoupledCorrection())
+    // IS exactly what state_ was left at by THIS scan's own coupled update
+    // (propagate() always starts from state_'s current value, and
+    // estimateCoupledCorrection() is the only thing that sets it) -- there
+    // is no discrepancy that could exist to measure, by construction, not
+    // by a freeze. Forced to exactly 0.0, not left at -1.0, so a reader
+    // sees "structurally zero" rather than "not computed".
+    if (opts_.estimatorCoupled()) {
+      boundary_dpos_ = 0.0;
+      boundary_drot_deg_ = 0.0;
+    }
 
     // T7-a. dx must be read here and not inside the loop: it is the FRAME's
     // correction, and reading it mid-iteration would report one Gauss-Newton
