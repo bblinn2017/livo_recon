@@ -39,6 +39,16 @@ struct LioProcOptions
   // History (24-27): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-24
   bool   log_debug_en          = false;
 
+  // CQ-46: dumps raw per-accepted-residual fields (world point, normal,
+  // rotation-Jacobian column, plane_id, r, and the four sigma_squared
+  // components) to cq46_residuals.txt, and the frame-constant 6x6 prior
+  // pose covariance block to cq46_prior.txt, on the FIRST IEKF iteration of
+  // every scan only (allow_consistency_log's own gate -- see buildResiduals()'s
+  // call sites). Read-only diagnostic: nothing it writes is read back by any
+  // estimator path. Default off; the correlation binning/analysis itself is
+  // done post-hoc in Python over these two files, not in this build.
+  bool   log_pair_corr_en      = false;
+
   // History (30-50): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-30
   int    dry_run_point_filter_num = 0;
 
