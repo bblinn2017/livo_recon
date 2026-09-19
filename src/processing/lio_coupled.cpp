@@ -57,6 +57,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/freeze_bg", copts_.freeze_bg, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/adaptive_sigma", copts_.adaptive_sigma, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_freeze_on_vibration", copts_.bias_freeze_on_vibration, false);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/bias_freeze_vibration_factor", copts_.bias_freeze_vibration_factor, LioProcCoupledOptions::BIAS_FREEZE_VIBRATION_FACTOR_DEFAULT);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_anchor", copts_.bias_anchor, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/curvature_weight", copts_.curvature_weight, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_observable_only", copts_.bias_observable_only, false);
@@ -82,6 +83,7 @@ std::string LioProcCoupled::engagementReport() const
       << " freeze_bg=" << (copts_.freeze_bg ? "true" : "false")
       << " adaptive_sigma=" << (copts_.adaptive_sigma ? "true" : "false")
       << " bias_freeze_on_vibration=" << (copts_.bias_freeze_on_vibration ? "true" : "false")
+      << " bias_freeze_vibration_factor=" << copts_.bias_freeze_vibration_factor
       << " bias_anchor=" << (copts_.bias_anchor ? "true" : "false")
       << " curvature_weight=" << copts_.curvature_weight
       << " bias_observable_only=" << (copts_.bias_observable_only ? "true" : "false")
@@ -505,7 +507,7 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     for (const auto& s : mg.imu_samples_raw) { const double da = s.acc.norm() - acc_mean; acc_var += da * da; }
     acc_var /= (mg.imu_samples_raw.size() - 1);
     const double ratio = std::sqrt(acc_var) / std::max(sigma_a_floor, 1e-12);
-    coupled_bias_freeze_active_ = (ratio > LioProcCoupledOptions::BIAS_FREEZE_VIBRATION_FACTOR_DEFAULT);
+    coupled_bias_freeze_active_ = (ratio > copts_.bias_freeze_vibration_factor);
   }
 
   // ---- (1) re-propagate with the CURRENT coefficient AND delta_s estimate

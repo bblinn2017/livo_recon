@@ -112,6 +112,11 @@ struct LioProcCoupledOptions
   // yet (rule 26: a real numerics default is Bryce's call), mirrors
   // JOINT_PIVOT_MIN_FLOOR's own shipped-inert-until-validated pattern.
   static constexpr double BIAS_FREEZE_VIBRATION_FACTOR_DEFAULT = 3.0;
+  // CQ-55 item 3: runtime-overridable threshold (was previously a hardcoded
+  // constexpr, blocking a sweep over its value) -- defaults to the same
+  // BIAS_FREEZE_VIBRATION_FACTOR_DEFAULT, so this is md5-inert unless
+  // explicitly overridden via estimator/coupled/bias_freeze_vibration_factor.
+  double bias_freeze_vibration_factor = BIAS_FREEZE_VIBRATION_FACTOR_DEFAULT;
   // CQ-54 item 6: penalises the TOTAL departure of the gyro bias from its
   // calibration value (state_->biasGyr() + coupled_delta_bg_ -
   // coupled_bg_calib_), separately from Pi_ss's own per-scan-increment
