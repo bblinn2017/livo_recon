@@ -71,10 +71,12 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_freeze_on_vibration", copts_.bias_freeze_on_vibration, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/bias_freeze_vibration_factor", copts_.bias_freeze_vibration_factor, LioProcCoupledOptions::BIAS_FREEZE_VIBRATION_FACTOR_DEFAULT);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_anchor", copts_.bias_anchor, false);
-  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/curvature_weight", copts_.curvature_weight, 0.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/curvature_weight_acc", copts_.curvature_weight_acc, 0.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/curvature_weight_gyr", copts_.curvature_weight_gyr, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_observable_only", copts_.bias_observable_only, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/curvature_only", copts_.curvature_only, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/dc_weight", copts_.dc_weight, 0.0);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/prior_per_axis_sigma", copts_.prior_per_axis_sigma, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_bg_projection_en", copts_.log_bg_projection_en, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_cov_repropagation_en", copts_.log_cov_repropagation_en, false);
   paramWarn<double>(pnh, "imu/q_alpha_gyr", copts_.repro_q_alpha_gyr, 1.0);
@@ -112,10 +114,12 @@ std::string LioProcCoupled::engagementReport() const
       << " bias_freeze_on_vibration=" << (copts_.bias_freeze_on_vibration ? "true" : "false")
       << " bias_freeze_vibration_factor=" << copts_.bias_freeze_vibration_factor
       << " bias_anchor=" << (copts_.bias_anchor ? "true" : "false")
-      << " curvature_weight=" << copts_.curvature_weight
+      << " curvature_weight_acc=" << copts_.curvature_weight_acc
+      << " curvature_weight_gyr=" << copts_.curvature_weight_gyr
       << " bias_observable_only=" << (copts_.bias_observable_only ? "true" : "false")
       << " curvature_only=" << (copts_.curvature_only ? "true" : "false")
       << " dc_weight=" << copts_.dc_weight
+      << " prior_per_axis_sigma=" << (copts_.prior_per_axis_sigma ? "true" : "false")
       << " log_bg_projection_en=" << (copts_.log_bg_projection_en ? "true" : "false")
       << " -- no spline/AdaptiveQ engagement to report (this class has "
          "neither)";
@@ -278,7 +282,8 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
                 << ") -- scan_id=" << voxel_map_->frame_idx_
                 << " n_residuals=" << coupled_n_residuals_
                 << " n_c=" << copts_.n_c << " jacobian_time_mode=" << copts_.jacobian_time_mode
-                << " curvature_weight=" << copts_.curvature_weight
+                << " curvature_weight_acc=" << copts_.curvature_weight_acc
+                << " curvature_weight_gyr=" << copts_.curvature_weight_gyr
                 << " curvature_only=" << (copts_.curvature_only ? "true" : "false");
       throw std::runtime_error(abort_msg.str());
     }
@@ -869,7 +874,7 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // of whether their basis supports overlap -- default 0.0, so shipped
   // behavior is unchanged and this is provably md5-inert at that default.
   Eigen::MatrixXd Curv = Eigen::MatrixXd::Zero(n_c, n_c);
-  if (copts_.curvature_weight > 0.0 && n_c >= 3) {
+  if ((copts_.curvature_weight_acc > 0.0 || copts_.curvature_weight_gyr > 0.0) && n_c >= 3) {
     Eigen::MatrixXd D = Eigen::MatrixXd::Zero(n_c - 2, n_c);
     for (int k = 0; k < n_c - 2; ++k) { D(k, k) = 1.0; D(k, k + 1) = -2.0; D(k, k + 2) = 1.0; }
     Curv = D.transpose() * D;
@@ -884,16 +889,51 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // leave the bias-degenerate constant direction completely unpriced --
   // this term is what keeps arm (c) a valid configuration at all. Default
   // false: arm (a)/(b)'s existing value(+curvature) behavior is unchanged.
+  // CQ-59 item 4: the VALUE term's precision, per axis instead of the
+  // scalar 1/sigma^2 every other term here still uses. Measured on
+  // eee_01/eee_02 (calib_processing.cpp's own per-axis floor print):
+  // acc max/min ratio 9.8-17.4x, gyr max/min ratio 8.0-39.4x -- neither
+  // near 1, so per the card's own criterion this is worth a flag rather
+  // than being dropped. infl_a/infl_g carry adaptive_sigma's scalar
+  // inflation (sigma_a/sigma_a_floor)^2 through unchanged -- 1.0 when
+  // adaptive_sigma is off (the default), so at that default this reduces
+  // to the literal "diagonal from the per-axis floor" the card asks for;
+  // when adaptive_sigma is also on, the per-axis floor's RATIOS are kept
+  // but scaled to the same inflated overall magnitude, so the two flags
+  // compose rather than fight over which sigma is authoritative. Default
+  // false -- md5-inert (prec_acc_diag/prec_gyr_diag both collapse to the
+  // existing scalar terms below when off).
+  V3D prec_acc_diag = V3D::Constant(1.0 / (sigma_a * sigma_a));
+  V3D prec_gyr_diag = V3D::Constant(1.0 / (sigma_g * sigma_g));
+  if (copts_.prior_per_axis_sigma) {
+    const double infl_a = (sigma_a_floor > 1e-12) ? (sigma_a * sigma_a) / (sigma_a_floor * sigma_a_floor) : 1.0;
+    const double infl_g = (sigma_g_floor > 1e-12) ? (sigma_g * sigma_g) / (sigma_g_floor * sigma_g_floor) : 1.0;
+    const V3D floor_acc = state_->varAccFloor();
+    const V3D floor_gyr = state_->varGyrFloor();
+    for (int k = 0; k < 3; ++k) {
+      prec_acc_diag(k) = 1.0 / std::max(floor_acc(k) * infl_a, 1e-18);
+      prec_gyr_diag(k) = 1.0 / std::max(floor_gyr(k) * infl_g, 1e-18);
+    }
+  }
+
   Eigen::MatrixXd Lambda = Eigen::MatrixXd::Zero(ncol_c, ncol_c);
   for (int i = 0; i < n_c; ++i)
     for (int j = 0; j < n_c; ++j) {
-      const double curv_ij = copts_.curvature_weight * Curv(i, j);
-      const double value_acc = copts_.curvature_only ? 0.0 : gram(i, j) / (sigma_a * sigma_a);
-      const double value_gyr = copts_.curvature_only ? 0.0 : gram(i, j) / (sigma_g * sigma_g);
+      // CQ-59 item 1: curv_acc/curv_gyr each normalized by the SAME
+      // sigma^2 the value term for that block uses, so the weight means
+      // "this shape penalty is worth w times the value penalty" on that
+      // block specifically -- replaces the single raw curv_ij that used
+      // to apply identically to both blocks despite their ~4657x base-
+      // prior stiffness difference.
+      const double curv_acc = copts_.curvature_weight_acc * Curv(i, j) / (sigma_a * sigma_a);
+      const double curv_gyr = copts_.curvature_weight_gyr * Curv(i, j) / (sigma_g * sigma_g);
+      const double value_gram = copts_.curvature_only ? 0.0 : gram(i, j);
       const double dc_acc = copts_.curvature_only ? copts_.dc_weight / (sigma_a * sigma_a) : 0.0;
       const double dc_gyr = copts_.curvature_only ? copts_.dc_weight / (sigma_g * sigma_g) : 0.0;
-      Lambda.block<3, 3>(3 * i, 3 * j) = (value_acc + curv_ij + dc_acc) * M3D::Identity();
-      Lambda.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) = (value_gyr + curv_ij + dc_gyr) * M3D::Identity();
+      Lambda.block<3, 3>(3 * i, 3 * j) =
+          M3D(value_gram * prec_acc_diag.asDiagonal()) + (curv_acc + dc_acc) * M3D::Identity();
+      Lambda.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) =
+          M3D(value_gram * prec_gyr_diag.asDiagonal()) + (curv_gyr + dc_gyr) * M3D::Identity();
     }
 
   Eigen::MatrixXd Pi_ss = Eigen::MatrixXd::Zero(ncol_s, ncol_s);

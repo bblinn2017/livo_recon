@@ -1,5 +1,6 @@
 #include "livo_recon/processing/calib_processing.h"
 
+#include <algorithm>
 #include <stdexcept>
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/state/state.h"
@@ -145,8 +146,28 @@ void CalibProc::computeBiasAndNoise(V3D& acc_bias, V3D& gyro_bias,
   acc_cov  /= static_cast<double>(N - 1);
   gyro_cov /= static_cast<double>(N - 1);
 
-  var_acc = V3D::Constant(acc_cov.trace()  / 3.0);
-  var_gyr = V3D::Constant(gyro_cov.trace() / 3.0);
+  // CQ-59 item 4: measured on eee_01/eee_02 (10s LIO-only smoke runs,
+  // calib_processing's own diag print below) -- acc max/min ratio 9.8-17.4,
+  // gyr max/min ratio 7.98-39.4. Neither is anywhere near 1, so per the
+  // card's own criterion this IS worth a flag: var_acc/var_gyr now carry
+  // the REAL per-axis diagonal instead of an isotropic V3D::Constant(mean)
+  // broadcast. This is behavior-PRESERVING for every existing consumer --
+  // grepped every varAccFloor()/varGyrFloor() call site (lio_coupled.cpp,
+  // lio_decoupled.cpp, adaptive_q.h's own caller): all of them immediately
+  // call .mean() on the result, and mean([d0,d1,d2]) == trace/3 exactly,
+  // so nothing downstream changes unless it reads the raw V3D directly --
+  // which only the new prior_per_axis_sigma path (estimateCoupledCorrection())
+  // now does.
+  ROS_INFO_STREAM("[calib] per-axis floor (diag, not mean-reduced):"
+      << "  acc=[" << acc_cov(0,0) << ", " << acc_cov(1,1) << ", " << acc_cov(2,2) << "]"
+      << "  gyr=[" << gyro_cov(0,0) << ", " << gyro_cov(1,1) << ", " << gyro_cov(2,2) << "]"
+      << "  acc_ratio(max/min)=" << (std::max({acc_cov(0,0), acc_cov(1,1), acc_cov(2,2)})
+                                    / std::max(std::min({acc_cov(0,0), acc_cov(1,1), acc_cov(2,2)}), 1e-18))
+      << "  gyr_ratio(max/min)=" << (std::max({gyro_cov(0,0), gyro_cov(1,1), gyro_cov(2,2)})
+                                    / std::max(std::min({gyro_cov(0,0), gyro_cov(1,1), gyro_cov(2,2)}), 1e-18)));
+
+  var_acc = V3D(acc_cov(0,0), acc_cov(1,1), acc_cov(2,2));
+  var_gyr = V3D(gyro_cov(0,0), gyro_cov(1,1), gyro_cov(2,2));
 }
 
 M3D CalibProc::computeInitialRotation(const V3D& acc_bias) const

@@ -131,10 +131,23 @@ struct LioProcCoupledOptions
   // 8.72665e-4 rad/s) as a starting point for item 6's own run to react
   // against, not a validated physical spec.
   static constexpr double BIAS_ANCHOR_SIGMA_RAD_S_DEFAULT = 8.72665e-4;
-  // CQ-55 item 6: second-difference curvature penalty weight on the
+  // CQ-59 item 1: second-difference curvature penalty weight on the
   // correction coefficients, added to Lambda alongside (not instead of)
-  // the existing basis-Gram value term. Default 0.0 -- md5-inert.
-  double curvature_weight = 0.0;
+  // the existing basis-Gram value term. SPLIT (was one raw
+  // curvature_weight, CQ-55 item 6) and NORMALIZED by the same sigma^2 the
+  // value term uses -- the old raw knob landed against a gyro base prior
+  // ~4657x stiffer than the accelerometer's (sigma_a=0.00434,
+  // sigma_g=6.36e-05 on eee_01/02: (sigma_a/sigma_g)^2 ~ 4657), so one raw
+  // number could not mean the same thing on both blocks. Dimensionless now
+  // ("this shape penalty is worth w times the value penalty" on THIS
+  // block) -- 1.0 is a meaningful default, not an arbitrary number. Both
+  // default 0.0 -- md5-inert. The old single curvature_weight knob is
+  // REMOVED, not kept as a deprecated alias: it was never set in any
+  // checked-in config (grepped config/, scripts/ -- zero hits) and always
+  // defaulted to 0.0, so nothing depends on it continuing to exist, and a
+  // permanent alias for a knob nothing ever used is pure upkeep cost.
+  double curvature_weight_acc = 0.0;
+  double curvature_weight_gyr = 0.0;
   // CQ-55 item 11(b): the principled, threshold-free alternative to
   // freeze_bg/bias_freeze_on_vibration -- see estimateCoupledCorrection()'s
   // own comment at the accumulation site for the full mechanism. Default
@@ -155,6 +168,16 @@ struct LioProcCoupledOptions
   // Only read when curvature_only is true. Default 0.0 -- no validated
   // value exists yet (rule 26); a test run must set this explicitly.
   double dc_weight = 0.0;
+  // CQ-59 item 4: builds the Lambda VALUE term's 3x3 blocks as a diagonal
+  // from the calibration's real per-axis noise floor (state_->varAccFloor()/
+  // varGyrFloor(), now genuinely anisotropic -- see calib_processing.cpp)
+  // instead of the scalar sigma^2 * Identity every other term still uses.
+  // "Anisotropy with an unimpeachable source -- the sensor's own measured
+  // noise" (the card's own words), independent of the residual-derived
+  // anisotropy CQ-58 reports and deliberately does NOT feed back in (see
+  // estimateCoupledCorrection()'s own comment on why that route is
+  // wrong). Default false -- md5-inert.
+  bool prior_per_axis_sigma = false;
   // CQ-55 item 11(a): report-only, free -- log each scan's bg-block
   // posterior covariance eigenvalues (degenerate vs. well-observed
   // directions), independent of whether bias_observable_only itself is
