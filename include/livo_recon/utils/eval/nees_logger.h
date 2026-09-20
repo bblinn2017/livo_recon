@@ -2,6 +2,7 @@
 
 #include "livo_recon/utils/algo/math.h"
 #include <Eigen/Core>
+#include <limits>
 #include <vector>
 
 namespace livo_recon
@@ -28,6 +29,20 @@ struct NeesResult
   Eigen::Matrix<double, 6, 6> whitening_axes = Eigen::Matrix<double, 6, 6>::Zero();
   bool valid = false;  // false if P was not invertible (rule 58: report, don't substitute)
   double min_eig = -1.0, max_eig = -1.0;  // always populated, even when !valid
+
+  // CQ-70 item 2b: sum(log(eigenvalue)) over ALL SIX raw eigenvalues (not
+  // just min/max), always populated -- log(negative) is NaN, which is the
+  // honest, rule-58-consistent report for a non-PSD P rather than a
+  // substituted number. log det, not the trace, because CQ-62 already
+  // showed this posterior is anisotropic by up to 12x across axes -- a
+  // trace cannot see that, log det can (it is literally the sum of the
+  // per-axis log-uncertainties, so an anisotropic collapse in ONE axis
+  // moves it exactly as much as an isotropic collapse of the same
+  // determinant would, unlike the trace which a single small axis barely
+  // dents). CQ-70's own arm-D diagnostic (P growing by Q alone, with no
+  // measurement update at all) is read off this field's slope vs scan
+  // number, not off its absolute value.
+  double logdet = std::numeric_limits<double>::quiet_NaN();
 
   // CQ-62 item 5b: per-axis confidence in the STATE basis (order
   // [rot_x,rot_y,rot_z,pos_x,pos_y,pos_z], NOT the eigenbasis

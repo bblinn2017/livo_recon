@@ -28,6 +28,10 @@ NeesResult computeNeesPerDof(const M3D& R_est, const V3D& p_est,
   const Eigen::Matrix<double, 6, 1> raw_eigvals = es.eigenvalues();
   out.max_eig = raw_eigvals.maxCoeff();
   out.min_eig = raw_eigvals.minCoeff();
+  // CQ-70 item 2b: always computed from the SAME raw_eigvals, before the
+  // early-return below -- NaN (log of a non-positive eigenvalue) is the
+  // honest report for a non-PSD P, not a substituted number.
+  out.logdet = raw_eigvals.array().log().sum();
   // CQ-60 item 2/5: coupled's own P is measurably non-PSD -- confirmed by
   // direct measurement on the real binary: min_eig is NEGATIVE on every
   // single scan across a 489-scan run (not an occasional outlier), ranging
@@ -123,7 +127,7 @@ void logNeesPerDof(const char* channel, int scan_id, double t_abs, const NeesRes
   bool just_opened = false;
   std::ofstream& ofs = log.stream(&just_opened);
   if (just_opened)
-    ofs << "channel,scan_id,t_abs,valid,nees,min_eig,max_eig,"
+    ofs << "channel,scan_id,t_abs,valid,nees,min_eig,max_eig,logdet,"
            "whitened_sq_0,whitened_sq_1,whitened_sq_2,"
            "whitened_sq_3,whitened_sq_4,whitened_sq_5,"
            // CQ-62 item 5b: per-axis state-basis ratio, ALWAYS populated
@@ -131,7 +135,8 @@ void logNeesPerDof(const char* channel, int scan_id, double t_abs, const NeesRes
            "axis_ratio_rx,axis_ratio_ry,axis_ratio_rz,"
            "axis_ratio_px,axis_ratio_py,axis_ratio_pz\n";
   ofs << channel << "," << scan_id << "," << std::setprecision(12) << t_abs << ","
-      << (r.valid ? 1 : 0) << "," << r.nees << "," << r.min_eig << "," << r.max_eig;
+      << (r.valid ? 1 : 0) << "," << r.nees << "," << r.min_eig << "," << r.max_eig
+      << "," << r.logdet;
   for (int i = 0; i < 6; ++i) ofs << "," << r.per_dof_whitened_sq(i);
   for (int i = 0; i < 6; ++i) ofs << "," << r.per_axis_state_ratio(i);
   ofs << "\n";
