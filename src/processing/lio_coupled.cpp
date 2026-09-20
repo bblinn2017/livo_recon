@@ -335,7 +335,9 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
                      "dc_gyr_over_sigma_x,dc_gyr_over_sigma_y,dc_gyr_over_sigma_z,"
                      "marg_sigma_acc_x,marg_sigma_acc_y,marg_sigma_acc_z,"
                      "marg_sigma_gyr_x,marg_sigma_gyr_y,marg_sigma_gyr_z,"
-                     "info_eig_min,info_eig_max,info_ratio\n";
+                     "info_eig_min,info_eig_max,info_ratio,"
+                     "info_eigvec_min_acc_x,info_eigvec_min_acc_y,info_eigvec_min_acc_z,"
+                     "info_eigvec_min_gyr_x,info_eigvec_min_gyr_y,info_eigvec_min_gyr_z\n";
           cp_header_written = true;
         }
         const double sig_a = std::max(coupled_sigma_a_used_, 1e-12);
@@ -361,6 +363,16 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           const double eig_max = es_info.eigenvalues()(5);
           const double info_ratio = (eig_min > 1e-12) ? eig_max / eig_min
                                                         : std::numeric_limits<double>::infinity();
+          // Item 5: the least-informed direction itself (eigenvectors()
+          // column 0, paired with eigenvalues() index 0 by
+          // SelfAdjointEigenSolver's own ascending-order convention) --
+          // needed to say whether it's consistent across control points or
+          // varies with j, and (item 6) whether it turns toward yaw
+          // (gyr_z) as the n_c=13 offset opens. Sign is arbitrary (a unit
+          // eigenvector and its negation are equally valid) -- callers
+          // comparing directions across scans/cp must compare axes
+          // (|dot|, or fix a sign convention), not raw signed components.
+          const Eigen::Matrix<double, 6, 1> v_min = es_info.eigenvectors().col(0);
           // 2b MARGINAL: A^-1's own diagonal at this control point's rows,
           // as standard deviations -- "how uncertain once everything this
           // control point is coupled to (other cp's, delta_bg via Lambda's
@@ -384,7 +396,9 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
                  << dc_gyr.x() / sig_g << "," << dc_gyr.y() / sig_g << "," << dc_gyr.z() / sig_g << ","
                  << marg_sigma_acc.x() << "," << marg_sigma_acc.y() << "," << marg_sigma_acc.z() << ","
                  << marg_sigma_gyr.x() << "," << marg_sigma_gyr.y() << "," << marg_sigma_gyr.z() << ","
-                 << eig_min << "," << eig_max << "," << info_ratio << "\n";
+                 << eig_min << "," << eig_max << "," << info_ratio << ","
+                 << v_min(0) << "," << v_min(1) << "," << v_min(2) << ","
+                 << v_min(3) << "," << v_min(4) << "," << v_min(5) << "\n";
         }
         // Buffered, not flushed per line (n_c lines/scan, ~45k over a full
         // n_c=13 run) -- same convention log_jrow_leverage_en uses: relies
