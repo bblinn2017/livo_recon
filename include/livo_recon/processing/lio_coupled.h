@@ -265,6 +265,14 @@ struct LioProcCoupledOptions
   // buffered rather than flushed per line (same convention
   // log_jrow_leverage_en uses). Default false.
   bool log_cp_constraint_en = false;
+  // CQ-75: re-deskew/re-propagate against the FINAL accepted GN step
+  // (previously the published pose's own map-deskew input, mg.points,
+  // and the covariance/A construction all reflected the PENULTIMATE
+  // iteration's trajectory -- see this option's own use site for the
+  // precise, verified structural finding). final_relinearize_cov requires
+  // final_redeskew (enforced at load time).
+  bool final_redeskew = false;
+  bool final_relinearize_cov = false;
 };
 
 // CQ-49: the coupled estimator, reimplemented as its own class -- see

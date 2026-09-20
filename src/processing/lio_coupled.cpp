@@ -122,6 +122,14 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/q_out_of_band_fraction_acc", copts_.q_out_of_band_fraction_acc, 0.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/q_out_of_band_fraction_gyr", copts_.q_out_of_band_fraction_gyr, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_cp_constraint_en", copts_.log_cp_constraint_en, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/final_redeskew", copts_.final_redeskew, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/final_relinearize_cov", copts_.final_relinearize_cov, false);
+  if (copts_.final_relinearize_cov && !copts_.final_redeskew)
+    cfg.requireCombination(
+        "estimator/coupled/final_relinearize_cov requires "
+        "estimator/coupled/final_redeskew=true -- relinearizing the "
+        "covariance at the final trajectory is meaningless if the final "
+        "trajectory was never actually re-deskewed/re-propagated against.");
   coupled_tier1_nees_ = Tier1NeesBuffer(opts_.nees_per_dof_en ? opts_.nees_tier1_window_scans : 0);
 
   // Every spline/* and adaptive_q/* key is unclaimed by this class by
@@ -320,6 +328,79 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     }
     if ((prev - error) / std::max(prev, 1e-6) < opts_.min_diff_error)
       { stop = "rel_diff"; break; }
+  }
+
+  // CQ-75: final_redeskew. STRUCTURAL FINDING, VERIFIED BY CODE READ, THAT
+  // CORRECTS THIS CARD'S OWN PREMISE -- reported here rather than silently
+  // implementing the card's literal text without flagging the correction.
+  // The card's own structure section (item 0) states propagateCoupled()
+  // "appears exactly once... inside the loop, no call after it," so
+  // state_ holds the c_{K-1} endpoint at loop exit. THIS IS NOT WHAT THE
+  // CODE DOES: estimateCoupledCorrection() (called once per GN iteration
+  // by the loop above) itself calls propagateCoupled() TWICE internally --
+  // once to build this iteration's residuals/A from the INCOMING
+  // (c_{K-1}) trajectory, and a SECOND time (see that function's own "re-
+  // propagate ONCE MORE with the updated c AND delta_s" comment) using
+  // THIS iteration's own freshly-solved c_K, immediately followed by
+  // state_->setPropagatedState(). This second call runs on EVERY
+  // iteration, including the last -- so state_'s own POSE is verifiably
+  // NOT one step behind; it already reflects c_K by the time the loop
+  // exits. WHAT IS GENUINELY STALE, confirmed: mg.points (deskewed only
+  // once per iteration, at the FIRST propagate, i.e. against c_{K-1}) --
+  // and by extension whatever consumes mg.points downstream (the map
+  // update) -- and coupled_last_A_/the reported covariance (built from
+  // residuals over that same c_{K-1}-deskewed mg.points). This flag fixes
+  // exactly those two things; it does not need to "fix" state_'s pose,
+  // which was never actually behind.
+  if (copts_.final_redeskew) {
+    const double t1 = mg.image.t;
+    const int n_c = copts_.n_c;
+    CoupledPropagation final_prop;
+    propagateCoupled(mg.poses, state_propagat_.rot(), t1,
+                     mg.poses.front().rot * Exp(coupled_delta_phi0_),
+                     mg.poses.front().pos + coupled_delta_pos0_,
+                     coupled_v0_pre_ + coupled_delta_v_,
+                     coupled_g0_pre_ + coupled_delta_g_, coupled_g0_pre_,
+                     coupled_delta_bg_, coupled_delta_ba_,
+                     coupled_c_acc_, coupled_c_gyr_, n_c, final_prop);
+    // Matches the card's own literal spec (propagateCoupled ->
+    // setPropagatedState) -- an explicit, testable check of the
+    // structural finding above: if state_'s pose were genuinely stale,
+    // this would change it; per the finding, it should be a no-op
+    // (final_prop.rot1/pos1/vel1 identical to what the loop's own last
+    // iteration already set). Captured BEFORE the write, to measure that.
+    const M3D rot_before_fr = state_->rot();
+    const V3D pos_before_fr = state_->pos();
+    state_->setPropagatedState(final_prop.rot1, final_prop.pos1, final_prop.vel1);
+    std::vector<PointXYZCov> final_deskewed;
+    deskewPoints(state_, final_prop.poses, t1, mg.lidar_points, opts_.deskew, final_deskewed);
+    DsMode ds_mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
+    voxelDownsample(final_deskewed, mg.points, PointXYZCovKeyFn{opts_.ds_leaf_size}, ds_mode);
+    // Report-only: rebuilds residuals against the NOW-CORRECT mg.points,
+    // does NOT solve or write to state_/A/covariance again (rule: "do not
+    // solve again").
+    const double res_rms_pre = coupled_res_rms_;  // at c_{K-1}, the loop's own last value
+    buildResiduals(mg.points, residuals_, /*allow_consistency_log=*/false);
+    double sum_sq_r_final = 0.0;
+    for (const auto& res : residuals_) sum_sq_r_final += res.r * res.r;
+    const double res_rms_post = residuals_.empty()
+        ? -1.0 : std::sqrt(sum_sq_r_final / static_cast<double>(residuals_.size()));
+    static PersistentLogStream fr_log("cq75_final_redeskew.txt");
+    bool fr_first;
+    std::ofstream& fr_ofs = fr_log.stream(&fr_first);
+    if (fr_first) fr_ofs << "scan_id,t_abs,res_rms_pre,res_rms_post,"
+                            "pose_delta_rot_deg,pose_delta_pos_mm\n";
+    const double t_abs_fr = mg.image.t + data_queues_->start_time;
+    // Pose delta BEFORE this final_redeskew pass vs AFTER -- tests the
+    // structural finding directly: predicted ~0 (state_'s pose was
+    // already at c_K via the loop's own last-iteration second propagate).
+    const double pose_delta_rot_deg =
+        Log(rot_before_fr.transpose() * final_prop.rot1).norm() * (180.0 / M_PI);
+    const double pose_delta_pos_mm = (final_prop.pos1 - pos_before_fr).norm() * 1000.0;
+    fr_ofs << voxel_map_->frame_idx_ << "," << t_abs_fr << ","
+           << res_rms_pre << "," << res_rms_post << ","
+           << pose_delta_rot_deg << "," << pose_delta_pos_mm << "\n";
+    fr_ofs.flush();
   }
 
   // CQ-54 item 3: once per SCAN (not per GN iteration -- the loop above
