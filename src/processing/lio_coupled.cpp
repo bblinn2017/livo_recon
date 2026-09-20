@@ -747,6 +747,49 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         eq_ofs << voxel_map_->frame_idx_ << "," << max_abs_diff << ","
                << iR << "," << iP << "\n";
         eq_ofs.flush();
+
+        // CQ-71 item 1: trace(P) cannot see anisotropy -- CQ-57's own
+        // 5,396x/965,170x trace-based collapse numbers and CQ-62's
+        // per-axis ratios spanning 12x across axes are both invisible to
+        // each other's instrument. Log the full eigenspectrum (not just
+        // min/max, though those are what's reported below) and WHICH state
+        // direction the weakest (largest-uncertainty) eigenvector points
+        // along, for both the (R,P) 6x6 (P6, already computed above) and
+        // the full 18x18 (P_final itself) -- so the anisotropy is visible
+        // for the WHOLE run, not just inside the 489-scan stationary
+        // window nees_per_dof.txt is capped to.
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es6(P6);
+        const auto& ev6 = es6.eigenvalues();     // ascending
+        const auto& evec6 = es6.eigenvectors();
+        const double lam_min6 = ev6(0), lam_max6 = ev6(5);
+        // The weak (largest-uncertainty) eigenvector's dominant component
+        // names which physical axis it's closest to -- [rx,ry,rz,px,py,pz]
+        // order, matching P6's own construction above.
+        int weak6_axis; evec6.col(0).cwiseAbs().maxCoeff(&weak6_axis);
+        static const char* AXIS6[6] = {"rx","ry","rz","px","py","pz"};
+
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es18(P_final);
+        const Eigen::VectorXd ev18 = es18.eigenvalues();  // ascending
+        const double lam_min18 = ev18(0), lam_max18 = ev18(ev18.size() - 1);
+        int weak18_axis;
+        es18.eigenvectors().col(0).cwiseAbs().maxCoeff(&weak18_axis);
+
+        static PersistentLogStream eig_log("psd_eigenspectrum.txt");
+        bool eig_first;
+        std::ofstream& eig_ofs = eig_log.stream(&eig_first);
+        if (eig_first)
+          eig_ofs << "scan_id,lam_min6,lam_max6,ratio6,weak6_axis,"
+                     "lam_min18,lam_max18,ratio18,weak18_dim\n";
+        eig_ofs << voxel_map_->frame_idx_ << ","
+                << lam_min6 << "," << lam_max6 << ","
+                << (lam_min6 > 0.0 ? lam_max6 / lam_min6
+                                    : std::numeric_limits<double>::quiet_NaN())
+                << "," << AXIS6[weak6_axis] << ","
+                << lam_min18 << "," << lam_max18 << ","
+                << (lam_min18 > 0.0 ? lam_max18 / lam_min18
+                                     : std::numeric_limits<double>::quiet_NaN())
+                << "," << weak18_axis << "\n";
+        eig_ofs.flush();
       }
       const double t_abs_nees = mg.image.t + data_queues_->start_time;
       coupled_tier1_nees_.addScan("tier1_coupled", voxel_map_->frame_idx_, t_abs_nees,
