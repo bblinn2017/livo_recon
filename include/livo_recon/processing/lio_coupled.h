@@ -185,6 +185,11 @@ struct LioProcCoupledOptions
   // dominating A), not Bug A's own mechanism (that's arm (a),
   // pose_cov_in_sigma, a pre-existing shared-code flag -- see voxelplane.cpp).
   std::string robust_loss = "none";
+  // CQ-62 item 0b/1: staged PSD audit -- see the diagnostic block at
+  // posterior18's own computation site in lio_coupled.cpp for what this
+  // logs (psd_audit.txt). Default false, md5-inert (report-only, no
+  // state mutation).
+  bool psd_audit_en = false;
   // CQ-55 item 11(a): report-only, free -- log each scan's bg-block
   // posterior covariance eigenvalues (degenerate vs. well-observed
   // directions), independent of whether bias_observable_only itself is

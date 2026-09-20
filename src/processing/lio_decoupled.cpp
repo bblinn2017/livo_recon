@@ -2108,7 +2108,13 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
         P6.block<3, 3>(0, 0) = P.block<3, 3>(iR, iR);
         P6.block<3, 3>(3, 3) = P.block<3, 3>(iP, iP);
         P6.block<3, 3>(0, 3) = P.block<3, 3>(iR, iP);
-        P6.block<3, 3>(3, 0) = P.block<3, 3>(iP, iR).transpose();
+        // CQ-62: was P.block(iP,iR).transpose() -- the SAME extraction
+        // bug as LioProcCoupled's own equivalent hook (see its comment
+        // for the full derivation). P is symmetric, so the extra
+        // transpose silently re-flips this back to P.block(iR,iP) -- the
+        // same value already placed at (0,3), not its true transpose --
+        // making P6 not actually a principal submatrix of P at all.
+        P6.block<3, 3>(3, 0) = P.block<3, 3>(iP, iR);
         const double t_abs_nees = mg.image.t + data_queues_->start_time;
         decoupled_tier1_nees_.addScan("tier1_decoupled", voxel_map_->frame_idx_, t_abs_nees,
                                        state_->rot(), state_->pos(), P6);

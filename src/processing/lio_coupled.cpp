@@ -80,6 +80,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/robust_loss",
                  copts_.robust_loss, "none",
                  {"none", "huber", "cauchy"});
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/psd_audit_en", copts_.psd_audit_en, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_bg_projection_en", copts_.log_bg_projection_en, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_cov_repropagation_en", copts_.log_cov_repropagation_en, false);
   paramWarn<double>(pnh, "imu/q_alpha_gyr", copts_.repro_q_alpha_gyr, 1.0);
@@ -327,6 +328,93 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       // M*(...)*M^T, then symmetrize -- just no longer duplicated).
       Eigen::MatrixXd posterior18 = solveCovarianceFromA(coupled_last_A_, &M);
 
+      // CQ-62 item 0b/1: staged PSD audit, coupled-only (no shared-file
+      // change), gated behind estimator/coupled/psd_audit_en (default
+      // false, md5-inert). Checks the (R,P) 6x6 sub-block's own min
+      // eigenvalue AT TWO POINTS: S_M (posterior18, the freshly-computed
+      // M*coeff_cov*M^T output, BEFORE it is written into state_->cov())
+      // and S_ldlt_cross (an INDEPENDENT recomputation of the same
+      // quantity using ldlt_A -- the SAME LDLT already verified PD by
+      // item 5's own guard a few lines above -- rather than letting
+      // solveCovarianceFromA build its own fresh internal LDLT from
+      // scratch). If these two disagree, the defect is inside
+      // solveCovarianceFromA's own fresh-LDLT path specifically; if they
+      // agree with each other but disagree with the LATER post-write-
+      // and-readback value the NEES hook sees (near the end of this
+      // function), the defect is in the state_->covMut() write or the R,P
+      // sub-block extraction downstream, not in this computation at all.
+      if (copts_.psd_audit_en) {
+        const int iP_a = StateGroup::idxP(), iR_a = StateGroup::idxR();
+        // CQ-62: is the FULL 18x18 posterior18 itself PSD (as M*PSD*M^T
+        // mathematically guarantees), even if a supposed R,P sub-block
+        // extraction looks non-PSD? A principal submatrix (same rows AND
+        // columns selected) of a genuinely PSD matrix is ALWAYS PSD --
+        // if the full 18x18 checks out clean but the extracted 6x6 does
+        // not, the bug is in the EXTRACTION, not in the covariance itself.
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_full18(
+            0.5 * (posterior18 + posterior18.transpose()));
+        const double full18_min_eig = es_full18.eigenvalues().minCoeff();
+        const double full18_max_eig = es_full18.eigenvalues().maxCoeff();
+        Eigen::Matrix<double, 6, 6> P6_sM;
+        P6_sM.block<3, 3>(0, 0) = posterior18.block<3, 3>(iR_a, iR_a);
+        P6_sM.block<3, 3>(3, 3) = posterior18.block<3, 3>(iP_a, iP_a);
+        P6_sM.block<3, 3>(0, 3) = posterior18.block<3, 3>(iR_a, iP_a);
+        P6_sM.block<3, 3>(3, 0) = posterior18.block<3, 3>(iP_a, iR_a);  // CQ-62 fix: no extra transpose, see the NEES hook's own comment
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es_sM(
+            0.5 * (P6_sM + P6_sM.transpose()));
+
+        const Eigen::MatrixXd coeff_cov_cross =
+            ldlt_A.solve(Eigen::MatrixXd::Identity(coupled_last_A_.rows(), coupled_last_A_.rows()));
+        // CQ-62: "are we starting out PSD?" -- the FULL coeff_cov = A^-1,
+        // BEFORE any M-projection, in its own native (18+6*n_c)-dim joint
+        // space. A's pivots (joint_dmin) being all positive mathematically
+        // guarantees A^-1 is PD too -- this checks whether the ACTUAL
+        // FLOATING-POINT MATRIX Eigen computed via ldlt.solve(Identity)
+        // still honors that in practice, independent of any M projection
+        // at all. If this is already substantially negative, the defect
+        // is in the LDLT solve itself (or A's own conditioning is bad
+        // enough that even the UNPROJECTED inverse can't be trusted); if
+        // this stays clean (~machine-epsilon negative at worst) while
+        // S_M/S_ldlt_cross above are NOT, the defect is specific to the M
+        // projection -- M picking out a direction where A^-1's own
+        // genuine-but-tiny eigenvalues get amplified/cancelled.
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_full(
+            0.5 * (coeff_cov_cross + coeff_cov_cross.transpose()));
+        const double full_min_eig = es_full.eigenvalues().minCoeff();
+        const double full_max_eig = es_full.eigenvalues().maxCoeff();
+
+        Eigen::MatrixXd posterior18_cross = M * coeff_cov_cross * M.transpose();
+        Eigen::Matrix<double, 6, 6> P6_cross;
+        P6_cross.block<3, 3>(0, 0) = posterior18_cross.block<3, 3>(iR_a, iR_a);
+        P6_cross.block<3, 3>(3, 3) = posterior18_cross.block<3, 3>(iP_a, iP_a);
+        P6_cross.block<3, 3>(0, 3) = posterior18_cross.block<3, 3>(iR_a, iP_a);
+        P6_cross.block<3, 3>(3, 0) = posterior18_cross.block<3, 3>(iP_a, iR_a);  // CQ-62 fix: no extra transpose
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es_cross(
+            0.5 * (P6_cross + P6_cross.transpose()));
+
+        static PersistentLogStream psd_audit_log("psd_audit.txt");
+        bool psd_first;
+        std::ofstream& psd_ofs = psd_audit_log.stream(&psd_first);
+        if (psd_first)
+          psd_ofs << "scan_id,S_M_min_eig,S_M_max_eig,S_ldlt_cross_min_eig,"
+                     "S_ldlt_cross_max_eig,diff_min_eig,joint_dmin,joint_dmax,"
+                     "joint_cond,full_coeff_cov_min_eig,full_coeff_cov_max_eig,"
+                     "full_coeff_cov_rel_min,full18_min_eig,full18_max_eig,"
+                     "idxR,idxP\n";
+        const double joint_dmax_here = ldlt_A.vectorD().maxCoeff();
+        psd_ofs << voxel_map_->frame_idx_ << ","
+                << es_sM.eigenvalues()(0) << "," << es_sM.eigenvalues()(5) << ","
+                << es_cross.eigenvalues()(0) << "," << es_cross.eigenvalues()(5) << ","
+                << (es_sM.eigenvalues()(0) - es_cross.eigenvalues()(0)) << ","
+                << min_pivot << "," << joint_dmax_here << ","
+                << (min_pivot > 0 ? joint_dmax_here / min_pivot : -1.0) << ","
+                << full_min_eig << "," << full_max_eig << ","
+                << (full_min_eig / full_max_eig) << ","
+                << full18_min_eig << "," << full18_max_eig << ","
+                << iR_a << "," << iP_a << "\n";
+        psd_ofs.flush();
+      }
+
       // CQ-58: per-control-point 6-dof constraint report. Reuses ldlt_A
       // (already computed above for item 5's rank-deficiency guard, already
       // confirmed PD by the min_pivot check) rather than paying for a
@@ -569,7 +657,28 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       P6.block<3, 3>(0, 0) = P_final.block<3, 3>(iR, iR);
       P6.block<3, 3>(3, 3) = P_final.block<3, 3>(iP, iP);
       P6.block<3, 3>(0, 3) = P_final.block<3, 3>(iR, iP);
-      P6.block<3, 3>(3, 0) = P_final.block<3, 3>(iP, iR).transpose();
+      // CQ-62: was P_final.block(iP,iR).transpose() -- WRONG. P_final is
+      // (nearly) symmetric, so P_final.block(iP,iR) ALREADY equals
+      // P_final.block(iR,iP).transpose() by construction; transposing it
+      // AGAIN silently flips it back to P_final.block(iR,iP) -- the SAME
+      // value already placed at (0,3) above, not its transpose. This made
+      // P6 = [[Prr,X],[X,Ppp]] instead of the true principal submatrix
+      // [[Prr,X],[X^T,Ppp]] -- a DIFFERENT matrix, not merely an
+      // asymmetric version of the right one. The mandatory downstream
+      // symmetrize (computeNeesPerDof's own Psym=0.5*(P+P^T)) then
+      // silently discards X's entire antisymmetric part instead of
+      // correctly combining X with its true transpose -- producing a
+      // matrix with NO relation to state_->cov()'s own genuine PSD-ness
+      // (a principal submatrix of a PSD matrix is always PSD; this
+      // reconstruction was not actually a principal submatrix at all).
+      // Confirmed directly: state_->cov()'s own FULL 18x18 has zero
+      // negative eigenvalues on every scan tested (psd_audit_en's own
+      // full18_min_eig column), while THIS extraction's 6x6 showed
+      // min_eig as negative as -11.7% of max_eig on the very same scans
+      // -- the "coupled is grossly non-PSD" finding (CQ-60 item 5) was
+      // this bug, not a real property of the covariance the estimator
+      // actually carries.
+      P6.block<3, 3>(3, 0) = P_final.block<3, 3>(iP, iR);
       const double t_abs_nees = mg.image.t + data_queues_->start_time;
       coupled_tier1_nees_.addScan("tier1_coupled", voxel_map_->frame_idx_, t_abs_nees,
                                    state_->rot(), state_->pos(), P6);
