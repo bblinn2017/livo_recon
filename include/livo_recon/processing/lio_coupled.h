@@ -419,6 +419,15 @@ private:
   // each call and read by processLIO()'s own iter_error.txt write (which
   // runs once per GN iteration already, right after the call).
   double coupled_last_delta_s_norm_ = -1.0, coupled_last_delta_c_norm_ = -1.0;
+  // CQ-53 item (B): the s-block's own six 3-dim sub-blocks (same
+  // [delta_phi0, delta_p0, delta_v, delta_bg, delta_ba, delta_g] order
+  // s_vec/delta_s use throughout this file), split out from the single
+  // combined delta_s_norm above -- needed to tell "phi0/p0 are still
+  // moving but bg has converged" apart from "everything is shrinking
+  // together", which the combined norm alone cannot.
+  double coupled_last_delta_phi0_norm_ = -1.0, coupled_last_delta_p0_norm_ = -1.0,
+         coupled_last_delta_v_norm_step_ = -1.0, coupled_last_delta_bg_norm_step_ = -1.0,
+         coupled_last_delta_ba_norm_step_ = -1.0, coupled_last_delta_g_norm_step_ = -1.0;
   // CQ-56: the SAME per-iteration step, split into its c_acc (position
   // spline) and c_gyr (rotation spline) halves -- delta_c_norm above is
   // their combined norm, which can't distinguish "acc coefficients moved a

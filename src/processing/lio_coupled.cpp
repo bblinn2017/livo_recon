@@ -229,7 +229,17 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           << "  delta_s_norm=" << coupled_last_delta_s_norm_
           << "  delta_c_norm=" << coupled_last_delta_c_norm_
           << "  delta_c_acc_norm=" << coupled_last_delta_c_acc_norm_
-          << "  delta_c_gyr_norm=" << coupled_last_delta_c_gyr_norm_;
+          << "  delta_c_gyr_norm=" << coupled_last_delta_c_gyr_norm_
+          // CQ-53 item (B): per-block breakdown of delta_s_norm above --
+          // distinguishes "phi0/p0 still moving, bg converged" from
+          // "everything shrinking together" / "everything oscillating",
+          // which the combined norm alone cannot.
+          << "  delta_phi0_norm=" << coupled_last_delta_phi0_norm_
+          << "  delta_p0_norm=" << coupled_last_delta_p0_norm_
+          << "  delta_v_norm_step=" << coupled_last_delta_v_norm_step_
+          << "  delta_bg_norm_step=" << coupled_last_delta_bg_norm_step_
+          << "  delta_ba_norm_step=" << coupled_last_delta_ba_norm_step_
+          << "  delta_g_norm_step=" << coupled_last_delta_g_norm_step_;
       static PersistentLogStream log("iter_error.txt");
       std::ofstream& ofs = log.stream();
       ofs << iss.str() << "\n";
@@ -1305,6 +1315,15 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // total below).
   coupled_last_delta_s_norm_ = delta_s.norm();
   coupled_last_delta_c_norm_ = delta_c.norm();
+  // CQ-53 item (B): the same combined delta_s split into its six 3-dim
+  // sub-blocks -- [delta_phi0, delta_p0, delta_v, delta_bg, delta_ba,
+  // delta_g], matching s_vec's own layout above exactly.
+  coupled_last_delta_phi0_norm_    = delta_s.segment<3>(0).norm();
+  coupled_last_delta_p0_norm_      = delta_s.segment<3>(3).norm();
+  coupled_last_delta_v_norm_step_  = delta_s.segment<3>(6).norm();
+  coupled_last_delta_bg_norm_step_ = delta_s.segment<3>(9).norm();
+  coupled_last_delta_ba_norm_step_ = delta_s.segment<3>(12).norm();
+  coupled_last_delta_g_norm_step_  = delta_s.segment<3>(15).norm();
   // CQ-56: split THIS iteration's step into its c_acc/c_gyr halves --
   // delta_c's own layout is [c_acc(3*n_c), c_gyr(3*n_c)], same order as
   // c_vec above.

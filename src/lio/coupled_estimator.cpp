@@ -1,5 +1,8 @@
 #include "livo_recon/lio/coupled_estimator.h"
 
+#include <cstdio>
+#include <cstdlib>
+
 namespace livo_recon
 {
 namespace
@@ -292,13 +295,47 @@ Eigen::Matrix<double, 9, 18> interpolatePhiX(
   return prop.phi_x_head.back();
 }
 
+// CQ-53 item (A)/0f: this function's own four fallbacks are ALL provably
+// unreachable given the current invariants (verified at c40d380 -- N is
+// always the just-propagated scan's own pose chain, and t is always a
+// residual's own capture time, which by construction lies within
+// [poses.front().t, t1]). Each previously returned a plausible-looking
+// substitute silently on the impossible branch; now each aborts loudly
+// instead (fprintf + abort(), not assert(), so it fires in a release
+// build too) -- rule 58: a fallback on an impossible condition aborts
+// loudly, it never substitutes. Since none of these branches can fire
+// under the current invariants, converting them is md5-inert BY
+// CONSTRUCTION -- this doubles as that inertness proof, verified
+// empirically below via the standing 4/4 decoupled md5 check (decoupled
+// never calls this function at all, so that check additionally confirms
+// no OTHER behavior in this shared file moved).
+//
+// The upper bound is deliberately t > t1 + kWorldRotAtTolS, NOT t >= t1:
+// a point captured exactly at scan end is legitimate (the last segment's
+// own tt = t1 exactly, so the loop below already returns the correct
+// rotation for t == t1 without needing this early-return at all) -- only
+// a t that is genuinely, meaningfully past t1 indicates an actual bug.
 M3D worldRotAt(const CoupledPropagation& prop, double t)
 {
+  constexpr double kWorldRotAtTolS = 1e-6;
   const int N = static_cast<int>(prop.poses.size());
-  if (N == 0) return prop.rot1;
-  if (t <= prop.poses.front().t) return prop.poses.front().rot;
+  if (N == 0) {
+    std::fprintf(stderr, "[FATAL] worldRotAt: prop.poses is empty (N=0) -- "
+                          "this should be provably unreachable, t=%.9f\n", t);
+    std::abort();
+  }
+  if (t <= prop.poses.front().t) {
+    std::fprintf(stderr, "[FATAL] worldRotAt: t=%.9f <= poses.front().t=%.9f -- "
+                          "this should be provably unreachable\n",
+                 t, prop.poses.front().t);
+    std::abort();
+  }
   const double t1 = prop.poses.back().t + prop.poses.back().dt;
-  if (t >= t1) return prop.rot1;
+  if (t > t1 + kWorldRotAtTolS) {
+    std::fprintf(stderr, "[FATAL] worldRotAt: t=%.9f > t1+tol=%.9f -- "
+                          "this should be provably unreachable\n", t, t1 + kWorldRotAtTolS);
+    std::abort();
+  }
 
   for (int k = 0; k < N; ++k)
   {
@@ -306,7 +343,10 @@ M3D worldRotAt(const CoupledPropagation& prop, double t)
     if (t >= th && t <= tt)
       return prop.poses[k].rot * Exp(prop.poses[k].gyr, t - th);
   }
-  return prop.rot1;
+  std::fprintf(stderr, "[FATAL] worldRotAt: t=%.9f matched no pose segment "
+                        "despite passing all bounds checks (t1=%.9f, N=%d) -- "
+                        "this should be provably unreachable\n", t, t1, N);
+  std::abort();
 }
 
 }  // namespace livo_recon
