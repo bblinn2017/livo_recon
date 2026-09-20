@@ -576,21 +576,49 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         }
       }
 
-      // CQ-57 item 3b: add out-of-band IMU noise power (see this option's
-      // own header doc comment for the measured fractions) into the V and
-      // P blocks -- integrated over the scan's own duration, using the
-      // SAME sigma_a/sigma_g this scan already calibrated (coupled_sigma_a_used_/
-      // coupled_sigma_g_used_), not a separate model.
+      // CQ-57 item 3b / CQ-68 item 3: add out-of-band IMU noise power (see
+      // this option's own header doc comment for the measured fractions)
+      // into the V and P blocks -- integrated over the scan's own
+      // duration. CQ-65 item 7's own P2 test found this injection was
+      // FLAT/scan-independent (var_acc_oob depended only on the near-
+      // constant dt_scan and on coupled_sigma_a_used_, which without
+      // estimator/coupled/adaptive_sigma also on is just the CALIBRATION
+      // FLOOR every scan -- i.e. a near-constant addition, unconditional
+      // on any actually-detected vibration), and that the falsifier fired:
+      // the term visibly reshaped the stationary window's own calibration,
+      // where no physical vibration source applies. FIX: inject only the
+      // EXCESS variance measured ABOVE the calibration floor (sigma_used^2
+      // - sigma_floor^2, floored at 0) rather than the raw sigma_used^2 --
+      // sigma_used^2 alone double-counts the floor's own contribution,
+      // which is already present via imu_processing.cpp's own cov_w term,
+      // and is exactly the calibration constant the raw formula injected
+      // even during a genuinely calm scan. With
+      // estimator/coupled/adaptive_sigma also enabled (so
+      // coupled_sigma_a_used_/coupled_sigma_g_used_ actually track this
+      // scan's own raw-IMU std rather than sitting at the floor), the
+      // excess is ~0 during calm scans (sigma_used ~= sigma_floor) and
+      // grows only when real excess in-scan noise is measured -- "inject
+      // what is actually there," per the card's own words. Requires
+      // adaptive_sigma=true to have any effect at all (with it off,
+      // sigma_used == sigma_floor identically every scan, so the excess
+      // is always exactly 0 and this option becomes silently a no-op --
+      // a real, intentional coupling between the two flags, not a bug).
       if (copts_.q_out_of_band_en) {
         const double dt_scan = mg.image.t - mg.poses.front().t;
         if (dt_scan > 0.0) {
+          const double sigma_a_floor_now = std::sqrt(state_->varAccFloor().mean());
+          const double sigma_g_floor_now = std::sqrt(state_->varGyrFloor().mean());
+          const double excess_var_a = std::max(0.0,
+              coupled_sigma_a_used_ * coupled_sigma_a_used_ - sigma_a_floor_now * sigma_a_floor_now);
+          const double excess_var_g = std::max(0.0,
+              coupled_sigma_g_used_ * coupled_sigma_g_used_ - sigma_g_floor_now * sigma_g_floor_now);
           const double var_acc_oob = copts_.q_out_of_band_scale * copts_.q_out_of_band_fraction_acc
-              * coupled_sigma_a_used_ * coupled_sigma_a_used_ * dt_scan;
+              * excess_var_a * dt_scan;
           const int iV = StateGroup::idxV(), iP = StateGroup::idxP();
           posterior18.block<3, 3>(iV, iV).diagonal().array() += var_acc_oob;
           posterior18.block<3, 3>(iP, iP).diagonal().array() += var_acc_oob * dt_scan * dt_scan;
           const double var_gyr_oob = copts_.q_out_of_band_scale * copts_.q_out_of_band_fraction_gyr
-              * coupled_sigma_g_used_ * coupled_sigma_g_used_ * dt_scan;
+              * excess_var_g * dt_scan;
           const int iR = StateGroup::idxR();
           posterior18.block<3, 3>(iR, iR).diagonal().array() += var_gyr_oob;
         }
