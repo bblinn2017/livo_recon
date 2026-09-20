@@ -214,7 +214,7 @@ std::string LioProcDecoupled::loadParameters(ros::NodeHandle& pnh)
   // read by paramWarn() in voxelmap.cpp, so they are unclaimed here and would
   // be reported as dead when they are merely read elsewhere. Widen this only
   // as those move onto a resolver.
-  return finalizeConfig(cfg, { "spline", "adaptive_q" });
+  return finalizeConfig(cfg, { "spline", "adaptive_q", "lio/ekf", "voxel_map" });
 }
 
 // LIO Processing

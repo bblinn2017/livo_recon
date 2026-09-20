@@ -101,7 +101,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   // adaptive_q OUT of the allowed-unclaimed list means any key set there
   // under a coupled config is refused at startup, naming itself -- the
   // structural enforcement item 3d(iii) describes.
-  return finalizeConfig(cfg, {});
+  return finalizeConfig(cfg, { "lio/ekf", "voxel_map" });
 }
 
 std::string LioProcCoupled::engagementReport() const

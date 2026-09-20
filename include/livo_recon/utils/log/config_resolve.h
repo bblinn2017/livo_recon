@@ -134,9 +134,37 @@ public:
   // the failure this file was written to eliminate, one level up.
   //
   // Call this AFTER every read, with the namespace prefixes this resolver
-  // owns COMPLETELY.  Do not pass a prefix whose keys are shared with a
-  // paramWarn() elsewhere: those keys are unclaimed here and would be
-  // reported as dead when they are merely read by someone else.
+  // owns COMPLETELY -- CQ-32 update: "owns completely" no longer means
+  // "reads through this resolver's own nested()/mode() calls" specifically,
+  // since the global-registry check below also recognises a key read by a
+  // plain paramWarn() call anywhere else in the process (e.g. VoxelMap's
+  // own voxel_map/* reads). It still means "no key under this prefix is
+  // EVER legitimately allowed to remain unread" -- a namespace some OTHER
+  // code path deliberately leaves partially unread (on purpose, not just
+  // via a different reader) is still the wrong prefix to pass.
+  //
+  // ALSO NOTE, a DIFFERENT defect this guard does NOT cover: a key can be
+  // legitimately CLAIMED (a real cfg.nested()/paramWarn() call names it)
+  // while that call's own SCOPE CONDITION is false for this run (e.g.
+  // cfg.nested<bool>(some_other_flag_is_true, "scope", "voxel_map/plane/x",
+  // ...) when some_other_flag_is_true is false this run) -- the key still
+  // resolves via pnh.param()'s own fallback-to-default machinery silently,
+  // exactly as if nobody had claimed it, but refuseUnclaimed() reports it
+  // as fine because SOMEONE did, in principle, ask for it. Catching "claimed
+  // by a call whose own scope never actually fires this run" is a
+  // meaningfully different check (it would need to know which nested()
+  // calls' scope conditions evaluated true, not just which keys were ever
+  // named) and is not implemented here.
+  // CQ-32: also consults the GLOBAL paramWarn()/markParamConsumed() registry
+  // (detail::consumedParamKeys(), param_warn.h), not just this resolver's
+  // own local claimed_ set -- this is what makes it SAFE to pass a prefix
+  // whose keys are read by a DIFFERENT reader entirely via plain paramWarn()
+  // (e.g. voxel_map/*, read by VoxelMap::loadParameters() through its own
+  // pnh calls, never through this LioProc's own ConfigResolver instance),
+  // exactly the case the original doc comment above warned never to do.
+  // Both registries are checked (local first, cheaper) so a key claimed
+  // through the ConfigResolver's own nested()/mode()/claim() OR through any
+  // paramWarn() call anywhere in the process counts as claimed here.
   void refuseUnclaimed(std::initializer_list<const char*> prefixes)
   {
     std::vector<std::string> names;
@@ -148,6 +176,7 @@ public:
                               "this run");
       return;
     }
+    const std::string ns = pnh_.getNamespace() + "/";
     for (const char* pre : prefixes)
     {
       const std::string root = pnh_.resolveName(pre);
@@ -156,6 +185,24 @@ public:
       {
         if (full != root && full.rfind(root_slash, 0) != 0) continue;
         if (claimed_.count(full) != 0) continue;
+        // Relative-key ancestor walk, same shape checkAllParamsConsumed()
+        // already uses -- a paramWarn<std::vector<T>> call consumes the
+        // whole key as one unit, so a leaf under it (e.g. a rosparam-loaded
+        // list's own enumerated indices) must check its ancestors too, not
+        // just its own exact name.
+        bool consumed_globally = false;
+        if (full.rfind(ns, 0) == 0)
+        {
+          std::string probe = full.substr(ns.size());
+          while (true)
+          {
+            if (detail::consumedParamKeys().count(probe)) { consumed_globally = true; break; }
+            const auto slash = probe.find_last_of('/');
+            if (slash == std::string::npos) break;
+            probe = probe.substr(0, slash);
+          }
+        }
+        if (consumed_globally) continue;
         std::ostringstream oss;
         oss << full << " is set but NO reader claims it. Either it is a key "
                "renamed out from under this config, or a typo. Nothing would "
