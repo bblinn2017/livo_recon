@@ -49,6 +49,12 @@ struct LioProcOptions
   // done post-hoc in Python over these two files, not in this build.
   bool   log_pair_corr_en      = false;
 
+  // CQ-74 item 5a: full 18-dim eigenspectrum of the POST-update covariance,
+  // both estimator paths (shared here rather than duplicated in each --
+  // see LioProcBase::logEigenspectrum18()). Default false, report-only,
+  // never read back by any estimator path.
+  bool   log_eigenspectrum_en  = false;
+
   // History (30-50): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-30
   int    dry_run_point_filter_num = 0;
 
@@ -332,6 +338,12 @@ protected:
   // called from both derived classes' own overrides -- see lio_base.cpp's
   // own doc comment for exactly which keys this reads.
   void loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh);
+
+  // CQ-74 item 5a: full 18x18 POST-update covariance eigenspectrum --
+  // shared between both estimator paths so it's implemented once. No-op
+  // unless opts_.log_eigenspectrum_en. mode_label distinguishes coupled
+  // vs decoupled rows in the one shared log file (cq74_eigenspectrum.txt).
+  void logEigenspectrum18(int scan_id, double t_abs, const char* mode_label) const;
   // The shared finish: refuseUnclaimed(allowed_unclaimed_namespaces), the
   // build/accumulation_precision derived line, the ok()-or-throw gate, and
   // returning cfg.report().

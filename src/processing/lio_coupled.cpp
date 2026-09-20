@@ -826,6 +826,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           coupled_diag.p_rot_eig_max_post = es_r_post.eigenvalues()(2);
         }
         if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) vm->noteLioFrameDiag(coupled_diag);
+        logEigenspectrum18(voxel_map_->frame_idx_, mg.image.t + data_queues_->start_time, "coupled");
       }
 
       // CQ-76 T1.0: the qhat accumulator (imu_processing.cpp) is primed on

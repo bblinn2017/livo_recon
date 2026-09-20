@@ -1978,6 +1978,7 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
       }
 
       if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) vm->noteLioFrameDiag(diag);
+      logEigenspectrum18(voxel_map_->frame_idx_, mg.image.t + data_queues_->start_time, "decoupled");
     }
 
     if (opts_.log_debug_en)

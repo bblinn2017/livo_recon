@@ -101,6 +101,7 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   paramWarn<double>(pnh, "lio/ekf/min_diff_error",  opts_.min_diff_error,  -1.0);
   paramWarn<bool>(pnh, "lio/log_debug_en",          opts_.log_debug_en,   false);
   paramWarn<bool>(pnh, "lio/log_pair_corr_en",      opts_.log_pair_corr_en, false);
+  paramWarn<bool>(pnh, "lio/log_eigenspectrum_en",  opts_.log_eigenspectrum_en, false);
   paramWarn<bool>(pnh, "lio/log_consistency_scan_en", opts_.log_consistency_scan_en, false);
   paramWarn<bool>(pnh, "lio/log_nll_en", opts_.log_nll_en, false);
   paramWarn<int>(pnh, "lio/dry_run_point_filter_num", opts_.dry_run_point_filter_num, 0);
@@ -517,6 +518,47 @@ bool LioProcBase::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, double
       accumulateLioResiduals(residuals_, out);
   }
   return true;
+}
+
+void LioProcBase::logEigenspectrum18(int scan_id, double t_abs, const char* mode_label) const
+{
+  if (!opts_.log_eigenspectrum_en) return;
+  if (state_->idxBG() < 0 || state_->idxBA() < 0 || state_->idxG() < 0) return;
+  const Eigen::MatrixXd& P = state_->cov();
+  if (P.rows() < 18 || P.cols() < 18) return;
+
+  const Eigen::Matrix<double, 18, 18> P18 = P.block<18, 18>(0, 0);
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 18, 18>> es(P18);
+  const auto& eigvals = es.eigenvalues();     // ascending
+  const auto& eigvecs = es.eigenvectors();
+
+  // CQ-74 item 5a: which state block (rot/pos/vel/bg/ba/gravity) the
+  // SMALLEST eigenvector loads onto, by largest-component -- StateGroup's
+  // own fixed 18-dim layout (idxR=0,idxP=3,idxV=6,idxBG=9,idxBA=12,idxG=15,
+  // each a contiguous 3-block).
+  static const char* BLOCK_NAMES[6] = {"rot", "pos", "vel", "bg", "ba", "gravity"};
+  const Eigen::VectorXd v_min = eigvecs.col(0);
+  int max_block = 0;
+  double max_block_norm = -1.0;
+  for (int b = 0; b < 6; ++b) {
+    const double block_norm = v_min.segment<3>(3 * b).squaredNorm();
+    if (block_norm > max_block_norm) { max_block_norm = block_norm; max_block = b; }
+  }
+
+  static PersistentLogStream log("cq74_eigenspectrum.txt");
+  bool first;
+  std::ofstream& ofs = log.stream(&first);
+  if (first) {
+    ofs << "mode,scan_id,t_abs,lambda_min,lambda_max,weak_axis_block";
+    for (int i = 0; i < 18; ++i) ofs << ",eig" << i;
+    ofs << "\n";
+  }
+  ofs << mode_label << "," << scan_id << "," << std::fixed << std::setprecision(6) << t_abs
+      << std::defaultfloat << "," << eigvals(0) << "," << eigvals(17) << ","
+      << BLOCK_NAMES[max_block];
+  for (int i = 0; i < 18; ++i) ofs << "," << eigvals(i);
+  ofs << "\n";
+  ofs.flush();
 }
 
 }  // namespace livo_recon
