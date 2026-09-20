@@ -225,7 +225,9 @@ evo:
   # own norm).
   gt_file: ""  # TUM-format path, used when gt_source == "file"
   queue_size: 2000
-  max_time_diff: 0.05  # seconds; nearest-match tolerance (file) or RTE/ROE pairing tolerance (topic)
+  max_time_diff: 0.25  # seconds; matches fastlivo_evo.py's own EVO_MAX_TIME_DIFF (CQ-65: the
+    # old 0.05 sat right at NTU_VIRAL's ~0.1s frame spacing's edge and rejected ~53% of
+    # otherwise-good GT matches -- see EvoProcOptions::max_time_diff's doc comment)
   rpe:
     compute_rte: true   # relative translation error (RPE's translation part) -- topic mode only
     # GT AUDIT, 2026-08-31 / disabled 2026-09-01. FALSE ON PURPOSE, and it

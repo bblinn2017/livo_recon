@@ -45,7 +45,11 @@ std::string EvoProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<std::string>(pnh, "evo/gt_topic",   opts_.gt_topic,     "/leica/pose/relative");
   paramWarn<std::string>(pnh, "evo/gt_file",    opts_.gt_file,      "");
   paramWarn<int>(pnh, "evo/queue_size",         opts_.queue_size,   2000);
-  paramWarn<double>(pnh, "evo/max_time_diff",   opts_.max_time_diff, 0.05);
+  // CQ-65 (mid-session direction): raised to match fastlivo_evo.py's own
+  // current EVO_MAX_TIME_DIFF -- see EvoProcOptions::max_time_diff's doc
+  // comment for the measured rationale (the old 0.05 rejected ~53% of
+  // NTU_VIRAL's own GT matches).
+  paramWarn<double>(pnh, "evo/max_time_diff",   opts_.max_time_diff, 0.25);
   paramWarn<bool>(pnh, "evo/rpe/compute_rte",   opts_.compute_rte,  false);
   paramWarn<bool>(pnh, "evo/rpe/compute_roe",   opts_.compute_roe,  false);
   paramWarn<double>(pnh, "evo/rpe/delta_s",     opts_.rpe_delta_s,  1.0);

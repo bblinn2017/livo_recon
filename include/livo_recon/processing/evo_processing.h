@@ -78,12 +78,25 @@ struct EvoProcOptions
   V3D gt_lever_arm = V3D::Zero();
 
   // Maximum time gap (seconds), same role as FAST-LIVO2's own
-  // fastlivo_evo.py --max-time-diff (default there: 0.08; kept at this
-  // module's pre-existing 0.05 default here since datasets/tuning already
-  // depend on it). Two association MODES are computed against this single
-  // threshold, exactly mirroring fastlivo_evo.py's lookup_est()/
-  // lookup_nearest() (see processEvo()'s doc comment and MODE_NEAREST/
-  // MODE_INTERP below):
+  // fastlivo_evo.py --max-time-diff / EVO_MAX_TIME_DIFF. THIS MODULE'S
+  // OLD 0.05 DEFAULT WAS STALE -- fastlivo_evo.py's own comment history
+  // documents raising ITS identical default from 0.08 to 0.25 on
+  // 2026-08-07, specifically because the interp bracket-gap reject
+  // threshold is 2x this value and must comfortably exceed the
+  // estimate's own native frame period or nearly every GT sample gets
+  // rejected: "the old 0.05 default (0.1s threshold) sat right at that
+  // spacing's edge and rejected ~44% of otherwise-good GT samples
+  // (n=1870 matched vs the expected ~3362)" on NTU_VIRAL's own ~0.1s
+  // frame spacing. That fix was never ported to this C++ module, which
+  // carried the pre-fix 0.05 default (and a stale "default there: 0.08"
+  // comment) until this was independently rediscovered here: confirmed
+  // directly on eee_01_n4_end/coupled/n_c=4 -- 0.05 gave n=1868/3980
+  // matched (47%), 0.25 gave n=6616 and moved ATE from 0.0251m to
+  // 0.0258m (2.8%, real, not floating-point noise). Now matches
+  // fastlivo_evo.py's own current EVO_MAX_TIME_DIFF=0.25 exactly. Two
+  // association MODES are computed against this single threshold,
+  // exactly mirroring fastlivo_evo.py's lookup_est()/lookup_nearest()
+  // (see processEvo()'s doc comment and MODE_NEAREST/MODE_INTERP below):
   //   nearest: a GT sample is matched to whichever of the two RAW estimate
   //     frames bracketing it (before/after) is closer in time, and dropped
   //     if that gap exceeds max_time_diff.
@@ -96,7 +109,7 @@ struct EvoProcOptions
   // Both modes are computed unconditionally (whenever gt_source == "topic")
   // so this module's ATE/RTE/ROE are directly comparable to fastlivo_evo.py's
   // own dual-mode output -- there is no yaml toggle to pick just one.
-  double max_time_diff = 0.05;
+  double max_time_diff = 0.25;
 
   // RTE/ROE (RPE's translation/rotation parts) compare pairs of matched
   // poses separated by ~rpe_delta_s; ATE is always computed regardless of

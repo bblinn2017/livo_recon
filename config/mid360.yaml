@@ -180,7 +180,9 @@ evo:
   gt_topic: "/leica/pose/relative"
   gt_file: ""  # TUM-format path, used when gt_source == "file"
   queue_size: 2000
-  max_time_diff: 0.05  # seconds; nearest-match tolerance (file) or RTE/ROE pairing tolerance (topic)
+  max_time_diff: 0.25  # seconds; matches fastlivo_evo.py's own EVO_MAX_TIME_DIFF (CQ-65 fix --
+  # see EvoProcOptions::max_time_diff's doc comment; the old 0.05 sat at NTU_VIRAL's own
+  # frame-spacing edge and rejected ~53% of otherwise-good GT matches there)
   rpe:
     compute_rte: false  # relative translation error (RPE's translation part) -- topic mode only
     compute_roe: false  # relative rotation error (RPE's rotation part) -- topic mode only; a diagnostic curiosity against position-only ground truth, not a true orientation error (see evo_processing.cpp's logStage())
