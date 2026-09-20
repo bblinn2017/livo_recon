@@ -1,4 +1,5 @@
 #include "livo_recon/processing/lio_coupled.h"
+#include "livo_recon/processing/imu_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/config_resolve.h"
 #include "livo_recon/utils/log/debug_log_dir.h"
@@ -673,6 +674,115 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       // CQ-62 item 1: S11 -- state_->cov() immediately after the write.
       if (copts_.psd_audit_en)
         logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S11_cov_post_write", state_->cov());
+
+      // CQ-76 T1.0: the qhat accumulator (imu_processing.cpp) is primed on
+      // EVERY IMU propagation regardless of estimator mode, but was only
+      // ever CONSUMED (read + reset) by the decoupled path -- in coupled
+      // mode it was never read, so it accumulated F A F^T + cov_w
+      // continuously across the whole run rather than resetting per scan.
+      // This call is the coupled-side consumer: it no-ops (returns false)
+      // unless imu/log_qhat_en is set, exactly like the decoupled call
+      // site -- no new flag, zero behavior change to the estimator (the
+      // returned matrices are read-only diagnostic output, never fed back
+      // into state_ or A). g_qhat_p_before is P at the START of this
+      // scan's IMU integration (end of the PREVIOUS scan's LiDAR
+      // correction); phi_p_phit + accum_cov_w reconstructs g_qhat_p_after,
+      // the covariance THIS scan's Pi_ss/Omega is actually built from (see
+      // T0.1's confirmed call chain: state_->cov() at that read point is
+      // exactly this post-IMU-propagation value, nothing else has written
+      // covMut() in between).
+      {
+        Eigen::MatrixXd phi_p_phit, accum_cov_w, p_before;
+        if (imuProcQhatRead(phi_p_phit, accum_cov_w, p_before)) {
+          const Eigen::MatrixXd P_t1 = phi_p_phit + accum_cov_w;  // = g_qhat_p_after
+          if (p_before.rows() == P_t1.rows() && p_before.rows() >= 18) {
+            auto blockEig = [](const Eigen::MatrixXd& M, int idx0, double& tr,
+                                double& lmin, double& lmid, double& lmax) {
+              const Eigen::Matrix3d B = M.block<3, 3>(idx0, idx0);
+              Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(0.5 * (B + B.transpose()));
+              const Eigen::Vector3d ev = es.eigenvalues();
+              tr = B.trace(); lmin = ev(0); lmid = ev(1); lmax = ev(2);
+            };
+            const int iR = StateGroup::idxR(), iP = StateGroup::idxP();
+            static PersistentLogStream cq76_log("cq76_prior_time_index.txt");
+            bool cq76_first;
+            std::ofstream& cq76_ofs = cq76_log.stream(&cq76_first);
+            if (cq76_first)
+              cq76_ofs << "scan_id,t_abs,matrix,block,trace,eig_min,eig_mid,eig_max\n";
+            const double t_abs = mg.image.t + data_queues_->start_time;
+            const int sid = voxel_map_->frame_idx_;
+            struct MatEntry { const char* name; const Eigen::MatrixXd* M; };
+            const std::vector<MatEntry> mats = {
+                {"P_t0", &p_before}, {"P_t1", &P_t1},
+                {"PhiP0Phi", &phi_p_phit}, {"Q_scan", &accum_cov_w}};
+            for (const auto& me : mats) {
+              for (const auto& blk : {std::make_pair("pos", iP), std::make_pair("rot", iR)}) {
+                double tr, lmin, lmid, lmax;
+                blockEig(*me.M, blk.second, tr, lmin, lmid, lmax);
+                cq76_ofs << sid << "," << std::setprecision(10) << t_abs << ","
+                         << me.name << "," << blk.first << "," << tr << ","
+                         << lmin << "," << lmid << "," << lmax << "\n";
+              }
+            }
+            // T1.1's own extra ask: eigenvalue spectrum of P(t0)^-1 - P(t1)^-1
+            // (the s-block information DIFFERENCE the two time-index
+            // readings would disagree by), full 18x18, all eigenvalues,
+            // not just a 3x3 block.
+            Eigen::LDLT<Eigen::MatrixXd> ldlt_t0(p_before), ldlt_t1(P_t1);
+            if (ldlt_t0.info() == Eigen::Success && ldlt_t1.info() == Eigen::Success) {
+              const Eigen::MatrixXd I = Eigen::MatrixXd::Identity(P_t1.rows(), P_t1.rows());
+              const Eigen::MatrixXd info_diff = ldlt_t0.solve(I) - ldlt_t1.solve(I);
+              Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_diff(
+                  0.5 * (info_diff + info_diff.transpose()));
+              const Eigen::VectorXd ev_diff = es_diff.eigenvalues();
+              static PersistentLogStream cq76_diff_log("cq76_info_diff_spectrum.txt");
+              bool cq76_diff_first;
+              std::ofstream& cq76_diff_ofs = cq76_diff_log.stream(&cq76_diff_first);
+              if (cq76_diff_first) cq76_diff_ofs << "scan_id,t_abs,eig_min,eig_max,eig_all\n";
+              cq76_diff_ofs << sid << "," << t_abs << "," << ev_diff(0) << ","
+                            << ev_diff(ev_diff.size() - 1) << ",\"";
+              for (int i = 0; i < ev_diff.size(); ++i)
+                cq76_diff_ofs << ev_diff(i) << (i + 1 < ev_diff.size() ? ";" : "");
+              cq76_diff_ofs << "\"\n";
+            }
+            // T1.2: P_coeff_to_state = Phi_c P_c Phi_c^T -- what the
+            // coefficient posterior already carries into the endpoint
+            // state block, logged with its own blocks/spectrum so T1.2's
+            // "report both, decide neither" instruction can be honored
+            // without re-deriving this quantity from raw logs later.
+            if (coupled_last_A_.rows() > 18 && copts_.log_cp_constraint_en) {
+              const int ncol_c = coupled_last_A_.rows() - 18;
+              // NOTE, reported not silently fixed: this is A_cc^-1, the
+              // BLOCK-DIAGONAL approximation of the coefficient marginal
+              // covariance -- it ignores the s/c cross-correlation A
+              // actually carries (the true marginal would need the Schur
+              // complement (A_cc - A_cs*A_ss^-1*A_sc)^-1). Acceptable for
+              // this card's own explicit "diagnostic, report both, decide
+              // neither" framing (T1.2) but NOT a claim of exactness.
+              const Eigen::MatrixXd P_cc =
+                  coupled_last_A_.block(18, 18, ncol_c, ncol_c).inverse();
+              // phi_head[k] is already exactly 9 x ncol_c (the c-block-only
+              // sensitivity -- see coupled_estimator.h's own doc comment),
+              // no s-block columns to slice off.
+              const Eigen::Matrix<double, 9, Eigen::Dynamic>& Phi_c =
+                  coupled_prop_.phi_head.back();
+              const Eigen::MatrixXd P_coeff_to_state = Phi_c * P_cc * Phi_c.transpose();
+              static PersistentLogStream cq76_pcs_log("cq76_p_coeff_to_state.txt");
+              bool cq76_pcs_first;
+              std::ofstream& cq76_pcs_ofs = cq76_pcs_log.stream(&cq76_pcs_first);
+              if (cq76_pcs_first)
+                cq76_pcs_ofs << "scan_id,t_abs,block,trace,eig_min,eig_mid,eig_max\n";
+              for (const auto& blk : {std::make_pair("pos", 3), std::make_pair("rot", 0)}) {
+                const Eigen::Matrix3d B = P_coeff_to_state.block<3, 3>(blk.second, blk.second);
+                Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(0.5 * (B + B.transpose()));
+                const Eigen::Vector3d ev = es.eigenvalues();
+                cq76_pcs_ofs << sid << "," << t_abs << "," << blk.first << "," << B.trace()
+                             << "," << ev(0) << "," << ev(1) << "," << ev(2) << "\n";
+              }
+            }
+          }
+        }
+      }
 
       // CQ-61 item 4, RULE 58 -- NOT AN EXPERIMENT: on residual starvation
       // the estimator keeps integrating IMU and reports convergence --
