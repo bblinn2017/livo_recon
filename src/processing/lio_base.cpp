@@ -127,6 +127,13 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   cfg.nested<double>(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/max_discount",
                      opts_.residual_redundancy.max_discount, 0.9);
 
+  // CQ-70: split information update -- see CovRedundancyDiscountOptions's
+  // own doc comment in lio_base.h for the full derivation.
+  cfg.mode("lio/ekf/cov_redundancy_discount", opts_.cov_redundancy_discount.mode, "off",
+           { "off", "info_gain", "fixed" });
+  cfg.nested<double>(opts_.cov_redundancy_discount.mode == "fixed", "lio/ekf/cov_redundancy_discount=fixed",
+                     "lio/ekf/cov_redundancy_kappa", opts_.cov_redundancy_discount.kappa, 1.0);
+
   // CQ-37 axis A (residual-set reduction) and axis B (per-residual
   // reweight).
   cfg.mode("lio/residual_weighting/collapse", opts_.residual_weighting.collapse, "off",
@@ -378,6 +385,21 @@ void LioProcBase::solveSystem(const std::vector<Residual>& residuals) const {
   // state_propagat_, snapshotted once in processLIO() before this frame's
   // iteration loop began) -- does not touch state_->cov().
   ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
+}
+
+// CQ-70: see CovRedundancyDiscountOptions's own doc comment in lio_base.h.
+double LioProcBase::covRedundancyKappa() const {
+  const auto& o = opts_.cov_redundancy_discount;
+  if (!o.on()) return 1.0;
+  if (o.mode == "fixed") return o.kappa;
+  // mode == "info_gain": this frame's OWN final-iteration counters (not a
+  // one-frame lag -- see the doc comment on why this differs from
+  // sigma_scale's info_gain_derived level). No discount when there was
+  // nothing grouped to discount against.
+  if (redundancy_stats_.redund_n_raw > 0 && redundancy_stats_.redund_n_eff > 0)
+    return static_cast<double>(redundancy_stats_.redund_n_raw) /
+           static_cast<double>(redundancy_stats_.redund_n_eff);
+  return 1.0;
 }
 
 // CQ-37 axis D.  See LioProcOptions::SigmaScaleOptions's own doc comment for

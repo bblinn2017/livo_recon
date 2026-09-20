@@ -116,9 +116,22 @@ struct EkfUpdate
     // iteration's H_full (cached by the last applyMeanUpdate() call). Call
     // this once after a frame's whole inner iteration loop finishes
     // (whatever the reason it stopped), not per-iteration.
-    void applyCovarianceUpdate(const StateGroupPtr& state, const Eigen::MatrixXd& prior_cov)
+    //
+    // CQ-70: H_full_discount (default 1.0, the identity) divides ONLY this
+    // call's OWN copy of last_H_full_ before it's folded into A -- it never
+    // touches last_H_full_ itself (applyMeanUpdate() already ran and is
+    // unaffected regardless of call order) or Htz (this update doesn't read
+    // Htz at all). A caller that never passes this argument gets EXACTLY
+    // the pre-CQ-70 formula, guarded to skip the division entirely at
+    // discount==1.0 rather than relying on x/1.0==x -- see
+    // solveCovarianceFromA()'s own doc comment for why this shared path's
+    // byte-for-byte behavior at the default is load-bearing (decoupled-md5).
+    void applyCovarianceUpdate(const StateGroupPtr& state, const Eigen::MatrixXd& prior_cov,
+                                double H_full_discount = 1.0)
     {
-        Eigen::MatrixXd A = last_H_full_ + prior_cov.inverse();
+        Eigen::MatrixXd A = (H_full_discount == 1.0)
+            ? Eigen::MatrixXd(last_H_full_ + prior_cov.inverse())
+            : Eigen::MatrixXd(last_H_full_ / H_full_discount + prior_cov.inverse());
         // CQ-57 item 4: shared with LioProcCoupled's own posterior18
         // construction -- see solveCovarianceFromA()'s own doc comment.
         // M=nullptr here reproduces the EXACT prior behaviour (P_new = A^-1

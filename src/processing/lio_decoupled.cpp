@@ -1441,8 +1441,16 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
     // accumulated this frame (ekf_'s H_full would be stale from a previous
     // frame), so there's nothing to blend and state_->cov() should stay
     // exactly as it was going into this frame.
+    //
+    // CQ-70: covRedundancyKappa() is 1.0 (no-op) unless
+    // lio/ekf/cov_redundancy_discount is set -- the REAL posterior write is
+    // the only one this card discounts. The shadow update above (line ~1161,
+    // used only for a trace(P) diagnostic comparison at an earlier
+    // point_filter_num) is deliberately left undiscounted, so that
+    // diagnostic keeps comparing against the historical formula rather than
+    // silently changing shape when this new option is engaged.
     if (any_solved)
-      ekf_.applyCovarianceUpdate(state_, prior_cov_);
+      ekf_.applyCovarianceUpdate(state_, prior_cov_, covRedundancyKappa());
 
     // CQ-43 item (4d-ii): save this frame's own EKF rotation correction
     // (total_dtheta is local to this scope) for finalizeSplineAndQ() to

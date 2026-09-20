@@ -138,6 +138,47 @@ struct LioProcOptions
   // default.
   PriorScalarOptions prior_scalar;
 
+  // CQ-70: SPLIT information update -- discount redundancy ONLY in
+  // EkfUpdate::applyCovarianceUpdate()'s own H_full contribution (dividing
+  // it by kappa before forming A), leaving applyMeanUpdate()'s H_full/Htz
+  // completely untouched. Every prior redundancy-discounting mechanism in
+  // this codebase (residual_redundancy's Woodbury modes above) discounts
+  // the SAME HtH/Htz that both the mean and covariance updates read from,
+  // so it necessarily costs tracking accuracy along with fixing
+  // overconfidence -- this is the first mechanism that can touch ONLY the
+  // covariance's own belief about its uncertainty, leaving the actual state
+  // correction (and therefore ATE) mechanically unable to move. Candidate
+  // fix for the ~1000x aggregate NEES overconfidence found three
+  // independent ways (standing/round-61's 275x factor, CQ-47's ~123x
+  // directional over-count, CQ-62's 251-2955x per-axis/1008x aggregate) --
+  // decoupled's own reduced_chi2=1.226 already rules out a simple flat
+  // residual-variance miscalibration as the explanation, since that would
+  // show up as reduced_chi2 far from 1, not as a healthy per-residual
+  // calibration alongside a wildly overconfident joint covariance.
+  //
+  // "off" (default): kappa==1.0 always, A is built exactly as before --
+  // byte-identical to pre-CQ-70 behavior.
+  // "info_gain": kappa = redundancy_stats_.redund_n_raw /
+  //   redundancy_stats_.redund_n_eff for THIS frame's FINAL inner-iteration
+  //   value (NOT the one-frame lag sigma_scale's own info_gain_derived level
+  //   uses -- applyCovarianceUpdate() runs once, after the inner loop, by
+  //   which point redundancy_stats_ already holds this frame's own last
+  //   solveSystem[_cuda]() call's counters). kappa==1.0 (no discount)
+  //   whenever redund_n_raw or redund_n_eff is 0 (no grouped residuals this
+  //   frame -- nothing to discount).
+  // "fixed": kappa == cov_redundancy_kappa, a constant set by the caller
+  //   (used for the card's own arm D: a very large fixed kappa drives the
+  //   covariance update's own H_full contribution toward zero -- P then
+  //   tracks the propagated prior almost exactly, isolating "how much does
+  //   the covariance shrink from Q/prediction alone" from "how much does it
+  //   shrink from LiDAR information").
+  struct CovRedundancyDiscountOptions
+  {
+    std::string mode = "off";
+    double kappa = 1.0;  // only read when mode == "fixed"
+    bool on() const { return mode != "off"; }
+  } cov_redundancy_discount;
+
   // CQ-37 axis A/B: residual-set reduction (collapse) and per-residual
   // reweight (per_residual) -- see residual_weighting.h for the full
   // derivation of both. Both default off/identity.
@@ -258,6 +299,13 @@ public:
 
   void solveSystem(const std::vector<Residual>& residuals) const;
   void solveSystem_cuda(const std::vector<Residual>& residuals) const;
+
+  // CQ-70: the kappa a caller should pass to EkfUpdate::applyCovarianceUpdate()
+  // as its H_full_discount argument -- see CovRedundancyDiscountOptions's own
+  // doc comment above for what each mode computes. Always 1.0 (no discount)
+  // when opts_.cov_redundancy_discount.mode == "off", so a caller that never
+  // reads this at all is unaffected either way.
+  double covRedundancyKappa() const;
 
   // Used only by the decoupled estimator's own iteration loop, but the
   // residual-build + EKF-accumulate machinery it wraps is shared, so it
