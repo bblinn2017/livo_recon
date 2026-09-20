@@ -1341,6 +1341,20 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   Eigen::Matrix<double, 6, 6> HtH_pose_lidar = Eigen::Matrix<double, 6, 6>::Zero();
   Eigen::Matrix<double, 6, 1> Htz_pose_lidar = Eigen::Matrix<double, 6, 1>::Zero();
   double sum_weight_this_iter = 0.0;
+  // CQ-66 item 1: sum_k w_k H_k^T H_k, RAW 6x6 (H before composing with
+  // Phix_pt/Phic_pt -- the [rot_jac_col;normal] measurement sensitivity
+  // alone). Item 1's own derivation: in end_time mode, EVERY residual's
+  // c-block contribution is H_k*Phic_end (Phic_end the SAME fixed 6xncol_c
+  // matrix for the whole scan), so the c-block's own contribution to A from
+  // the residual loop is Phic_end^T * (sum_k w_k H_k^T H_k) * Phic_end --
+  // rank-bounded by THIS 6x6 matrix's own rank, regardless of n_residuals
+  // or ncol_c. point_time uses a DIFFERENT Phic_pt per residual, so no such
+  // bound applies there.
+  Eigen::Matrix<double, 6, 6> H6_raw_accum = Eigen::Matrix<double, 6, 6>::Zero();
+  // CQ-66 item 3's own accumulator -- see its doc comment inside the loop.
+  Eigen::MatrixXd phic_spread_sum;
+  double phic_spread_sumsq = 0.0;
+  int phic_spread_n = 0;
   for (const auto& res : residuals_) {
     Eigen::Matrix<double, 1, 6> H;
     // CQ-50 item (d), the real fix: build the rotation-Jacobian column at
@@ -1377,6 +1391,18 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
         end_time ? coupled_prop_.phi_x_head.back() : interpolatePhiX(coupled_prop_, res.t);
     const Eigen::Matrix<double, 9, Eigen::Dynamic> Phic_pt =
         end_time ? coupled_prop_.phi_head.back() : interpolatePhi(coupled_prop_, res.t);
+    // CQ-66 item 3: per-scan spread of Phi_c(t_k) across residuals --
+    // single-pass (Var = E[||X||^2] - ||E[X]||^2, applied to the whole
+    // matrix via the Frobenius inner product) so no second pass over
+    // residuals_ is needed. In end_time mode Phic_pt is IDENTICAL for
+    // every residual, so this is mathematically guaranteed to come out
+    // exactly 0 -- the interesting number is point_time's own value.
+    if (copts_.psd_audit_en) {
+      if (phic_spread_sum.size() == 0) phic_spread_sum = Eigen::MatrixXd::Zero(9, ncol_c);
+      phic_spread_sum.noalias() += Phic_pt;
+      phic_spread_sumsq += Phic_pt.squaredNorm();
+      ++phic_spread_n;
+    }
     Eigen::Matrix<double, 1, Eigen::Dynamic> Jrow(1, ncol);
     Jrow.segment(0, ncol_s) = H * Phix_pt.topRows(6);          // R,P rows only (item 3b/3c)
     Jrow.segment(ncol_s, ncol_c) = H * Phic_pt.topRows(6);
@@ -1434,6 +1460,7 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     }
     A.noalias() += w * (Jrow.transpose() * Jrow);
     b.noalias() -= w * Jrow.transpose() * res.r;
+    if (copts_.psd_audit_en) H6_raw_accum.noalias() += w * (H.transpose() * H);
     sum_abs_r += std::abs(res.r);
     sum_sq_r += res.r * res.r;
     sum_wr2 += w * res.r * res.r;  // CQ-54 item 4: reduced chi-square numerator
@@ -1504,6 +1531,53 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     if (ldlt_coeff.info() == Eigen::Success) {
       coupled_coeff_dmin_ = ldlt_coeff.vectorD().minCoeff();
       coupled_coeff_dmax_ = ldlt_coeff.vectorD().maxCoeff();
+    }
+    // CQ-66: test the end_time-collapses-to-rank-6 derivation directly.
+    // rank_h6 = rank(H6_raw_accum) (the 6x6 upper bound the derivation
+    // predicts); rank_cblock = numerical rank of the RESIDUAL LOOP's own
+    // contribution to the c-block, i.e. (A-Lambda)'s c-block -- A's c-block
+    // was seeded with Lambda BEFORE the residual loop ran (A.block(ncol_s,
+    // ncol_s,...) = Lambda, above), so subtracting it back out isolates
+    // exactly what the derivation is about. Only meaningful when Lambda was
+    // actually captured (log_cp_constraint_en); psd_audit_en alone still
+    // gives rank_h6 (needs only H6_raw_accum, always safe to compute).
+    if (copts_.psd_audit_en) {
+      Eigen::JacobiSVD<Eigen::Matrix<double, 6, 6>> svd_h6(H6_raw_accum);
+      const Eigen::Matrix<double, 6, 1> sv_h6 = svd_h6.singularValues();
+      const double tol = sv_h6(0) * 1e-9 * 6;  // scale-relative, Eigen's own default-style tolerance
+      int rank_h6 = 0;
+      for (int i = 0; i < 6; ++i) if (sv_h6(i) > tol) ++rank_h6;
+
+      int rank_cblock = -1;
+      double cblock_tol = std::numeric_limits<double>::quiet_NaN();
+      if (copts_.log_cp_constraint_en) {
+        const Eigen::MatrixXd resid_only_cblock =
+            A.block(ncol_s, ncol_s, ncol_c, ncol_c) - coupled_last_Lambda_;
+        Eigen::JacobiSVD<Eigen::MatrixXd> svd_c(resid_only_cblock);
+        const Eigen::VectorXd sv_c = svd_c.singularValues();
+        cblock_tol = (sv_c.size() > 0 ? sv_c(0) : 0.0) * 1e-9 * ncol_c;
+        rank_cblock = 0;
+        for (int i = 0; i < sv_c.size(); ++i) if (sv_c(i) > cblock_tol) ++rank_cblock;
+      }
+
+      double phic_spread = std::numeric_limits<double>::quiet_NaN();
+      if (phic_spread_n > 0) {
+        const Eigen::MatrixXd mean_phic = phic_spread_sum / static_cast<double>(phic_spread_n);
+        const double var = phic_spread_sumsq / static_cast<double>(phic_spread_n) - mean_phic.squaredNorm();
+        phic_spread = std::sqrt(std::max(var, 0.0));
+      }
+
+      static PersistentLogStream rank_log("cq66_rank.txt");
+      bool rank_first;
+      std::ofstream& rank_ofs = rank_log.stream(&rank_first);
+      if (rank_first)
+        rank_ofs << "scan_id,jacobian_time_mode,n_c,ncol_c,n_residuals,"
+                     "rank_h6,h6_tol,rank_cblock,cblock_tol,coeff_dmin,phic_spread\n";
+      rank_ofs << voxel_map_->frame_idx_ << "," << copts_.jacobian_time_mode << ","
+               << copts_.n_c << "," << ncol_c << "," << residuals_.size() << ","
+               << rank_h6 << "," << tol << "," << rank_cblock << "," << cblock_tol << ","
+               << coupled_coeff_dmin_ << "," << phic_spread << "\n";
+      rank_ofs.flush();
     }
     // Disabled-by-default (JOINT_PIVOT_MIN_FLOOR=-1.0, below any real pivot
     // this system produces) -- exercises the refusal SHAPE without gating
