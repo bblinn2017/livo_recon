@@ -635,6 +635,19 @@ struct LioFrameDiag
   double p_pos_eig_min_post = -1.0, p_pos_eig_mid_post = -1.0, p_pos_eig_max_post = -1.0;
   double p_rot_trace_pre    = -1.0, p_rot_eig_min_pre  = -1.0;
   double p_pos_vel_fro_pre  = -1.0, p_pos_bias_fro_pre = -1.0;
+  // CQ-74 item 1: the rotation block's POST-update counterpart to
+  // p_rot_trace_pre/p_rot_eig_min_pre above (the rotation block previously
+  // had NO post-update columns at all, despite the weakest eigenvector
+  // being a rotation axis on ~100% of scans measured this session --
+  // standing/weak-direction-is-always-rotation). p_rot_eig_mid_pre/
+  // p_rot_eig_max_pre fill out the PRE side's own already-computed
+  // eigenvalue spectrum (only the min was previously kept). trP_pos_post
+  // makes the position block's own post-update trace explicit rather than
+  // requiring a reader to sum p_pos_eig_*_post themselves.
+  double p_rot_eig_mid_pre  = -1.0, p_rot_eig_max_pre  = -1.0;
+  double trP_pos_post       = -1.0;
+  double p_rot_trace_post   = -1.0;
+  double p_rot_eig_min_post = -1.0, p_rot_eig_mid_post = -1.0, p_rot_eig_max_post = -1.0;
 
   // CQ-19(b).  |v_min(P_pp) . v_min(HtH_pp)| -- the one number that signs
   // rho_ref: 1 if the prior's tightest axis coincides with HtH's weakest

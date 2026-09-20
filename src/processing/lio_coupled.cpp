@@ -221,6 +221,32 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     logPsdStage(voxel_map_->frame_idx_, -1, "S1_prior_cov_scaled", prior_cov_);
   state_propagat_ = *state_;
   trP_pos_pre_ = prior_cov_.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()).trace();
+
+  // CQ-74 item 1: coupled never populated frame_stats.txt's LioFrameDiag
+  // at all before this (confirmed by grep -- no noteLioFrameDiag() call
+  // anywhere in this file), so every LioFrameDiag-sourced column,
+  // including the ones that already existed for decoupled, silently sat
+  // at its -1.0 default for every coupled run. Scoped here to just the P
+  // (prior_cov_/state_->cov()) fields the card's own comparison needs --
+  // the ESIKF-specific residual/HtH fields (ask/got/refusal, htz_*_norm,
+  // etc.) genuinely do not apply to coupled's own GN solve the same way
+  // and are left at their existing "unavailable" defaults, matching how
+  // decoupled's own N/A cases already read.
+  LioFrameDiag coupled_diag;
+  if (prior_cov_.rows() >= StateGroup::idxP() + 3 && prior_cov_.cols() >= StateGroup::idxP() + 3) {
+    const M3D P_pp_pre = prior_cov_.block<3, 3>(StateGroup::idxP(), StateGroup::idxP());
+    Eigen::SelfAdjointEigenSolver<M3D> es_p_pre(P_pp_pre);
+    coupled_diag.p_pos_eig_min_pre = es_p_pre.eigenvalues()(0);
+    coupled_diag.p_pos_eig_mid_pre = es_p_pre.eigenvalues()(1);
+    coupled_diag.p_pos_eig_max_pre = es_p_pre.eigenvalues()(2);
+    const M3D P_rr_pre = prior_cov_.block<3, 3>(StateGroup::idxR(), StateGroup::idxR());
+    Eigen::SelfAdjointEigenSolver<M3D> es_r_pre(P_rr_pre);
+    coupled_diag.p_rot_trace_pre   = P_rr_pre.trace();
+    coupled_diag.p_rot_eig_min_pre = es_r_pre.eigenvalues()(0);
+    coupled_diag.p_rot_eig_mid_pre = es_r_pre.eigenvalues()(1);
+    coupled_diag.p_rot_eig_max_pre = es_r_pre.eigenvalues()(2);
+  }
+  coupled_diag.trP_pos_pre = trP_pos_pre_;
   mg.prior_pos = state_propagat_.pos();
   mg.prior_rot = state_propagat_.rot();
   mg.prior_vel = state_propagat_.vel();
@@ -674,6 +700,34 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       // CQ-62 item 1: S11 -- state_->cov() immediately after the write.
       if (copts_.psd_audit_en)
         logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S11_cov_post_write", state_->cov());
+
+      // CQ-74 item 1: the POST half of coupled_diag (see its own comment
+      // at this function's PRE site) -- state_->cov() now reflects THIS
+      // scan's posterior, matching decoupled's own POST read timing
+      // (after applyCovarianceUpdate() there, after this covMut() write
+      // here). Then submit -- this is the ONLY noteLioFrameDiag() call
+      // site for coupled; frame_stats.txt's P-related columns are
+      // populated for coupled for the first time as of this card.
+      {
+        const Eigen::MatrixXd& P_post_diag = state_->cov();
+        if (P_post_diag.rows() >= StateGroup::idxP() + 3 && P_post_diag.cols() >= StateGroup::idxP() + 3) {
+          const M3D P_pp_post = P_post_diag.block<3, 3>(StateGroup::idxP(), StateGroup::idxP());
+          Eigen::SelfAdjointEigenSolver<M3D> es_p_post(P_pp_post);
+          coupled_diag.p_pos_eig_min_post = es_p_post.eigenvalues()(0);
+          coupled_diag.p_pos_eig_mid_post = es_p_post.eigenvalues()(1);
+          coupled_diag.p_pos_eig_max_post = es_p_post.eigenvalues()(2);
+          coupled_diag.trP_pos_post = P_pp_post.trace();
+        }
+        if (P_post_diag.rows() >= StateGroup::idxR() + 3 && P_post_diag.cols() >= StateGroup::idxR() + 3) {
+          const M3D P_rr_post = P_post_diag.block<3, 3>(StateGroup::idxR(), StateGroup::idxR());
+          Eigen::SelfAdjointEigenSolver<M3D> es_r_post(P_rr_post);
+          coupled_diag.p_rot_trace_post   = P_rr_post.trace();
+          coupled_diag.p_rot_eig_min_post = es_r_post.eigenvalues()(0);
+          coupled_diag.p_rot_eig_mid_post = es_r_post.eigenvalues()(1);
+          coupled_diag.p_rot_eig_max_post = es_r_post.eigenvalues()(2);
+        }
+        if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) vm->noteLioFrameDiag(coupled_diag);
+      }
 
       // CQ-76 T1.0: the qhat accumulator (imu_processing.cpp) is primed on
       // EVERY IMU propagation regardless of estimator mode, but was only

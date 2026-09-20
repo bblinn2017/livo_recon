@@ -98,7 +98,14 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            // trace -- see updateMaxPlaneCovarianceTrace()'s own doc
            // comment. Appended, not interleaved, per this file's own
            // convention.
-           ",max_plane_covariance_trace\n";
+           ",max_plane_covariance_trace"
+           // CQ-74 item 1: the rotation block's post-update columns
+           // (previously had none at all) plus the pre-side's own
+           // remaining eigenvalues and the position block's explicit
+           // post-update trace -- see LioFrameDiag's own doc comment.
+           ",trP_pos_post,p_rot_trace_post"
+           ",p_rot_eig_mid_pre,p_rot_eig_max_pre"
+           ",p_rot_eig_min_post,p_rot_eig_mid_post,p_rot_eig_max_post\n";
   first_call = false;
   // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
   // (6 significant figures) collapses every frame in a run to the same
@@ -144,6 +151,9 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.per_residual_mean_scale
       << "," << lio.sigma_scale_applied << "," << lio.sigma_scale_chi2_ema
       << "," << max_plane_covariance_trace
+      << "," << lio.trP_pos_post << "," << lio.p_rot_trace_post
+      << "," << lio.p_rot_eig_mid_pre << "," << lio.p_rot_eig_max_pre
+      << "," << lio.p_rot_eig_min_post << "," << lio.p_rot_eig_mid_post << "," << lio.p_rot_eig_max_post
       << "\n";
   ofs.flush();
 }
@@ -400,7 +410,11 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     ROS_INFO_STREAM("\n" << cfg.report());
   }
   paramWarn<int>(pnh, "voxel_map/map/shuffle_insertion_seed", opts_->shuffle_insertion_seed, 0);
-  paramWarn<bool>(pnh, "voxel_map/map/log_frame_stats_en", opts_->log_frame_stats_en, false);
+  // CQ-74 item 1: default flipped false->true, making rule 60's per-frame
+  // ATE + position/attitude confidence contract real (was previously
+  // opt-in and silently off for every run unless a manifest explicitly
+  // set it).
+  paramWarn<bool>(pnh, "voxel_map/map/log_frame_stats_en", opts_->log_frame_stats_en, true);
 
   std::ostringstream oss;
   oss << "[params/voxel_map]"

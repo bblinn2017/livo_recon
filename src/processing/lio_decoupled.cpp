@@ -1693,6 +1693,10 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
         Eigen::SelfAdjointEigenSolver<M3D> es_r_pre(P_rr_pre);
         diag.p_rot_trace_pre   = P_rr_pre.trace();
         diag.p_rot_eig_min_pre = es_r_pre.eigenvalues()(0);
+        // CQ-74 item 1: the rest of the same already-computed spectrum --
+        // only the min was kept before.
+        diag.p_rot_eig_mid_pre = es_r_pre.eigenvalues()(1);
+        diag.p_rot_eig_max_pre = es_r_pre.eigenvalues()(2);
 
         diag.p_pos_vel_fro_pre =
             prior_cov_.block<3, 3>(StateGroup::idxP(), StateGroup::idxV()).norm();
@@ -1848,11 +1852,22 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
       {
         const Eigen::MatrixXd& P_post = state_->cov();
         if (P_post.rows() >= StateGroup::idxP() + 3 && P_post.cols() >= StateGroup::idxP() + 3) {
-          Eigen::SelfAdjointEigenSolver<M3D> es_p_post(
-              P_post.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()));
+          const M3D P_pp_post = P_post.block<3, 3>(StateGroup::idxP(), StateGroup::idxP());
+          Eigen::SelfAdjointEigenSolver<M3D> es_p_post(P_pp_post);
           diag.p_pos_eig_min_post = es_p_post.eigenvalues()(0);
           diag.p_pos_eig_mid_post = es_p_post.eigenvalues()(1);
           diag.p_pos_eig_max_post = es_p_post.eigenvalues()(2);
+          diag.trP_pos_post = P_pp_post.trace();
+        }
+        // CQ-74 item 1: the rotation block's POST-update counterpart --
+        // previously had no post-update columns at all.
+        if (P_post.rows() >= StateGroup::idxR() + 3 && P_post.cols() >= StateGroup::idxR() + 3) {
+          const M3D P_rr_post = P_post.block<3, 3>(StateGroup::idxR(), StateGroup::idxR());
+          Eigen::SelfAdjointEigenSolver<M3D> es_r_post(P_rr_post);
+          diag.p_rot_trace_post   = P_rr_post.trace();
+          diag.p_rot_eig_min_post = es_r_post.eigenvalues()(0);
+          diag.p_rot_eig_mid_post = es_r_post.eigenvalues()(1);
+          diag.p_rot_eig_max_post = es_r_post.eigenvalues()(2);
         }
       }
       // Captured in finalizeSplineAndQ(), which already ran earlier this
