@@ -146,6 +146,16 @@ struct EvoProcOptions
   // ATE for the rest of the run. "interp" keeps being computed live
   // regardless of this flag (for incremental/expanding-ATE analysis).
   bool compute_nearest_live = false;
+
+  // CQ-74 item 2 (native C++, per the user's own direction -- separate
+  // from and NOT touching the incremental/live-streaming ATE path above):
+  // when true, exportAtePerFrameCsv() is called once, at the shared
+  // "run is done" hook (finishRun() in livo_recon_node.cpp -- reached by
+  // BOTH live mode's auto_terminate_on_idle path and offline mode's own
+  // end-of-bag), writing one CSV per stage/mode whose matched_*_ buffer is
+  // non-empty. Default false -- an explicit opt-in flag, not an always-on
+  // change to the live scoring path.
+  bool export_ate_per_frame_csv = false;
 };
 
 // Optional trajectory-evaluation module: subscribes to a ground-truth pose
@@ -231,6 +241,25 @@ public:
   // same spot, which this mirrors (no destructor/signal-handler shutdown
   // hook exists in this codebase to piggyback on instead).
   std::string finalizePendingFileMatch();
+
+  // CQ-74 item 2 (native): writes one ate_per_frame_<stage>_<mode>.csv per
+  // non-empty matched_*_ buffer, via debugLogPath() -- same shared
+  // outputs/debug_log_dir resolution every other per-file debug log in
+  // this codebase uses, no separate path plumbing needed. Uses ONE global
+  // Kabsch/Horn alignment (computeAte() over the WHOLE buffer -- never
+  // refit per-row, matching the same "global, not incremental"
+  // requirement the Python fastlivo_evo.py implementation of this same
+  // artifact already satisfies). Called once, at the shared run-finished
+  // hook -- see EvoProcOptions::export_ate_per_frame_csv's own doc
+  // comment. Returns a printer-ready status string (files written + row
+  // counts, or why nothing was written). frame_idx is matched_*_'s own
+  // 0-based commit-order index (this module's matches are GT-sample-
+  // indexed, like fastlivo_evo.py's own -- NOT a literal 1:1 mapping to
+  // an estimate log row; multiple rows can legitimately share a close t
+  // if GT sampling is denser than the estimator's own scan rate).
+  // Self-checks against computeAte()'s own returned RMSE and logs (does
+  // not abort the run) on disagreement beyond 3 decimal places.
+  std::string exportAtePerFrameCsv() const;
 
 private:
   struct GtSample

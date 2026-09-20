@@ -54,6 +54,7 @@ std::string EvoProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "evo/rpe/compute_roe",   opts_.compute_roe,  false);
   paramWarn<double>(pnh, "evo/rpe/delta_s",     opts_.rpe_delta_s,  1.0);
   paramWarn<bool>(pnh, "evo/compute_nearest_live", opts_.compute_nearest_live, false);
+  paramWarn<bool>(pnh, "evo/export_ate_per_frame_csv", opts_.export_ate_per_frame_csv, false);
 
   {
     std::vector<double> lever_arm{0.0, 0.0, 0.0};
@@ -748,6 +749,86 @@ std::string EvoProc::processEvoTopicMode(MeasureGroup& mg)
   bracket_cache_.valid = true;
 
   return result;
+}
+
+std::string EvoProc::exportAtePerFrameCsv() const
+{
+  if (!opts_.export_ate_per_frame_csv) return {};
+
+  std::ostringstream oss;
+  oss << "[evo/ate_per_frame] ";
+  bool wrote_any = false;
+
+  // gt_matched=0 (unmatched) rows are NOT emitted -- a genuine scope
+  // limit, named here rather than silently implied: matched_lio_/
+  // matched_vio_ only ever hold COMMITTED matches (a scan with no nearby
+  // GT sample never enters this buffer at all), so this native
+  // implementation has no record of which scans were skipped, unlike
+  // fastlivo_evo.py's own Python implementation of this same artifact,
+  // which re-loads the full raw estimate log independently and can
+  // therefore report skipped frames explicitly. Every row here has
+  // gt_matched=1 by construction.
+  const struct { const char* stage; const char* mode; const std::vector<MatchedPose>* matched; } bufs[] = {
+      {"lio", "interp", &matched_lio_.interp}, {"lio", "nearest", &matched_lio_.nearest},
+      {"vio", "interp", &matched_vio_.interp}, {"vio", "nearest", &matched_vio_.nearest},
+  };
+  for (const auto& b : bufs)
+  {
+    const std::vector<MatchedPose>& matched = *b.matched;
+    const int n = static_cast<int>(matched.size());
+    if (n < 3) continue;
+
+    M3D R_align; V3D t_align;
+    const double reported_ate = computeAte(matched, R_align, t_align);
+    if (reported_ate < 0.0) continue;
+
+    const std::string path = debugLogPath(
+        std::string("ate_per_frame_") + b.stage + "_" + b.mode + ".csv");
+    std::ofstream ofs(path);
+    if (!ofs.is_open()) continue;
+    ofs << "frame_idx,t,gt_matched,err_pos_mm,err_rot_deg,px_mm,py_mm,pz_mm\n";
+
+    const bool gt_rot_ok = gtOrientationMeaningful();
+    double sq_err_sum = 0.0;
+    for (int i = 0; i < n; ++i)
+    {
+      const auto& m = matched[i];
+      const V3D aligned_pos = R_align * m.est_pos + t_align;
+      const V3D err_vec = aligned_pos - m.gt_pos;
+      const double err_pos_mm = err_vec.norm() * 1000.0;
+      sq_err_sum += err_pos_mm * err_pos_mm;
+
+      ofs << i << "," << std::fixed << std::setprecision(6) << m.t << std::defaultfloat
+          << ",1," << err_pos_mm << ",";
+      // rule 58f: NULL, not a fabricated 0.0, when GT carries no real
+      // orientation (e.g. NTU VIRAL's Leica topic, identity placeholder).
+      if (gt_rot_ok)
+      {
+        const M3D err_rot = (R_align * m.est_rot).transpose() * m.gt_rot;
+        const double cos_angle = std::clamp((err_rot.trace() - 1.0) / 2.0, -1.0, 1.0);
+        ofs << (std::acos(cos_angle) * (180.0 / M_PI));
+      }
+      ofs << "," << (err_vec.x() * 1000.0) << "," << (err_vec.y() * 1000.0)
+          << "," << (err_vec.z() * 1000.0) << "\n";
+    }
+    ofs.flush();
+
+    // Self-check, per CQ-74 item 2's own instruction: sqrt(mean(
+    // err_pos_mm^2)) over these (all gt_matched=1 here, see this method's
+    // own "no unmatched-frame tracking" doc comment) must reproduce
+    // reported_ate (computeAte()'s own RMSE, metres) to 3dp. Logged, not
+    // fatal -- this is a reporting artifact, not the estimator.
+    const double self_check_ate_m = std::sqrt(sq_err_sum / n) / 1000.0;
+    const double self_check_delta = std::abs(self_check_ate_m - reported_ate);
+    wrote_any = true;
+    oss << path << " (n=" << n << ", self_check_delta="
+        << std::fixed << std::setprecision(6) << self_check_delta << std::defaultfloat << "m) ";
+    if (std::round(self_check_delta * 1000.0) != 0.0)
+      oss << "*** SELF-CHECK MISMATCH BEYOND 3dp *** ";
+  }
+
+  if (!wrote_any) oss << "nothing written (no buffer had >= 3 matched poses)";
+  return oss.str();
 }
 
 std::string EvoProc::finalizePendingFileMatch()

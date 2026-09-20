@@ -316,6 +316,12 @@ void finishRun(NodeContext& ctx, PubProc& pub_proc, EvoProc& evo_proc)
   // pattern of the two calls just above (the only "run finished" hook
   // point in this codebase -- no destructor/signal handler exists).
   ctx.printer->print(PrintCategory::EVO, evo_proc.finalizePendingFileMatch());
+
+  // CQ-74 item 2 (native): opt-in, off by default (EvoProcOptions::
+  // export_ate_per_frame_csv). Runs after finalizePendingFileMatch()
+  // above so a gt_source=="file" run's last pending checkpoint is already
+  // committed into matched_lio_/matched_vio_ by the time this reads them.
+  ctx.printer->print(PrintCategory::EVO, evo_proc.exportAtePerFrameCsv());
 }
 }  // namespace
 
