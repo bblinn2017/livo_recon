@@ -176,6 +176,28 @@ static bool runScenario(const char* label, const V3D& gyr, const V3D& acc_body)
       block_max_rel_err[0] = std::max(block_max_rel_err[0], relErr(dtheta_an, dtheta_num));
       block_max_rel_err[1] = std::max(block_max_rel_err[1], relErr(dp_an, dp_num));
       block_max_rel_err[2] = std::max(block_max_rel_err[2], relErr(dv_an, dv_num));
+
+      // CQ-71 follow-up: report a SIGNED ratio (analytic/numeric, dominant
+      // component) for the three known-mismatching cells, same construction
+      // as #6's own signed check above -- lets a reader confirm the
+      // mismatch is a small consistent UNDER/OVER-count (ratio near but not
+      // at 1.0), not a sign flip (which would show as a negative ratio).
+      auto signedRatioDominant = [](const V3D& an, const V3D& num) {
+        int i_dom = 0; double best = -1.0;
+        for (int i = 0; i < 3; ++i) {
+          if (std::abs(an(i)) > best) { best = std::abs(an(i)); i_dom = i; }
+        }
+        const double n = num(i_dom);
+        return an(i_dom) / (n + (n == 0.0 ? 1e-30 : 0.0));
+      };
+      if (block == 3) {  // delta_bg -> dp/dv, every perturbation axis
+        printf("    [signed axis=%d] delta_bg  -> dp  ratio=%.6f   delta_bg -> dv  ratio=%.6f\n",
+               axis, signedRatioDominant(dp_an, dp_num), signedRatioDominant(dv_an, dv_num));
+      }
+      if (block == 4) {  // delta_ba -> dp, every perturbation axis
+        printf("    [signed axis=%d] delta_ba  -> dp  ratio=%.6f\n",
+               axis, signedRatioDominant(dp_an, dp_num));
+      }
     }
     for (int out = 0; out < 3; ++out) {
       const bool pass = block_max_rel_err[out] < 0.05;
