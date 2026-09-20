@@ -273,6 +273,14 @@ struct LioProcCoupledOptions
   // final_redeskew (enforced at load time).
   bool final_redeskew = false;
   bool final_relinearize_cov = false;
+  // CQ-76 T2.1: when true, Pi_ss is built from the pre-propagation P
+  // snapshot (imuProcQhatPeekPBefore(), "P(t0)" in the OTHER sense --
+  // before THIS scan's own IMU propagation, i.e. the previous scan's own
+  // posterior) instead of state_->cov() (the post-propagation prior,
+  // confirmed correct by CQ-76 T0.1's own call-chain proof). A
+  // deliberate sensitivity probe, not a claim this alternative is more
+  // correct -- requires imu/log_qhat_en=true (enforced at load time).
+  bool prior_at_scan_start = false;
 };
 
 // CQ-49: the coupled estimator, reimplemented as its own class -- see

@@ -54,6 +54,15 @@ struct ImuProcOptions
 bool imuProcQhatRead(Eigen::MatrixXd& phi_p_phit, Eigen::MatrixXd& accum_cov_w,
                       Eigen::MatrixXd& p_before);
 
+// CQ-76 T2.1: a NON-DESTRUCTIVE read of the same p_before snapshot
+// imuProcQhatRead() above consumes -- does not touch g_qhat_primed or
+// g_qhat_accum_cov_w, so it can be called EARLIER in a scan (at Pi_ss's
+// own construction site, before the solve) without disturbing the later,
+// destructive imuProcQhatRead() call CQ-76 T1.0/T1.1 already added at the
+// posterior-write site. Same g_qhat_enabled/imu_samples-empty gating as
+// the read above (returns false, p_before left untouched, if not primed).
+bool imuProcQhatPeekPBefore(Eigen::MatrixXd& p_before);
+
 class ImuProc
 {
 public:

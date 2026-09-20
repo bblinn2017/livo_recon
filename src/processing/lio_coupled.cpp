@@ -130,6 +130,20 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
         "estimator/coupled/final_redeskew=true -- relinearizing the "
         "covariance at the final trajectory is meaningless if the final "
         "trajectory was never actually re-deskewed/re-propagated against.");
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/prior_at_scan_start", copts_.prior_at_scan_start, false);
+  if (copts_.prior_at_scan_start) {
+    // log_qhat_en lives in ImuProcOptions, a separate class's options
+    // struct not reachable from here -- check the raw rosparam directly
+    // (it is set on the same shared param server) rather than plumbing a
+    // cross-class dependency for one validation check.
+    bool imu_log_qhat_en = false;
+    pnh.param<bool>("imu/log_qhat_en", imu_log_qhat_en, false);
+    if (!imu_log_qhat_en)
+      cfg.requireCombination(
+          "estimator/coupled/prior_at_scan_start requires imu/log_qhat_en=true "
+          "-- it reads the pre-propagation P snapshot that machinery already "
+          "captures every scan; there is no separate capture path.");
+  }
   coupled_tier1_nees_ = Tier1NeesBuffer(opts_.nees_per_dof_en ? opts_.nees_tier1_window_scans : 0);
 
   // Every spline/* and adaptive_q/* key is unclaimed by this class by
@@ -1511,7 +1525,21 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   Eigen::MatrixXd Pi_ss = Eigen::MatrixXd::Zero(ncol_s, ncol_s);
   bool have_pi_ss = state_->idxBG() >= 0 && state_->idxBA() >= 0 && state_->idxG() >= 0;
   if (have_pi_ss) {
-    const Eigen::MatrixXd Omega = state_->cov().inverse();  // information form of P(t0)
+    // CQ-76 T2.1: prior_at_scan_start substitutes the pre-propagation P
+    // snapshot for state_->cov() here -- a deliberate sensitivity probe
+    // (see this option's own doc comment). Falls back to state_->cov()
+    // (today's behavior) if the peek isn't primed for any reason, rather
+    // than silently using an empty/garbage matrix.
+    Eigen::MatrixXd P_for_omega = state_->cov();
+    if (copts_.prior_at_scan_start) {
+      Eigen::MatrixXd p_before_peek;
+      if (imuProcQhatPeekPBefore(p_before_peek) &&
+          p_before_peek.rows() == P_for_omega.rows() &&
+          p_before_peek.cols() == P_for_omega.cols()) {
+        P_for_omega = p_before_peek;
+      }
+    }
+    const Eigen::MatrixXd Omega = P_for_omega.inverse();  // information form of P(t0) (or, if prior_at_scan_start, the pre-propagation snapshot)
     // CQ-62 item 1: S2 -- Omega, the full dense inverse.
     if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S2_Omega", Omega);
     const int idx[6] = {StateGroup::idxR(), StateGroup::idxP(), StateGroup::idxV(),
