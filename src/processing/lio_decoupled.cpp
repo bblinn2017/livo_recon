@@ -1534,14 +1534,82 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
     // correction, and reading it mid-iteration would report one Gauss-Newton
     // step rather than the process-model error the measurement disagreed with.
     {
-      Eigen::MatrixXd phi_p_phit, accum_cov_w;
-      if (imuProcQhatRead(phi_p_phit, accum_cov_w)) {
+      Eigen::MatrixXd phi_p_phit, accum_cov_w, p_before;
+      if (imuProcQhatRead(phi_p_phit, accum_cov_w, p_before)) {
         const Eigen::VectorXd dx = state_->boxminusFromPropagat(state_propagat_);
         const Eigen::MatrixXd& P_post = state_->cov();
         if (phi_p_phit.rows() == P_post.rows()) {
           const double t_abs = mg.image.t + data_queues_->start_time;
           debugLogQhat(voxel_map_->frame_idx_, t_abs, dx, (phi_p_phit - P_post).diagonal(),
                        accum_cov_w.diagonal());
+
+          // CQ-71 item 0: the information budget. P_after_IMU reconstructed
+          // as phi_p_phit + accum_cov_w (F P F^T + Q_eff, by construction --
+          // see imuProcQhatRead()'s own doc comment). eig(H^TWH) is NOT
+          // separately tracked anywhere in this codebase -- reconstructed
+          // here from ekf.h's own A = H_full + prior_cov^-1 identity:
+          // H_full = P_after_LIO^-1 - P_after_IMU^-1 exactly, when
+          // lio/ekf/cov_redundancy_discount is "off" (kappa==1, the
+          // default) -- NOT valid if a non-default discount is active,
+          // flagged via the h_eff_valid column so a reader never mistakes
+          // a discounted run's number for the true LiDAR information.
+          if (p_before.rows() == P_post.rows() && p_before.rows() > 0) {
+            const Eigen::MatrixXd P_after_imu = phi_p_phit + accum_cov_w;
+            auto eigStats = [](const Eigen::MatrixXd& M, double& trP, double& logdetP,
+                                double& lam_min, double& lam_max) {
+              Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (M + M.transpose()));
+              const Eigen::VectorXd ev = es.eigenvalues();
+              trP = M.trace();
+              logdetP = ev.array().log().sum();
+              lam_min = ev(0);
+              lam_max = ev(ev.size() - 1);
+            };
+            double trP_before, ld_before, lmin_before, lmax_before;
+            double trP_imu, ld_imu, lmin_imu, lmax_imu;
+            double trP_fpf, ld_fpf, lmin_fpf, lmax_fpf;
+            double trP_qeff, ld_qeff, lmin_qeff, lmax_qeff;
+            double trP_lio, ld_lio, lmin_lio, lmax_lio;
+            eigStats(p_before, trP_before, ld_before, lmin_before, lmax_before);
+            eigStats(P_after_imu, trP_imu, ld_imu, lmin_imu, lmax_imu);
+            eigStats(phi_p_phit, trP_fpf, ld_fpf, lmin_fpf, lmax_fpf);
+            eigStats(accum_cov_w, trP_qeff, ld_qeff, lmin_qeff, lmax_qeff);
+            eigStats(P_post, trP_lio, ld_lio, lmin_lio, lmax_lio);
+
+            const bool discount_off = !opts_.cov_redundancy_discount.on();
+            double trP_h = std::numeric_limits<double>::quiet_NaN();
+            double ld_h = std::numeric_limits<double>::quiet_NaN();
+            double lmin_h = std::numeric_limits<double>::quiet_NaN();
+            double lmax_h = std::numeric_limits<double>::quiet_NaN();
+            if (discount_off) {
+              Eigen::LDLT<Eigen::MatrixXd> ldlt_imu(P_after_imu), ldlt_lio(P_post);
+              if (ldlt_imu.info() == Eigen::Success && ldlt_lio.info() == Eigen::Success) {
+                const Eigen::MatrixXd I = Eigen::MatrixXd::Identity(P_post.rows(), P_post.rows());
+                const Eigen::MatrixXd H_eff = ldlt_lio.solve(I) - ldlt_imu.solve(I);
+                eigStats(H_eff, trP_h, ld_h, lmin_h, lmax_h);
+              }
+            }
+
+            static PersistentLogStream ib_log("info_budget.txt");
+            bool ib_first;
+            std::ofstream& ib_ofs = ib_log.stream(&ib_first);
+            if (ib_first)
+              ib_ofs << "scan_id,t_abs,h_eff_valid,"
+                        "trP_before,logdet_before,lmin_before,lmax_before,"
+                        "trP_after_imu,logdet_after_imu,lmin_after_imu,lmax_after_imu,"
+                        "trP_fpf,logdet_fpf,lmin_fpf,lmax_fpf,"
+                        "trP_qeff,logdet_qeff,lmin_qeff,lmax_qeff,"
+                        "trP_after_lio,logdet_after_lio,lmin_after_lio,lmax_after_lio,"
+                        "trP_h,logdet_h,lmin_h,lmax_h\n";
+            ib_ofs << voxel_map_->frame_idx_ << "," << std::setprecision(12) << t_abs << ","
+                   << (discount_off ? 1 : 0) << ","
+                   << trP_before << "," << ld_before << "," << lmin_before << "," << lmax_before << ","
+                   << trP_imu << "," << ld_imu << "," << lmin_imu << "," << lmax_imu << ","
+                   << trP_fpf << "," << ld_fpf << "," << lmin_fpf << "," << lmax_fpf << ","
+                   << trP_qeff << "," << ld_qeff << "," << lmin_qeff << "," << lmax_qeff << ","
+                   << trP_lio << "," << ld_lio << "," << lmin_lio << "," << lmax_lio << ","
+                   << trP_h << "," << ld_h << "," << lmin_h << "," << lmax_h << "\n";
+            ib_ofs.flush();
+          }
         }
       }
     }

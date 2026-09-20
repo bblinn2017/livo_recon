@@ -45,7 +45,14 @@ struct ImuProcOptions
 // frame makes the accumulation span exactly one frame with no separate
 // begin-frame call to keep in sync. Returns false when disarmed or when no
 // propagation has happened since the last read.
-bool imuProcQhatRead(Eigen::MatrixXd& phi_p_phit, Eigen::MatrixXd& accum_cov_w);
+//
+// CQ-71 item 0: p_before is P at the START of this frame's propagation
+// (before the first IMU sample is consumed) -- the fourth quantity the
+// card's own information-budget ask needs, alongside phi_p_phit (F P F^T,
+// the propagated prior) and accum_cov_w (Q_eff, the noise actually
+// injected): phi_p_phit + accum_cov_w == P_after_IMU by construction.
+bool imuProcQhatRead(Eigen::MatrixXd& phi_p_phit, Eigen::MatrixXd& accum_cov_w,
+                      Eigen::MatrixXd& p_before);
 
 class ImuProc
 {

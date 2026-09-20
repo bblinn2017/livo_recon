@@ -37,17 +37,26 @@ bool g_qhat_enabled = false;
 bool g_qhat_primed  = false;
 Eigen::MatrixXd g_qhat_accum_cov_w;   // A <- F A F^T + cov_w, over one frame
 Eigen::MatrixXd g_qhat_p_after;       // P after the frame's last propagation
+// CQ-71 item 0: P BEFORE this frame's propagation begins -- the fourth
+// leg of the information budget (P_before/P_after_IMU/FPF^T/Q_eff were
+// three-quarters already sitting in this file's existing qhat machinery;
+// only the starting snapshot was missing). Captured once per frame, at
+// the top of propagate(), under the SAME opts_.log_qhat_en gate as the
+// rest of this mechanism -- no new flag, since it's the same measurement.
+Eigen::MatrixXd g_qhat_p_before;
 std::mutex g_qhat_mtx;
 
 }  // namespace
 
-bool imuProcQhatRead(Eigen::MatrixXd& phi_p_phit, Eigen::MatrixXd& accum_cov_w)
+bool imuProcQhatRead(Eigen::MatrixXd& phi_p_phit, Eigen::MatrixXd& accum_cov_w,
+                      Eigen::MatrixXd& p_before)
 {
   std::lock_guard<std::mutex> lock(g_qhat_mtx);
   if (!g_qhat_enabled || !g_qhat_primed) return false;
   accum_cov_w = g_qhat_accum_cov_w;
   // Phi P+_{k-1} Phi^T = (propagated P) - (accumulated process noise)
   phi_p_phit = g_qhat_p_after - g_qhat_accum_cov_w;
+  p_before = g_qhat_p_before;
   g_qhat_accum_cov_w.setZero();
   g_qhat_primed = false;
   return true;
@@ -127,6 +136,14 @@ void ImuProc::propagate(MeasureGroup& mg)
   }
 
   const double t_curr = mg.image.t;
+
+  // CQ-71 item 0: snapshot P BEFORE this frame's propagation touches it.
+  // Same gate as the rest of the qhat machinery below; a plain read, never
+  // written back, so it cannot perturb state_->covMut() itself.
+  if (opts_.log_qhat_en) {
+    std::lock_guard<std::mutex> lock(g_qhat_mtx);
+    g_qhat_p_before = state_->cov();
+  }
 
   V3D acc_avr, angvel_avr, acc_avr_world;
 
