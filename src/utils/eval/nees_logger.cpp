@@ -51,6 +51,13 @@ NeesResult computeNeesPerDof(const M3D& R_est, const V3D& p_est,
   // is the actual fix, and it is EXPLICITLY BLOCKED until CQ-60 item 2
   // captures its baseline on THIS binary, so this logger must not "fix"
   // what it is supposed to be measuring.
+  // CQ-62 item 5b: ALWAYS computed, before the early-return below --
+  // this is the whole point (it works TODAY, before the joint matrix is
+  // fixed, and names an AXIS, which an eigenvector does not).
+  for (int i = 0; i < 6; ++i) {
+    const double Pii = P(i, i);
+    if (Pii > 0.0) out.per_axis_state_ratio(i) = (e(i) * e(i)) / Pii;
+  }
   if (out.min_eig <= 0.0) return out;  // out.valid stays false
   const Eigen::Matrix<double, 6, 1> eigvals = raw_eigvals;
   const Eigen::Matrix<double, 6, 6> V = es.eigenvectors();
@@ -118,10 +125,15 @@ void logNeesPerDof(const char* channel, int scan_id, double t_abs, const NeesRes
   if (just_opened)
     ofs << "channel,scan_id,t_abs,valid,nees,min_eig,max_eig,"
            "whitened_sq_0,whitened_sq_1,whitened_sq_2,"
-           "whitened_sq_3,whitened_sq_4,whitened_sq_5\n";
+           "whitened_sq_3,whitened_sq_4,whitened_sq_5,"
+           // CQ-62 item 5b: per-axis state-basis ratio, ALWAYS populated
+           // (whenever P_ii > 0 for that axis) regardless of `valid`.
+           "axis_ratio_rx,axis_ratio_ry,axis_ratio_rz,"
+           "axis_ratio_px,axis_ratio_py,axis_ratio_pz\n";
   ofs << channel << "," << scan_id << "," << std::setprecision(12) << t_abs << ","
       << (r.valid ? 1 : 0) << "," << r.nees << "," << r.min_eig << "," << r.max_eig;
   for (int i = 0; i < 6; ++i) ofs << "," << r.per_dof_whitened_sq(i);
+  for (int i = 0; i < 6; ++i) ofs << "," << r.per_axis_state_ratio(i);
   ofs << "\n";
   ofs.flush();
 }

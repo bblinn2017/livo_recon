@@ -16,6 +16,33 @@
 namespace livo_recon
 {
 
+// CQ-62 item 1/5c: one reusable stage-audit logger, gated behind
+// psd_audit_en (default false, debug-only, doesn't need to be pretty or
+// survive -- Bryce's own instruction on this card). Reports dim/min_eig/
+// max_eig/rel AND asym: asym is NOT optional -- a matrix that is not
+// symmetric BEFORE 0.5*(X+X^T) carries a construction bug that
+// symmetrisation then conceals (the symmetrised result can be perfectly
+// PSD while the thing that produced it is wrong; asym is the only column
+// that can see that).
+static void logPsdStage(int scan_id, int iter, const char* stage, const Eigen::MatrixXd& X)
+{
+  const Eigen::MatrixXd Xsym = 0.5 * (X + X.transpose());
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(Xsym);
+  const double min_eig = es.eigenvalues().minCoeff();
+  const double max_eig = es.eigenvalues().maxCoeff();
+  const double denom_asym = std::max(X.cwiseAbs().maxCoeff(), 1e-300);
+  const double asym = (X - X.transpose()).cwiseAbs().maxCoeff() / denom_asym;
+  static PersistentLogStream log("psd_stage_audit.txt");
+  bool first;
+  std::ofstream& ofs = log.stream(&first);
+  if (first) ofs << "scan_id,iter,stage,dim,min_eig,max_eig,rel,asym\n";
+  ofs << scan_id << "," << iter << "," << stage << "," << X.rows() << ","
+      << min_eig << "," << max_eig << ","
+      << (max_eig != 0.0 ? min_eig / max_eig : 0.0) << ","
+      << asym << "\n";
+  ofs.flush();
+}
+
 LioProcCoupled::LioProcCoupled(NodeContext& ctx)
   : LioProcBase(ctx)
 {}
@@ -181,8 +208,15 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   std::string stop = "max_iter";
   int iter = 0;
 
+  // CQ-62 item 1: S0 -- state_->cov() on entry to processLIO, what
+  // processIMU left (P(t1)_raw), BEFORE anything this function does.
+  if (copts_.psd_audit_en)
+    logPsdStage(voxel_map_->frame_idx_, -1, "S0_cov_entry", state_->cov());
   prior_cov_ = state_->cov();
   applyPriorScalarControls(prior_cov_, opts_.prior_scalar);
+  // CQ-62 item 1: S1 -- prior_cov_ after applyPriorScalarControls.
+  if (copts_.psd_audit_en)
+    logPsdStage(voxel_map_->frame_idx_, -1, "S1_prior_cov_scaled", prior_cov_);
   state_propagat_ = *state_;
   trP_pos_pre_ = prior_cov_.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()).trace();
   mg.prior_pos = state_propagat_.pos();
@@ -413,6 +447,16 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
                 << full18_min_eig << "," << full18_max_eig << ","
                 << iR_a << "," << iP_a << "\n";
         psd_ofs.flush();
+
+        // CQ-62 item 1: S8/S9/S10 into the same per-stage audit S0-S7 use.
+        // S8 = coeff_cov = ldlt_A.solve(Identity) (coeff_cov_cross above IS
+        // this quantity, just named for the cross-check it's also used
+        // for). S9 = M*coeff_cov*M^T BEFORE symmetrisation (posterior18_cross
+        // above, pre-0.5(X+X^T)). S10 = the actual, symmetrized posterior18
+        // this scan writes downstream.
+        logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S8_coeff_cov", coeff_cov_cross);
+        logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S9_posterior18_presym", posterior18_cross);
+        logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S10_posterior18_postsym", posterior18);
       }
 
       // CQ-58: per-control-point 6-dof constraint report. Reuses ldlt_A
@@ -597,6 +641,9 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       Eigen::MatrixXd P = state_->cov();
       P.block(0, 0, 18, 18) = posterior18;   // idxR=0..idxG()+3=18, contiguous
       state_->covMut() = P;
+      // CQ-62 item 1: S11 -- state_->cov() immediately after the write.
+      if (copts_.psd_audit_en)
+        logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S11_cov_post_write", state_->cov());
 
       // CQ-61 item 4, RULE 58 -- NOT AN EXPERIMENT: on residual starvation
       // the estimator keeps integrating IMU and reports convergence --
@@ -679,6 +726,27 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       // this bug, not a real property of the covariance the estimator
       // actually carries.
       P6.block<3, 3>(3, 0) = P_final.block<3, 3>(iP, iR);
+      // CQ-62 item 1: S12 -- the (R,P) 6x6 exactly as handed to the NEES
+      // logger. Item 4: check the handoff BY EQUALITY, not eigenvalues --
+      // a principal submatrix of a PSD matrix is always PSD, so if S12
+      // disagrees element-by-element with state_->cov().block<6,6>(0,0)
+      // (idxR=0, idxP=3, contiguous -- confirmed via the psd_audit_en log's
+      // own idxR/idxP columns), S12 is not actually a principal submatrix.
+      // Post-fix this should be exactly zero (P6 IS a direct block copy of
+      // the same contiguous 6x6, just gathered via two 3x3 sub-blocks
+      // instead of one 6x6 block read).
+      if (copts_.psd_audit_en) {
+        logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S12_P6_nees_handoff", P6);
+        const Eigen::Matrix<double, 6, 6> P6_direct = P_final.block<6, 6>(0, 0);
+        const double max_abs_diff = (P6 - P6_direct).cwiseAbs().maxCoeff();
+        static PersistentLogStream eq_log("psd_s12_equality.txt");
+        bool eq_first;
+        std::ofstream& eq_ofs = eq_log.stream(&eq_first);
+        if (eq_first) eq_ofs << "scan_id,max_abs_diff,idxR,idxP\n";
+        eq_ofs << voxel_map_->frame_idx_ << "," << max_abs_diff << ","
+               << iR << "," << iP << "\n";
+        eq_ofs.flush();
+      }
       const double t_abs_nees = mg.image.t + data_queues_->start_time;
       coupled_tier1_nees_.addScan("tier1_coupled", voxel_map_->frame_idx_, t_abs_nees,
                                    state_->rot(), state_->pos(), P6);
@@ -1094,11 +1162,15 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
       Lambda.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) =
           M3D(value_gram * prec_gyr_diag.asDiagonal()) + (curv_gyr + dc_gyr) * M3D::Identity();
     }
+  // CQ-62 item 1: S4 -- Lambda.
+  if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S4_Lambda", Lambda);
 
   Eigen::MatrixXd Pi_ss = Eigen::MatrixXd::Zero(ncol_s, ncol_s);
   bool have_pi_ss = state_->idxBG() >= 0 && state_->idxBA() >= 0 && state_->idxG() >= 0;
   if (have_pi_ss) {
     const Eigen::MatrixXd Omega = state_->cov().inverse();  // information form of P(t0)
+    // CQ-62 item 1: S2 -- Omega, the full dense inverse.
+    if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S2_Omega", Omega);
     const int idx[6] = {StateGroup::idxR(), StateGroup::idxP(), StateGroup::idxV(),
                          state_->idxBG(), state_->idxBA(), state_->idxG()};
     for (int bi = 0; bi < 6; ++bi)
@@ -1122,6 +1194,8 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // the LiDAR evidence below would otherwise push it to. Column 3*3=9 in
   // the [phi0,p0,v,bg,ba,g] layout (bi=3 in the idx[6] array above).
   if (copts_.freeze_bg || coupled_bias_freeze_active_) Pi_ss.block<3, 3>(9, 9) += M3D::Identity() * 1e12;
+  // CQ-62 item 1: S3 -- Pi_ss, after the freeze_bg adjustment.
+  if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S3_Pi_ss", Pi_ss);
 
   Eigen::VectorXd c_vec(ncol_c);
   for (int j = 0; j < n_c; ++j) {
@@ -1154,6 +1228,9 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   Eigen::MatrixXd A = Eigen::MatrixXd::Zero(ncol, ncol);
   A.block(0, 0, ncol_s, ncol_s) = Pi_ss;
   A.block(ncol_s, ncol_s, ncol_c, ncol_c) = Lambda;
+  // CQ-62 item 1: S5 -- A after Pi_ss and Lambda are placed, BEFORE the
+  // residual loop.
+  if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S5_A_prior_only", A);
   Eigen::VectorXd b = Eigen::VectorXd::Zero(ncol);
   b.segment(0, ncol_s) = -(Pi_ss * s_vec);
   b.segment(ncol_s, ncol_c) = -(Lambda * c_vec);
@@ -1173,6 +1250,9 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     A.block<3, 3>(9, 9) += Pi_anchor;
     b.segment<3>(9) += Pi_anchor * (coupled_bg_calib_ - state_->biasGyr());
   }
+  // CQ-62 item 1: S6 -- A after the bias_anchor block add (identical to S5
+  // when bias_anchor is off, still logged for completeness -- cheap).
+  if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S6_A_post_anchor", A);
   double sum_abs_r = 0.0;
   double sum_sq_r = 0.0;  // CQ-53 item 4
   double sum_wr2 = 0.0;   // CQ-54 item 4
@@ -1306,6 +1386,8 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     sum_weight_this_iter += w;
   }
   coupled_last_A_ = A;
+  // CQ-62 item 1: S7 -- A after the residual accumulation loop (== coupled_last_A_).
+  if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S7_A_final", A);
   if (copts_.log_cp_constraint_en) coupled_last_Lambda_ = Lambda;
   coupled_n_residuals_ = static_cast<int>(residuals_.size());
   coupled_sum_weight_ = sum_weight_this_iter;

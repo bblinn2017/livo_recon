@@ -28,6 +28,16 @@ struct NeesResult
   Eigen::Matrix<double, 6, 6> whitening_axes = Eigen::Matrix<double, 6, 6>::Zero();
   bool valid = false;  // false if P was not invertible (rule 58: report, don't substitute)
   double min_eig = -1.0, max_eig = -1.0;  // always populated, even when !valid
+
+  // CQ-62 item 5b: per-axis confidence in the STATE basis (order
+  // [rot_x,rot_y,rot_z,pos_x,pos_y,pos_z], NOT the eigenbasis
+  // per_dof_whitened_sq uses), e_i^2 / P_ii. ALWAYS computed whenever
+  // P_ii > 0 for that axis, independent of whether P is jointly PSD -- a
+  // diagonal entry can be perfectly positive while the matrix is
+  // indefinite, so this works even when `valid` above is false. Expected
+  // 1.0 per axis when calibrated; above 1 is overconfident. -1.0 for any
+  // axis whose P_ii <= 0 (rule 58: report, don't substitute).
+  Eigen::Matrix<double, 6, 1> per_axis_state_ratio = Eigen::Matrix<double, 6, 1>::Constant(-1.0);
 };
 
 // e = [Log(R_gt^T * R_est); p_est - p_gt], whitened by P (see NeesResult's
