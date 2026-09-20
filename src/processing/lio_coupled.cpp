@@ -131,6 +131,9 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
         "covariance at the final trajectory is meaningless if the final "
         "trajectory was never actually re-deskewed/re-propagated against.");
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/prior_at_scan_start", copts_.prior_at_scan_start, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_point_plane_en", copts_.log_point_plane_en, false);
+  cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/log_point_plane_hist_start_scan", copts_.log_point_plane_hist_start_scan, 0);
+  cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/log_point_plane_hist_n_scans", copts_.log_point_plane_hist_n_scans, 20);
   if (copts_.prior_at_scan_start) {
     // log_qhat_en lives in ImuProcOptions, a separate class's options
     // struct not reachable from here -- check the raw rosparam directly
@@ -281,6 +284,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   coupled_c_gyr_.assign(copts_.n_c, V3D::Zero());
   coupled_iters_ = 0;
   coupled_solve_ms_ = 0.0;
+  coupled_prev_iter_planes_.clear();  // CQ-79: no "previous iteration" carries into a new scan
   coupled_delta_v_.setZero(); coupled_delta_bg_.setZero();
   coupled_delta_ba_.setZero(); coupled_delta_g_.setZero();
   coupled_delta_phi0_.setZero(); coupled_delta_pos0_.setZero();
@@ -1787,6 +1791,101 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // CQ-62 item 1: S7 -- A after the residual accumulation loop (== coupled_last_A_).
   if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S7_A_final", A);
   if (copts_.log_cp_constraint_en) coupled_last_Lambda_ = Lambda;
+
+  // CQ-79: are the spline corrections pulling points toward their matched
+  // planes, and does it differ across the scan? Report-only, reads
+  // struct Residual's own r/t/plane_id -- see this option's own doc
+  // comment. Deliberately a SEPARATE pass over residuals_ (not folded
+  // into the accumulation loop above) so this purely-diagnostic addition
+  // cannot perturb the real math by construction, not just by inspection.
+  if (copts_.log_point_plane_en && !mg.poses.empty()) {
+    const double t0 = mg.poses.front().t;
+    const double dt_scan = std::max(mg.image.t - t0, 1e-9);
+    const int scan_id = voxel_map_->frame_idx_;
+    const bool in_hist_window = scan_id >= copts_.log_point_plane_hist_start_scan &&
+        scan_id < copts_.log_point_plane_hist_start_scan + copts_.log_point_plane_hist_n_scans;
+    constexpr int NBINS = 20;
+    int bin_n[NBINS] = {0};
+    double bin_sum_signed[NBINS] = {0.0}, bin_sum_abs[NBINS] = {0.0}, bin_sum_sq[NBINS] = {0.0};
+
+    std::unordered_set<std::size_t> cur_planes;
+    double sum_t = 0.0, sum_t2 = 0.0, sum_r = 0.0, sum_tr = 0.0, sum_r2 = 0.0;
+    int n_carried = 0;
+    const int n_pts = static_cast<int>(residuals_.size());
+    for (const auto& res : residuals_) {
+      const double t_rel = res.t - t0;
+      const double r_mm = res.r * 1000.0;
+      sum_t += t_rel; sum_t2 += t_rel * t_rel;
+      sum_r += r_mm; sum_tr += t_rel * r_mm; sum_r2 += r_mm * r_mm;
+
+      const std::size_t plane_hash = std::hash<const void*>{}(res.plane_id);
+      cur_planes.insert(plane_hash);
+      if (coupled_prev_iter_planes_.count(plane_hash)) ++n_carried;
+
+      if (in_hist_window) {
+        int bin = static_cast<int>((t_rel / dt_scan) * NBINS);
+        bin = std::clamp(bin, 0, NBINS - 1);
+        ++bin_n[bin];
+        bin_sum_signed[bin] += r_mm;
+        bin_sum_abs[bin] += std::abs(r_mm);
+        bin_sum_sq[bin] += r_mm * r_mm;
+      }
+    }
+
+    double slope = 0.0, intercept = 0.0, r2 = 0.0, rms = 0.0;
+    if (n_pts >= 2) {
+      const double denom = n_pts * sum_t2 - sum_t * sum_t;
+      if (std::abs(denom) > 1e-12) {
+        slope = (n_pts * sum_tr - sum_t * sum_r) / denom;
+        intercept = (sum_r - slope * sum_t) / n_pts;
+        const double mean_r = sum_r / n_pts;
+        double ss_tot = 0.0, ss_res = 0.0;
+        for (const auto& res : residuals_) {
+          const double t_rel = res.t - t0;
+          const double r_mm = res.r * 1000.0;
+          const double pred = slope * t_rel + intercept;
+          ss_res += (r_mm - pred) * (r_mm - pred);
+          ss_tot += (r_mm - mean_r) * (r_mm - mean_r);
+        }
+        r2 = (ss_tot > 1e-12) ? 1.0 - ss_res / ss_tot : 0.0;
+      }
+      rms = std::sqrt(sum_r2 / n_pts);
+    }
+    const double carry_frac = n_pts > 0 ? static_cast<double>(n_carried) / n_pts : 0.0;
+
+    static PersistentLogStream fit_log("cq79_point_plane_fit.csv");
+    bool fit_first;
+    std::ofstream& fit_ofs = fit_log.stream(&fit_first);
+    if (fit_first)
+      fit_ofs << "scan_id,iter,n_pts,slope_mm_per_s,intercept_mm,r2,rms_r_mm,"
+                 "n_carried_over,carry_frac\n";
+    fit_ofs << scan_id << "," << coupled_iters_ << "," << n_pts << ","
+            << slope << "," << intercept << "," << r2 << "," << rms << ","
+            << n_carried << "," << carry_frac << "\n";
+    fit_ofs.flush();
+
+    if (in_hist_window) {
+      static PersistentLogStream hist_log("cq79_point_plane_hist.csv");
+      bool hist_first;
+      std::ofstream& hist_ofs = hist_log.stream(&hist_first);
+      if (hist_first)
+        hist_ofs << "scan_id,iter,bin,t_center_s,n_pts,mean_signed_r_mm,"
+                     "mean_abs_r_mm,rms_r_mm\n";
+      const double bin_width = dt_scan / NBINS;
+      for (int b = 0; b < NBINS; ++b) {
+        const double t_center = (b + 0.5) * bin_width;
+        const double mean_signed = bin_n[b] > 0 ? bin_sum_signed[b] / bin_n[b] : 0.0;
+        const double mean_abs = bin_n[b] > 0 ? bin_sum_abs[b] / bin_n[b] : 0.0;
+        const double bin_rms = bin_n[b] > 0 ? std::sqrt(bin_sum_sq[b] / bin_n[b]) : 0.0;
+        hist_ofs << scan_id << "," << coupled_iters_ << "," << b << "," << t_center
+                 << "," << bin_n[b] << "," << mean_signed << "," << mean_abs
+                 << "," << bin_rms << "\n";
+      }
+      hist_ofs.flush();
+    }
+
+    coupled_prev_iter_planes_ = std::move(cur_planes);
+  }
   coupled_n_residuals_ = static_cast<int>(residuals_.size());
   coupled_sum_weight_ = sum_weight_this_iter;
   // CQ-53 items 2/4: RMS residual and hcol_reldiff distribution, overwritten

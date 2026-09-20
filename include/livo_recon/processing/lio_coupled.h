@@ -5,6 +5,7 @@
 #include "livo_recon/utils/eval/nees_logger.h"
 
 #include <limits>
+#include <unordered_set>
 
 namespace livo_recon
 {
@@ -281,6 +282,16 @@ struct LioProcCoupledOptions
   // deliberate sensitivity probe, not a claim this alternative is more
   // correct -- requires imu/log_qhat_en=true (enforced at load time).
   bool prior_at_scan_start = false;
+  // CQ-79: report-only, log-only, reads quantities the accumulation loop
+  // already holds (struct Residual's own r/t/plane_id/sigma_squared) --
+  // no new computation, never touches the solve. Default false,
+  // md5-inert. hist_start_scan/hist_n_scans name the one 20-scan window
+  // Artifact 2's full per-bin detail is written for (Artifact 1's own
+  // per-scan line fit is written for every scan, unconditionally, once
+  // the flag is on).
+  bool log_point_plane_en = false;
+  int  log_point_plane_hist_start_scan = 0;
+  int  log_point_plane_hist_n_scans = 20;
 };
 
 // CQ-49: the coupled estimator, reimplemented as its own class -- see
@@ -341,6 +352,11 @@ private:
   // processLIO() each frame); NOT carried scan-to-scan -- c_prior = 0 every
   // scan (item 4).
   std::vector<V3D> coupled_c_acc_, coupled_c_gyr_;
+  // CQ-79: this scan's PREVIOUS iteration's own set of matched-plane
+  // hashes, for carry_frac -- reset to empty at scan start (alongside
+  // coupled_iters_'s own reset), updated after every iteration's own
+  // point-plane logging pass.
+  std::unordered_set<std::size_t> coupled_prev_iter_planes_;
   // CQ-44 items 3c/3d: this scan's own ACCUMULATED delta_s(t0) =
   // [delta_v, delta_bg, delta_ba, delta_g] across GN iterations -- added ON
   // TOP OF state_'s own pre-scan v/bg/ba/g (captured once at scan start).
