@@ -77,6 +77,9 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/curvature_only", copts_.curvature_only, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/dc_weight", copts_.dc_weight, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/prior_per_axis_sigma", copts_.prior_per_axis_sigma, false);
+  cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/robust_loss",
+                 copts_.robust_loss, "none",
+                 {"none", "huber", "cauchy"});
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_bg_projection_en", copts_.log_bg_projection_en, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_cov_repropagation_en", copts_.log_cov_repropagation_en, false);
   paramWarn<double>(pnh, "imu/q_alpha_gyr", copts_.repro_q_alpha_gyr, 1.0);
@@ -120,6 +123,7 @@ std::string LioProcCoupled::engagementReport() const
       << " curvature_only=" << (copts_.curvature_only ? "true" : "false")
       << " dc_weight=" << copts_.dc_weight
       << " prior_per_axis_sigma=" << (copts_.prior_per_axis_sigma ? "true" : "false")
+      << " robust_loss=" << copts_.robust_loss
       << " log_bg_projection_en=" << (copts_.log_bg_projection_en ? "true" : "false")
       << " -- no spline/AdaptiveQ engagement to report (this class has "
          "neither)";
@@ -495,6 +499,42 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       Eigen::MatrixXd P = state_->cov();
       P.block(0, 0, 18, 18) = posterior18;   // idxR=0..idxG()+3=18, contiguous
       state_->covMut() = P;
+
+      // CQ-61 item 4, RULE 58 -- NOT AN EXPERIMENT: on residual starvation
+      // the estimator keeps integrating IMU and reports convergence --
+      // confirmed directly (3700 -> 0 residuals by scan 1785, trP_pos_post
+      // 0.0787 -> 309.24, a full pose still comes out). ABORT loudly
+      // rather than let a starved scan masquerade as a normal one -- this
+      // does not fix Bug A, it stops Bug A from producing a plausible-
+      // looking answer once the LiDAR evidence has effectively vanished.
+      //
+      // CORRECTED after the first cut wrongly fired on a genuinely healthy
+      // run: a single-scan relative-drop check (originally alongside the
+      // floor below) is NOT a valid signal here -- n_residuals oscillates
+      // legitimately by 10x+ scan-to-scan under completely normal
+      // operation (confirmed directly against CQ-59's own known-good
+      // eee_01_n4_base run, ATE=0.0251m: 1695 -> 147 is an 11.5x single-
+      // scan drop that happens every ~3rd scan, healthily, throughout the
+      // WHOLE run). An absolute floor alone is the right signal -- the
+      // same healthy run's own minimum across its entire run is 93,
+      // comfortably above the floor below, so this cannot false-positive
+      // on normal variance the way the drop check did.
+      {
+        constexpr int MIN_RESIDUALS_FLOOR = 20;
+        if (coupled_n_residuals_ < MIN_RESIDUALS_FLOOR) {
+          const double trP_pos_post_now =
+              posterior18.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()).trace();
+          std::ostringstream abort_msg;
+          abort_msg << "[FATAL] coupled residual starvation: n_residuals=" << coupled_n_residuals_
+                    << " (floor=" << MIN_RESIDUALS_FLOOR << ")"
+                    << " prev_n_residuals=" << coupled_prev_n_residuals_
+                    << " trP_pos_post=" << trP_pos_post_now
+                    << " scan_id=" << voxel_map_->frame_idx_
+                    << " n_c=" << copts_.n_c << " jacobian_time_mode=" << copts_.jacobian_time_mode;
+          throw std::runtime_error(abort_msg.str());
+        }
+        coupled_prev_n_residuals_ = coupled_n_residuals_;
+      }
     }
   }
 
@@ -1105,7 +1145,24 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
       // per RESIDUAL, potentially hundreds of thousands of times per run;
       // relies on ofstream's own buffering + normal process exit to flush.
     }
-    const double w = 1.0 / res.sigma_squared;
+    // CQ-61 arm (b): outlier-robust IRLS down-weighting on the normalized
+    // residual z = r/sqrt(sigma_squared) -- treats the SYMPTOM (a handful
+    // of bad correspondences dominating A once matching has already
+    // degraded), not the mechanism arm (a)/pose_cov_in_sigma targets; it
+    // will not reopen a gate that voxelplane.cpp's own acceptance test has
+    // already closed. Standard 95%-efficiency-under-Gaussian constants
+    // (Huber k=1.345, Cauchy c=2.3849). Default "none" -- md5-inert.
+    double w = 1.0 / res.sigma_squared;
+    if (copts_.robust_loss != "none") {
+      const double z = std::abs(res.r) / std::sqrt(std::max(res.sigma_squared, 1e-18));
+      if (copts_.robust_loss == "huber") {
+        constexpr double HUBER_K = 1.345;
+        if (z > HUBER_K) w *= HUBER_K / z;
+      } else if (copts_.robust_loss == "cauchy") {
+        constexpr double CAUCHY_C = 2.3849;
+        w *= 1.0 / (1.0 + (z / CAUCHY_C) * (z / CAUCHY_C));
+      }
+    }
     A.noalias() += w * (Jrow.transpose() * Jrow);
     b.noalias() -= w * Jrow.transpose() * res.r;
     sum_abs_r += std::abs(res.r);
@@ -1205,10 +1262,41 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     Eigen::VectorXd rhs = Eigen::VectorXd::Zero(ncol + 6);
     rhs.segment(0, ncol) = b;
     Eigen::FullPivLU<Eigen::MatrixXd> lu(K);
-    if (lu.isInvertible()) delta = lu.solve(rhs).head(ncol);
+    // CQ-61 item 4, sibling defect, RULE 58: delta was initialised to
+    // Zero() above and this branch only ASSIGNED it on success -- a failed
+    // solve silently fell through as delta=0, i.e. "the GN step converged
+    // to exactly zero correction", indistinguishable from genuine
+    // convergence. ABORT loudly instead; a failed bordered solve here
+    // means the KKT system itself is singular, not that nothing needs
+    // correcting.
+    if (lu.isInvertible()) {
+      delta = lu.solve(rhs).head(ncol);
+    } else {
+      std::ostringstream abort_msg;
+      abort_msg << "[FATAL] coupled zero_mean solve: bordered KKT matrix K is "
+                   "NOT invertible -- scan_id=" << voxel_map_->frame_idx_
+                << " n_residuals=" << coupled_n_residuals_
+                << " n_c=" << copts_.n_c << " jacobian_time_mode=" << copts_.jacobian_time_mode
+                << " iters_so_far=" << coupled_iters_;
+      throw std::runtime_error(abort_msg.str());
+    }
   } else {
     Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
-    if (ldlt.info() == Eigen::Success) delta = ldlt.solve(b);
+    // Same rule-58 fix as above: ldlt.info() previously gated the ONLY
+    // assignment to delta, so a failed factorization silently left
+    // delta=0 (a false "converged, no correction needed" instead of a
+    // real failure). ABORT loudly instead.
+    if (ldlt.info() == Eigen::Success) {
+      delta = ldlt.solve(b);
+    } else {
+      std::ostringstream abort_msg;
+      abort_msg << "[FATAL] coupled GN solve: LDLT(A) factorization failed "
+                   "(info()=NumericalIssue) -- scan_id=" << voxel_map_->frame_idx_
+                << " n_residuals=" << coupled_n_residuals_
+                << " n_c=" << copts_.n_c << " jacobian_time_mode=" << copts_.jacobian_time_mode
+                << " iters_so_far=" << coupled_iters_;
+      throw std::runtime_error(abort_msg.str());
+    }
   }
 
   const Eigen::VectorXd delta_s = delta.segment(0, ncol_s);

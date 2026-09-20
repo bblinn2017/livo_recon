@@ -178,6 +178,13 @@ struct LioProcCoupledOptions
   // estimateCoupledCorrection()'s own comment on why that route is
   // wrong). Default false -- md5-inert.
   bool prior_per_axis_sigma = false;
+  // CQ-61 arm (b): outlier-robust IRLS weighting on each residual's own
+  // normalized value -- "none" (default, md5-inert), "huber", or "cauchy".
+  // See estimateCoupledCorrection()'s own accumulation-loop comment for
+  // the formula and why this treats the symptom (bad correspondences
+  // dominating A), not Bug A's own mechanism (that's arm (a),
+  // pose_cov_in_sigma, a pre-existing shared-code flag -- see voxelplane.cpp).
+  std::string robust_loss = "none";
   // CQ-55 item 11(a): report-only, free -- log each scan's bg-block
   // posterior covariance eigenvalues (degenerate vs. well-observed
   // directions), independent of whether bias_observable_only itself is
@@ -363,6 +370,11 @@ private:
   // phi0/p0 alone by whatever those directions correlate away).
   double coupled_ask_ = -1.0, coupled_got_ = -1.0, coupled_refusal_ = std::numeric_limits<double>::quiet_NaN();
   int    coupled_n_residuals_ = -1;
+  // CQ-61 item 4: previous scan's own n_residuals, so residual-starvation
+  // (a sudden drop, not just an absolute floor) can be detected -- see the
+  // abort site in processLIO() for the full rationale. -1 means "no prior
+  // scan yet" (never triggers the drop check on the very first scan).
+  int    coupled_prev_n_residuals_ = -1;
   double coupled_sum_weight_ = -1.0;
   double coupled_h_pp_min_eig_ = -1.0, coupled_h_rr_min_eig_ = -1.0;
 
