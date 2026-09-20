@@ -1369,9 +1369,17 @@ def add_row(
         end = last.end + (1 if doc.src[last.end : last.end + 1] == "\n" else 0)
         doc.stage_insert(end, text, "row at bottom")
     else:
-        anchor = rows[0] if rows else None
-        at_off = (doc.src.rfind("\n", 0, anchor.start) + 1) if anchor else body.inner_start
-        doc.stage_insert(at_off, text, "row at top")
+        # CQ-48: the previous anchor.start-based rfind("\n", ...) computed
+        # the insertion offset from the FIRST ROW'S OWN position -- correct
+        # when that row is single-line, but when it spans multiple lines
+        # (e.g. a <div class="knobs"> block inside the row), rfind can walk
+        # back past the row's own start and land the newline search outside
+        # the table entirely, in the surrounding section prose. body.inner_start
+        # (right after <tbody>, or <table> if no tbody) is the table's own
+        # anchor point and inserting there ALWAYS produces "new row first"
+        # semantics whether or not rows already exist -- no special-casing
+        # on rows[0] needed at all.
+        doc.stage_insert(body.inner_start, text, "row at top")
 
 
 def remove_row(doc: Doc, table_key: str, rid: str) -> None:
@@ -1503,6 +1511,48 @@ def verify_row_mutation(
             raise ValueError(
                 f"row-mutation invariant (c): added id {added_id!r} is not present in "
                 f"table {tcap!r} after insertion -- have {a_ids!r}")
+        # CQ-48 item 3: containment, checked directly and independently of
+        # doc.rows(table_key)/_table_row_id_map above -- their own doc
+        # comment (invariant (a)'s own note) previously CLAIMED containment
+        # was "enforced by construction" in add_row via those same
+        # functions, which was exactly the assumption that let CQ-48's own
+        # defect (add_row's "at=top" anchor landing outside the table on a
+        # multi-line first row) go unreached: those functions only ever
+        # report what a row-collection PASS finds, so a bug in that same
+        # pass has no independent check to catch it -- and doc.rows()'s own
+        # filter (`not (r.parent and r.parent.tag == "thead")`) accepts ANY
+        # descendant <tr> whose immediate parent isn't <thead>, so a <tr>
+        # nested one level too deep (e.g. inside a previous row's own <td>)
+        # would be silently counted as a normal row, passing invariant (b)
+        # despite being structurally malformed -- row identity again, not
+        # tag balance (rule 43s). This re-derives the new row's Node by a
+        # DOCUMENT-WIDE search (not table-scoped, so it is found even when
+        # completely outside the target table) and asserts TWO things
+        # neither invariant (a)/(b)/(c) above checks: it is a DIRECT CHILD
+        # of a <tbody>, and that <tbody>'s own byte span is nested inside
+        # the target table's span.
+        candidates = [r for r in doc_after.find("tr") if doc_after.row_id(r) == want]
+        if not candidates:
+            raise ValueError(
+                f"row-mutation invariant (containment): added id {added_id!r} was "
+                f"reported present in table {tcap!r}'s own row list, but no matching "
+                f"<tr> could be found anywhere in the re-parsed document at all.")
+        new_row = candidates[0]
+        target_after = doc_after.table(table_key)
+        parent = new_row.parent
+        if parent is None or parent.tag != "tbody":
+            raise ValueError(
+                f"row-mutation invariant (containment): added id {added_id!r}'s <tr> "
+                f"is not a direct child of a <tbody> (parent is "
+                f"{parent.tag if parent else None!r}) -- it is nested somewhere it "
+                f"should not be, even though it was counted as a normal row.")
+        if not (target_after.start <= parent.start and parent.end <= target_after.end):
+            raise ValueError(
+                f"row-mutation invariant (containment): added id {added_id!r}'s <tbody> "
+                f"parent is at byte span [{parent.start},{parent.end}), which is NOT "
+                f"inside target table {tcap!r}'s own span [{target_after.start},"
+                f"{target_after.end}) -- the row landed outside the table it was "
+                f"supposedly added to.")
 
 
 def retitle_card(
