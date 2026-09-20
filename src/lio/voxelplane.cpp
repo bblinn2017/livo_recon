@@ -25,12 +25,25 @@ std::atomic<int> g_denom_rejected_count{0};
 // mechanism actually runs.
 std::atomic<long> g_info_fits{0};
 std::atomic<double> g_max_plane_var_trace{-1.0};
+// CQ-56 item 3: same pattern, tracking covariance_'s own trace (the
+// geometric point-scatter covariance the catastrophic-cancellation
+// fix applies to) -- a DIFFERENT quantity from plane_var_ above (that's
+// the fit's uncertainty, not the raw scatter), needed to measure
+// centred_accumulation's effect directly.
+std::atomic<double> g_max_plane_covariance_trace{-1.0};
 
 void updateMaxPlaneVarTrace(double trace)
 {
   double cur = g_max_plane_var_trace.load(std::memory_order_relaxed);
   while (trace > cur &&
          !g_max_plane_var_trace.compare_exchange_weak(cur, trace, std::memory_order_relaxed)) {}
+}
+
+void updateMaxPlaneCovarianceTrace(double trace)
+{
+  double cur = g_max_plane_covariance_trace.load(std::memory_order_relaxed);
+  while (trace > cur &&
+         !g_max_plane_covariance_trace.compare_exchange_weak(cur, trace, std::memory_order_relaxed)) {}
 }
 // CQ-35: ofs is a function-local static, opened once (truncating) and kept
 // open for the process lifetime instead of reopened every call. This one
@@ -505,12 +518,22 @@ void voxelPlaneFrameStatsReset()
 {
   g_denom_rejected_count.store(0, std::memory_order_relaxed);
   g_max_plane_var_trace.store(-1.0, std::memory_order_relaxed);
+  g_max_plane_covariance_trace.store(-1.0, std::memory_order_relaxed);
 }
 
 void voxelPlaneFrameStatsRead(int& denom_rejected_count, double& max_plane_var_trace)
 {
   denom_rejected_count = g_denom_rejected_count.load(std::memory_order_relaxed);
   max_plane_var_trace = g_max_plane_var_trace.load(std::memory_order_relaxed);
+}
+
+// CQ-56 item 3: separate accessor (not folded into voxelPlaneFrameStatsRead
+// above) so no existing caller's signature needs to change -- this is a
+// report-only diagnostic added for this card's own measurement, not a
+// standing part of frame_stats.
+double voxelPlaneMaxCovarianceTrace()
+{
+  return g_max_plane_covariance_trace.load(std::memory_order_relaxed);
 }
 
 long voxelPlaneInformationFitCount()
@@ -1178,8 +1201,17 @@ void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_cou
     const M3D combined_cov = (opts_->plane_fit_pose_cov_mode == "sensor_only")
         ? pt.sensor_cov : M3D(pt.sensor_cov + pt.pos_cov);
     N_acc_ += 1.0;
-    Sp_    += p;
-    Spp_.noalias() += p * p.transpose();
+    // CQ-56: accumulate relative to ref_ (this voxel's first-ever point)
+    // instead of raw world p when centred_accumulation is on -- see
+    // voxelmap_utils.h's own doc comment for why. ref_ is set exactly
+    // once per voxel, from whichever point happens to arrive first.
+    V3D p_acc = p;
+    if (opts_->centred_accumulation) {
+      if (!ref_set_) { ref_ = p; ref_set_ = true; }
+      p_acc = p - ref_;
+    }
+    Sp_    += p_acc;
+    Spp_.noalias() += p_acc * p_acc.transpose();
     Scov_  += combined_cov;
     // Only fold this point's sensor_cov into the SUBTRACTED correction
     // (Scov_sensor_/sum_sensor_var_) when it comes from a trusted,
@@ -1233,7 +1265,17 @@ void VoxelPlane::refitDebiased()
   const double N = N_acc_;
   if (N < 3) return;
 
-  const V3D mean = Sp_ / N;
+  // CQ-56: when centred_accumulation is on, Sp_/Spp_ live in the (p-ref_)
+  // basis (see addPoints()) -- mean_rel is THAT basis's own mean, exactly
+  // matching Spp_ for the covariance formula below (translation-invariant,
+  // so this needs no ref_ correction at all: Cov(p) == Cov(p-ref_)
+  // identically). `mean`, in contrast, is the TRUE world-frame mean (ref_
+  // added back) -- every OTHER use in this function (plane_.center, the
+  // Scov_w/W_/V_ cross-terms below, which accumulate from RAW world p and
+  // so need a world-frame mean to stay self-consistent) needs this one,
+  // not mean_rel.
+  const V3D mean_rel = Sp_ / N;
+  const V3D mean = (opts_->centred_accumulation && ref_set_) ? (ref_ + mean_rel) : mean_rel;
   // M_debiased: noise-corrected structure tensor -- see
   // docs/debiased_voxel_plane_fit_2026aug24.md. covariance_ is reused here
   // (same field PCA mode fills) purely for getVizInfo()/diagnostics parity.
@@ -1252,8 +1294,19 @@ void VoxelPlane::refitDebiased()
   const M3D Scov_pose = Scov_ - Scov_sensor_;
   const double pose_shrink = (distinct_frames_ > 1)
       ? (distinct_frames_ - 1.0) / distinct_frames_ : 0.0;
-  covariance_ = Spp_ / N - mean * mean.transpose()
+  // CQ-56: mean_rel (not mean) here -- Spp_/N - mean_rel*mean_rel^T is the
+  // scatter term, and it must be computed in the SAME basis Spp_/Sp_ were
+  // accumulated in (raw world when centred_accumulation is off, (p-ref_)
+  // when on) for the two to cancel correctly. Scov_sensor_/Scov_pose are
+  // independent of point position entirely (pure per-point/per-frame
+  // covariance sums), so they're unaffected by centring either way.
+  covariance_ = Spp_ / N - mean_rel * mean_rel.transpose()
               - Scov_sensor_ / N - pose_shrink * (Scov_pose / N);
+  // CQ-56 item 3: recorded as soon as covariance_ is computed, regardless
+  // of whether this fit goes on to be accepted as a plane -- the
+  // measurement this card asks for is about the raw accumulator's own
+  // conditioning, not about which fits survive.
+  updateMaxPlaneCovarianceTrace(covariance_.trace());
 
   Eigen::SelfAdjointEigenSolver<M3D> solver(covariance_);
   if (solver.info() != Eigen::Success) return;

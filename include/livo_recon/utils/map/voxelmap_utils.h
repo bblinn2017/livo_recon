@@ -311,6 +311,20 @@ struct VoxelOpts
   // model says is implausible.
   bool   sensor_noise_floor_eig0    = false;
 
+  // CQ-56: VoxelPlane::addPoints()/refitDebiased() accumulate Spp_ = Sigma
+  // p_i p_i^T from RAW WORLD coordinates, then compute covariance_ =
+  // Spp_/N - mean*mean^T -- textbook catastrophic cancellation (terms of
+  // order |p|^2, answer of order the plane's own thickness, ~1e-4 m^2;
+  // a double's ~16 significant digits run out once |p| reaches the
+  // thousands-of-metres range this project's own trajectories now
+  // routinely traverse). When true, VoxelPlane accumulates (p - ref_)
+  // instead of raw p (ref_ = this voxel's first-ever accumulated point,
+  // set once) -- translation-invariant and exact in infinite-precision
+  // arithmetic, only the cancellation error goes away. Default false --
+  // provably inert (same Spp_/Sp_ values, same fit, when ref_ is never
+  // subtracted).
+  bool   centred_accumulation       = false;
+
   // "pca" (default): today's unchanged behavior -- unweighted PCA on raw
   // point positions, plane_var_ (fit uncertainty) a separate O(N)
   // per-point Jacobian sandwich propagating each point's PointXYZCov::cov.

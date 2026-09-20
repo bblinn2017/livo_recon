@@ -20,7 +20,8 @@ namespace
 // History (17-24): see docs/livo_recon_changelog.md#src-map-voxelmap.cpp-17
 void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
                         double max_plane_var_trace, const LioFrameDiag& lio, int n_planes,
-                        int n_voxels, int n_voxels_is_plane, int n_voxels_converged)
+                        int n_voxels, int n_voxels_is_plane, int n_voxels_converged,
+                        double max_plane_covariance_trace)
 {
   // CQ-36: PersistentLogStream re-resolves debugLogPath() on every call
   // (reopening only if it actually changed) and the caller flushes after
@@ -92,7 +93,12 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            ",htth_pos_trace"
            ",collapse_groups_collapsed,collapse_residuals_removed"
            ",per_residual_touched,per_residual_renorm_factor,per_residual_mean_scale"
-           ",sigma_scale_applied,sigma_scale_chi2_ema\n";
+           ",sigma_scale_applied,sigma_scale_chi2_ema"
+           // CQ-56 item 3: this frame's largest VoxelPlane::covariance_
+           // trace -- see updateMaxPlaneCovarianceTrace()'s own doc
+           // comment. Appended, not interleaved, per this file's own
+           // convention.
+           ",max_plane_covariance_trace\n";
   first_call = false;
   // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
   // (6 significant figures) collapses every frame in a run to the same
@@ -137,6 +143,7 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.per_residual_touched << "," << lio.per_residual_renorm_factor
       << "," << lio.per_residual_mean_scale
       << "," << lio.sigma_scale_applied << "," << lio.sigma_scale_chi2_ema
+      << "," << max_plane_covariance_trace
       << "\n";
   ofs.flush();
 }
@@ -155,6 +162,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "voxel_map/map/voxel_size",   opts_->voxel_size,  0.5);
   paramWarn<int>(pnh, "voxel_map/map/max_layer",       opts_->max_layer,    2);
   paramWarn<bool>(pnh, "voxel_map/plane/sensor_noise_floor_eig0", opts_->sensor_noise_floor_eig0, false);
+  paramWarn<bool>(pnh, "voxel_map/plane/centred_accumulation", opts_->centred_accumulation, false);
   paramWarn<std::string>(pnh, "voxel_map/plane/convergence_mode", opts_->convergence_mode, "normal");
   paramWarn<int>(pnh, "voxel_map/plane/min_frames_to_converge", opts_->min_frames_to_converge, 5);
   paramWarn<int>(pnh, "voxel_map/plane/min_frames_to_init", opts_->min_frames_to_init, 1);
@@ -399,6 +407,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  map/voxel_size:                  " << opts_->voxel_size
       << "\n  map/max_layer:                   " << opts_->max_layer
       << "\n  plane/sensor_noise_floor_eig0:   " << (opts_->sensor_noise_floor_eig0 ? "true" : "false")
+      << "\n  plane/centred_accumulation:      " << (opts_->centred_accumulation ? "true" : "false")
       << "\n  plane/convergence_mode:          " << opts_->convergence_mode
       << "\n  plane/min_frames_to_converge:    " << opts_->min_frames_to_converge
       << "\n  plane/min_frames_to_init:        " << opts_->min_frames_to_init
@@ -564,7 +573,8 @@ void VoxelMap::updateMap(MeasureGroup& mg) {
                         lio_frame_diag_, stats_->planes.load(std::memory_order_relaxed),
                         stats_->total(),
                         stats_->planes.load(std::memory_order_relaxed),
-                        stats_->converged.load(std::memory_order_relaxed));
+                        stats_->converged.load(std::memory_order_relaxed),
+                        voxelPlaneMaxCovarianceTrace());
   }
 }
 

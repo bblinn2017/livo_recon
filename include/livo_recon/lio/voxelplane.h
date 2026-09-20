@@ -100,8 +100,21 @@ private:
   // (unweighted, w_i=1) sums, never reset. Normalization (by N or N^2, see
   // refitDebiased()) is applied only at query time.
   double N_acc_ = 0.0;
-  V3D    Sp_    = V3D::Zero();  // Sigma p_i
-  M3D    Spp_   = M3D::Zero();  // Sigma p_i p_i^T
+  V3D    Sp_    = V3D::Zero();  // Sigma p_i (or Sigma (p_i - ref_) when centred_accumulation)
+  M3D    Spp_   = M3D::Zero();  // Sigma p_i p_i^T (or Sigma (p_i-ref_)(p_i-ref_)^T when centred_accumulation)
+  // CQ-56: reference offset for centred_accumulation (voxel_map/plane/
+  // centred_accumulation, default false) -- set once, from this voxel's
+  // FIRST accumulated point, then never changed. Accumulating (p - ref_)
+  // instead of raw world p keeps Spp_'s own magnitude near the plane's
+  // true thickness (~1e-4 m^2) instead of the trajectory's own distance-
+  // from-origin squared (up to ~4e6 m^2 at 2000m) -- translation-invariant,
+  // exact in infinite-precision arithmetic (Cov(p) == Cov(p-ref) for any
+  // constant ref), only removes the catastrophic-cancellation error a raw
+  // Spp_/N - mean*mean^T accumulates as |p| grows. See refitDebiased()
+  // for where ref_ gets added back into plane_.center (the one place a
+  // TRUE, not offset, world position is needed).
+  V3D    ref_ = V3D::Zero();
+  bool   ref_set_ = false;
   M3D    Scov_  = M3D::Zero();  // Sigma (pt.sensor_cov+pt.pos_cov), combined -- plane_var_'s accumulators only
   M3D    Scov_sensor_ = M3D::Zero(); // Sigma pt.sensor_cov, independent -- M_debiased's fit correction
   M3D    V_[3][3];              // V_[a][b] = Sigma p_i(a) p_i(b) Cov_i  (combined cov, plane_var_ only)
@@ -366,6 +379,10 @@ public:
 // History (238-248): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-238
 void voxelPlaneFrameStatsReset();
 void voxelPlaneFrameStatsRead(int& denom_rejected_count, double& max_plane_var_trace);
+// CQ-56 item 3: this frame's largest covariance_.trace() seen across every
+// VoxelPlane refit -- reset by voxelPlaneFrameStatsReset() alongside the
+// other per-frame maxima above.
+double voxelPlaneMaxCovarianceTrace();
 
 // Total planes fitted under plane_var_mode = "information" since process
 // start.  Zero on a run configured for it means the mode never ran: an INERT
