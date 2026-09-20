@@ -148,6 +148,22 @@ struct LioProcCoupledOptions
   // permanent alias for a knob nothing ever used is pure upkeep cost.
   double curvature_weight_acc = 0.0;
   double curvature_weight_gyr = 0.0;
+  // CQ-69: "the trajectory change caused by the correction should be
+  // small" as a THIRD prior band, distinct from gram (mid-band, IID-noise-
+  // correct value prior) and curvature (high-band, second-difference shape
+  // penalty). Lambda_traj = sum_k phi_head[k]^T W phi_head[k], W picking
+  // out the POSITION rows only (rows 3-5 of phi_head[k]'s 9 rows) -- phi_head
+  // already bakes in the basis weights, the world-frame rotation, and the
+  // double integration (see estimateCoupledCorrection()'s own construction),
+  // so this is an EXACT low-band trajectory-deviation penalty, not an
+  // approximation built from a hand-rolled integration operator (which
+  // would integrate the correction in the wrong frame). Normalized by
+  // (t1-t0)^2 inside the construction -- the term's own DC weighting scales
+  // as T^2, so an un-normalized knob would silently mean something different
+  // at every scan duration/LiDAR rate. Default 0.0 -- md5-inert (adds
+  // nothing to Lambda at that default). A regularization weight, not a
+  // variance -- never described as one in a filing.
+  double lambda_traj_pos = 0.0;
   // CQ-55 item 11(b): the principled, threshold-free alternative to
   // freeze_bg/bias_freeze_on_vibration -- see estimateCoupledCorrection()'s
   // own comment at the accumulation site for the full mechanism. Default

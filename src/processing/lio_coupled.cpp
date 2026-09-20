@@ -100,6 +100,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_anchor", copts_.bias_anchor, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/curvature_weight_acc", copts_.curvature_weight_acc, 0.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/curvature_weight_gyr", copts_.curvature_weight_gyr, 0.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/lambda_traj_pos", copts_.lambda_traj_pos, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_observable_only", copts_.bias_observable_only, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/curvature_only", copts_.curvature_only, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/dc_weight", copts_.dc_weight, 0.0);
@@ -1162,6 +1163,32 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
       Lambda.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) =
           M3D(value_gram * prec_gyr_diag.asDiagonal()) + (curv_gyr + dc_gyr) * M3D::Identity();
     }
+  // CQ-69: the low-band trajectory-deviation prior. Lambda_traj = sum_k
+  // phi_head[k]^T W phi_head[k], W selecting phi_head[k]'s POSITION rows
+  // (rows 3-5 of its 9-row [dtheta,dp,dv] layout) only -- position-only for
+  // this first pass per the card's own instruction (attitude/velocity rows
+  // have different units, so a single scalar W can't combine them
+  // dimensionlessly). phi_head[k] already bakes in the basis weights, the
+  // world-frame rotation, and the double integration via the Fx*Phi
+  // recursion (see this function's own G-block construction above) -- this
+  // is an EXACT low-band penalty on the trajectory deviation the
+  // correction implies, not an approximation. NOT block-diagonal in (i,j)
+  // the way gram/Curv are -- accumulated as one whole-matrix outer-product
+  // sum, which is guaranteed PSD by construction (a sum of P_k^T*P_k
+  // terms). Normalized by (t1-t0)^2: the term's own DC weighting scales as
+  // T^2 (verified by computation in the card), so this keeps a given
+  // lambda_traj_pos meaning the same thing across scan durations/LiDAR
+  // rates. Default 0.0 -- md5-inert (the whole block is skipped).
+  if (copts_.lambda_traj_pos > 0.0) {
+    Eigen::MatrixXd Lambda_traj = Eigen::MatrixXd::Zero(ncol_c, ncol_c);
+    for (const auto& phi_k : coupled_prop_.phi_head) {
+      const Eigen::Matrix<double, 3, Eigen::Dynamic> P_k = phi_k.middleRows<3>(3);
+      Lambda_traj.noalias() += P_k.transpose() * P_k;
+    }
+    const double T = t1 - t0;
+    const double norm = (T * T > 1e-12) ? 1.0 / (T * T) : 0.0;
+    Lambda.noalias() += (copts_.lambda_traj_pos * norm) * Lambda_traj;
+  }
   // CQ-62 item 1: S4 -- Lambda.
   if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S4_Lambda", Lambda);
 
