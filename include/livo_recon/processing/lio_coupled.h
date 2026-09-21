@@ -2,6 +2,7 @@
 
 #include "livo_recon/processing/lio_base.h"
 #include "livo_recon/lio/coupled_estimator.h"
+#include "livo_recon/lio/pose_spline_system.h"
 #include "livo_recon/utils/eval/nees_logger.h"
 
 #include <limits>
@@ -484,6 +485,19 @@ private:
   // processLIO() each frame); NOT carried scan-to-scan -- c_prior = 0 every
   // scan (item 4).
   std::vector<V3D> coupled_c_acc_, coupled_c_gyr_;
+  // CQ-82 Phase 2, Artifact 1: the pose-basis analogue. coupled_pose_spline_
+  // is fit ONCE per scan (first GN iteration only, via ScanSpline::fit() on
+  // the IMU-propagated mg.poses -- "the matching initial condition to the
+  // other arm's c=0", per the card) and never re-fit within the scan;
+  // coupled_c_pos_/coupled_c_rot_ are the accumulated corrections ON TOP of
+  // that fixed fit's own control points, persisted across this scan's GN
+  // iterations the same way coupled_c_acc_/coupled_c_gyr_ are, reset to
+  // zero (and the spline re-fit) at the top of every new scan. Only
+  // meaningful when copts_.poseBasis() -- untouched, unread, on the raw_imu
+  // path.
+  ScanSpline coupled_pose_spline_;
+  bool coupled_pose_spline_valid_ = false;
+  std::vector<V3D> coupled_c_pos_, coupled_c_rot_;
   // CQ-79: this scan's PREVIOUS iteration's own set of matched-plane
   // hashes, for carry_frac -- reset to empty at scan start (alongside
   // coupled_iters_'s own reset), updated after every iteration's own

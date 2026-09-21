@@ -427,6 +427,29 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   coupled_delta_v_.setZero(); coupled_delta_bg_.setZero();
   coupled_delta_ba_.setZero(); coupled_delta_g_.setZero();
   coupled_delta_phi0_.setZero(); coupled_delta_pos0_.setZero();
+  // CQ-82 Phase 2, Artifact 1: the pose-basis's own scan-start reset. Fit
+  // ONCE per scan (not once per GN iteration -- INIT via ScanSpline::fit()
+  // on the IMU-propagated mg.poses, "the matching initial condition to the
+  // other arm's c=0", per the card), then reset the accumulated corrections
+  // to zero, exactly mirroring coupled_c_acc_/coupled_c_gyr_'s own pattern.
+  // control_point_hz is chosen PER SCAN so the derived n_cp (ScanSpline's
+  // own formula: round(hz*(t1-t0))+3) lands on EXACTLY copts_.n_c -- ScanSpline's
+  // own public fit() API takes a rate, not a raw control-point count, and
+  // is shared with the decoupled spline path, so this works around that
+  // rather than changing shared, already-shipped surface.
+  if (copts_.poseBasis()) {
+    coupled_c_pos_.assign(copts_.n_c, V3D::Zero());
+    coupled_c_rot_.assign(copts_.n_c, V3D::Zero());
+    coupled_pose_spline_valid_ = false;
+    if (!mg.poses.empty() && mg.image.t > mg.poses.front().t) {
+      const double t0 = mg.poses.front().t;
+      const double t1 = mg.image.t;
+      SplineOptions pose_fit_opts;
+      pose_fit_opts.control_point_hz = (copts_.n_c - 3) / std::max(t1 - t0, 1e-6);
+      pose_fit_opts.end_constraint_velocity = true;
+      coupled_pose_spline_valid_ = coupled_pose_spline_.fit(mg.poses, t0, t1, pose_fit_opts);
+    }
+  }
   // mg.poses.front().vel (NOT state_->vel()), for consistency with
   // rot0/pos0 in estimateCoupledCorrection() -- all three come from the
   // SAME raw-chain snapshot.
