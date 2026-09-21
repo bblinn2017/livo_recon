@@ -370,6 +370,25 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   // residuals over that same c_{K-1}-deskewed mg.points). This flag fixes
   // exactly those two things; it does not need to "fix" state_'s pose,
   // which was never actually behind.
+  //
+  // BUGFIX (found during CQ-75-R2 md5/ATE verification, pre-publish):
+  // final_relinearize_cov's own write of state_->covMut() cannot happen
+  // where it originally lived (inside this if-block) because the CQ-44
+  // item 5 block a few hundred lines below -- which runs UNCONDITIONALLY
+  // after this whole if-block, for every arm, and is what actually feeds
+  // this scan's posterior forward as the NEXT scan's Pi_ss prior --
+  // overwrites state_->covMut() again right after, silently discarding
+  // whatever this block wrote. relin_pending_/relin_A_final_/
+  // relin_Jx_f_/relin_Jc_f_ below carry the relinearized posterior's
+  // ingredients (computed here, from A_final/final_prop -- NEITHER of
+  // which is touched by CQ-44's block -- so they're unaffected by that
+  // block's own read of the now-restored coupled_last_A_/coupled_prop_)
+  // past CQ-44's write, which then applies the actual relinearized
+  // overwrite immediately afterward (see that site for the write itself).
+  bool relin_pending_ = false;
+  Eigen::MatrixXd relin_A_final_;
+  Eigen::Matrix<double, 9, 18> relin_Jx_f_;
+  Eigen::Matrix<double, 9, Eigen::Dynamic> relin_Jc_f_;
   if (copts_.final_redeskew) {
     const double t1 = mg.image.t;
     const int n_c = copts_.n_c;
@@ -419,6 +438,102 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
            << res_rms_pre << "," << res_rms_post << ","
            << pose_delta_rot_deg << "," << pose_delta_pos_mm << "\n";
     fr_ofs.flush();
+
+    // CQ-75 arm (c): final_relinearize_cov. Rebuilds A (and the posterior
+    // it implies) at the FINAL trajectory -- WITHOUT taking another step.
+    // Deliberately reuses estimateCoupledCorrection() itself (the exact,
+    // already-verified code that builds Lambda/Pi_ss/HtH/A) rather than
+    // duplicating ~900 lines of dense accumulation logic in a second,
+    // parallel implementation -- a duplicate is exactly the kind of
+    // drift-prone, hard-to-verify surgery this project's own code-
+    // organization preference warns against. The mean is restored exactly
+    // by construction: coupled_c_acc_/coupled_c_gyr_/coupled_delta_* (this
+    // extra call's own INPUT, read at its own top, same as every ordinary
+    // iteration) are snapshotted before the call and restored after, so
+    // the one solve step this call takes internally is computed and then
+    // discarded -- only coupled_last_A_ (which the call updates as an
+    // unconditional side effect) is kept.
+    if (copts_.final_relinearize_cov) {
+      const std::vector<V3D> c_acc_snap = coupled_c_acc_, c_gyr_snap = coupled_c_gyr_;
+      const V3D delta_v_snap = coupled_delta_v_, delta_bg_snap = coupled_delta_bg_,
+                delta_ba_snap = coupled_delta_ba_, delta_g_snap = coupled_delta_g_,
+                delta_phi0_snap = coupled_delta_phi0_, delta_pos0_snap = coupled_delta_pos0_;
+      const M3D rot_snap = state_->rot();
+      const V3D pos_snap = state_->pos(), vel_snap = state_->vel();
+      // BUGFIX (found during CQ-75-R2 md5/ATE verification, pre-publish):
+      // estimateCoupledCorrection() also mutates mg.points (re-deskews +
+      // re-downsamples the full raw set against ITS OWN extra-call
+      // trajectory, lio_coupled.cpp's own step (2)) and residuals_
+      // (buildResiduals() over that same mg.points) as unconditional side
+      // effects -- neither was in the original snapshot set. Left
+      // unreverted, this extra call's mg.points silently replaced the
+      // legitimate final_redeskew pass's own already-correct mg.points,
+      // which then fed map insertion for this scan and corrupted every
+      // later scan's map -- confirmed as the cause of a real ATE
+      // divergence vs arm (b) (eee_01 -1.0mm, eee_02 +5.3mm) that should
+      // have been exactly 0 by this pass's own stated contract (measures
+      // covariance only, takes no 6th GN step).
+      const std::vector<PointXYZCov> points_snap = mg.points;
+      const auto residuals_snap = residuals_;
+      // Same bug, second instance: estimateCoupledCorrection() also
+      // overwrites the coupled_last_A_/coupled_prop_ MEMBERS (not just
+      // mg.points/residuals_) as unconditional side effects. The CQ-44
+      // item 5 block below (pre-existing, runs for every arm, not new to
+      // this card) reads those same two members directly to compute the
+      // posterior it feeds forward as the NEXT scan's Pi_ss prior --
+      // left uncorrected, that block silently used this extra call's
+      // post-step (not post-convergence) A/propagation, corrupting every
+      // later scan's prior and, transitively, the whole rest of the
+      // trajectory. This is what the mg.points fix alone did not catch
+      // (a rebuild+rerun with only that fix reproduced the exact same
+      // wrong ATE as the original bug).
+      const Eigen::MatrixXd A_snap = coupled_last_A_;
+      const CoupledPropagation prop_snap = coupled_prop_;
+
+      V3D dtheta_extra, dt_extra;
+      estimateCoupledCorrection(mg, dtheta_extra, dt_extra);
+      const Eigen::MatrixXd A_final = coupled_last_A_;
+
+      // Revert the mean and every side-effected member -- this pass
+      // measures the covariance implied by the final trajectory, it does
+      // not take a 6th GN step and must be invisible to everything else
+      // this scan touches afterward.
+      coupled_c_acc_ = c_acc_snap; coupled_c_gyr_ = c_gyr_snap;
+      coupled_delta_v_ = delta_v_snap; coupled_delta_bg_ = delta_bg_snap;
+      coupled_delta_ba_ = delta_ba_snap; coupled_delta_g_ = delta_g_snap;
+      coupled_delta_phi0_ = delta_phi0_snap; coupled_delta_pos0_ = delta_pos0_snap;
+      state_->setPropagatedState(rot_snap, pos_snap, vel_snap);
+      mg.points = points_snap;
+      residuals_ = residuals_snap;
+      coupled_last_A_ = A_snap;
+      coupled_prop_ = prop_snap;
+
+      // Same M/posterior construction as the card's own item 0 cites
+      // (lio_coupled.cpp:306-311's own formula) -- reused verbatim, just
+      // fed A_final and final_prop's own (already-reverted-consistent,
+      // since final_prop was built from the SAME c_K before this extra
+      // call ever ran) Jacobians instead of coupled_last_A_/coupled_prop_.
+      // Stashed rather than written here -- see relin_pending_'s own
+      // doc comment above for why the actual state_->covMut() overwrite
+      // has to happen after the CQ-44 item 5 block below, not here.
+      if (A_final.rows() == final_prop.phi_head.back().cols() + 18 &&
+          state_->idxBG() >= 0 && state_->idxBA() >= 0 && state_->idxG() >= 0) {
+        Eigen::LDLT<Eigen::MatrixXd> ldlt_final(A_final);
+        const double min_pivot_final = ldlt_final.vectorD().minCoeff();
+        if (min_pivot_final > 0.0) {
+          relin_pending_ = true;
+          relin_A_final_ = A_final;
+          relin_Jx_f_ = final_prop.phi_x_head.back();
+          relin_Jc_f_ = final_prop.phi_head.back();
+        }
+        // min_pivot_final <= 0.0: leave relin_pending_ false -- the
+        // (soon-to-be-written) A_K-based posterior stays in place rather
+        // than a non-PSD covariance getting written -- matches the
+        // existing guard's own "abort loudly" spirit, but report-not-
+        // abort here since this whole pass is diagnostic and the run's
+        // own real posterior is validly written by CQ-44's block either way.
+      }
+    }
   }
 
   // CQ-54 item 3: once per SCAN (not per GN iteration -- the loop above
@@ -796,6 +911,28 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       Eigen::MatrixXd P = state_->cov();
       P.block(0, 0, 18, 18) = posterior18;   // idxR=0..idxG()+3=18, contiguous
       state_->covMut() = P;
+
+      // CQ-75 arm (c): final_relinearize_cov's own posterior overwrite,
+      // moved here (see relin_pending_'s doc comment above the
+      // final_redeskew if-block) so it applies AFTER this scan's normal
+      // posterior write above rather than being silently clobbered by
+      // it. This IS the intended effect of the flag: the relinearized
+      // covariance becomes what's actually carried forward as the NEXT
+      // scan's Pi_ss prior -- only the MEAN/trajectory is guaranteed
+      // unchanged (reverted immediately after the extra solve, above),
+      // not the covariance, which is the entire quantity this flag exists
+      // to test.
+      if (relin_pending_) {
+        Eigen::MatrixXd M_f(18, 18 + relin_Jc_f_.cols());
+        M_f.setZero();
+        M_f.topRows(9).leftCols(18) = relin_Jx_f_;
+        M_f.topRows(9).rightCols(relin_Jc_f_.cols()) = relin_Jc_f_;
+        M_f.block(9, 9, 9, 9) = Eigen::MatrixXd::Identity(9, 9);
+        const Eigen::MatrixXd posterior18_relin = solveCovarianceFromA(relin_A_final_, &M_f);
+        Eigen::MatrixXd P_relin = state_->cov();
+        P_relin.block(0, 0, 18, 18) = posterior18_relin;
+        state_->covMut() = P_relin;
+      }
       // CQ-62 item 1: S11 -- state_->cov() immediately after the write.
       if (copts_.psd_audit_en)
         logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S11_cov_post_write", state_->cov());
