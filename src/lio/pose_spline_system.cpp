@@ -48,13 +48,14 @@ PoseSplineCBlockBuild buildPoseSplineCBlock(
     const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
     double pose_imu_weight_acc, double pose_imu_weight_gyr,
     double pose_curvature_weight_pos, double pose_curvature_weight_rot,
-    PoseSplineTimeMode time_mode, double end_time_t1, bool audit)
+    PoseSplineTimeMode time_mode, double end_time_t1, bool audit,
+    double tikhonov_eps)
 {
   const int n_c = spline.nControlPoints();
   const int ncol_c = 6 * n_c;  // [c_p(3n_c); c_phi(3n_c)]
 
   PoseSplineCBlockBuild build;
-  build.A = Eigen::MatrixXd::Identity(ncol_c, ncol_c) * POSE_SPLINE_TIKHONOV_EPS;
+  build.A = Eigen::MatrixXd::Identity(ncol_c, ncol_c) * tikhonov_eps;
   build.b = Eigen::VectorXd::Zero(ncol_c);
   Eigen::MatrixXd& A = build.A;
   Eigen::VectorXd& b = build.b;
@@ -182,6 +183,70 @@ PoseSplineCBlockBuild buildPoseSplineCBlock(
   }
 
   return build;
+}
+
+// CQ-87 items 1/2/3 -- see this function's own declaration-site doc
+// comment (pose_spline_system.h) for the full derivation and the
+// mechanism chosen. Implemented as a direct T^T A T reduction via
+// per-column destination indices, then the prior is seeded into the
+// resulting [delta_phi0;delta_pos0] block -- both O(n_c^2), trivial cost
+// at this project's n_c range (4-13).
+PoseSplineReducedSystem reducePoseSplineHeadCoupling(
+    const PoseSplineCBlockBuild& build, int n_c,
+    const Eigen::Matrix<double, 6, 6>& pi_ss,
+    const Eigen::Matrix<double, 6, 1>& s_vec)
+{
+  constexpr int kTie = POSE_SPLINE_HEAD_TIE_CP;
+  const int n_free = std::max(0, n_c - kTie);
+  const int ncol_orig = 6 * n_c;
+  const int new_dim = 6 * n_free + 6;
+
+  PoseSplineReducedSystem out;
+  out.n_free = n_free;
+  out.A = Eigen::MatrixXd::Zero(new_dim, new_dim);
+  out.b = Eigen::VectorXd::Zero(new_dim);
+  if (n_c <= 0) return out;
+
+  // dest[orig_col] = destination row/col in the reduced system. The tied
+  // head columns (c_p and c_phi, control points 0..kTie-1) all map to the
+  // SAME 3 destination columns each (delta_phi0 or delta_pos0) -- that
+  // repetition, summed via the loop below, is exactly the T^T A T
+  // reduction; free columns (control points kTie..n_c-1) each get their
+  // own unique destination.
+  std::vector<int> dest(ncol_orig, -1);
+  int fp = 0;
+  for (int j = kTie; j < n_c; ++j)
+    for (int a = 0; a < 3; ++a) dest[3 * j + a] = fp++;
+  int fr = 0;
+  for (int j = kTie; j < n_c; ++j)
+    for (int a = 0; a < 3; ++a) dest[3 * n_c + 3 * j + a] = 3 * n_free + fr++;
+  for (int j = 0; j < std::min(kTie, n_c); ++j)
+    for (int a = 0; a < 3; ++a) {
+      dest[3 * j + a]           = 6 * n_free + 3 + a;  // delta_pos0 block
+      dest[3 * n_c + 3 * j + a] = 6 * n_free + a;       // delta_phi0 block
+    }
+
+  for (int r = 0; r < ncol_orig; ++r) {
+    const int dr = dest[r];
+    if (dr < 0) continue;
+    out.b(dr) += build.b(r);
+    for (int c = 0; c < ncol_orig; ++c) {
+      const int dc = dest[c];
+      if (dc < 0) continue;
+      out.A(dr, dc) += build.A(r, c);
+    }
+  }
+
+  // The prior: SAME normal-equations convention the raw_imu arm's own
+  // Pi_ss/s_vec seeding uses (lio_coupled.cpp:1903/1910) -- added ON TOP
+  // of the reduced LiDAR/IMU/curvature/Tikhonov contributions already
+  // summed into this block above (addition order doesn't matter for a
+  // sum, so this is exactly equivalent to seeding first, as the raw_imu
+  // arm's own code does).
+  out.A.block<6, 6>(6 * n_free, 6 * n_free) += pi_ss;
+  out.b.segment<6>(6 * n_free) -= pi_ss * s_vec;
+
+  return out;
 }
 
 }  // namespace livo_recon

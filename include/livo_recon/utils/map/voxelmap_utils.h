@@ -618,6 +618,19 @@ struct LioFrameDiag
   // standing 39-vs-20 samples-per-scan discrepancy directly rather than
   // leaving it uncounted.
   int n_imu_samples = -1;
+  // CQ-87 item 8: ScanSpline::fit() silently clamps n_cp below the
+  // requested count when a scan has too few pose samples in its window --
+  // documented behaviour, but nothing downstream reported it, so a
+  // pose-arm filing saying "n_c=4" could actually mean something else
+  // (CQ-86 item 0's own n_c=4->actual=7 was caught only by accident).
+  // Logged on BOTH arms: raw_imu's own n_c never clamps (n_c_actual==
+  // n_c_requested, n_c_clamped=0 always -- that arm has no per-scan
+  // ScanSpline::fit() call the way the pose/decoupled-spline paths do),
+  // reported anyway so every filing can read this column without first
+  // checking which arm produced it.
+  int n_c_requested = -1;
+  int n_c_actual = -1;
+  int n_c_clamped = -1;  // 0/1, -1 = not applicable/not populated
 
   // CQ-18 item (2).  S = floor_term + sigma_diag_squared + plane_var_term +
   // s_prior_pose, summed across this frame's residuals_; the four *_share

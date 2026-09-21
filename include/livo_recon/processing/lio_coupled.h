@@ -44,20 +44,35 @@ struct LioProcCoupledOptions
   double pose_imu_weight_gyr = 1.0;
   double pose_curvature_weight_pos = 0.0;
   double pose_curvature_weight_rot = 0.0;
-  // CQ-86 item 1: the WEAKER anchor the card's own fallback authorizes --
+  // CQ-86 item 1: the WEAKER anchor the card's own fallback authorized --
   // "IF COUPLING s TO c IS MORE THAN THIS ROUND CAN CARRY... instead FREEZE
   // the head control points to the raw-chain values". Freezes the first
   // `pose_head_freeze_cp` control points' correction (both c_p and c_phi
   // blocks) to EXACTLY ZERO by eliminating those columns from the linear
   // solve entirely (not a soft/large-weight prior) -- the spline's HEAD
   // stays at wherever this scan's ScanSpline::fit() (the IMU-propagated
-  // raw chain) put it, for as many control points as this covers; not a
-  // true p(t0)=p_start+delta_p0 s-coupling (that remains unimplemented --
-  // see estimateCoupledCorrectionPoseBasis()'s own doc comment). Default 0
-  // (off, md5-inert to every existing call site) -- a numerics DEFAULT is
-  // Bryce's call (rule 26); this round only PROPOSES turning it on. Config
-  // key: estimator/coupled/pose_head_freeze_cp.
+  // raw chain) put it, for as many control points as this covers.
+  // MEASURED NEGATIVE (CQ-86 item 3): freezing made stability WORSE than no
+  // anchor at all (last_scan 62 vs 69) -- a hard elimination removes solve
+  // freedom and adds no information. STAYS as a separate, named, opt-in
+  // arm (default 0/off, md5-inert) -- CQ-87 item 1 did NOT delete it, per
+  // Bryce's own instruction, since it is a measured result this register
+  // cites. THE REAL head-tie (p(t0)=p_start+delta_p0 via the clamped-
+  // B-spline identity, WITH a genuine Omega prior on delta_phi0/delta_pos0)
+  // is now the DEFAULT pose-arm behavior whenever this is 0 -- see
+  // reducePoseSplineHeadCoupling() and estimateCoupledCorrectionPoseBasis().
+  // When this is > 0, that real coupling is SKIPPED and the older
+  // hard-elimination arm runs instead, reproducing CQ-86's own measured
+  // cells exactly. Config key: estimator/coupled/pose_head_freeze_cp.
   int pose_head_freeze_cp = 0;
+
+  // CQ-87 item 5, Bryce asked for this directly: POSE_SPLINE_TIKHONOV_EPS
+  // (pose_spline_system.h) is no longer a compile-time-only constant --
+  // this is the live value threaded through buildPoseSplineCBlock() as an
+  // explicit parameter. Default 1e-6 is EXACTLY that constant's own value,
+  // so this key is md5-inert at its default. Config key:
+  // estimator/coupled/pose_tikhonov_eps.
+  double pose_tikhonov_eps = 1e-6;
 
   // CQ-85 item 1: rule 58f's exact failure mode -- CQ-72's own 96-cell grid
   // produced a cell reporting completed=yes with ATE=396,499,288.300 mm (a
@@ -546,6 +561,15 @@ private:
   ScanSpline coupled_pose_spline_;
   bool coupled_pose_spline_valid_ = false;
   std::vector<V3D> coupled_c_pos_, coupled_c_rot_;
+  // CQ-87 item 3: the pose arm's own posterior for [delta_phi0;delta_pos0]
+  // (SAME layout as raw_imu's s_vec.segment<3>(0)/segment<3>(3)) -- the
+  // marginal covariance of reducePoseSplineHeadCoupling()'s own reduced
+  // system, recomputed every GN iteration (so the LAST one, used for the
+  // post-loop state_->covMut() write, reflects the CONVERGED solve --
+  // this is what makes final_relinearize_cov genuinely true on this arm,
+  // see item 4). Valid only when poseBasis() && pose_head_freeze_cp==0
+  // (the real-coupling path); untouched, unread otherwise.
+  Eigen::Matrix<double, 6, 6> coupled_pose_head_cov_ = Eigen::Matrix<double, 6, 6>::Zero();
   // CQ-79: this scan's PREVIOUS iteration's own set of matched-plane
   // hashes, for carry_frac -- reset to empty at scan start (alongside
   // coupled_iters_'s own reset), updated after every iteration's own

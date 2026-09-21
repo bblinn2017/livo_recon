@@ -95,6 +95,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_curvature_weight_pos", copts_.pose_curvature_weight_pos, 0.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_curvature_weight_rot", copts_.pose_curvature_weight_rot, 0.0);
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/pose_head_freeze_cp", copts_.pose_head_freeze_cp, 0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_tikhonov_eps", copts_.pose_tikhonov_eps, 1e-6);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/max_scan_displacement_m", copts_.max_scan_displacement_m, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
@@ -262,10 +263,26 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
           "linear in c_p directly and carries no H-vs-Phi time mismatch to "
           "describe; set end_time or point_time explicitly to acknowledge "
           "this key is otherwise a no-op under the pose basis.");
-    // Item 4's final clause: force final_relinearize_cov on for the pose
-    // basis regardless of what was configured -- unlike the raw_imu case
-    // (where it's optional, gated on final_redeskew), the pose basis's own
-    // covariance is only meaningful evaluated at the basis actually solved.
+    // Force final_relinearize_cov on for the pose basis regardless of what
+    // was configured -- unlike the raw_imu case (where it's optional,
+    // gated on final_redeskew), the pose basis's own covariance is only
+    // meaningful evaluated at the basis actually solved. CQ-87 item 4,
+    // CORRECTING A RULE-58f VIOLATION THIS COMMENT USED TO DESCRIBE
+    // WITHOUT NOTICING IT: this flag used to be forced true here and then
+    // NEVER READ on this arm at all -- the block that honours it
+    // (final_relinearize/relin_pending_, ~line 1141) lives past the
+    // poseBasis() early return this file's own processLIO() takes, so
+    // [config/effective] printed final_relinearize_cov=true for every pose
+    // run while the actual behaviour was false. FIXED (honoured, not
+    // refused, per the card's own preference): the pose arm's posterior
+    // write (estimateCoupledCorrectionPoseBasis()'s own
+    // coupled_pose_head_cov_, applied at the poseBasis() early-return site
+    // in processLIO()) is recomputed from the FULLY CONVERGED last GN
+    // iteration's own reduced system every time -- this genuinely IS
+    // "relinearized at the converged solution," the same guarantee this
+    // flag names, just satisfied by construction rather than by a second
+    // explicit pass the way the raw_imu arm's own relin_pending_ block
+    // needs one.
     copts_.final_relinearize_cov = true;
 
     // CQ-82 Phase 2: the pose basis's own residual construction now HAS a
@@ -542,13 +559,105 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   if (copts_.poseBasis()) {
     boundary_dpos_ = 0.0;
     boundary_drot_deg_ = 0.0;
+    // CQ-87 item 3: the posterior covariance write this arm never had.
+    // coupled_pose_head_cov_ was recomputed every GN iteration inside
+    // estimateCoupledCorrectionPoseBasis() (real head coupling path only
+    // -- pose_head_freeze_cp>0 leaves it at its last-set value, which for
+    // a fresh process is Zero(); see the write guard below), so by the
+    // time we reach here it reflects the LAST (converged) iteration's own
+    // reduced system -- exactly what "relinearize at the converged
+    // solution" (item 4) means, with no separate relinearization pass
+    // needed: every GN iteration already rebuilds the reduced system
+    // fresh from the current trial spline. This is what makes
+    // copts_.final_relinearize_cov=true (set at loadParameters(), CQ-82's
+    // own poseBasis() config block) GENUINELY true on this arm now,
+    // rather than the rule-58f violation CQ-87 item 4 found (forced true,
+    // then never honoured because the block that reads it lives past this
+    // early return). HONOURED, not refused -- item 4's preferred option,
+    // since it falls out of item 3 exactly as the card predicted.
+    //
+    // Scope: only [idxR,idxP] (rotation, position) are written -- velocity/
+    // bias/gravity are NOT touched by this arm's own solve at all (CQ-87's
+    // explicit not-in-scope list), so their rows/columns of state_->cov()
+    // (and their cross-correlation with rot/pos) are left exactly as IMU
+    // propagation alone produced. Only fires on the real-coupling path
+    // (pose_head_freeze_cp==0); the frozen-elimination arm has no
+    // posterior of its own to report (it never touches state_->cov() at
+    // all) and correctly leaves the propagated-only covariance in place,
+    // same as before this item.
+    if (copts_.pose_head_freeze_cp == 0) {
+      Eigen::MatrixXd P_full = state_->cov();
+      const int iR = StateGroup::idxR(), iP = StateGroup::idxP();
+      if (P_full.rows() >= iP + 3 && P_full.cols() >= iP + 3) {
+        P_full.block<3, 3>(iR, iR) = coupled_pose_head_cov_.block<3, 3>(0, 0);
+        P_full.block<3, 3>(iR, iP) = coupled_pose_head_cov_.block<3, 3>(0, 3);
+        P_full.block<3, 3>(iP, iR) = coupled_pose_head_cov_.block<3, 3>(3, 0);
+        P_full.block<3, 3>(iP, iP) = coupled_pose_head_cov_.block<3, 3>(3, 3);
+        state_->covMut() = P_full;
+      }
+    }
+
+    // CQ-87 item 8 (and the rule-60 contract item 3 exists to make
+    // satisfiable): this arm NEVER called noteLioFrameDiag() at all before
+    // this -- the only call site in this file (further below, now
+    // labelled "the ONLY raw_imu noteLioFrameDiag() call site") sits past
+    // this early return, so a pose-basis run wrote ZERO rows to
+    // frame_stats.txt, full stop. coupled_diag already carries the P_pre
+    // fields (populated earlier in this function, before either arm
+    // branches -- see its own declaration comment). Add what this arm
+    // actually has: n_residuals, n_c_requested/actual/clamped, and --
+    // NEW, because item 3 just made it real -- the POST covariance this
+    // arm's own solve just wrote (or, on the frozen-elimination arm,
+    // whatever state_->cov() already held, unchanged by this arm).
+    // Everything else (HtH family, ask/got/refusal, S-decomposition,
+    // kappa/redund/*) stays at its struct-default sentinel -- this arm's
+    // solve has no analogue for any of them, named rather than guessed.
+    coupled_diag.n_residuals = static_cast<int>(residuals_.size());
+    // NOTE, discovered live via this smoke test, worth recording rather
+    // than silently accepting: nControlPointsRequested()'s own n_cp_req_
+    // is captured AFTER ScanSpline::fit()'s hard floor of 7 (spline.cpp:
+    // "n_cp = std::max(7, n_cp)" -- both ends are clamped, six control
+    // points are spent on the two clamps, so below 7 there is no free
+    // interior at all), so this column does NOT reflect
+    // estimator/coupled/n_c's own configured value when n_c<7 -- e.g. a
+    // config requesting n_c=4 already reports n_c_requested=7 here, not
+    // 4, because the floor already applied before this accessor's own
+    // "requested" snapshot was taken. copts_.n_c (the true config value)
+    // is available separately in every filing's own effective-config
+    // report if that distinction matters.
+    coupled_diag.n_c_requested = coupled_pose_spline_.nControlPointsRequested();
+    coupled_diag.n_c_actual    = coupled_pose_spline_.nControlPoints();
+    coupled_diag.n_c_clamped   = coupled_pose_spline_.nControlPointsClamped() ? 1 : 0;
+    coupled_diag.n_imu_samples = mg.n_imu_samples;
+    {
+      const Eigen::MatrixXd& P_post = state_->cov();
+      const int iR = StateGroup::idxR(), iP = StateGroup::idxP();
+      if (P_post.rows() >= iP + 3 && P_post.cols() >= iP + 3) {
+        const M3D P_pp_post = P_post.block<3, 3>(iP, iP);
+        Eigen::SelfAdjointEigenSolver<M3D> es_p_post(P_pp_post);
+        coupled_diag.p_pos_eig_min_post = es_p_post.eigenvalues()(0);
+        coupled_diag.p_pos_eig_mid_post = es_p_post.eigenvalues()(1);
+        coupled_diag.p_pos_eig_max_post = es_p_post.eigenvalues()(2);
+        coupled_diag.trP_pos_post = P_pp_post.trace();
+        const M3D P_rr_post = P_post.block<3, 3>(iR, iR);
+        Eigen::SelfAdjointEigenSolver<M3D> es_r_post(P_rr_post);
+        coupled_diag.p_rot_trace_post   = P_rr_post.trace();
+        coupled_diag.p_rot_eig_min_post = es_r_post.eigenvalues()(0);
+        coupled_diag.p_rot_eig_mid_post = es_r_post.eigenvalues()(1);
+        coupled_diag.p_rot_eig_max_post = es_r_post.eigenvalues()(2);
+      }
+    }
+    if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) vm->noteLioFrameDiag(coupled_diag);
+
     std::ostringstream oss;
     oss << "[lio/ekf][pose-basis] iters=" << iter + 1 << "  stop=" << stop
         << std::scientific << std::setprecision(1)
         << "  |dtheta|=" << total_dtheta.norm() * (180.0 / M_PI) << " deg"
         << "  |dt|=" << total_dt.norm() * 1000.0 << " mm"
-        << "  (post-loop bg-projection/relinearization/most diagnostics "
-        << "SKIPPED -- raw_imu-specific, not yet ported to this basis)";
+        << "  head_tie=" << (copts_.pose_head_freeze_cp == 0 ? "real" : "frozen")
+        << "  (post-loop bg-projection/final_redeskew/most CQ-53-era "
+        << "diagnostics SKIPPED -- raw_imu-specific, not yet ported to "
+        << "this basis, per CQ-87's own not-in-scope list)";
     return oss.str();
   }
 
@@ -1158,8 +1267,10 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       // scan's posterior, matching decoupled's own POST read timing
       // (after applyCovarianceUpdate() there, after this covMut() write
       // here). Then submit -- this is the ONLY noteLioFrameDiag() call
-      // site for coupled; frame_stats.txt's P-related columns are
-      // populated for coupled for the first time as of this card.
+      // site for the RAW_IMU arm (CQ-87 item 8 added a second, pose-arm-
+      // only site at the poseBasis() early-return above, since that arm
+      // never reached this one at all); frame_stats.txt's P-related
+      // columns are populated for coupled for the first time as of CQ-74.
       {
         const Eigen::MatrixXd& P_post_diag = state_->cov();
         if (P_post_diag.rows() >= StateGroup::idxP() + 3 && P_post_diag.cols() >= StateGroup::idxP() + 3) {
@@ -1213,6 +1324,17 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         coupled_diag.kappa_gev4 = coupled_kappa_gev_[4]; coupled_diag.kappa_gev5 = coupled_kappa_gev_[5];
         coupled_diag.kappa_gev_ok  = coupled_kappa_gev_ok_;
         coupled_diag.n_imu_samples = mg.n_imu_samples;
+        // CQ-87 item 8: raw_imu's own n_c never clamps (no per-scan
+        // ScanSpline::fit() call on this arm at all) -- reported as
+        // requested==actual, clamped=0, so this column reads consistently
+        // regardless of which arm produced the row. The pose arm's own
+        // real clamp status is populated separately, in
+        // estimateCoupledCorrectionPoseBasis()'s own scan-start reset
+        // (this diag-population site is raw_imu-only; the pose arm's
+        // early return in processLIO() never reaches it).
+        coupled_diag.n_c_requested = copts_.n_c;
+        coupled_diag.n_c_actual    = copts_.n_c;
+        coupled_diag.n_c_clamped   = 0;
         // CQ-83: NO COUPLED ANALOGUE, left at their struct-default
         // sentinel -- confirmed by direct search, none of
         // residual_redundancy/ResidualRedundancyStats/collapse-axis/
@@ -2961,7 +3083,8 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
       state_->biasAcc(), state_->biasGyr(), state_->gravity(),
       copts_.pose_imu_weight_acc, copts_.pose_imu_weight_gyr,
       copts_.pose_curvature_weight_pos, copts_.pose_curvature_weight_rot,
-      pose_time_mode, t1, /*audit=*/copts_.psd_audit_en);
+      pose_time_mode, t1, /*audit=*/copts_.psd_audit_en,
+      copts_.pose_tikhonov_eps);
 
   if (copts_.psd_audit_en) {
     // CQ-86 item 0: rank_cblock = numerical rank of build.A_lidar_only (the
@@ -2999,8 +3122,71 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
   const int n_frozen = std::max(0, std::min(copts_.pose_head_freeze_cp, n_c));
   Eigen::VectorXd delta_c = Eigen::VectorXd::Zero(6 * n_c);
   if (n_frozen == 0) {
-    Eigen::LDLT<Eigen::MatrixXd> ldlt(build.A);
-    delta_c = ldlt.solve(build.b);
+    // CQ-87 items 1/2/3: the REAL head coupling, now the default path
+    // whenever pose_head_freeze_cp==0. Omega/Pi_ss in the SAME convention
+    // the raw_imu arm's own s-block prior uses (lio_coupled.cpp:2256-2281,
+    // ~line 2273's Omega = P_for_omega.inverse()) -- restricted to the
+    // [rot,pos] 6x6 sub-block since this arm's own s-block is only
+    // [delta_phi0;delta_pos0], not the full 18-dim raw_imu state (velocity/
+    // bias/gravity remain owned by IMU propagation alone on this arm, per
+    // CQ-87's own explicit not-in-scope list).
+    Eigen::Matrix<double, 6, 6> pi_ss_pose = Eigen::Matrix<double, 6, 6>::Zero();
+    const Eigen::MatrixXd& P_for_omega = state_->cov();
+    const int iR = StateGroup::idxR(), iP = StateGroup::idxP();
+    if (P_for_omega.rows() >= iP + 3 && P_for_omega.cols() >= iP + 3) {
+      Eigen::MatrixXd Omega6(6, 6);
+      Omega6.block<3, 3>(0, 0) = P_for_omega.block<3, 3>(iR, iR);
+      Omega6.block<3, 3>(0, 3) = P_for_omega.block<3, 3>(iR, iP);
+      Omega6.block<3, 3>(3, 0) = P_for_omega.block<3, 3>(iP, iR);
+      Omega6.block<3, 3>(3, 3) = P_for_omega.block<3, 3>(iP, iP);
+      pi_ss_pose = Omega6.inverse();
+    }
+    Eigen::Matrix<double, 6, 1> s_vec_pose;
+    s_vec_pose.segment<3>(0) = coupled_delta_phi0_;
+    s_vec_pose.segment<3>(3) = coupled_delta_pos0_;
+
+    const PoseSplineReducedSystem reduced =
+        reducePoseSplineHeadCoupling(build, n_c, pi_ss_pose, s_vec_pose);
+    Eigen::LDLT<Eigen::MatrixXd> ldlt_red(reduced.A);
+    const Eigen::VectorXd delta_red = ldlt_red.solve(reduced.b);
+    if (delta_red.size() != reduced.A.rows()) {
+      std::ostringstream diag;
+      diag << "[coupled/pose] DIAG reduced solve size mismatch: delta_red.size()="
+           << delta_red.size() << " reduced.A.rows()=" << reduced.A.rows()
+           << " n_c=" << n_c << " scan_id=" << voxel_map_->frame_idx_;
+      throw std::runtime_error(diag.str());
+    }
+    // Unpack: free control points (kTie..n_c-1) map back directly; the
+    // shared [delta_phi0;delta_pos0] tail applies IDENTICALLY to every
+    // tied head control point (0..kTie-1) -- delta_c for those rows is
+    // set, not accumulated, since coupled_c_pos_[j]/coupled_c_rot_[j] for
+    // j<kTie are defined to always equal coupled_delta_pos0_/
+    // coupled_delta_phi0_ exactly (the clamped-identity construction),
+    // never an independent per-iteration increment layered on top.
+    const int n_free = reduced.n_free;
+    for (int j = POSE_SPLINE_HEAD_TIE_CP; j < n_c; ++j) {
+      delta_c.segment<3>(3 * j)           = delta_red.segment<3>(3 * (j - POSE_SPLINE_HEAD_TIE_CP));
+      delta_c.segment<3>(3 * n_c + 3 * j) = delta_red.segment<3>(3 * n_free + 3 * (j - POSE_SPLINE_HEAD_TIE_CP));
+    }
+    coupled_delta_phi0_ += delta_red.segment<3>(6 * n_free);
+    coupled_delta_pos0_ += delta_red.segment<3>(6 * n_free + 3);
+    for (int j = 0; j < std::min(POSE_SPLINE_HEAD_TIE_CP, n_c); ++j) {
+      // SET (not +=): coupled_c_pos_[j]/coupled_c_rot_[j] carry the ALREADY-
+      // accumulated coupled_delta_pos0_/coupled_delta_phi0_ directly below,
+      // so this delta_c contribution is (new total - old total), applied
+      // via the same "coupled_c_pos_[j] += delta_c.segment<3>(3*j)" loop
+      // every other column already goes through further down.
+      delta_c.segment<3>(3 * j)           = coupled_delta_pos0_ - coupled_c_pos_[j];
+      delta_c.segment<3>(3 * n_c + 3 * j) = coupled_delta_phi0_ - coupled_c_rot_[j];
+    }
+
+    const Eigen::MatrixXd M_head = [&] {
+      Eigen::MatrixXd M = Eigen::MatrixXd::Zero(6, reduced.A.rows());
+      M.block<3, 3>(0, 6 * n_free)     = M3D::Identity();  // delta_phi0
+      M.block<3, 3>(3, 6 * n_free + 3) = M3D::Identity();  // delta_pos0
+      return M;
+    }();
+    coupled_pose_head_cov_ = solveCovarianceFromA(reduced.A, &M_head);
   } else {
     // Build the full free-column index list: c_p free columns, then c_phi
     // free columns, each expanded to its 3 scalar components.

@@ -1667,6 +1667,14 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
       diag.n_points_after_pfn = static_cast<int>(mg.lidar_points.size());
       diag.n_points_after_ds  = static_cast<int>(mg.points.size());
       diag.n_imu_samples      = mg.n_imu_samples;
+      // CQ-87 item 8: only meaningful when the spline is actually in use
+      // this scan (spline.mode != raw_imu) -- left at their -1 defaults
+      // otherwise, matching this struct's own "not applicable" convention.
+      if (dopts_.spline.splineOn() && spline_ok_) {
+        diag.n_c_requested = spline_.nControlPointsRequested();
+        diag.n_c_actual    = spline_.nControlPoints();
+        diag.n_c_clamped   = spline_.nControlPointsClamped() ? 1 : 0;
+      }
 
       // CQ-19(a): P's own decomposition (prior_cov_, pre-update -- state_->
       // cov()'s POST-update counterpart is read further below, once the

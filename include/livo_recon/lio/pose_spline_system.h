@@ -98,10 +98,20 @@ struct PoseSplineCBlockBuild
   Eigen::MatrixXd A_lidar_only;
   // Single-pass spread (Var = E[||X||^2] - ||E[X]||^2, Frobenius) of the
   // per-residual LiDAR Jacobian row Jrow (1 x ncol_c) across all lidar_obs --
-  // the pose-arm analogue of CQ-66 item 3's phic_spread. In "end_time" mode
-  // every residual's Jrow is identical by construction (Jrow depends on t
-  // only through the SAME fixed t1), so this is mathematically guaranteed
-  // to be exactly 0, matching raw_imu's own end_time guarantee.
+  // the pose-arm analogue of CQ-66 item 3's phic_spread. CQ-87 item 7,
+  // CORRECTING A CLAIM THIS COMMENT USED TO MAKE: "end_time" does NOT
+  // guarantee this is exactly 0 the way raw_imu's own end_time phic_spread
+  // is. CQ-86 item 0 MEASURED IT: 0.589624 at n_c=7 and 0.589624 at n_c=13
+  // (sections/round-81) -- eight orders of magnitude from raw_imu's own
+  // ~6.04e-9 (CQ-65). The reason: under end_time, only b_j/Jr/rotAt are
+  // pinned to the fixed t1 -- obs.normal and obs.raw_body_point still vary
+  // per residual, so Jrow = b_j(t1) * n_i^T still varies per point. This is
+  // DIFFERENT from raw_imu's own Phic_pt, which carries no per-residual
+  // normal at all, so ITS end_time guarantee is real and this arm's is not.
+  // CONSEQUENCE: the two arms' phic_spread values are NOT the same
+  // quantity -- CQ-86's own rank_cblock comparison against CQ-66 still
+  // stands (both measure the SAME thing, the c-block's own information
+  // rank), but a phic_spread comparison between the two arms does not.
   double phic_spread = 0.0;
 };
 
@@ -132,6 +142,11 @@ enum class PoseSplineTimeMode { kPointTime, kEndTime };
 // `audit`, if true, additionally populates A_lidar_only/phic_spread above
 // (two extra passes' worth of bookkeeping, opt-in for the same reason
 // psd_audit_en gates the raw_imu arm's own equivalent).
+// `tikhonov_eps` -- CQ-87 item 5: now an explicit parameter, THREADED
+// THROUGH rather than read from config inside this function (this file
+// stays standalone/config-free, per its own header doc comment and item
+// 6's correctness gate's own dependence on that). Default
+// POSE_SPLINE_TIKHONOV_EPS reproduces every prior call site exactly.
 PoseSplineCBlockBuild buildPoseSplineCBlock(
     const ScanSpline& spline,
     const std::vector<PoseSplineLidarObs>& lidar_obs,
@@ -140,11 +155,80 @@ PoseSplineCBlockBuild buildPoseSplineCBlock(
     double pose_imu_weight_acc, double pose_imu_weight_gyr,
     double pose_curvature_weight_pos, double pose_curvature_weight_rot,
     PoseSplineTimeMode time_mode = PoseSplineTimeMode::kPointTime,
-    double end_time_t1 = 0.0, bool audit = false);
+    double end_time_t1 = 0.0, bool audit = false,
+    double tikhonov_eps = 1e-6);
 
-// The fixed regularizer floor -- see buildPoseSplineCBlock()'s own doc
-// comment. Small enough to be negligible whenever any real term is active,
-// large enough to keep A invertible when every weight is 0 (item 6's gate).
+// The fixed regularizer floor's DEFAULT value -- see
+// buildPoseSplineCBlock()'s own doc comment. Small enough to be
+// negligible whenever any real term is active, large enough to keep A
+// invertible when every weight is 0 (item 6's gate). CQ-87 item 5: this
+// remains the single source of truth for estimator/coupled/
+// pose_tikhonov_eps's own shipped default (lio_coupled.cpp's
+// loadParameters()) -- the config key is now what callers actually pass,
+// this constant is only what it defaults to.
 inline constexpr double POSE_SPLINE_TIKHONOV_EPS = 1e-6;
+
+// ============================================================================
+// CQ-87 items 1/2/3: real coupling between the pose c-block and the
+// filter's own state -- "under spline_mode=pose there is no state prior
+// in the solve, no posterior covariance write, and the head is still
+// untied, so coupled mode is not coupled, it is a per-scan spline fit
+// with no memory." This function is the fix for all three, in one place,
+// because they are one mechanism: tying the head IS how the prior enters
+// the solve, and the reduced system's own marginal covariance IS the
+// posterior.
+//
+// MECHANISM CHOSEN, AND WHY (item 1's own "say which forms you
+// considered" requirement): item 1 asks for this "via
+// setFrozenBoundary()" -- that function constrains ScanSpline::fit()'s
+// own one-time KKT solve at scan START, not the per-GN-iteration
+// correction loop buildPoseSplineCBlock() rebuilds every iteration; it
+// cannot be called here without re-deriving a KKT solve for a system
+// that already exists in normal-equations form. Instead this function
+// applies the SAME underlying identity setFrozenBoundary()/
+// SplineOptions::N_FROZEN_CP already exploits: a clamped cubic B-spline's
+// basis weights at u=0 are [1/6, 4/6, 1/6, 0] and sum to 1, so tying the
+// first POSE_SPLINE_HEAD_TIE_CP (=3, matching N_FROZEN_CP) control
+// points' CORRECTIONS together (cp0=cp1=cp2=X) forces the CORRECTION to
+// p(t0) to be exactly X, bit-exact, regardless of every other control
+// point -- i.e. p(t0) = p_start + X. This is a linear reduction (T^T A T)
+// on the existing normal equations, not a second solve: cheaper, and it
+// keeps buildPoseSplineCBlock() itself untouched and still directly
+// testable by item 6's own gate.
+//
+// The reduced 6-dim block [delta_phi0; delta_pos0] this produces is
+// EXACTLY the raw_imu arm's own s-block head variables
+// (lio_coupled.cpp's coupled_delta_phi0_/coupled_delta_pos0_,
+// s_vec.segment<3>(0)/segment<3>(3)) -- reused, not duplicated, so a
+// caller seeds `pi_ss`/`s_vec` from the SAME Omega=state_->cov().inverse()
+// the raw_imu arm already computes, in the SAME [rot;pos] order, and gets
+// the SAME normal-equations prior convention (A_block = pi_ss,
+// b_block -= pi_ss * s_vec -- see lio_coupled.cpp:1903/1910) applied to
+// the pose arm's head. pi_ss=Zero()/s_vec=Zero() reduces the system
+// without adding a prior (the head is tied but with no statistical pull),
+// which is NOT the default path (item 2 wants a real prior) but is kept
+// reachable for testing the reduction in isolation from state_->cov().
+//
+// n_c must be >= POSE_SPLINE_HEAD_TIE_CP + 1 for a nonempty free block;
+// callers must guard n_c (this project's own minimum n_c is 4, so this
+// is never violated in practice, but is not re-checked here -- a caller
+// passing a smaller n_c gets an empty-but-well-defined reduced system).
+struct PoseSplineReducedSystem
+{
+  Eigen::MatrixXd A;   // 6*n_free + 6 square, n_free = n_c - POSE_SPLINE_HEAD_TIE_CP
+  Eigen::VectorXd b;
+  int n_free = 0;
+  // Column layout, for unpacking a solved delta: [0, 3*n_free) = free
+  // c_p (control points POSE_SPLINE_HEAD_TIE_CP..n_c-1, in order);
+  // [3*n_free, 6*n_free) = free c_phi, same order; [6*n_free, 6*n_free+3)
+  // = delta_phi0; [6*n_free+3, 6*n_free+6) = delta_pos0.
+};
+
+inline constexpr int POSE_SPLINE_HEAD_TIE_CP = 3;
+
+PoseSplineReducedSystem reducePoseSplineHeadCoupling(
+    const PoseSplineCBlockBuild& build, int n_c,
+    const Eigen::Matrix<double, 6, 6>& pi_ss,
+    const Eigen::Matrix<double, 6, 1>& s_vec);
 
 }  // namespace livo_recon

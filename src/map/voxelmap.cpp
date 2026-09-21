@@ -113,7 +113,11 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            // CQ-85 item 2: mg.n_imu_samples, straight through -- settles
            // the standing 39-vs-20 samples-per-scan discrepancy. Appended,
            // not interleaved, per this file's own convention.
-           ",n_imu_samples\n";
+           ",n_imu_samples"
+           // CQ-87 item 8: ScanSpline::fit()'s silent clamp, reported on
+           // both arms. Appended, not interleaved, per this file's own
+           // convention.
+           ",n_c_requested,n_c_actual,n_c_clamped\n";
   first_call = false;
   // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
   // (6 significant figures) collapses every frame in a run to the same
@@ -164,6 +168,7 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.p_rot_eig_min_post << "," << lio.p_rot_eig_mid_post << "," << lio.p_rot_eig_max_post
       << "," << lio.h_pp_max_eig
       << "," << lio.n_imu_samples
+      << "," << lio.n_c_requested << "," << lio.n_c_actual << "," << lio.n_c_clamped
       << "\n";
   ofs.flush();
 }
