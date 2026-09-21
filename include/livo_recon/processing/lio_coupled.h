@@ -357,9 +357,62 @@ public:
   // trajectory, rebuilds residuals (buildResiduals() -- the SAME shared
   // method the decoupled path uses), solves the joint normal equations, and
   // applies the step. Does NOT touch estimateStateCorrection() at all.
+  //
+  // CQ-82 Phase 1: this is now a DISPATCHER. Everything before the
+  // coefficient-block prior/residual-loop (propagate, re-deskew+downsample,
+  // buildResiduals, the state-prior Pi_ss) is basis-independent and stays
+  // here; the coefficient-block prior + the normal-equations residual loop
+  // (previously inline) moved verbatim into buildImuCorrectionSystem() --
+  // "moved", not rewritten: every accumulator/diagnostic it used to fill is
+  // still filled, just via the returned CoupledSystemBuild rather than a
+  // bare local. Everything from the LDLT solve onward (rank diagnostics,
+  // the solve itself, the delta application, bg-projection, re-propagation)
+  // is unchanged and still lives here, since none of it depends on which
+  // basis built A/b -- only their CONTENTS do.
   double estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out);
 
 private:
+  // CQ-82 Phase 1: everything buildImuCorrectionSystem() (and, in Phase 2,
+  // its pose-basis sibling) hands back to the dispatcher besides A/b itself
+  // -- every sum/accumulator the residual loop used to leave in a bare local
+  // for the bookkeeping below it to read. A struct, not a longer parameter
+  // list of out-params, so the builder's own signature stays "the inputs it
+  // needs" and nothing about its RETURN shape leaks into the call site
+  // beyond one name. Deliberately NOT M -- solveCovarianceFromA()/the
+  // covMut write are not called from inside estimateCoupledCorrection() at
+  // all (they live in processLIO(), reading coupled_last_A_ after the GN
+  // loop converges), so there is no "M" to thread through here; the card's
+  // own dispatcher skeleton names it as an aspiration this function does not
+  // actually need to satisfy.
+  struct CoupledSystemBuild
+  {
+    Eigen::MatrixXd A;
+    Eigen::VectorXd b;
+    double sum_abs_r = 0.0, sum_sq_r = 0.0, sum_wr2 = 0.0, sum_sigma_squared = 0.0;
+    double sum_floor_S = 0.0, sum_sdiag_S = 0.0, sum_pvar_S = 0.0, sum_prior_pose_S = 0.0;
+    double sum_weight_this_iter = 0.0;
+    std::vector<double> hcol_reldiff;
+    Eigen::Matrix<double, 6, 6> HtH_pose_lidar = Eigen::Matrix<double, 6, 6>::Zero();
+    Eigen::Matrix<double, 6, 1> Htz_pose_lidar = Eigen::Matrix<double, 6, 1>::Zero();
+    Eigen::Matrix<double, 6, 6> H6_raw_accum = Eigen::Matrix<double, 6, 6>::Zero();
+    Eigen::MatrixXd phic_spread_sum;
+    double phic_spread_sumsq = 0.0;
+    int phic_spread_n = 0;
+  };
+
+  // CQ-82 Phase 1: the shipped arm ("raw_imu"/"imu_correction"), MOVED
+  // verbatim from estimateCoupledCorrection() -- the coefficient-block prior
+  // (gram/Curv/Lambda, item 3b/4/CQ-55/CQ-59/CQ-69) and the normal-equations
+  // residual loop (H/Phix_pt/Phic_pt/Jrow, item 3c, CQ-50/CQ-53/CQ-61/CQ-66),
+  // including the bias_anchor block and coupled_last_A_/coupled_last_Lambda_
+  // writes. No new math anywhere in this function; only the split itself is
+  // new. Pi_ss/s_vec (the state-block prior) are built by the caller and
+  // passed in, since they do not depend on the coefficient-block basis.
+  CoupledSystemBuild buildImuCorrectionSystem(
+      MeasureGroup& mg, double t0, double t1, int n_c, int ncol, int ncol_s, int ncol_c,
+      double sigma_a, double sigma_g, double sigma_a_floor, double sigma_g_floor,
+      const Eigen::MatrixXd& Pi_ss, const Eigen::VectorXd& s_vec);
+
   LioProcCoupledOptions copts_;
 
   // Persisted across this scan's own GN iterations (reset at the top of

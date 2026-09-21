@@ -1472,6 +1472,343 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   return oss.str();
 }
 
+LioProcCoupled::CoupledSystemBuild LioProcCoupled::buildImuCorrectionSystem(
+    MeasureGroup& mg, double t0, double t1, int n_c, int ncol, int ncol_s, int ncol_c,
+    double sigma_a, double sigma_g, double sigma_a_floor, double sigma_g_floor,
+    const Eigen::MatrixXd& Pi_ss, const Eigen::VectorXd& s_vec)
+{
+  CoupledSystemBuild build;
+  // CQ-82 Phase 1: gram/Curv/Lambda (the coefficient-block prior) and c_vec
+  // are UNCHANGED from estimateCoupledCorrection()'s own pre-split code --
+  // see this function's declaration-site comment for the "(4) the prior,
+  // TWO BLOCKS" context this half (the c-block) used to sit next to; the
+  // s-block half (Pi_ss) moved to the dispatcher, since it does not depend
+  // on which coefficient basis is active.
+  Eigen::MatrixXd gram = Eigen::MatrixXd::Zero(n_c, n_c);
+  for (const auto& pose : mg.poses) {
+    std::vector<double> bw(n_c);
+    for (int j = 0; j < n_c; ++j) bw[j] = basisWeight(j, n_c, t0, t1, pose.t);
+    for (int i = 0; i < n_c; ++i)
+      for (int j = 0; j < n_c; ++j) gram(i, j) += bw[i] * bw[j];
+  }
+  // CQ-55 item 6: gram is built from basis VALUES only -- nothing penalises
+  // the correction's SHAPE, which is why the prior's connectivity collapses
+  // to a chain at n_c=13 (adjacent-only support overlap) instead of the
+  // fully-dense n_c=4 case (item 9's gram[0][12]=0 vs gram[0][3]!=0
+  // finding). Curv = D^T D for the second-difference operator D (row k:
+  // +1,-2,+1 at columns k,k+1,k+2) adds an EXPLICIT connectivity term
+  // between every control point pair within 2 of each other, independent
+  // of whether their basis supports overlap -- default 0.0, so shipped
+  // behavior is unchanged and this is provably md5-inert at that default.
+  Eigen::MatrixXd Curv = Eigen::MatrixXd::Zero(n_c, n_c);
+  if ((copts_.curvature_weight_acc > 0.0 || copts_.curvature_weight_gyr > 0.0) && n_c >= 3) {
+    Eigen::MatrixXd D = Eigen::MatrixXd::Zero(n_c - 2, n_c);
+    for (int k = 0; k < n_c - 2; ++k) { D(k, k) = 1.0; D(k, k + 1) = -2.0; D(k, k + 2) = 1.0; }
+    Curv = D.transpose() * D;
+  }
+  // CQ-55 item 8, arm (c): curvature_only REPLACES the gram/sigma^2 value
+  // term with curvature_weight's shape penalty plus an explicit DC-only
+  // prior (dc_weight/sigma^2, applied UNIFORMLY to every (i,j) pair -- a
+  // rank-1 all-ones contribution whose quadratic form for c is exactly
+  // dc_weight/sigma^2 * n_c * ||mean(c)||^2, pricing the mean/constant
+  // direction only). A pure curvature penalty's 2D null space per axis
+  // (constant AND linear both map to zero under [1,-2,1]) would otherwise
+  // leave the bias-degenerate constant direction completely unpriced --
+  // this term is what keeps arm (c) a valid configuration at all. Default
+  // false: arm (a)/(b)'s existing value(+curvature) behavior is unchanged.
+  // CQ-59 item 4: the VALUE term's precision, per axis instead of the
+  // scalar 1/sigma^2 every other term here still uses. Measured on
+  // eee_01/eee_02 (calib_processing.cpp's own per-axis floor print):
+  // acc max/min ratio 9.8-17.4x, gyr max/min ratio 8.0-39.4x -- neither
+  // near 1, so per the card's own criterion this is worth a flag rather
+  // than being dropped. infl_a/infl_g carry adaptive_sigma's scalar
+  // inflation (sigma_a/sigma_a_floor)^2 through unchanged -- 1.0 when
+  // adaptive_sigma is off (the default), so at that default this reduces
+  // to the literal "diagonal from the per-axis floor" the card asks for;
+  // when adaptive_sigma is also on, the per-axis floor's RATIOS are kept
+  // but scaled to the same inflated overall magnitude, so the two flags
+  // compose rather than fight over which sigma is authoritative. Default
+  // false -- md5-inert (prec_acc_diag/prec_gyr_diag both collapse to the
+  // existing scalar terms below when off).
+  V3D prec_acc_diag = V3D::Constant(1.0 / (sigma_a * sigma_a));
+  V3D prec_gyr_diag = V3D::Constant(1.0 / (sigma_g * sigma_g));
+  if (copts_.prior_per_axis_sigma) {
+    const double infl_a = (sigma_a_floor > 1e-12) ? (sigma_a * sigma_a) / (sigma_a_floor * sigma_a_floor) : 1.0;
+    const double infl_g = (sigma_g_floor > 1e-12) ? (sigma_g * sigma_g) / (sigma_g_floor * sigma_g_floor) : 1.0;
+    const V3D floor_acc = state_->varAccFloor();
+    const V3D floor_gyr = state_->varGyrFloor();
+    for (int k = 0; k < 3; ++k) {
+      prec_acc_diag(k) = 1.0 / std::max(floor_acc(k) * infl_a, 1e-18);
+      prec_gyr_diag(k) = 1.0 / std::max(floor_gyr(k) * infl_g, 1e-18);
+    }
+  }
+
+  Eigen::MatrixXd Lambda = Eigen::MatrixXd::Zero(ncol_c, ncol_c);
+  for (int i = 0; i < n_c; ++i)
+    for (int j = 0; j < n_c; ++j) {
+      // CQ-59 item 1: curv_acc/curv_gyr each normalized by the SAME
+      // sigma^2 the value term for that block uses, so the weight means
+      // "this shape penalty is worth w times the value penalty" on that
+      // block specifically -- replaces the single raw curv_ij that used
+      // to apply identically to both blocks despite their ~4657x base-
+      // prior stiffness difference.
+      const double curv_acc = copts_.curvature_weight_acc * Curv(i, j) / (sigma_a * sigma_a);
+      const double curv_gyr = copts_.curvature_weight_gyr * Curv(i, j) / (sigma_g * sigma_g);
+      const double value_gram = copts_.curvature_only ? 0.0 : gram(i, j);
+      const double dc_acc = copts_.curvature_only ? copts_.dc_weight / (sigma_a * sigma_a) : 0.0;
+      const double dc_gyr = copts_.curvature_only ? copts_.dc_weight / (sigma_g * sigma_g) : 0.0;
+      Lambda.block<3, 3>(3 * i, 3 * j) =
+          M3D(value_gram * prec_acc_diag.asDiagonal()) + (curv_acc + dc_acc) * M3D::Identity();
+      Lambda.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) =
+          M3D(value_gram * prec_gyr_diag.asDiagonal()) + (curv_gyr + dc_gyr) * M3D::Identity();
+    }
+  // CQ-69: the low-band trajectory-deviation prior. Lambda_traj = sum_k
+  // phi_head[k]^T W phi_head[k], W selecting phi_head[k]'s POSITION rows
+  // (rows 3-5 of its 9-row [dtheta,dp,dv] layout) only -- position-only for
+  // this first pass per the card's own instruction (attitude/velocity rows
+  // have different units, so a single scalar W can't combine them
+  // dimensionlessly). phi_head[k] already bakes in the basis weights, the
+  // world-frame rotation, and the double integration via the Fx*Phi
+  // recursion (see this function's own G-block construction above) -- this
+  // is an EXACT low-band penalty on the trajectory deviation the
+  // correction implies, not an approximation. NOT block-diagonal in (i,j)
+  // the way gram/Curv are -- accumulated as one whole-matrix outer-product
+  // sum, which is guaranteed PSD by construction (a sum of P_k^T*P_k
+  // terms). Normalized by (t1-t0)^2: the term's own DC weighting scales as
+  // T^2 (verified by computation in the card), so this keeps a given
+  // lambda_traj_pos meaning the same thing across scan durations/LiDAR
+  // rates. Default 0.0 -- md5-inert (the whole block is skipped).
+  if (copts_.lambda_traj_pos > 0.0) {
+    Eigen::MatrixXd Lambda_traj = Eigen::MatrixXd::Zero(ncol_c, ncol_c);
+    for (const auto& phi_k : coupled_prop_.phi_head) {
+      const Eigen::Matrix<double, 3, Eigen::Dynamic> P_k = phi_k.middleRows<3>(3);
+      Lambda_traj.noalias() += P_k.transpose() * P_k;
+    }
+    const double T = t1 - t0;
+    const double norm = (T * T > 1e-12) ? 1.0 / (T * T) : 0.0;
+    Lambda.noalias() += (copts_.lambda_traj_pos * norm) * Lambda_traj;
+  }
+  // CQ-62 item 1: S4 -- Lambda.
+  if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S4_Lambda", Lambda);
+
+  Eigen::VectorXd c_vec(ncol_c);
+  for (int j = 0; j < n_c; ++j) {
+    c_vec.segment<3>(3 * j) = coupled_c_acc_[j];
+    c_vec.segment<3>(3 * n_c + 3 * j) = coupled_c_gyr_[j];
+  }
+
+  // ---- (5) normal equations, JOINTLY over [delta_s(t0), c] -- items
+  // 3c/3d/CORRECTED 2026-09-19, replacing the old c-alone solve entirely
+  // (see the amendment: solving for c alone left velocity/both biases/
+  // gravity with a COVARIANCE contribution and NO MEAN CORRECTION, a
+  // regression on bias estimation only visible as slow drift over ~4000
+  // scans). SAME sign convention as the (correct, still-valid) fix found
+  // in the c-alone version: A*delta = -(J'R^-1 r) - Pi(prior_iter), i.e.
+  // b accumulates MINUS the residual term, matching ekf.h's own
+  // applyMeanUpdate() "-K1*Htz" convention (Htz itself a "+H'*W*r"
+  // accumulation) -- verified again here, not merely carried over
+  // unchecked, since the joint Jacobian's own sign (Phi_x, Phi_c) could in
+  // principle have flipped something the scalar c-alone case didn't
+  // exercise; it did not (see the filing's own G0/G1 numbers). ----
+  build.A = Eigen::MatrixXd::Zero(ncol, ncol);
+  Eigen::MatrixXd& A = build.A;
+  A.block(0, 0, ncol_s, ncol_s) = Pi_ss;
+  A.block(ncol_s, ncol_s, ncol_c, ncol_c) = Lambda;
+  // CQ-62 item 1: S5 -- A after Pi_ss and Lambda are placed, BEFORE the
+  // residual loop.
+  if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S5_A_prior_only", A);
+  build.b = Eigen::VectorXd::Zero(ncol);
+  Eigen::VectorXd& b = build.b;
+  b.segment(0, ncol_s) = -(Pi_ss * s_vec);
+  b.segment(ncol_s, ncol_c) = -(Lambda * c_vec);
+  // CQ-54 item 6: the existing Pi_ss/s_vec term above penalises delta_bg
+  // against ZERO, i.e. against wherever the bias already is at t0 -- so a
+  // sequence of individually-cheap per-scan increments accumulates without
+  // anything ever pricing the TOTAL departure from calibration (the
+  // ratchet). bias_anchor adds a SEPARATE quadratic penalty on the total
+  // (state_->biasGyr() + coupled_delta_bg_ - coupled_bg_calib_), independent
+  // of Pi_ss's own (state-covariance-derived) local-increment prior. Only
+  // touches the bg 3x3 diagonal block of A and its own 3 rows of b -- every
+  // other block (phi0/p0/v/ba/g, and the c-block via Lambda) is unaffected.
+  if (copts_.bias_anchor) {
+    if (!coupled_bg_calib_set_) { coupled_bg_calib_ = state_->biasGyr(); coupled_bg_calib_set_ = true; }
+    const double sigma_anchor = LioProcCoupledOptions::BIAS_ANCHOR_SIGMA_RAD_S_DEFAULT;
+    const M3D Pi_anchor = M3D::Identity() / (sigma_anchor * sigma_anchor);
+    A.block<3, 3>(9, 9) += Pi_anchor;
+    b.segment<3>(9) += Pi_anchor * (coupled_bg_calib_ - state_->biasGyr());
+  }
+  // CQ-62 item 1: S6 -- A after the bias_anchor block add (identical to S5
+  // when bias_anchor is off, still logged for completeness -- cheap).
+  if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S6_A_post_anchor", A);
+  double& sum_abs_r = build.sum_abs_r;
+  double& sum_sq_r = build.sum_sq_r;  // CQ-53 item 4
+  double& sum_wr2 = build.sum_wr2;   // CQ-54 item 4
+  // CQ-55 item 12: S = floor_term + sigma_diag_squared + plane_var_term +
+  // s_prior_pose per residual, same definition lio_decoupled.cpp's own
+  // sum_S uses -- summed here so the coupled path reports the SAME
+  // absolute-units denominator, never logged on this path before now.
+  double& sum_floor_S = build.sum_floor_S;
+  double& sum_sdiag_S = build.sum_sdiag_S;
+  double& sum_pvar_S = build.sum_pvar_S;
+  double& sum_prior_pose_S = build.sum_prior_pose_S;
+  double& sum_sigma_squared = build.sum_sigma_squared;  // CQ-60 item 0a
+  std::vector<double>& hcol_reldiff = build.hcol_reldiff;  // CQ-53 item 2
+  hcol_reldiff.reserve(residuals_.size());
+  // TQ-40 item 3: pure-LiDAR-info accumulation restricted to [delta_phi0,
+  // delta_p0] (columns 0-5), BEFORE the Pi_ss/Lambda prior is added --
+  // see coupled_ask_'s own doc comment in the header for the approximation
+  // this makes (no marginalisation over v/bg/ba/g/c).
+  Eigen::Matrix<double, 6, 6>& HtH_pose_lidar = build.HtH_pose_lidar;
+  Eigen::Matrix<double, 6, 1>& Htz_pose_lidar = build.Htz_pose_lidar;
+  double& sum_weight_this_iter = build.sum_weight_this_iter;
+  // CQ-66 item 1: sum_k w_k H_k^T H_k, RAW 6x6 (H before composing with
+  // Phix_pt/Phic_pt -- the [rot_jac_col;normal] measurement sensitivity
+  // alone). Item 1's own derivation: in end_time mode, EVERY residual's
+  // c-block contribution is H_k*Phic_end (Phic_end the SAME fixed 6xncol_c
+  // matrix for the whole scan), so the c-block's own contribution to A from
+  // the residual loop is Phic_end^T * (sum_k w_k H_k^T H_k) * Phic_end --
+  // rank-bounded by THIS 6x6 matrix's own rank, regardless of n_residuals
+  // or ncol_c. point_time uses a DIFFERENT Phic_pt per residual, so no such
+  // bound applies there.
+  Eigen::Matrix<double, 6, 6>& H6_raw_accum = build.H6_raw_accum;
+  // CQ-66 item 3's own accumulator -- see its doc comment inside the loop.
+  Eigen::MatrixXd& phic_spread_sum = build.phic_spread_sum;
+  double& phic_spread_sumsq = build.phic_spread_sumsq;
+  int& phic_spread_n = build.phic_spread_n;
+  for (const auto& res : residuals_) {
+    Eigen::Matrix<double, 1, 6> H;
+    // CQ-50 item (d), the real fix: build the rotation-Jacobian column at
+    // this point's OWN capture time t_k, using raw_body_point (the body
+    // point before deskew's warp to t1) and worldRotAt(t_k) -- the SAME
+    // formula point_cross_normal itself uses (p.cross(R^T*n)), just with
+    // (p1, R(t1)) replaced by (p(t_k), R(t_k)). The translation column
+    // (normal itself) is frame-independent -- dr/dpos is n^T regardless of
+    // which time's body frame p was expressed in -- so it is unaffected.
+    // CQ-53 item 2: computed for EVERY residual regardless of which arm is
+    // actually active below, so the two arms stay directly comparable on
+    // this number -- the permanent replacement for the deleted ad hoc debug
+    // print CQ-50's own filing cited a since-nonexistent "1-3%" figure from.
+    const V3D hk = V3D(res.raw_body_point.cross(worldRotAt(coupled_prop_, res.t).transpose() * res.normal));
+    hcol_reldiff.push_back((hk - res.point_cross_normal).norm() / std::max(res.point_cross_normal.norm(), 1e-9));
+    // jacobian_time_mode: H and Phi must be evaluated at the SAME time for
+    // H_k*Phi(t_k) to be a valid chain rule (CQ-50's original diagnosis was
+    // exactly this mismatch -- H built once from the DESKEWED point and the
+    // SCAN-END state_->rot() in lio_base.cpp's buildResiduals(), chained
+    // against Phi interpolated at each residual's own t_k, valid only at
+    // rest by coincidence). "point_time" pulls H back to t_k to meet Phi
+    // there (real within-scan resolution preserved); "end_time" pushes Phi
+    // forward to t1 to meet H there (resolution collapsed, but consistent);
+    // "legacy_mismatched" (default) reproduces the original mismatch
+    // unchanged, so this refactor changes no one's numerics by default
+    // (rule 26 item 1 -- see the header's own doc comment for the full
+    // 4-combination table this collapses).
+    const bool point_time = (copts_.jacobian_time_mode == "point_time");
+    const bool end_time = (copts_.jacobian_time_mode == "end_time");
+    const V3D rot_jac_col = point_time ? hk : res.point_cross_normal;
+    H.block<1, 3>(0, 0) = rot_jac_col.transpose();
+    H.block<1, 3>(0, 3) = res.normal.transpose();
+    const Eigen::Matrix<double, 9, 18> Phix_pt =
+        end_time ? coupled_prop_.phi_x_head.back() : interpolatePhiX(coupled_prop_, res.t);
+    const Eigen::Matrix<double, 9, Eigen::Dynamic> Phic_pt =
+        end_time ? coupled_prop_.phi_head.back() : interpolatePhi(coupled_prop_, res.t);
+    // CQ-66 item 3: per-scan spread of Phi_c(t_k) across residuals --
+    // single-pass (Var = E[||X||^2] - ||E[X]||^2, applied to the whole
+    // matrix via the Frobenius inner product) so no second pass over
+    // residuals_ is needed. In end_time mode Phic_pt is IDENTICAL for
+    // every residual, so this is mathematically guaranteed to come out
+    // exactly 0 -- the interesting number is point_time's own value.
+    if (copts_.psd_audit_en) {
+      if (phic_spread_sum.size() == 0) phic_spread_sum = Eigen::MatrixXd::Zero(9, ncol_c);
+      phic_spread_sum.noalias() += Phic_pt;
+      phic_spread_sumsq += Phic_pt.squaredNorm();
+      ++phic_spread_n;
+    }
+    Eigen::Matrix<double, 1, Eigen::Dynamic> Jrow(1, ncol);
+    Jrow.segment(0, ncol_s) = H * Phix_pt.topRows(6);          // R,P rows only (item 3b/3c)
+    Jrow.segment(ncol_s, ncol_c) = H * Phic_pt.topRows(6);
+    // Diagnostic toggle: zero c_gyr's own columns (the last 3*n_c of the
+    // c-block, per coupled_estimator.h's own documented column order
+    // [c_acc(3*n_c), c_gyr(3*n_c)]) AFTER computing them, so c_gyr gets NO
+    // LiDAR information at all -- its posterior then equals its prior
+    // (Lambda) exactly, i.e. c_gyr never moves and never correlates with
+    // anything else in A (the cross term with delta_bg this toggle exists
+    // to test is a Jrow-column product, and one factor is now identically
+    // zero). delta_bg (the ONLY rotation-correction path left active) is
+    // untouched -- this is not "no rotation correction at all", it is
+    // "rotation correction exactly as bounded as the decoupled path's own
+    // EKF pose-block dtheta, no within-scan SHAPE parameterisation".
+    if (copts_.disable_cgyr) Jrow.segment(ncol_s + 3 * n_c, 3 * n_c).setZero();
+    // CQ-53 item 6: committed diagnostic harness (was an ad hoc getenv
+    // print during CQ-50's own investigation) -- per-residual leverage on
+    // delta_phi0/delta_p0, binnable by the point's own capture-time
+    // fraction within the scan [0,1]. Refuted the "early-scan points get
+    // outsized delta_phi0 leverage under jacobian_time_mode=point_time"
+    // hypothesis when this was run manually: the frac-vs-leverage pattern
+    // came out nearly identical between end_time and point_time.
+    if (copts_.log_jrow_leverage_en) {
+      const double t0_local = coupled_prop_.poses.empty() ? 0.0 : coupled_prop_.poses.front().t;
+      const double t1_local = coupled_prop_.poses.empty() ? 1.0
+          : coupled_prop_.poses.back().t + coupled_prop_.poses.back().dt;
+      const double frac = (t1_local > t0_local) ? (res.t - t0_local) / (t1_local - t0_local) : -1.0;
+      static PersistentLogStream log("jrow_leverage.txt");
+      std::ofstream& ofs = log.stream();
+      ofs << "scan_id=" << voxel_map_->frame_idx_ << " frac=" << frac
+          << " phi0_lev=" << Jrow.segment(0, 3).norm()
+          << " p0_lev=" << Jrow.segment(3, 3).norm() << "\n";
+      // Deliberately NOT flushed per residual (unlike nees_diag.txt/
+      // iter_error.txt's per-scan/per-iteration writes) -- this fires once
+      // per RESIDUAL, potentially hundreds of thousands of times per run;
+      // relies on ofstream's own buffering + normal process exit to flush.
+    }
+    // CQ-61 arm (b): outlier-robust IRLS down-weighting on the normalized
+    // residual z = r/sqrt(sigma_squared) -- treats the SYMPTOM (a handful
+    // of bad correspondences dominating A once matching has already
+    // degraded), not the mechanism arm (a)/pose_cov_in_sigma targets; it
+    // will not reopen a gate that voxelplane.cpp's own acceptance test has
+    // already closed. Standard 95%-efficiency-under-Gaussian constants
+    // (Huber k=1.345, Cauchy c=2.3849). Default "none" -- md5-inert.
+    double w = 1.0 / res.sigma_squared;
+    if (copts_.robust_loss != "none") {
+      const double z = std::abs(res.r) / std::sqrt(std::max(res.sigma_squared, 1e-18));
+      if (copts_.robust_loss == "huber") {
+        constexpr double HUBER_K = 1.345;
+        if (z > HUBER_K) w *= HUBER_K / z;
+      } else if (copts_.robust_loss == "cauchy") {
+        constexpr double CAUCHY_C = 2.3849;
+        w *= 1.0 / (1.0 + (z / CAUCHY_C) * (z / CAUCHY_C));
+      }
+    }
+    A.noalias() += w * (Jrow.transpose() * Jrow);
+    b.noalias() -= w * Jrow.transpose() * res.r;
+    if (copts_.psd_audit_en) H6_raw_accum.noalias() += w * (H.transpose() * H);
+    sum_abs_r += std::abs(res.r);
+    sum_sq_r += res.r * res.r;
+    sum_wr2 += w * res.r * res.r;  // CQ-54 item 4: reduced chi-square numerator
+    sum_sigma_squared += res.sigma_squared;  // CQ-60 item 0a
+    // CQ-55 item 12: same accept/skip rule as lio_decoupled.cpp's own sum_S.
+    if (res.floor_term >= 0.0 && res.sigma_diag_squared >= 0.0 && res.s_prior_pose >= 0.0) {
+      sum_floor_S      += res.floor_term;
+      sum_sdiag_S      += res.sigma_diag_squared;
+      sum_pvar_S       += res.plane_var_term;
+      sum_prior_pose_S += res.s_prior_pose;
+    }
+    // TQ-40 item 3: matches ekf_.HtH/Htz's own "+H'*W*r" convention exactly
+    // (H here is the SAME 1x6 row, since Jrow.head(6) IS H*Phix_pt.topRows(6)
+    // restricted to the phi0/p0 columns -- Phix_pt's own phi0/p0 columns are
+    // Identity at t0 and only decay via Fx's own accumulation to t_k, so
+    // this is genuinely "how much does THIS residual constrain phi0/p0").
+    const Eigen::Matrix<double, 1, 6> H6 = Jrow.segment(0, 6);
+    HtH_pose_lidar.noalias() += w * (H6.transpose() * H6);
+    Htz_pose_lidar.noalias() += w * H6.transpose() * res.r;
+    sum_weight_this_iter += w;
+  }
+  coupled_last_A_ = A;
+  // CQ-62 item 1: S7 -- A after the residual accumulation loop (== coupled_last_A_).
+  if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S7_A_final", A);
+  if (copts_.log_cp_constraint_en) coupled_last_Lambda_ = Lambda;
+  return build;
+}
+
 double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out)
 {
   dtheta_out = V3D::Zero();
@@ -1611,113 +1948,6 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // cross term with the c-block: the prior itself does not correlate the
   // two blocks (any correlation enters only through the shared LiDAR
   // evidence, in the loop below). ----
-  Eigen::MatrixXd gram = Eigen::MatrixXd::Zero(n_c, n_c);
-  for (const auto& pose : mg.poses) {
-    std::vector<double> bw(n_c);
-    for (int j = 0; j < n_c; ++j) bw[j] = basisWeight(j, n_c, t0, t1, pose.t);
-    for (int i = 0; i < n_c; ++i)
-      for (int j = 0; j < n_c; ++j) gram(i, j) += bw[i] * bw[j];
-  }
-  // CQ-55 item 6: gram is built from basis VALUES only -- nothing penalises
-  // the correction's SHAPE, which is why the prior's connectivity collapses
-  // to a chain at n_c=13 (adjacent-only support overlap) instead of the
-  // fully-dense n_c=4 case (item 9's gram[0][12]=0 vs gram[0][3]!=0
-  // finding). Curv = D^T D for the second-difference operator D (row k:
-  // +1,-2,+1 at columns k,k+1,k+2) adds an EXPLICIT connectivity term
-  // between every control point pair within 2 of each other, independent
-  // of whether their basis supports overlap -- default 0.0, so shipped
-  // behavior is unchanged and this is provably md5-inert at that default.
-  Eigen::MatrixXd Curv = Eigen::MatrixXd::Zero(n_c, n_c);
-  if ((copts_.curvature_weight_acc > 0.0 || copts_.curvature_weight_gyr > 0.0) && n_c >= 3) {
-    Eigen::MatrixXd D = Eigen::MatrixXd::Zero(n_c - 2, n_c);
-    for (int k = 0; k < n_c - 2; ++k) { D(k, k) = 1.0; D(k, k + 1) = -2.0; D(k, k + 2) = 1.0; }
-    Curv = D.transpose() * D;
-  }
-  // CQ-55 item 8, arm (c): curvature_only REPLACES the gram/sigma^2 value
-  // term with curvature_weight's shape penalty plus an explicit DC-only
-  // prior (dc_weight/sigma^2, applied UNIFORMLY to every (i,j) pair -- a
-  // rank-1 all-ones contribution whose quadratic form for c is exactly
-  // dc_weight/sigma^2 * n_c * ||mean(c)||^2, pricing the mean/constant
-  // direction only). A pure curvature penalty's 2D null space per axis
-  // (constant AND linear both map to zero under [1,-2,1]) would otherwise
-  // leave the bias-degenerate constant direction completely unpriced --
-  // this term is what keeps arm (c) a valid configuration at all. Default
-  // false: arm (a)/(b)'s existing value(+curvature) behavior is unchanged.
-  // CQ-59 item 4: the VALUE term's precision, per axis instead of the
-  // scalar 1/sigma^2 every other term here still uses. Measured on
-  // eee_01/eee_02 (calib_processing.cpp's own per-axis floor print):
-  // acc max/min ratio 9.8-17.4x, gyr max/min ratio 8.0-39.4x -- neither
-  // near 1, so per the card's own criterion this is worth a flag rather
-  // than being dropped. infl_a/infl_g carry adaptive_sigma's scalar
-  // inflation (sigma_a/sigma_a_floor)^2 through unchanged -- 1.0 when
-  // adaptive_sigma is off (the default), so at that default this reduces
-  // to the literal "diagonal from the per-axis floor" the card asks for;
-  // when adaptive_sigma is also on, the per-axis floor's RATIOS are kept
-  // but scaled to the same inflated overall magnitude, so the two flags
-  // compose rather than fight over which sigma is authoritative. Default
-  // false -- md5-inert (prec_acc_diag/prec_gyr_diag both collapse to the
-  // existing scalar terms below when off).
-  V3D prec_acc_diag = V3D::Constant(1.0 / (sigma_a * sigma_a));
-  V3D prec_gyr_diag = V3D::Constant(1.0 / (sigma_g * sigma_g));
-  if (copts_.prior_per_axis_sigma) {
-    const double infl_a = (sigma_a_floor > 1e-12) ? (sigma_a * sigma_a) / (sigma_a_floor * sigma_a_floor) : 1.0;
-    const double infl_g = (sigma_g_floor > 1e-12) ? (sigma_g * sigma_g) / (sigma_g_floor * sigma_g_floor) : 1.0;
-    const V3D floor_acc = state_->varAccFloor();
-    const V3D floor_gyr = state_->varGyrFloor();
-    for (int k = 0; k < 3; ++k) {
-      prec_acc_diag(k) = 1.0 / std::max(floor_acc(k) * infl_a, 1e-18);
-      prec_gyr_diag(k) = 1.0 / std::max(floor_gyr(k) * infl_g, 1e-18);
-    }
-  }
-
-  Eigen::MatrixXd Lambda = Eigen::MatrixXd::Zero(ncol_c, ncol_c);
-  for (int i = 0; i < n_c; ++i)
-    for (int j = 0; j < n_c; ++j) {
-      // CQ-59 item 1: curv_acc/curv_gyr each normalized by the SAME
-      // sigma^2 the value term for that block uses, so the weight means
-      // "this shape penalty is worth w times the value penalty" on that
-      // block specifically -- replaces the single raw curv_ij that used
-      // to apply identically to both blocks despite their ~4657x base-
-      // prior stiffness difference.
-      const double curv_acc = copts_.curvature_weight_acc * Curv(i, j) / (sigma_a * sigma_a);
-      const double curv_gyr = copts_.curvature_weight_gyr * Curv(i, j) / (sigma_g * sigma_g);
-      const double value_gram = copts_.curvature_only ? 0.0 : gram(i, j);
-      const double dc_acc = copts_.curvature_only ? copts_.dc_weight / (sigma_a * sigma_a) : 0.0;
-      const double dc_gyr = copts_.curvature_only ? copts_.dc_weight / (sigma_g * sigma_g) : 0.0;
-      Lambda.block<3, 3>(3 * i, 3 * j) =
-          M3D(value_gram * prec_acc_diag.asDiagonal()) + (curv_acc + dc_acc) * M3D::Identity();
-      Lambda.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) =
-          M3D(value_gram * prec_gyr_diag.asDiagonal()) + (curv_gyr + dc_gyr) * M3D::Identity();
-    }
-  // CQ-69: the low-band trajectory-deviation prior. Lambda_traj = sum_k
-  // phi_head[k]^T W phi_head[k], W selecting phi_head[k]'s POSITION rows
-  // (rows 3-5 of its 9-row [dtheta,dp,dv] layout) only -- position-only for
-  // this first pass per the card's own instruction (attitude/velocity rows
-  // have different units, so a single scalar W can't combine them
-  // dimensionlessly). phi_head[k] already bakes in the basis weights, the
-  // world-frame rotation, and the double integration via the Fx*Phi
-  // recursion (see this function's own G-block construction above) -- this
-  // is an EXACT low-band penalty on the trajectory deviation the
-  // correction implies, not an approximation. NOT block-diagonal in (i,j)
-  // the way gram/Curv are -- accumulated as one whole-matrix outer-product
-  // sum, which is guaranteed PSD by construction (a sum of P_k^T*P_k
-  // terms). Normalized by (t1-t0)^2: the term's own DC weighting scales as
-  // T^2 (verified by computation in the card), so this keeps a given
-  // lambda_traj_pos meaning the same thing across scan durations/LiDAR
-  // rates. Default 0.0 -- md5-inert (the whole block is skipped).
-  if (copts_.lambda_traj_pos > 0.0) {
-    Eigen::MatrixXd Lambda_traj = Eigen::MatrixXd::Zero(ncol_c, ncol_c);
-    for (const auto& phi_k : coupled_prop_.phi_head) {
-      const Eigen::Matrix<double, 3, Eigen::Dynamic> P_k = phi_k.middleRows<3>(3);
-      Lambda_traj.noalias() += P_k.transpose() * P_k;
-    }
-    const double T = t1 - t0;
-    const double norm = (T * T > 1e-12) ? 1.0 / (T * T) : 0.0;
-    Lambda.noalias() += (copts_.lambda_traj_pos * norm) * Lambda_traj;
-  }
-  // CQ-62 item 1: S4 -- Lambda.
-  if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S4_Lambda", Lambda);
-
   Eigen::MatrixXd Pi_ss = Eigen::MatrixXd::Zero(ncol_s, ncol_s);
   bool have_pi_ss = state_->idxBG() >= 0 && state_->idxBA() >= 0 && state_->idxG() >= 0;
   if (have_pi_ss) {
@@ -1764,13 +1994,6 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // CQ-62 item 1: S3 -- Pi_ss, after the freeze_bg adjustment.
   if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S3_Pi_ss", Pi_ss);
 
-  Eigen::VectorXd c_vec(ncol_c);
-  for (int j = 0; j < n_c; ++j) {
-    c_vec.segment<3>(3 * j) = coupled_c_acc_[j];
-    c_vec.segment<3>(3 * n_c + 3 * j) = coupled_c_gyr_[j];
-  }
-  // Item 3e(v)/3f bug 2: order [delta_phi0, delta_p0, delta_v, delta_bg,
-  // delta_ba, delta_g] -- matches phi_x_head's own column order exactly.
   Eigen::VectorXd s_vec(ncol_s);
   s_vec.segment<3>(0)  = coupled_delta_phi0_;
   s_vec.segment<3>(3)  = coupled_delta_pos0_;
@@ -1779,210 +2002,31 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   s_vec.segment<3>(12) = coupled_delta_ba_;
   s_vec.segment<3>(15) = coupled_delta_g_;
 
-  // ---- (5) normal equations, JOINTLY over [delta_s(t0), c] -- items
-  // 3c/3d/CORRECTED 2026-09-19, replacing the old c-alone solve entirely
-  // (see the amendment: solving for c alone left velocity/both biases/
-  // gravity with a COVARIANCE contribution and NO MEAN CORRECTION, a
-  // regression on bias estimation only visible as slow drift over ~4000
-  // scans). SAME sign convention as the (correct, still-valid) fix found
-  // in the c-alone version: A*delta = -(J'R^-1 r) - Pi(prior_iter), i.e.
-  // b accumulates MINUS the residual term, matching ekf.h's own
-  // applyMeanUpdate() "-K1*Htz" convention (Htz itself a "+H'*W*r"
-  // accumulation) -- verified again here, not merely carried over
-  // unchecked, since the joint Jacobian's own sign (Phi_x, Phi_c) could in
-  // principle have flipped something the scalar c-alone case didn't
-  // exercise; it did not (see the filing's own G0/G1 numbers). ----
-  Eigen::MatrixXd A = Eigen::MatrixXd::Zero(ncol, ncol);
-  A.block(0, 0, ncol_s, ncol_s) = Pi_ss;
-  A.block(ncol_s, ncol_s, ncol_c, ncol_c) = Lambda;
-  // CQ-62 item 1: S5 -- A after Pi_ss and Lambda are placed, BEFORE the
-  // residual loop.
-  if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S5_A_prior_only", A);
-  Eigen::VectorXd b = Eigen::VectorXd::Zero(ncol);
-  b.segment(0, ncol_s) = -(Pi_ss * s_vec);
-  b.segment(ncol_s, ncol_c) = -(Lambda * c_vec);
-  // CQ-54 item 6: the existing Pi_ss/s_vec term above penalises delta_bg
-  // against ZERO, i.e. against wherever the bias already is at t0 -- so a
-  // sequence of individually-cheap per-scan increments accumulates without
-  // anything ever pricing the TOTAL departure from calibration (the
-  // ratchet). bias_anchor adds a SEPARATE quadratic penalty on the total
-  // (state_->biasGyr() + coupled_delta_bg_ - coupled_bg_calib_), independent
-  // of Pi_ss's own (state-covariance-derived) local-increment prior. Only
-  // touches the bg 3x3 diagonal block of A and its own 3 rows of b -- every
-  // other block (phi0/p0/v/ba/g, and the c-block via Lambda) is unaffected.
-  if (copts_.bias_anchor) {
-    if (!coupled_bg_calib_set_) { coupled_bg_calib_ = state_->biasGyr(); coupled_bg_calib_set_ = true; }
-    const double sigma_anchor = LioProcCoupledOptions::BIAS_ANCHOR_SIGMA_RAD_S_DEFAULT;
-    const M3D Pi_anchor = M3D::Identity() / (sigma_anchor * sigma_anchor);
-    A.block<3, 3>(9, 9) += Pi_anchor;
-    b.segment<3>(9) += Pi_anchor * (coupled_bg_calib_ - state_->biasGyr());
-  }
-  // CQ-62 item 1: S6 -- A after the bias_anchor block add (identical to S5
-  // when bias_anchor is off, still logged for completeness -- cheap).
-  if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S6_A_post_anchor", A);
-  double sum_abs_r = 0.0;
-  double sum_sq_r = 0.0;  // CQ-53 item 4
-  double sum_wr2 = 0.0;   // CQ-54 item 4
-  // CQ-55 item 12: S = floor_term + sigma_diag_squared + plane_var_term +
-  // s_prior_pose per residual, same definition lio_decoupled.cpp's own
-  // sum_S uses -- summed here so the coupled path reports the SAME
-  // absolute-units denominator, never logged on this path before now.
-  double sum_floor_S = 0.0, sum_sdiag_S = 0.0, sum_pvar_S = 0.0, sum_prior_pose_S = 0.0;
-  double sum_sigma_squared = 0.0;  // CQ-60 item 0a
-  std::vector<double> hcol_reldiff;  // CQ-53 item 2
-  hcol_reldiff.reserve(residuals_.size());
-  // TQ-40 item 3: pure-LiDAR-info accumulation restricted to [delta_phi0,
-  // delta_p0] (columns 0-5), BEFORE the Pi_ss/Lambda prior is added --
-  // see coupled_ask_'s own doc comment in the header for the approximation
-  // this makes (no marginalisation over v/bg/ba/g/c).
-  Eigen::Matrix<double, 6, 6> HtH_pose_lidar = Eigen::Matrix<double, 6, 6>::Zero();
-  Eigen::Matrix<double, 6, 1> Htz_pose_lidar = Eigen::Matrix<double, 6, 1>::Zero();
-  double sum_weight_this_iter = 0.0;
-  // CQ-66 item 1: sum_k w_k H_k^T H_k, RAW 6x6 (H before composing with
-  // Phix_pt/Phic_pt -- the [rot_jac_col;normal] measurement sensitivity
-  // alone). Item 1's own derivation: in end_time mode, EVERY residual's
-  // c-block contribution is H_k*Phic_end (Phic_end the SAME fixed 6xncol_c
-  // matrix for the whole scan), so the c-block's own contribution to A from
-  // the residual loop is Phic_end^T * (sum_k w_k H_k^T H_k) * Phic_end --
-  // rank-bounded by THIS 6x6 matrix's own rank, regardless of n_residuals
-  // or ncol_c. point_time uses a DIFFERENT Phic_pt per residual, so no such
-  // bound applies there.
-  Eigen::Matrix<double, 6, 6> H6_raw_accum = Eigen::Matrix<double, 6, 6>::Zero();
-  // CQ-66 item 3's own accumulator -- see its doc comment inside the loop.
-  Eigen::MatrixXd phic_spread_sum;
-  double phic_spread_sumsq = 0.0;
-  int phic_spread_n = 0;
-  for (const auto& res : residuals_) {
-    Eigen::Matrix<double, 1, 6> H;
-    // CQ-50 item (d), the real fix: build the rotation-Jacobian column at
-    // this point's OWN capture time t_k, using raw_body_point (the body
-    // point before deskew's warp to t1) and worldRotAt(t_k) -- the SAME
-    // formula point_cross_normal itself uses (p.cross(R^T*n)), just with
-    // (p1, R(t1)) replaced by (p(t_k), R(t_k)). The translation column
-    // (normal itself) is frame-independent -- dr/dpos is n^T regardless of
-    // which time's body frame p was expressed in -- so it is unaffected.
-    // CQ-53 item 2: computed for EVERY residual regardless of which arm is
-    // actually active below, so the two arms stay directly comparable on
-    // this number -- the permanent replacement for the deleted ad hoc debug
-    // print CQ-50's own filing cited a since-nonexistent "1-3%" figure from.
-    const V3D hk = V3D(res.raw_body_point.cross(worldRotAt(coupled_prop_, res.t).transpose() * res.normal));
-    hcol_reldiff.push_back((hk - res.point_cross_normal).norm() / std::max(res.point_cross_normal.norm(), 1e-9));
-    // jacobian_time_mode: H and Phi must be evaluated at the SAME time for
-    // H_k*Phi(t_k) to be a valid chain rule (CQ-50's original diagnosis was
-    // exactly this mismatch -- H built once from the DESKEWED point and the
-    // SCAN-END state_->rot() in lio_base.cpp's buildResiduals(), chained
-    // against Phi interpolated at each residual's own t_k, valid only at
-    // rest by coincidence). "point_time" pulls H back to t_k to meet Phi
-    // there (real within-scan resolution preserved); "end_time" pushes Phi
-    // forward to t1 to meet H there (resolution collapsed, but consistent);
-    // "legacy_mismatched" (default) reproduces the original mismatch
-    // unchanged, so this refactor changes no one's numerics by default
-    // (rule 26 item 1 -- see the header's own doc comment for the full
-    // 4-combination table this collapses).
-    const bool point_time = (copts_.jacobian_time_mode == "point_time");
-    const bool end_time = (copts_.jacobian_time_mode == "end_time");
-    const V3D rot_jac_col = point_time ? hk : res.point_cross_normal;
-    H.block<1, 3>(0, 0) = rot_jac_col.transpose();
-    H.block<1, 3>(0, 3) = res.normal.transpose();
-    const Eigen::Matrix<double, 9, 18> Phix_pt =
-        end_time ? coupled_prop_.phi_x_head.back() : interpolatePhiX(coupled_prop_, res.t);
-    const Eigen::Matrix<double, 9, Eigen::Dynamic> Phic_pt =
-        end_time ? coupled_prop_.phi_head.back() : interpolatePhi(coupled_prop_, res.t);
-    // CQ-66 item 3: per-scan spread of Phi_c(t_k) across residuals --
-    // single-pass (Var = E[||X||^2] - ||E[X]||^2, applied to the whole
-    // matrix via the Frobenius inner product) so no second pass over
-    // residuals_ is needed. In end_time mode Phic_pt is IDENTICAL for
-    // every residual, so this is mathematically guaranteed to come out
-    // exactly 0 -- the interesting number is point_time's own value.
-    if (copts_.psd_audit_en) {
-      if (phic_spread_sum.size() == 0) phic_spread_sum = Eigen::MatrixXd::Zero(9, ncol_c);
-      phic_spread_sum.noalias() += Phic_pt;
-      phic_spread_sumsq += Phic_pt.squaredNorm();
-      ++phic_spread_n;
-    }
-    Eigen::Matrix<double, 1, Eigen::Dynamic> Jrow(1, ncol);
-    Jrow.segment(0, ncol_s) = H * Phix_pt.topRows(6);          // R,P rows only (item 3b/3c)
-    Jrow.segment(ncol_s, ncol_c) = H * Phic_pt.topRows(6);
-    // Diagnostic toggle: zero c_gyr's own columns (the last 3*n_c of the
-    // c-block, per coupled_estimator.h's own documented column order
-    // [c_acc(3*n_c), c_gyr(3*n_c)]) AFTER computing them, so c_gyr gets NO
-    // LiDAR information at all -- its posterior then equals its prior
-    // (Lambda) exactly, i.e. c_gyr never moves and never correlates with
-    // anything else in A (the cross term with delta_bg this toggle exists
-    // to test is a Jrow-column product, and one factor is now identically
-    // zero). delta_bg (the ONLY rotation-correction path left active) is
-    // untouched -- this is not "no rotation correction at all", it is
-    // "rotation correction exactly as bounded as the decoupled path's own
-    // EKF pose-block dtheta, no within-scan SHAPE parameterisation".
-    if (copts_.disable_cgyr) Jrow.segment(ncol_s + 3 * n_c, 3 * n_c).setZero();
-    // CQ-53 item 6: committed diagnostic harness (was an ad hoc getenv
-    // print during CQ-50's own investigation) -- per-residual leverage on
-    // delta_phi0/delta_p0, binnable by the point's own capture-time
-    // fraction within the scan [0,1]. Refuted the "early-scan points get
-    // outsized delta_phi0 leverage under jacobian_time_mode=point_time"
-    // hypothesis when this was run manually: the frac-vs-leverage pattern
-    // came out nearly identical between end_time and point_time.
-    if (copts_.log_jrow_leverage_en) {
-      const double t0_local = coupled_prop_.poses.empty() ? 0.0 : coupled_prop_.poses.front().t;
-      const double t1_local = coupled_prop_.poses.empty() ? 1.0
-          : coupled_prop_.poses.back().t + coupled_prop_.poses.back().dt;
-      const double frac = (t1_local > t0_local) ? (res.t - t0_local) / (t1_local - t0_local) : -1.0;
-      static PersistentLogStream log("jrow_leverage.txt");
-      std::ofstream& ofs = log.stream();
-      ofs << "scan_id=" << voxel_map_->frame_idx_ << " frac=" << frac
-          << " phi0_lev=" << Jrow.segment(0, 3).norm()
-          << " p0_lev=" << Jrow.segment(3, 3).norm() << "\n";
-      // Deliberately NOT flushed per residual (unlike nees_diag.txt/
-      // iter_error.txt's per-scan/per-iteration writes) -- this fires once
-      // per RESIDUAL, potentially hundreds of thousands of times per run;
-      // relies on ofstream's own buffering + normal process exit to flush.
-    }
-    // CQ-61 arm (b): outlier-robust IRLS down-weighting on the normalized
-    // residual z = r/sqrt(sigma_squared) -- treats the SYMPTOM (a handful
-    // of bad correspondences dominating A once matching has already
-    // degraded), not the mechanism arm (a)/pose_cov_in_sigma targets; it
-    // will not reopen a gate that voxelplane.cpp's own acceptance test has
-    // already closed. Standard 95%-efficiency-under-Gaussian constants
-    // (Huber k=1.345, Cauchy c=2.3849). Default "none" -- md5-inert.
-    double w = 1.0 / res.sigma_squared;
-    if (copts_.robust_loss != "none") {
-      const double z = std::abs(res.r) / std::sqrt(std::max(res.sigma_squared, 1e-18));
-      if (copts_.robust_loss == "huber") {
-        constexpr double HUBER_K = 1.345;
-        if (z > HUBER_K) w *= HUBER_K / z;
-      } else if (copts_.robust_loss == "cauchy") {
-        constexpr double CAUCHY_C = 2.3849;
-        w *= 1.0 / (1.0 + (z / CAUCHY_C) * (z / CAUCHY_C));
-      }
-    }
-    A.noalias() += w * (Jrow.transpose() * Jrow);
-    b.noalias() -= w * Jrow.transpose() * res.r;
-    if (copts_.psd_audit_en) H6_raw_accum.noalias() += w * (H.transpose() * H);
-    sum_abs_r += std::abs(res.r);
-    sum_sq_r += res.r * res.r;
-    sum_wr2 += w * res.r * res.r;  // CQ-54 item 4: reduced chi-square numerator
-    sum_sigma_squared += res.sigma_squared;  // CQ-60 item 0a
-    // CQ-55 item 12: same accept/skip rule as lio_decoupled.cpp's own sum_S.
-    if (res.floor_term >= 0.0 && res.sigma_diag_squared >= 0.0 && res.s_prior_pose >= 0.0) {
-      sum_floor_S      += res.floor_term;
-      sum_sdiag_S      += res.sigma_diag_squared;
-      sum_pvar_S       += res.plane_var_term;
-      sum_prior_pose_S += res.s_prior_pose;
-    }
-    // TQ-40 item 3: matches ekf_.HtH/Htz's own "+H'*W*r" convention exactly
-    // (H here is the SAME 1x6 row, since Jrow.head(6) IS H*Phix_pt.topRows(6)
-    // restricted to the phi0/p0 columns -- Phix_pt's own phi0/p0 columns are
-    // Identity at t0 and only decay via Fx's own accumulation to t_k, so
-    // this is genuinely "how much does THIS residual constrain phi0/p0").
-    const Eigen::Matrix<double, 1, 6> H6 = Jrow.segment(0, 6);
-    HtH_pose_lidar.noalias() += w * (H6.transpose() * H6);
-    Htz_pose_lidar.noalias() += w * H6.transpose() * res.r;
-    sum_weight_this_iter += w;
-  }
-  coupled_last_A_ = A;
-  // CQ-62 item 1: S7 -- A after the residual accumulation loop (== coupled_last_A_).
-  if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S7_A_final", A);
-  if (copts_.log_cp_constraint_en) coupled_last_Lambda_ = Lambda;
+  // CQ-82 Phase 1: the coefficient-block prior + the normal-equations
+  // residual loop -- basis-specific -- MOVED verbatim into
+  // buildImuCorrectionSystem() below. Nothing from here to the LDLT
+  // solve changed; only where the code physically lives did.
+  CoupledSystemBuild build = buildImuCorrectionSystem(
+      mg, t0, t1, n_c, ncol, ncol_s, ncol_c, sigma_a, sigma_g, sigma_a_floor, sigma_g_floor,
+      Pi_ss, s_vec);
+  Eigen::MatrixXd& A = build.A;
+  Eigen::VectorXd& b = build.b;
+  double& sum_abs_r = build.sum_abs_r;
+  double& sum_sq_r = build.sum_sq_r;
+  double& sum_wr2 = build.sum_wr2;
+  double& sum_sigma_squared = build.sum_sigma_squared;
+  double& sum_floor_S = build.sum_floor_S;
+  double& sum_sdiag_S = build.sum_sdiag_S;
+  double& sum_pvar_S = build.sum_pvar_S;
+  double& sum_prior_pose_S = build.sum_prior_pose_S;
+  double& sum_weight_this_iter = build.sum_weight_this_iter;
+  std::vector<double>& hcol_reldiff = build.hcol_reldiff;
+  Eigen::Matrix<double, 6, 6>& HtH_pose_lidar = build.HtH_pose_lidar;
+  Eigen::Matrix<double, 6, 1>& Htz_pose_lidar = build.Htz_pose_lidar;
+  Eigen::Matrix<double, 6, 6>& H6_raw_accum = build.H6_raw_accum;
+  Eigen::MatrixXd& phic_spread_sum = build.phic_spread_sum;
+  double& phic_spread_sumsq = build.phic_spread_sumsq;
+  int& phic_spread_n = build.phic_spread_n;
 
   // CQ-79: are the spline corrections pulling points toward their matched
   // planes, and does it differ across the scan? Report-only, reads
