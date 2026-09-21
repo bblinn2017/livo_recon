@@ -99,12 +99,15 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_freeze_on_vibration", copts_.bias_freeze_on_vibration, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/bias_freeze_vibration_factor", copts_.bias_freeze_vibration_factor, LioProcCoupledOptions::BIAS_FREEZE_VIBRATION_FACTOR_DEFAULT);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_anchor", copts_.bias_anchor, false);
-  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/curvature_weight_acc", copts_.curvature_weight_acc, 0.0);
-  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/curvature_weight_gyr", copts_.curvature_weight_gyr, 0.0);
-  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/lambda_traj_pos", copts_.lambda_traj_pos, 0.0);
+  // CQ-72 item 0a: renamed, HARD BREAK not an alias -- refuseUnclaimed
+  // (CQ-32) already throws on an unclaimed estimator/coupled/* key, so a
+  // config still using the old names fails loudly at startup.
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/prior/smoothness_weight_acc", copts_.smoothness_weight_acc, 0.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/prior/smoothness_weight_gyr", copts_.smoothness_weight_gyr, 0.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/prior/traj_deviation_weight", copts_.traj_deviation_weight, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_observable_only", copts_.bias_observable_only, false);
-  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/curvature_only", copts_.curvature_only, false);
-  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/dc_weight", copts_.dc_weight, 0.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/prior/imu_deviation_weight", copts_.imu_deviation_weight, 1.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/prior/mean_weight", copts_.mean_weight, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/prior_per_axis_sigma", copts_.prior_per_axis_sigma, false);
   cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/robust_loss",
                  copts_.robust_loss, "none",
@@ -189,11 +192,12 @@ std::string LioProcCoupled::engagementReport() const
       << " bias_freeze_on_vibration=" << (copts_.bias_freeze_on_vibration ? "true" : "false")
       << " bias_freeze_vibration_factor=" << copts_.bias_freeze_vibration_factor
       << " bias_anchor=" << (copts_.bias_anchor ? "true" : "false")
-      << " curvature_weight_acc=" << copts_.curvature_weight_acc
-      << " curvature_weight_gyr=" << copts_.curvature_weight_gyr
+      << " smoothness_weight_acc=" << copts_.smoothness_weight_acc
+      << " smoothness_weight_gyr=" << copts_.smoothness_weight_gyr
       << " bias_observable_only=" << (copts_.bias_observable_only ? "true" : "false")
-      << " curvature_only=" << (copts_.curvature_only ? "true" : "false")
-      << " dc_weight=" << copts_.dc_weight
+      << " imu_deviation_weight=" << copts_.imu_deviation_weight
+      << " mean_weight=" << copts_.mean_weight
+      << " traj_deviation_weight=" << copts_.traj_deviation_weight
       << " prior_per_axis_sigma=" << (copts_.prior_per_axis_sigma ? "true" : "false")
       << " robust_loss=" << copts_.robust_loss
       << " log_bg_projection_en=" << (copts_.log_bg_projection_en ? "true" : "false")
@@ -602,9 +606,9 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
                 << ") -- scan_id=" << voxel_map_->frame_idx_
                 << " n_residuals=" << coupled_n_residuals_
                 << " n_c=" << copts_.n_c << " jacobian_time_mode=" << copts_.jacobian_time_mode
-                << " curvature_weight_acc=" << copts_.curvature_weight_acc
-                << " curvature_weight_gyr=" << copts_.curvature_weight_gyr
-                << " curvature_only=" << (copts_.curvature_only ? "true" : "false");
+                << " smoothness_weight_acc=" << copts_.smoothness_weight_acc
+                << " smoothness_weight_gyr=" << copts_.smoothness_weight_gyr
+                << " imu_deviation_weight=" << copts_.imu_deviation_weight;
       throw std::runtime_error(abort_msg.str());
     }
     {
@@ -1501,16 +1505,18 @@ LioProcCoupled::CoupledSystemBuild LioProcCoupled::buildImuCorrectionSystem(
   // of whether their basis supports overlap -- default 0.0, so shipped
   // behavior is unchanged and this is provably md5-inert at that default.
   Eigen::MatrixXd Curv = Eigen::MatrixXd::Zero(n_c, n_c);
-  if ((copts_.curvature_weight_acc > 0.0 || copts_.curvature_weight_gyr > 0.0) && n_c >= 3) {
+  if ((copts_.smoothness_weight_acc > 0.0 || copts_.smoothness_weight_gyr > 0.0) && n_c >= 3) {
     Eigen::MatrixXd D = Eigen::MatrixXd::Zero(n_c - 2, n_c);
     for (int k = 0; k < n_c - 2; ++k) { D(k, k) = 1.0; D(k, k + 1) = -2.0; D(k, k + 2) = 1.0; }
     Curv = D.transpose() * D;
   }
-  // CQ-55 item 8, arm (c): curvature_only REPLACES the gram/sigma^2 value
-  // term with curvature_weight's shape penalty plus an explicit DC-only
-  // prior (dc_weight/sigma^2, applied UNIFORMLY to every (i,j) pair -- a
+  // CQ-72 items 0a/0b: mean_weight now applies UNCONDITIONALLY (no longer
+  // gated on imu_deviation_weight==0 the way dc_weight used to be gated on
+  // curvature_only) -- the two beliefs are independent, so the switch that
+  // used to force them together is gone. mean_weight/sigma^2, applied
+  // UNIFORMLY to every (i,j) pair -- a
   // rank-1 all-ones contribution whose quadratic form for c is exactly
-  // dc_weight/sigma^2 * n_c * ||mean(c)||^2, pricing the mean/constant
+  // mean_weight/sigma^2 * n_c * ||mean(c)||^2, pricing the mean/constant
   // direction only). A pure curvature penalty's 2D null space per axis
   // (constant AND linear both map to zero under [1,-2,1]) would otherwise
   // leave the bias-degenerate constant direction completely unpriced --
@@ -1546,21 +1552,30 @@ LioProcCoupled::CoupledSystemBuild LioProcCoupled::buildImuCorrectionSystem(
   Eigen::MatrixXd Lambda = Eigen::MatrixXd::Zero(ncol_c, ncol_c);
   for (int i = 0; i < n_c; ++i)
     for (int j = 0; j < n_c; ++j) {
-      // CQ-59 item 1: curv_acc/curv_gyr each normalized by the SAME
+      // CQ-59 item 1: smooth_acc/smooth_gyr each normalized by the SAME
       // sigma^2 the value term for that block uses, so the weight means
       // "this shape penalty is worth w times the value penalty" on that
       // block specifically -- replaces the single raw curv_ij that used
       // to apply identically to both blocks despite their ~4657x base-
       // prior stiffness difference.
-      const double curv_acc = copts_.curvature_weight_acc * Curv(i, j) / (sigma_a * sigma_a);
-      const double curv_gyr = copts_.curvature_weight_gyr * Curv(i, j) / (sigma_g * sigma_g);
-      const double value_gram = copts_.curvature_only ? 0.0 : gram(i, j);
-      const double dc_acc = copts_.curvature_only ? copts_.dc_weight / (sigma_a * sigma_a) : 0.0;
-      const double dc_gyr = copts_.curvature_only ? copts_.dc_weight / (sigma_g * sigma_g) : 0.0;
+      const double smooth_acc = copts_.smoothness_weight_acc * Curv(i, j) / (sigma_a * sigma_a);
+      const double smooth_gyr = copts_.smoothness_weight_gyr * Curv(i, j) / (sigma_g * sigma_g);
+      // CQ-72 item 0b: value_gram is now a plain multiplier (was: ternary
+      // gated on curvature_only) -- at the default imu_deviation_weight=1.0
+      // this is EXACTLY gram(i,j), identical to today's curvature_only=
+      // false arithmetic. dc_acc/dc_gyr are now UNCONDITIONAL (were gated
+      // on the SAME curvature_only switch as value_gram) -- at the default
+      // mean_weight=0.0 both are exactly 0.0, identical to today's
+      // dc_weight=0.0 (the only value ever shipped) regardless of
+      // curvature_only. Both defaults together reproduce today's
+      // arithmetic exactly -- the md5 gate is what checks that claim.
+      const double value_gram = copts_.imu_deviation_weight * gram(i, j);
+      const double dc_acc = copts_.mean_weight / (sigma_a * sigma_a);
+      const double dc_gyr = copts_.mean_weight / (sigma_g * sigma_g);
       Lambda.block<3, 3>(3 * i, 3 * j) =
-          M3D(value_gram * prec_acc_diag.asDiagonal()) + (curv_acc + dc_acc) * M3D::Identity();
+          M3D(value_gram * prec_acc_diag.asDiagonal()) + (smooth_acc + dc_acc) * M3D::Identity();
       Lambda.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) =
-          M3D(value_gram * prec_gyr_diag.asDiagonal()) + (curv_gyr + dc_gyr) * M3D::Identity();
+          M3D(value_gram * prec_gyr_diag.asDiagonal()) + (smooth_gyr + dc_gyr) * M3D::Identity();
     }
   // CQ-69: the low-band trajectory-deviation prior. Lambda_traj = sum_k
   // phi_head[k]^T W phi_head[k], W selecting phi_head[k]'s POSITION rows
@@ -1576,9 +1591,9 @@ LioProcCoupled::CoupledSystemBuild LioProcCoupled::buildImuCorrectionSystem(
   // sum, which is guaranteed PSD by construction (a sum of P_k^T*P_k
   // terms). Normalized by (t1-t0)^2: the term's own DC weighting scales as
   // T^2 (verified by computation in the card), so this keeps a given
-  // lambda_traj_pos meaning the same thing across scan durations/LiDAR
+  // traj_deviation_weight meaning the same thing across scan durations/LiDAR
   // rates. Default 0.0 -- md5-inert (the whole block is skipped).
-  if (copts_.lambda_traj_pos > 0.0) {
+  if (copts_.traj_deviation_weight > 0.0) {
     Eigen::MatrixXd Lambda_traj = Eigen::MatrixXd::Zero(ncol_c, ncol_c);
     for (const auto& phi_k : coupled_prop_.phi_head) {
       const Eigen::Matrix<double, 3, Eigen::Dynamic> P_k = phi_k.middleRows<3>(3);
@@ -1586,7 +1601,7 @@ LioProcCoupled::CoupledSystemBuild LioProcCoupled::buildImuCorrectionSystem(
     }
     const double T = t1 - t0;
     const double norm = (T * T > 1e-12) ? 1.0 / (T * T) : 0.0;
-    Lambda.noalias() += (copts_.lambda_traj_pos * norm) * Lambda_traj;
+    Lambda.noalias() += (copts_.traj_deviation_weight * norm) * Lambda_traj;
   }
   // CQ-62 item 1: S4 -- Lambda.
   if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S4_Lambda", Lambda);

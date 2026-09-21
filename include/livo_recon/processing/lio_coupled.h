@@ -147,8 +147,16 @@ struct LioProcCoupledOptions
   // checked-in config (grepped config/, scripts/ -- zero hits) and always
   // defaulted to 0.0, so nothing depends on it continuing to exist, and a
   // permanent alias for a knob nothing ever used is pure upkeep cost.
-  double curvature_weight_acc = 0.0;
-  double curvature_weight_gyr = 0.0;
+  //
+  // CQ-72 item 0a: renamed from curvature_weight_acc/curvature_weight_gyr
+  // to smoothness_weight_acc/smoothness_weight_gyr (config key moves from
+  // estimator/coupled/curvature_weight_{acc,gyr} to estimator/coupled/
+  // prior/smoothness_weight_{acc,gyr}) -- states the BELIEF this term
+  // encodes ("the correction should not wiggle") rather than the math
+  // operator (D^T D) that implements it. Same type, same default, same
+  // arithmetic -- a pure rename, not a new knob.
+  double smoothness_weight_acc = 0.0;
+  double smoothness_weight_gyr = 0.0;
   // CQ-69: "the trajectory change caused by the correction should be
   // small" as a THIRD prior band, distinct from gram (mid-band, IID-noise-
   // correct value prior) and curvature (high-band, second-difference shape
@@ -164,27 +172,45 @@ struct LioProcCoupledOptions
   // at every scan duration/LiDAR rate. Default 0.0 -- md5-inert (adds
   // nothing to Lambda at that default). A regularization weight, not a
   // variance -- never described as one in a filing.
-  double lambda_traj_pos = 0.0;
+  //
+  // CQ-72 item 0a: renamed from lambda_traj_pos to traj_deviation_weight
+  // (estimator/coupled/lambda_traj_pos -> estimator/coupled/prior/
+  // traj_deviation_weight) -- same reason as above, pure rename.
+  double traj_deviation_weight = 0.0;
   // CQ-55 item 11(b): the principled, threshold-free alternative to
   // freeze_bg/bias_freeze_on_vibration -- see estimateCoupledCorrection()'s
   // own comment at the accumulation site for the full mechanism. Default
   // false.
   bool bias_observable_only = false;
-  // CQ-55 item 8, arm (c): when true, the basis-Gram value term
-  // (gram(i,j)/sigma^2) is REPLACED (not supplemented) by curvature_weight's
-  // second-difference term plus an explicit DC-only prior (dc_weight below)
-  // -- see estimateCoupledCorrection()'s Lambda-construction comment for why
-  // a pure curvature penalty alone is an invalid configuration (its 2D null
-  // space per axis -- constant AND linear -- leaves the bias-degenerate
-  // constant direction completely unpriced; the DC term prices exactly
-  // that one direction back). Default false, no-op (curvature_weight's own
-  // existing value+curvature behavior is unchanged when this is off).
-  bool curvature_only = false;
-  // Precision (relative to 1/sigma^2, same scale the removed gram term
-  // used) of the explicit DC/mean-direction-only prior arm (c) adds back.
-  // Only read when curvature_only is true. Default 0.0 -- no validated
-  // value exists yet (rule 26); a test run must set this explicitly.
-  double dc_weight = 0.0;
+  // CQ-72 items 0a/0b: REPLACES curvature_only (bool, default false --
+  // "IMU prior off" and "mean prior on" were the SAME switch, the exact
+  // thing this card exists to fix) with a plain multiplier on the existing
+  // gram(i,j) value term: value_imu = imu_deviation_weight * gram(i,j).
+  // Config key estimator/coupled/curvature_only -> estimator/coupled/
+  // prior/imu_deviation_weight. Default 1.0 (== "the IMU prior is fully
+  // on", i.e. today's curvature_only=false behavior, since 1.0*gram(i,j)
+  // == gram(i,j)); 0.0 means fully off (== today's curvature_only=true's
+  // effect on this one term, MINUS the mean-prior coupling -- see
+  // mean_weight below, now independent). NOT a bool any more: rule 61/
+  // CQ-72's own on/off grid only ever sets it to {0.0, 1.0}, but the type
+  // is a double so a later card can ask a magnitude question without a
+  // second rename.
+  double imu_deviation_weight = 1.0;
+  // CQ-72 items 0a/0b: REPLACES dc_weight (double, default 0.0, only ever
+  // READ when curvature_only was true -- gated behind the SAME switch that
+  // turned the IMU prior off, so "IMU prior off" and "mean prior on" could
+  // never be set independently). Config key estimator/coupled/dc_weight ->
+  // estimator/coupled/prior/mean_weight. Precision (relative to 1/sigma^2,
+  // same scale the gram term uses) of an explicit DC/mean-direction-only
+  // prior: mean_acc = mean_weight / sigma_a^2, mean_gyr = mean_weight /
+  // sigma_g^2 -- now applied UNCONDITIONALLY (no longer gated on
+  // imu_deviation_weight being 0), so the two beliefs ("corrections should
+  // be small" and "corrections should not carry a constant offset") are
+  // independently switchable, which is the whole point of this rename.
+  // Default 0.0 -- md5-inert at that default (identical arithmetic to
+  // today's curvature_only=false/dc_weight=0.0 case, since dc_acc/dc_gyr
+  // were already always 0 then).
+  double mean_weight = 0.0;
   // CQ-59 item 4: builds the Lambda VALUE term's 3x3 blocks as a diagonal
   // from the calibration's real per-axis noise floor (state_->varAccFloor()/
   // varGyrFloor(), now genuinely anisotropic -- see calib_processing.cpp)
