@@ -131,6 +131,17 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
         "covariance at the final trajectory is meaningless if the final "
         "trajectory was never actually re-deskewed/re-propagated against.");
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/prior_at_scan_start", copts_.prior_at_scan_start, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/add_q_scan_to_posterior", copts_.add_q_scan_to_posterior, false);
+  if (copts_.add_q_scan_to_posterior) {
+    bool imu_log_qhat_en = false;
+    pnh.param<bool>("imu/log_qhat_en", imu_log_qhat_en, false);
+    if (!imu_log_qhat_en)
+      cfg.requireCombination(
+          "estimator/coupled/add_q_scan_to_posterior requires "
+          "imu/log_qhat_en=true -- it reads the frame-local Q_scan that "
+          "machinery already captures every scan; there is no separate "
+          "capture path.");
+  }
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_point_plane_en", copts_.log_point_plane_en, false);
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/log_point_plane_hist_start_scan", copts_.log_point_plane_hist_start_scan, 0);
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/log_point_plane_hist_n_scans", copts_.log_point_plane_hist_n_scans, 20);
@@ -985,6 +996,21 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       {
         Eigen::MatrixXd phi_p_phit, accum_cov_w, p_before;
         if (imuProcQhatRead(phi_p_phit, accum_cov_w, p_before)) {
+          // CQ-76-R3: add the frame-local Q_scan to the ALREADY-WRITTEN
+          // posterior's rot/pos/vel 9x9 block (state_->covMut() was set
+          // by CQ-44 item 5's write above, and by arm (c)'s own relin
+          // overwrite if that also fired -- either way this runs after
+          // and adds on top of whichever posterior is currently in
+          // state_->cov(), matching the card's own "AFTER the M A^-1 M^T
+          // write" instruction). accum_cov_w is 18x18; only the 9x9
+          // [idxR,idxP,idxV) sub-block is added, per the card's own scope.
+          if (copts_.add_q_scan_to_posterior && accum_cov_w.rows() >= 9 && accum_cov_w.cols() >= 9) {
+            Eigen::MatrixXd P_with_q = state_->cov();
+            if (P_with_q.rows() >= 9 && P_with_q.cols() >= 9) {
+              P_with_q.block<9, 9>(0, 0) += accum_cov_w.block<9, 9>(0, 0);
+              state_->covMut() = P_with_q;
+            }
+          }
           const Eigen::MatrixXd P_t1 = phi_p_phit + accum_cov_w;  // = g_qhat_p_after
           if (p_before.rows() == P_t1.rows() && p_before.rows() >= 18) {
             auto blockEig = [](const Eigen::MatrixXd& M, int idx0, double& tr,
@@ -1548,11 +1574,21 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
 
   // ---- (4) the prior. TWO BLOCKS, per items 3c/3d/3e(v)/3f REVISED
   // 2026-09-19: Lambda (the c prior, item 3b/4, UNCHANGED math) on the
-  // c-block, and Pi_ss -- now the FULL 18x18 P(t0)^-1, at
+  // c-block, and Pi_ss -- now the FULL 18x18 P(t1)^-1 (CQ-76-R3: this is
+  // the PREVIOUS scan's post-solve posterior, i.e. P(t1) of that scan,
+  // read at the top of THIS scan before propagation -- not this scan's
+  // own pre-propagation P(t0), despite the state_->cov() read site's own
+  // naming. CQ-76-R2's T2.1 A/B (prior_at_scan_start) confirmed the two
+  // are materially different matrices: substituting the genuine
+  // pre-propagation P(t0) diverges catastrophically (four orders of
+  // magnitude in ATE) precisely because P(t1) is the only route by which
+  // within-scan process noise (Q_unmodelled, see :306-311's own comment)
+  // reaches the posterior at all -- so this being P(t1) is load-bearing,
+  // not a naming slip to silently correct behind), at
   // [idxR,idxP,idxV,idxBG,idxBA,idxG]. Bug 2's fix solves for ALL of
   // delta_x(t0) jointly (nothing held fixed/conditioned any more), so this
   // is no longer a Schur-complement sub-block trick -- these six blocks ARE
-  // the entire state, so Pi_ss is simply P(t0)^-1 itself (row/column
+  // the entire state, so Pi_ss is simply P(t1)^-1 itself (row/column
   // order matched to this solve's own [phi0,p0,v,bg,ba,g] convention). No
   // cross term with the c-block: the prior itself does not correlate the
   // two blocks (any correlation enters only through the shared LiDAR
@@ -1681,7 +1717,7 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
         P_for_omega = p_before_peek;
       }
     }
-    const Eigen::MatrixXd Omega = P_for_omega.inverse();  // information form of P(t0) (or, if prior_at_scan_start, the pre-propagation snapshot)
+    const Eigen::MatrixXd Omega = P_for_omega.inverse();  // information form of P(t1) of the PREVIOUS scan (CQ-76-R3: not this scan's own P(t0) -- see this function's own Pi_ss comment above), or, if prior_at_scan_start, the pre-propagation snapshot
     // CQ-62 item 1: S2 -- Omega, the full dense inverse.
     if (copts_.psd_audit_en) logPsdStage(voxel_map_->frame_idx_, coupled_iters_, "S2_Omega", Omega);
     const int idx[6] = {StateGroup::idxR(), StateGroup::idxP(), StateGroup::idxV(),

@@ -282,6 +282,12 @@ struct LioProcCoupledOptions
   // deliberate sensitivity probe, not a claim this alternative is more
   // correct -- requires imu/log_qhat_en=true (enforced at load time).
   bool prior_at_scan_start = false;
+  // CQ-76-R3: the principled pairing T2.1 alone did not test. Adds the
+  // frame-local Q_scan (T1.0's own g_qhat_accum_cov_w, already captured
+  // every scan by imuProcQhatRead()) to the rot/pos/vel 9x9 block of the
+  // 18x18 posterior AFTER the normal M*A^-1*M^T write -- requires
+  // imu/log_qhat_en=true (enforced at load time), md5-inert at false.
+  bool add_q_scan_to_posterior = false;
   // CQ-79: report-only, log-only, reads quantities the accumulation loop
   // already holds (struct Residual's own r/t/plane_id/sigma_squared) --
   // no new computation, never touches the solve. Default false,
