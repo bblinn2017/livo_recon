@@ -49,7 +49,8 @@ PoseSplineCBlockBuild buildPoseSplineCBlock(
     double pose_imu_weight_acc, double pose_imu_weight_gyr,
     double pose_curvature_weight_pos, double pose_curvature_weight_rot,
     PoseSplineTimeMode time_mode, double end_time_t1, bool audit,
-    double tikhonov_eps)
+    double tikhonov_eps, double sigma_acc, double sigma_gyr,
+    const Eigen::VectorXd& c_current)
 {
   const int n_c = spline.nControlPoints();
   const int ncol_c = 6 * n_c;  // [c_p(3n_c); c_phi(3n_c)]
@@ -59,6 +60,12 @@ PoseSplineCBlockBuild buildPoseSplineCBlock(
   build.b = Eigen::VectorXd::Zero(ncol_c);
   Eigen::MatrixXd& A = build.A;
   Eigen::VectorXd& b = build.b;
+  // POST-CQ-87-REVIEW FIX (item 3): mirrors every addition to `A` made by
+  // the curvature/Tikhonov prior ONLY (never the LiDAR/IMU measurement
+  // terms) -- see this function's own declaration-site doc comment for
+  // the derivation. Applied to `b` once, after the prior's own
+  // contribution to `A` is fully assembled below.
+  Eigen::MatrixXd Lambda_reg = Eigen::MatrixXd::Identity(ncol_c, ncol_c) * tikhonov_eps;
 
   Eigen::MatrixXd A_lidar_only;
   Eigen::MatrixXd phic_spread_sum;
@@ -73,11 +80,16 @@ PoseSplineCBlockBuild buildPoseSplineCBlock(
     const Eigen::MatrixXd Curv = D.transpose() * D;
     for (int i = 0; i < n_c; ++i)
       for (int j = 0; j < n_c; ++j) {
-        if (pose_curvature_weight_pos > 0.0)
-          A.block<3, 3>(3 * i, 3 * j) += pose_curvature_weight_pos * Curv(i, j) * M3D::Identity();
-        if (pose_curvature_weight_rot > 0.0)
-          A.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) +=
-              pose_curvature_weight_rot * Curv(i, j) * M3D::Identity();
+        if (pose_curvature_weight_pos > 0.0) {
+          const M3D block = pose_curvature_weight_pos * Curv(i, j) * M3D::Identity();
+          A.block<3, 3>(3 * i, 3 * j) += block;
+          Lambda_reg.block<3, 3>(3 * i, 3 * j) += block;
+        }
+        if (pose_curvature_weight_rot > 0.0) {
+          const M3D block = pose_curvature_weight_rot * Curv(i, j) * M3D::Identity();
+          A.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) += block;
+          Lambda_reg.block<3, 3>(3 * n_c + 3 * i, 3 * n_c + 3 * j) += block;
+        }
       }
   }
 
@@ -134,13 +146,16 @@ PoseSplineCBlockBuild buildPoseSplineCBlock(
 
   // ---- IMU-as-measurement-factor: per raw sample, FD Jacobian ----
   build.n_imu = static_cast<int>(imu_obs.size());
-  // A fixed, generous floor noise so the term is well-scaled even before any
-  // real calibration is threaded through -- this builder is a standalone
-  // correctness-gate harness (see the header's own doc comment), not yet
-  // wired to state_'s own calibrated sigma_a/sigma_g.
-  constexpr double SIGMA_A = 0.5, SIGMA_G = 0.3;
-  const double w_acc = pose_imu_weight_acc / (SIGMA_A * SIGMA_A);
-  const double w_gyr = pose_imu_weight_gyr / (SIGMA_G * SIGMA_G);
+  // POST-CQ-87-REVIEW FIX (item 4): sigma_acc/sigma_gyr are now caller-
+  // supplied (the live call site passes state_->varAcc()/varGyr(), the
+  // SAME calibrated noise the raw_imu arm solves against) rather than a
+  // fixed placeholder -- see this function's own declaration-site doc
+  // comment. Floored to avoid a division blowup if a caller ever passes
+  // (near-)zero.
+  const double sigma_a_eff = std::max(sigma_acc, 1e-6);
+  const double sigma_g_eff = std::max(sigma_gyr, 1e-6);
+  const double w_acc = pose_imu_weight_acc / (sigma_a_eff * sigma_a_eff);
+  const double w_gyr = pose_imu_weight_gyr / (sigma_g_eff * sigma_g_eff);
   for (const auto& obs : imu_obs) {
     if (pose_imu_weight_acc > 0.0) {
       const V3D r_a = spline.rotAt(obs.t).transpose() * (spline.accAt(obs.t) - gravity) +
@@ -180,6 +195,17 @@ PoseSplineCBlockBuild buildPoseSplineCBlock(
       A.noalias() += w_gyr * (J.transpose() * J);
       b.noalias() -= w_gyr * J.transpose() * r_g;
     }
+  }
+
+  // POST-CQ-87-REVIEW FIX (item 3), applied last (order doesn't matter --
+  // this is a plain sum into `b`, same as every LiDAR/IMU contribution
+  // above): center the curvature/Tikhonov prior at the CURRENT accumulated
+  // correction rather than at 0. Empty c_current (default) means "no
+  // correction, reproduce old behavior" -- exactly right for iteration 1
+  // (c=0) and for any caller (e.g. this file's own correctness-gate test)
+  // that never accumulates a c at all.
+  if (c_current.size() == ncol_c) {
+    b.noalias() -= Lambda_reg * c_current;
   }
 
   return build;

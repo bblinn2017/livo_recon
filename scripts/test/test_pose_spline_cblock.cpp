@@ -163,6 +163,125 @@ int main()
   const bool smoke_pass = finite && (min_eig > -1e-9);
   pass = pass && smoke_pass;
 
+  // ==========================================================================
+  // POST-CQ-87-REVIEW addition (item 9: "the current correctness test is not
+  // sufficient" -- GN iteration 2+, head consistency, FD Jacobian, rotation
+  // head-tie characterization were all named as gaps). Four new checks below,
+  // each targeting one specific reviewer-named gap.
+  // ==========================================================================
+
+  // ---- Check 1 (item 1's fix, item 9's "head consistency") ----
+  // Refit WITH setFrozenBoundary() this time (the previous fit() call above
+  // was deliberately left unconstrained, matching pre-fix behavior, so its
+  // own reference numbers stay meaningful) and confirm p(t0)==pos0,
+  // R(t0)==rot0 to numerical precision -- NOT approximately, per item 1's
+  // own "unless p_fit(t0)=p_start, you do not actually have
+  // p(t0)=p_start+delta_p0" argument.
+  ScanSpline spline_frozen;
+  spline_frozen.setFrozenBoundary(SplineOptions::N_FROZEN_CP,
+                                   poses.front().pos, poses.front().rot, poses.front().vel,
+                                   poses.back().pos, poses.back().rot, poses.back().vel);
+  const bool ok_frozen = spline_frozen.fit(poses, t0, t1, opts);
+  const double head_pos_err = ok_frozen ? (spline_frozen.posAt(t0) - poses.front().pos).norm() : -1.0;
+  const double head_rot_err = ok_frozen ? Log(M3D(poses.front().rot.transpose() * spline_frozen.rotAt(t0))).norm() : -1.0;
+  std::printf("head consistency: ok=%d pos_err=%.3e rot_err=%.3e (expect ~0)\n",
+              ok_frozen ? 1 : 0, head_pos_err, head_rot_err);
+  const bool head_pass = ok_frozen && head_pos_err < 1e-9 && head_rot_err < 1e-9;
+  pass = pass && head_pass;
+
+  // ---- Check 2 (item 3's fix, direct formula verification) ----
+  // Curvature+Tikhonov only (no LiDAR/IMU), so b is otherwise exactly zero
+  // -- with a nonzero c_current, the fix's own claim is `b == -Lambda*c`
+  // literally, checkable to machine precision without any GN dynamics.
+  {
+    const std::vector<PoseSplineLidarObs> no_lidar;
+    const std::vector<PoseSplineImuObs> no_imu;
+    const auto build_c0 = buildPoseSplineCBlock(
+        spline, no_lidar, no_imu, V3D::Zero(), V3D::Zero(), gravity,
+        /*pose_imu_weight_acc=*/0.0, /*pose_imu_weight_gyr=*/0.0,
+        /*pose_curvature_weight_pos=*/2.0, /*pose_curvature_weight_rot=*/3.0,
+        PoseSplineTimeMode::kPointTime, 0.0, /*audit=*/false,
+        POSE_SPLINE_TIKHONOV_EPS, 0.5, 0.3, Eigen::VectorXd());
+    Eigen::VectorXd v(build_c0.A.rows());
+    for (int i = 0; i < v.size(); ++i) v(i) = 0.01 * std::sin(0.7 * i + 1.0);  // arbitrary, deterministic
+    const auto build_cv = buildPoseSplineCBlock(
+        spline, no_lidar, no_imu, V3D::Zero(), V3D::Zero(), gravity,
+        /*pose_imu_weight_acc=*/0.0, /*pose_imu_weight_gyr=*/0.0,
+        /*pose_curvature_weight_pos=*/2.0, /*pose_curvature_weight_rot=*/3.0,
+        PoseSplineTimeMode::kPointTime, 0.0, /*audit=*/false,
+        POSE_SPLINE_TIKHONOV_EPS, 0.5, 0.3, v);
+    // Lambda == build_c0.A exactly here (b_c0 == 0, A never depends on c).
+    const Eigen::VectorXd predicted_b = -(build_c0.A * v);
+    const double reg_grad_err = (build_cv.b - predicted_b).cwiseAbs().maxCoeff();
+    std::printf("regularizer gradient formula: max|b_actual - (-Lambda*c)| = %.3e (expect ~0)\n",
+                reg_grad_err);
+    pass = pass && (reg_grad_err < 1e-9);
+  }
+
+  // ---- Check 3 (item 2's own requested test: rotation head-tie is a
+  // first-order chart approximation, discrepancy should scale QUADRATICALLY
+  // with perturbation size) ----
+  // R_spline(t0, c+dtheta-tied-to-head) vs R_start*Exp(dtheta): tie cp_phi
+  // 0..N_FROZEN_CP-1's CORRECTION to dtheta (the exact operation
+  // reducePoseSplineHeadCoupling() performs) and compare.
+  {
+    const M3D R_start = spline_frozen.rotAt(t0);
+    const V3D axis = V3D(0.3, -0.6, 0.74).normalized();
+    std::printf("rotation head-tie characterization (expect ~quadratic scaling):\n");
+    double prev_err = -1.0;
+    for (double mag : {1e-4, 1e-3, 1e-2, 1e-1}) {
+      const V3D dtheta = axis * mag;
+      ScanSpline perturbed = spline_frozen;
+      for (int j = 0; j < std::min(POSE_SPLINE_HEAD_TIE_CP, perturbed.nControlPoints()); ++j)
+        perturbed.cp_phi_.col(j) += dtheta;
+      const M3D R_actual = perturbed.rotAt(t0);
+      const M3D R_expected = R_start * Exp(dtheta);
+      const double err = Log(M3D(R_expected.transpose() * R_actual)).norm();
+      const double ratio = (prev_err > 0.0) ? (err / prev_err) : 0.0;
+      std::printf("  |dtheta|=%.1e  err=%.3e  ratio_vs_prev(expect~100 per 10x step)=%.2f\n",
+                  mag, err, ratio);
+      prev_err = err;
+    }
+    // Not folded into `pass` -- item 2's own text: "this might be perfectly
+    // adequate... but it should be characterized," not asserted against a
+    // fixed threshold. Printed for the record per rule 41b ("print the
+    // number, never 'ok'").
+  }
+
+  // ---- Check 4 (item 9's "finite-difference LiDAR Jacobian... PSD does
+  // not prove the Jacobian is correct") ----
+  // Recompute the TRUE point-to-plane residual r(c) = n^T(R(t;c)q+p(t;c))+d
+  // (d fixed from r(0)) under a perturbed control point, central-difference
+  // it, and compare against the analytic Jrow column buildPoseSplineCBlock()
+  // used (recomputed identically here, since Jrow itself isn't exposed).
+  {
+    const V3D q(1.0, 0.2, 0.1), n(0.0, 0.0, 1.0);
+    const double t_obs = poses[N / 2].t;
+    const double d_plane = 0.05;  // arbitrary fixed plane offset -- doesn't affect dr/dc
+    auto residual = [&](const ScanSpline& s) {
+      return n.dot(s.rotAt(t_obs) * q + s.posAt(t_obs)) + d_plane;
+    };
+    int first_cp; Eigen::Vector4d bw, dbw, ddbw;
+    spline.basisAt(t_obs, first_cp, bw, dbw, ddbw);
+    constexpr double EPS = 1e-6;
+    double max_rel_err = 0.0;
+    for (int k = 0; k < 4; ++k) {
+      const int j = first_cp + k;
+      if (j < 0 || j >= n_c) continue;
+      for (int axis = 0; axis < 3; ++axis) {
+        ScanSpline plus = spline, minus = spline;
+        plus.cpPosMut()(axis, j)  += EPS;
+        minus.cpPosMut()(axis, j) -= EPS;
+        const double fd = (residual(plus) - residual(minus)) / (2.0 * EPS);
+        const double analytic = bw(k) * n(axis);  // dr/dc_p[j][axis] = b_j(t)*n^T
+        max_rel_err = std::max(max_rel_err, std::fabs(fd - analytic));
+      }
+    }
+    std::printf("LiDAR position-Jacobian FD check: max|fd - analytic| = %.3e (expect ~0)\n",
+                max_rel_err);
+    pass = pass && (max_rel_err < 1e-6);
+  }
+
   std::printf("%s\n", pass ? "PASS" : "FAIL");
   return pass ? 0 : 1;
 }

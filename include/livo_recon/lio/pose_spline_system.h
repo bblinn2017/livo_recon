@@ -147,6 +147,33 @@ enum class PoseSplineTimeMode { kPointTime, kEndTime };
 // stays standalone/config-free, per its own header doc comment and item
 // 6's correctness gate's own dependence on that). Default
 // POSE_SPLINE_TIKHONOV_EPS reproduces every prior call site exactly.
+//
+// POST-CQ-87-REVIEW FIX (item 3): `c_current`, if non-empty (must then be
+// exactly 6*n_c long), is the correction ALREADY ACCUMULATED this scan
+// (coupled_c_pos_/coupled_c_rot_ flattened, same [c_p;c_phi] layout as
+// `A`/`b`). The smoothness (curvature) and Tikhonov terms are a quadratic
+// prior E(c) = 0.5 c^T Lambda c on the correction itself -- for a GN step
+// linearised around the CURRENT c=c_current, the correct normal-equations
+// contribution is `Lambda*delta_c = -Lambda*c_current` (added to `A`,`b`
+// respectively), not `Lambda*delta_c = 0`. Previously the curvature/
+// Tikhonov blocks were added to `A` only, never to `b` -- correct at c=0
+// (the first GN iteration, where every prior call site left this
+// starting) but WRONG at c=c_current!=0 (iteration 2+): the solver kept
+// changing the regularizer's STIFFNESS every iteration without applying
+// its corresponding RESTORING FORCE, i.e. the prior silently stopped
+// being centered at 0 after iteration 1. Leaving `c_current` empty
+// (default -- matches every pre-fix call site, including this file's own
+// correctness-gate test) reproduces the old (c=0-only-correct) behavior
+// exactly; a live per-GN-iteration caller (lio_coupled.cpp) always passes
+// the real accumulated c.
+//
+// POST-CQ-87-REVIEW FIX (item 4): `sigma_acc`/`sigma_gyr` replace the
+// previously-hardcoded SIGMA_A=0.5/SIGMA_G=0.3 floor constants -- this
+// arm now solves against the SAME calibrated IMU noise the raw_imu arm
+// uses (state_->varAcc()/varGyr(), see the live call site), making an A/B
+// comparison between the two arms fair. Defaults (0.5/0.3) reproduce
+// every prior call site's numbers exactly for any caller that doesn't
+// pass real values (this file's own test).
 PoseSplineCBlockBuild buildPoseSplineCBlock(
     const ScanSpline& spline,
     const std::vector<PoseSplineLidarObs>& lidar_obs,
@@ -156,7 +183,9 @@ PoseSplineCBlockBuild buildPoseSplineCBlock(
     double pose_curvature_weight_pos, double pose_curvature_weight_rot,
     PoseSplineTimeMode time_mode = PoseSplineTimeMode::kPointTime,
     double end_time_t1 = 0.0, bool audit = false,
-    double tikhonov_eps = 1e-6);
+    double tikhonov_eps = 1e-6,
+    double sigma_acc = 0.5, double sigma_gyr = 0.3,
+    const Eigen::VectorXd& c_current = Eigen::VectorXd());
 
 // The fixed regularizer floor's DEFAULT value -- see
 // buildPoseSplineCBlock()'s own doc comment. Small enough to be

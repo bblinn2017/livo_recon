@@ -460,6 +460,36 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       SplineOptions pose_fit_opts;
       pose_fit_opts.control_point_hz = (copts_.n_c - 3) / std::max(t1 - t0, 1e-6);
       pose_fit_opts.end_constraint_velocity = true;
+      // POST-CQ-87-REVIEW FIX (item 1, "the pose spline is fitted without
+      // enforcing the scan-start pose"): without this, the initial fit is
+      // an unconstrained OLS approximation to mg.poses, NOT guaranteed to
+      // satisfy p(t0)=p_ESIKF(t0)/R(t0)=R_ESIKF(t0) -- and
+      // reducePoseSplineHeadCoupling()'s head tie only constrains the
+      // CORRECTION at t0 (p(t0)=p_fit(t0)+delta_p0), so without this fix
+      // "p(t0)=p_start+delta_p0" does not actually hold unless p_fit(t0)
+      // already equals p_start. mg.poses.front() IS p_ESIKF(t0)/R_ESIKF(t0)
+      // (this scan's own IMU-propagated starting condition, "the matching
+      // initial condition to the other arm's c=0" per CQ-82's own framing)
+      // -- freezing the fit to it directly, rather than via a separate
+      // prev_scan_end_pos_-style member (decoupled's own pattern,
+      // lio_decoupled.cpp:257-260), needs no "is this the first scan"
+      // gate: mg.poses.front() is always a valid boundary value, even on
+      // scan 1. Tail is frozen to state_->pos()/rot()/vel() (the
+      // IMU-propagated scan-end estimate, correction loop hasn't run yet)
+      // -- mirroring decoupled's own tail convention exactly. The reviewer
+      // who flagged this said "definitely enforce the head... not
+      // necessarily the tail" -- both are frozen here anyway because
+      // setFrozenBoundary()'s KKT construction only offers a single
+      // both-ends gate (no head-only mode exists in spline.cpp), and
+      // reusing that already-tested machinery (identical to decoupled's
+      // own call) is preferable to a new one-sided KKT variant; freezing
+      // the tail too is a free/harmless correctness step since the
+      // correction loop is a free solve for every control point beyond
+      // the head tie regardless of what fit() chose there.
+      coupled_pose_spline_.setFrozenBoundary(
+          SplineOptions::N_FROZEN_CP,
+          mg.poses.front().pos, mg.poses.front().rot, mg.poses.front().vel,
+          state_->pos(), state_->rot(), state_->vel());
       coupled_pose_spline_valid_ = coupled_pose_spline_.fit(mg.poses, t0, t1, pose_fit_opts);
       // BUGFIX (found via a live crash: SIGSEGV inside processLIO, an
       // out-of-bounds Eigen column access): ScanSpline::fit() can silently
@@ -3078,13 +3108,33 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
   const PoseSplineTimeMode pose_time_mode =
       (copts_.jacobian_time_mode == "end_time") ? PoseSplineTimeMode::kEndTime
                                                  : PoseSplineTimeMode::kPointTime;
+  // POST-CQ-87-REVIEW FIX (item 4): the SAME calibrated IMU noise the
+  // raw_imu arm solves against (state_->varAcc()/varGyr(), .mean()
+  // collapses to a scalar sigma -- the same convention this file already
+  // uses for varAccFloor()/varGyrFloor(), ~line 1175), not a hardcoded
+  // placeholder -- makes an A/B comparison against raw_imu fair.
+  const double pose_sigma_acc = std::sqrt(state_->varAcc().mean());
+  const double pose_sigma_gyr = std::sqrt(state_->varGyr().mean());
+  // POST-CQ-87-REVIEW FIX (item 3): the correction ALREADY accumulated
+  // this scan (across earlier GN iterations), flattened into the SAME
+  // [c_p(3n_c); c_phi(3n_c)] layout buildPoseSplineCBlock() itself uses --
+  // required so the curvature/Tikhonov prior's gradient is centered at the
+  // CURRENT c, not silently re-centered at 0 every iteration. c=0 on
+  // iteration 1 (coupled_c_pos_/coupled_c_rot_ were just reset to Zero()
+  // at scan start), so this is a no-op there and only matters from
+  // iteration 2 onward.
+  Eigen::VectorXd c_current(6 * n_c);
+  for (int j = 0; j < n_c; ++j) {
+    c_current.segment<3>(3 * j)           = coupled_c_pos_[j];
+    c_current.segment<3>(3 * n_c + 3 * j) = coupled_c_rot_[j];
+  }
   const auto build = buildPoseSplineCBlock(
       trial, lidar_obs, imu_obs,
       state_->biasAcc(), state_->biasGyr(), state_->gravity(),
       copts_.pose_imu_weight_acc, copts_.pose_imu_weight_gyr,
       copts_.pose_curvature_weight_pos, copts_.pose_curvature_weight_rot,
       pose_time_mode, t1, /*audit=*/copts_.psd_audit_en,
-      copts_.pose_tikhonov_eps);
+      copts_.pose_tikhonov_eps, pose_sigma_acc, pose_sigma_gyr, c_current);
 
   if (copts_.psd_audit_en) {
     // CQ-86 item 0: rank_cblock = numerical rank of build.A_lidar_only (the
