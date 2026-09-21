@@ -514,7 +514,8 @@ bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<Anc
          << "  depth_clamped=" << (depth_clamped ? 1 : 0)
          << "  weight=" << weight << "  weight_var=" << weight_var
          << "  htH_rr=" << (J.head<3>().squaredNorm() * weight)
-         << "  htH_pp=" << (J.tail<3>().squaredNorm() * weight * opts.pos_weight_scale)
+         // pos_weight_scale^2 matches the actually-applied scaling (outer product of a once-scaled J).
+         << "  htH_pp=" << (J.tail<3>().squaredNorm() * weight * opts.pos_weight_scale * opts.pos_weight_scale)
          << "  J=[" << J << "]"
          << "  Htz_i=[" << Htz_i.transpose() << "]\n";
       thread_point_log[t] += ps.str();
