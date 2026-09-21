@@ -63,13 +63,23 @@ constexpr double REFINE_STEP_WARN = 0.10;   // metres
 // ignored when include_rate is false. Basis values match basisU(0,...)/
 // basisU(1,...) exactly (b=[1/6,4/6,1/6,0], db=[-1/2,0,1/2,0] at u=0; the
 // mirror image at u=1) -- see item (2)'s own worked-out rows.
+// `constrain_tail` (pose-spline follow-up, user instruction 2026-09-21
+// item 5: "do not initially hard-clamp the tail -- let LiDAR + IMU +
+// smoothness determine the endpoint, otherwise the experiment loses one
+// of the main freedoms we're trying to investigate"): when false, only
+// the head_target/head_rate rows are built -- k_end rows total instead of
+// 2*k_end, tail_target/tail_rate are ignored. Defaults true, reproducing
+// every existing caller (decoupled's own always-both-ends usage,
+// including moveTailClamp()'s later reuse of this same row layout)
+// exactly.
 void buildEndConstraints(int n_cp, bool include_rate,
                          const V3D& head_target, const V3D& tail_target,
                          const V3D& head_rate, const V3D& tail_rate, double delta,
-                         Eigen::MatrixXd& C, Eigen::MatrixXd& D)
+                         Eigen::MatrixXd& C, Eigen::MatrixXd& D,
+                         bool constrain_tail = true)
 {
   const int k_end = include_rate ? 2 : 1;
-  const int k = 2 * k_end;
+  const int k = constrain_tail ? 2 * k_end : k_end;
   C = Eigen::MatrixXd::Zero(k, n_cp);
   D = Eigen::MatrixXd::Zero(k, 3);
 
@@ -79,6 +89,8 @@ void buildEndConstraints(int n_cp, bool include_rate,
     C(1, 0) = -0.5; C(1, 2) = 0.5;
     D.row(1) = (head_rate * delta).transpose();   // d/dt = (db.cp)/delta
   }
+
+  if (!constrain_tail) return;
 
   const int t0 = n_cp - 3;
   C(k_end, t0) = 1.0 / 6.0; C(k_end, t0 + 1) = 4.0 / 6.0; C(k_end, t0 + 2) = 1.0 / 6.0;
@@ -328,10 +340,10 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   if (have_boundary) {
     buildEndConstraints(n_cp_, opts.end_constraint_velocity,
                         frozen_pos_, frozen_pos1_, frozen_vel_, frozen_vel1_,
-                        delta_, C_p, D_p);
+                        delta_, C_p, D_p, constrain_tail_);
     buildEndConstraints(n_cp_, /*include_rate=*/false,
                         frozen_phi, frozen_phi1, V3D::Zero(), V3D::Zero(),
-                        delta_, C_r, D_r);
+                        delta_, C_r, D_r, constrain_tail_);
   } else {
     C_p = Eigen::MatrixXd(0, n_cp_); D_p = Eigen::MatrixXd(0, 3);
     C_r = Eigen::MatrixXd(0, n_cp_); D_r = Eigen::MatrixXd(0, 3);

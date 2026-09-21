@@ -98,6 +98,30 @@ struct LioProcCoupledOptions
   double pose_imu_var_acc = 1e-4;
   double pose_imu_var_gyr = 1e-4;
 
+  // User instruction 2026-09-21, item 15 ("fix the remaining numerical
+  // stability issue... the observed ScanSpline::fit() crashes are
+  // consistent with an upstream unstable pose-spline update"). Diagnosed
+  // live (psd_audit_en instrumentation, ntu_viral/eee_01/n_c=13): the GN
+  // solve diverges EXPONENTIALLY starting scan 1 iteration 1
+  // (||delta_c_pos|| on the FREE control points: 0.036m -> 324m -> 3.1e6m
+  // across 3 iterations, in every IMU/curvature weight configuration
+  // tested) -- an unconstrained Gauss-Newton step with no line search or
+  // trust region, exactly the gap item 15 names. This is a simple
+  // dogleg-style safeguard: if the worst free-control-point step this
+  // iteration exceeds the bound, the ENTIRE solved delta vector (both
+  // pos and rot sub-blocks, plus the head prior's own delta) is scaled
+  // down by one scalar so the direction is preserved and only the length
+  // is capped -- cheaper than a real trust region (no re-solve), but
+  // directly stops the geometric blowup at its source rather than only
+  // detecting it after the fact (ldlt.info()/allFinite() checks above).
+  // 0.0 = off (md5-inert at 0.0, matching every other numerics knob in
+  // this file). Non-zero defaults below are a FIRST proposed value (the
+  // sane iteration-0 step measured live was ~0.036m/2e-4rad -- these caps
+  // sit roughly an order of magnitude above that), not a validated
+  // choice -- report the actual number this produces before trusting it.
+  double pose_gn_max_step_pos_m = 0.5;
+  double pose_gn_max_step_rot_rad = 0.2;
+
   // CQ-85 item 1: rule 58f's exact failure mode -- CQ-72's own 96-cell grid
   // produced a cell reporting completed=yes with ATE=396,499,288.300 mm (a
   // FAILED run that looked like a successful one; imu_deviation_weight=0,

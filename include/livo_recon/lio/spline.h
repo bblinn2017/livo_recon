@@ -478,12 +478,26 @@ public:
   // (moveTailClamp() updates it every iteration, same as pos1/rot1 always
   // have). Both are ignored by the k=2 (velocity:false) constraint set but
   // always stored, since which setting is active can change frame to frame.
+  // `constrain_tail` (pose-spline follow-up, user instruction 2026-09-21
+  // item 5): when false, fit()'s own KKT system constrains ONLY the head
+  // (pos0/rot0/vel0) -- pos1/rot1/vel1 are still stored (moveTailClamp()
+  // and any caller reading frozen_pos1_/frozen_rot1_ elsewhere still see
+  // them) but contribute NO constraint rows, so the tail is free to be
+  // determined by the LiDAR/IMU/smoothness data term alone. Defaults true,
+  // reproducing every existing caller (decoupled's own always-both-ends
+  // usage) exactly -- moveTailClamp()'s constraint-increment reuse of the
+  // cached KKT factorization assumes the both-ends row layout and must
+  // only be called when constrain_tail_ is true (unenforced here -- no
+  // caller passes false today except the pose arm, which never calls
+  // moveTailClamp() at all).
   void setFrozenBoundary(int n_frozen,
                          const V3D& pos0, const M3D& rot0, const V3D& vel0,
-                         const V3D& pos1, const M3D& rot1, const V3D& vel1)
+                         const V3D& pos1, const M3D& rot1, const V3D& vel1,
+                         bool constrain_tail = true)
   { n_frozen_cp_ = n_frozen;
     frozen_pos_ = pos0; frozen_rot_ = rot0; frozen_vel_ = vel0;
-    frozen_pos1_ = pos1; frozen_rot1_ = rot1; frozen_vel1_ = vel1; }
+    frozen_pos1_ = pos1; frozen_rot1_ = rot1; frozen_vel1_ = vel1;
+    constrain_tail_ = constrain_tail; }
   int nFrozenCp() const { return n_frozen_cp_; }
 
   // CQ-41 item (3c): move the TAIL constraint to a new scan-end pose
@@ -709,6 +723,7 @@ public:
   V3D    frozen_pos1_ = V3D::Zero();
   M3D    frozen_rot1_ = M3D::Identity();
   V3D    frozen_vel1_ = V3D::Zero();
+  bool   constrain_tail_ = true;
 
   // CQ-41 item (3c): the KKT factorization built by fit() for the position
   // and rotation channels, cached so moveTailClamp() can reuse it for a

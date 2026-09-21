@@ -103,6 +103,8 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   // varGyr() at all.
   paramWarn<double>(pnh, "state/cov/acc", copts_.pose_imu_var_acc, 1e-4);
   paramWarn<double>(pnh, "state/cov/gyr", copts_.pose_imu_var_gyr, 1e-4);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_gn_max_step_pos_m", copts_.pose_gn_max_step_pos_m, 0.5);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_gn_max_step_rot_rad", copts_.pose_gn_max_step_rot_rad, 0.2);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/max_scan_displacement_m", copts_.max_scan_displacement_m, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
@@ -489,14 +491,22 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       // setFrozenBoundary()'s KKT construction only offers a single
       // both-ends gate (no head-only mode exists in spline.cpp), and
       // reusing that already-tested machinery (identical to decoupled's
-      // own call) is preferable to a new one-sided KKT variant; freezing
-      // the tail too is a free/harmless correctness step since the
-      // correction loop is a free solve for every control point beyond
-      // the head tie regardless of what fit() chose there.
+      // own call) is preferable to a new one-sided KKT variant.
+      //
+      // REVISED per user instruction 2026-09-21 item 5: do NOT hard-clamp
+      // the tail. spline.h's setFrozenBoundary()/buildEndConstraints() now
+      // support a HEAD-ONLY KKT constraint (constrain_tail=false) --
+      // pos1/rot1/vel1 are still passed (stored, unused as constraint
+      // targets) so the call shape matches every other caller; the tail is
+      // left for the LiDAR/IMU/smoothness data term alone to determine,
+      // which is the whole point of the pose-spline experiment ("don't
+      // lose one of the main freedoms we're trying to investigate"). The
+      // head stays hard-tied to the ESIKF state exactly as before.
       coupled_pose_spline_.setFrozenBoundary(
           SplineOptions::N_FROZEN_CP,
           mg.poses.front().pos, mg.poses.front().rot, mg.poses.front().vel,
-          state_->pos(), state_->rot(), state_->vel());
+          state_->pos(), state_->rot(), state_->vel(),
+          /*constrain_tail=*/false);
       coupled_pose_spline_valid_ = coupled_pose_spline_.fit(mg.poses, t0, t1, pose_fit_opts);
       // BUGFIX (found via a live crash: SIGSEGV inside processLIO, an
       // out-of-bounds Eigen column access): ScanSpline::fit() can silently
@@ -3206,7 +3216,7 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
     const PoseSplineReducedSystem reduced =
         reducePoseSplineHeadCoupling(build, n_c, pi_ss_pose, s_vec_pose);
     Eigen::LDLT<Eigen::MatrixXd> ldlt_red(reduced.A);
-    const Eigen::VectorXd delta_red = ldlt_red.solve(reduced.b);
+    Eigen::VectorXd delta_red = ldlt_red.solve(reduced.b);
     if (delta_red.size() != reduced.A.rows()) {
       std::ostringstream diag;
       diag << "[coupled/pose] DIAG reduced solve size mismatch: delta_red.size()="
@@ -3236,6 +3246,29 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
            << " max|c_pos so far|=" << [&]{ double m=0; for (auto& v: coupled_c_pos_) m=std::max(m, v.norm()); return m; }()
            << " max|c_rot so far|=" << [&]{ double m=0; for (auto& v: coupled_c_rot_) m=std::max(m, v.norm()); return m; }();
       throw std::runtime_error(diag.str());
+    }
+    // User instruction 2026-09-21 item 15: step-size/trust-region
+    // safeguard -- see copts_.pose_gn_max_step_pos_m/rot_rad's own doc
+    // comment for the diagnosis this responds to. A single scalar shrinks
+    // the WHOLE solved delta (free c_p, free c_phi, and the head's own
+    // delta_phi0/delta_pos0 together) so the step's DIRECTION is
+    // unchanged -- only its length is capped -- computed from whichever
+    // sub-block (position or rotation, free or head) is most over bound.
+    {
+      const int n_free_pre = reduced.n_free;
+      double max_step_pos = 0.0, max_step_rot = 0.0;
+      for (int j = 0; j < n_free_pre; ++j) {
+        max_step_pos = std::max(max_step_pos, delta_red.segment<3>(3 * j).norm());
+        max_step_rot = std::max(max_step_rot, delta_red.segment<3>(3 * n_free_pre + 3 * j).norm());
+      }
+      max_step_rot = std::max(max_step_rot, delta_red.segment<3>(6 * n_free_pre).norm());
+      max_step_pos = std::max(max_step_pos, delta_red.segment<3>(6 * n_free_pre + 3).norm());
+      double scale = 1.0;
+      if (copts_.pose_gn_max_step_pos_m > 0.0 && max_step_pos > copts_.pose_gn_max_step_pos_m)
+        scale = std::min(scale, copts_.pose_gn_max_step_pos_m / max_step_pos);
+      if (copts_.pose_gn_max_step_rot_rad > 0.0 && max_step_rot > copts_.pose_gn_max_step_rot_rad)
+        scale = std::min(scale, copts_.pose_gn_max_step_rot_rad / max_step_rot);
+      if (scale < 1.0) delta_red *= scale;
     }
     // Unpack: free control points (kTie..n_c-1) map back directly; the
     // shared [delta_phi0;delta_pos0] tail applies IDENTICALLY to every
@@ -3286,7 +3319,7 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
       for (int c = 0; c < nf; ++c) A_free(r, c) = build.A(free_cols[r], free_cols[c]);
     }
     Eigen::LDLT<Eigen::MatrixXd> ldlt_free(A_free);
-    const Eigen::VectorXd delta_free = ldlt_free.solve(b_free);
+    Eigen::VectorXd delta_free = ldlt_free.solve(b_free);
     // POST-CQ-87-REVIEW FIX: same finite/info check as the n_frozen==0
     // branch above -- this fallback arm (pose_head_freeze_cp>0) had the
     // identical gap.
@@ -3299,6 +3332,24 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
            << " n_c=" << n_c << " n_frozen=" << n_frozen
            << " iter=" << coupled_iters_ << " scan_id=" << voxel_map_->frame_idx_;
       throw std::runtime_error(diag.str());
+    }
+    // User instruction 2026-09-21 item 15: same step-size safeguard as the
+    // n_frozen==0 branch above. free_cols is laid out c_p first (nf/2
+    // scalar entries, 3 per free control point) then c_phi (the other
+    // half) -- see the free_cols build loop above.
+    {
+      const int n_free_p = (n_c - n_frozen);
+      double max_step_pos = 0.0, max_step_rot = 0.0;
+      for (int j = 0; j < n_free_p; ++j) {
+        max_step_pos = std::max(max_step_pos, delta_free.segment<3>(3 * j).norm());
+        max_step_rot = std::max(max_step_rot, delta_free.segment<3>(3 * n_free_p + 3 * j).norm());
+      }
+      double scale = 1.0;
+      if (copts_.pose_gn_max_step_pos_m > 0.0 && max_step_pos > copts_.pose_gn_max_step_pos_m)
+        scale = std::min(scale, copts_.pose_gn_max_step_pos_m / max_step_pos);
+      if (copts_.pose_gn_max_step_rot_rad > 0.0 && max_step_rot > copts_.pose_gn_max_step_rot_rad)
+        scale = std::min(scale, copts_.pose_gn_max_step_rot_rad / max_step_rot);
+      if (scale < 1.0) delta_free *= scale;
     }
     for (int r = 0; r < nf; ++r) delta_c(free_cols[r]) = delta_free(r);
     // Frozen columns of delta_c are left at their Zero() initialization --
