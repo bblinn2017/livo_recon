@@ -109,7 +109,11 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            // CQ-81 item B: h_pp_min_eig's own max-eigenvalue sibling -- see
            // LioFrameDiag's doc comment. Appended, not interleaved, per this
            // file's own convention (CQ-56 item 3).
-           ",h_pp_max_eig\n";
+           ",h_pp_max_eig"
+           // CQ-85 item 2: mg.n_imu_samples, straight through -- settles
+           // the standing 39-vs-20 samples-per-scan discrepancy. Appended,
+           // not interleaved, per this file's own convention.
+           ",n_imu_samples\n";
   first_call = false;
   // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
   // (6 significant figures) collapses every frame in a run to the same
@@ -159,6 +163,7 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.p_rot_eig_mid_pre << "," << lio.p_rot_eig_max_pre
       << "," << lio.p_rot_eig_min_post << "," << lio.p_rot_eig_mid_post << "," << lio.p_rot_eig_max_post
       << "," << lio.h_pp_max_eig
+      << "," << lio.n_imu_samples
       << "\n";
   ofs.flush();
 }

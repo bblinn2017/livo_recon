@@ -29,10 +29,15 @@ V6 jacobianOf(const Residual& r)
 
 // Uninformative seed covariance for info_gain's per-frame running Sigma --
 // large relative to any realistic sigma_squared (typically 1e-4 to 1e-2 in
-// this codebase's units), so the first residual(s) processed in a frame see
-// leverage ~= 0 (no discount) regardless of scale. Not tuned against data;
-// a from-scratch design choice (rule 51a), documented so a reader can judge
-// it directly rather than reverse-engineer it from behavior.
+// this codebase's units). NOT negligible in practice: CQ-80 (sections/
+// round-80) MEASURED frame 1's own leverage directly over its 94 residuals
+// and found a mean discount factor of 0.783 -- a ~22% discount on the very
+// first frame, not the "leverage ~= 0 / no discount" this comment used to
+// claim. Not tuned against data; a from-scratch design choice (rule 51a),
+// documented so a reader can judge it directly rather than reverse-
+// engineer it from behavior. (This whole arm is dead regardless -- CQ-70
+// found it drives eee_01 from 28.000mm to 153,812,000.000mm -- so this is
+// documentation of a dead path, not a live-default concern.)
 constexpr double kInfoGainSeedCov     = 1.0e6;
 constexpr double kInfoGainMinDiscount = 1.0e-3;
 

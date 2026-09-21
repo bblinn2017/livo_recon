@@ -95,6 +95,19 @@ struct PerResidualStats
 // collapsing -- frame_stats.txt's *_share columns already tolerate this via
 // their own < 0.0 skip (see LioFrameDiag's own comment).
 //
+// DIVERGENCE CONDITION (CQ-84, measured by CQ-80/sections/round-80): the
+// 1/sigma_collapsed^2 = sum_i(1/sigma_i^2)/k^2 formula above matches its
+// own derivation exactly (confirmed on real data), but it is NOT bounded
+// away from a collapse as the averaged-plane leverage k (group size) grows
+// -- variance shrinks like 1/k^2 while it should only shrink like 1/k for
+// a group that is genuinely k independent measurements of one value, so a
+// large group's collapsed sigma_squared understates its true uncertainty
+// once k is large enough. MEASURED exposure on eee_01: 37 of 3,981 frames
+// (< 1%) have at least one group with k >= 4, max observed k = 7.15
+// (fractional from the weighted-mean construction). Rare but real; the
+// formula itself is unchanged, only this threshold/exposure is newly
+// documented.
+//
 // Groups of size 1 (or residuals with plane_id == nullptr) pass through
 // unmodified. Mutates `residuals` in place (erase-and-append pattern);
 // caller must not hold iterators/pointers into it across this call.

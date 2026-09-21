@@ -1666,6 +1666,7 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
       diag.n_residuals = static_cast<int>(residuals_.size());
       diag.n_points_after_pfn = static_cast<int>(mg.lidar_points.size());
       diag.n_points_after_ds  = static_cast<int>(mg.points.size());
+      diag.n_imu_samples      = mg.n_imu_samples;
 
       // CQ-19(a): P's own decomposition (prior_cov_, pre-update -- state_->
       // cov()'s POST-update counterpart is read further below, once the

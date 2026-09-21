@@ -95,6 +95,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_curvature_weight_pos", copts_.pose_curvature_weight_pos, 0.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_curvature_weight_rot", copts_.pose_curvature_weight_rot, 0.0);
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/pose_head_freeze_cp", copts_.pose_head_freeze_cp, 0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/max_scan_displacement_m", copts_.max_scan_displacement_m, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
   cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/jacobian_time_mode",
@@ -1211,6 +1212,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         coupled_diag.kappa_gev2 = coupled_kappa_gev_[2]; coupled_diag.kappa_gev3 = coupled_kappa_gev_[3];
         coupled_diag.kappa_gev4 = coupled_kappa_gev_[4]; coupled_diag.kappa_gev5 = coupled_kappa_gev_[5];
         coupled_diag.kappa_gev_ok  = coupled_kappa_gev_ok_;
+        coupled_diag.n_imu_samples = mg.n_imu_samples;
         // CQ-83: NO COUPLED ANALOGUE, left at their struct-default
         // sentinel -- confirmed by direct search, none of
         // residual_redundancy/ResidualRedundancyStats/collapse-axis/
@@ -1388,6 +1390,42 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           throw std::runtime_error(abort_msg.str());
         }
         coupled_prev_n_residuals_ = coupled_n_residuals_;
+      }
+
+      // CQ-85 item 1, rule 58f: the non-aborting-divergence guard. Disabled
+      // (max_scan_displacement_m<=0.0) reproduces every prior run
+      // byte-identically -- this block computes nothing and throws nothing
+      // in that case. When enabled: the corrected position (state_->pos(),
+      // already written by this scan's correction loop by the time this
+      // runs) should stay close to mg.prior_pos -- the IMU-only prediction
+      // captured at line ~409, BEFORE this scan's correction loop ran at
+      // all -- a correction that moves the state by metres within one
+      // ~0.1s scan is exactly the "FAILED operation that looks like a
+      // successful one" rule 58f names, not a plausible LiDAR update.
+      // NOTE, found live during this guard's own first smoke test:
+      // coupled_prop_.pos1 is NOT usable here for this comparison -- the
+      // correction loop's OWN internal propagateCoupled() calls (the
+      // "twice per GN iteration, second call re-propagates with the
+      // solved c_K" the pose-basis doc comment describes) overwrite
+      // coupled_prop_ with the ALREADY-CORRECTED pose by the time this
+      // line runs, so a disp computed against it is always ~0 regardless
+      // of how far the scan actually diverged -- confirmed: the guard
+      // silently never fired against coupled_prop_.pos1 on a direct
+      // repro of the 396,499,288mm cell. mg.prior_pos is written once,
+      // at scan start, and never touched again -- the correct reference.
+      if (copts_.max_scan_displacement_m > 0.0) {
+        const double disp = (state_->pos() - mg.prior_pos).norm();
+        if (disp > copts_.max_scan_displacement_m) {
+          std::ostringstream abort_msg;
+          abort_msg << "[FATAL] coupled non-aborting divergence: scan displacement="
+                    << disp << "m exceeds max_scan_displacement_m="
+                    << copts_.max_scan_displacement_m << "m"
+                    << " scan_id=" << voxel_map_->frame_idx_
+                    << " n_c=" << copts_.n_c << " jacobian_time_mode=" << copts_.jacobian_time_mode
+                    << " corrected_pos=[" << state_->pos().transpose() << "]"
+                    << " imu_propagated_pos=[" << mg.prior_pos.transpose() << "]";
+          throw std::runtime_error(abort_msg.str());
+        }
       }
     }
   }

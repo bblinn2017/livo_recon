@@ -58,6 +58,21 @@ struct LioProcCoupledOptions
   // Bryce's call (rule 26); this round only PROPOSES turning it on. Config
   // key: estimator/coupled/pose_head_freeze_cp.
   int pose_head_freeze_cp = 0;
+
+  // CQ-85 item 1: rule 58f's exact failure mode -- CQ-72's own 96-cell grid
+  // produced a cell reporting completed=yes with ATE=396,499,288.300 mm (a
+  // FAILED run that looked like a successful one; imu_deviation_weight=0,
+  // point_time, n_c=8, eee_02). Loud, ABORT-style guard on the raw_imu
+  // arm's own per-scan displacement (measured against the IMU-propagated
+  // prediction, coupled_prop_.pos1, the same quantity a healthy scan's
+  // correction should stay close to) -- NOT a fix for the underlying
+  // failure, only a refusal to let it masquerade as a completed run, same
+  // spirit as the residual-starvation guard (CQ-61 item 4) right above its
+  // insertion site. <= 0.0 DISABLES the check entirely (the shipped
+  // default -- a numerics default is Bryce's call, rule 26; this card
+  // only PROPOSES turning it on). Config key:
+  // estimator/coupled/max_scan_displacement_m.
+  double max_scan_displacement_m = 0.0;
   // Item 3d(ii): the DC-component/bias split is exactly rank-deficient by 6
   // (a constant delta_a and a constant -delta_ba are indistinguishable over
   // one scan, same for delta_omega/delta_bg) and solvable only via the

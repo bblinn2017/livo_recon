@@ -614,6 +614,10 @@ struct LioFrameDiag
   // later patch.
   int n_points_after_pfn = -1;
   int n_points_after_ds  = -1;
+  // CQ-85 item 2: mg.n_imu_samples, read straight through -- settles the
+  // standing 39-vs-20 samples-per-scan discrepancy directly rather than
+  // leaving it uncounted.
+  int n_imu_samples = -1;
 
   // CQ-18 item (2).  S = floor_term + sigma_diag_squared + plane_var_term +
   // s_prior_pose, summed across this frame's residuals_; the four *_share

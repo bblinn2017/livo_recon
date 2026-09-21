@@ -329,6 +329,7 @@ void ImuProc::propagate(MeasureGroup& mg)
   }
 
   last_imu_sample_ = head;
+  mg.n_imu_samples = static_cast<int>(mg.imu_samples.size());
   mg.imu_samples.clear();
 
   state_->setPropagatedState(rot_imu, pos_imu, vel_imu);

@@ -37,6 +37,15 @@ struct MeasureGroup
   // final sample at mg.image.t so the residual covers the full scan.
   std::vector<ImuSample> imu_samples_raw;
 
+  // CQ-85 item 2: imu_samples.size() right before ImuProc::propagate()
+  // clears it -- the only place this count is ever available, since
+  // imu_samples itself doesn't survive past that function. Read at
+  // frame_stats.txt's diag-population sites (lio_coupled.cpp/
+  // lio_decoupled.cpp), which run much later in the same scan's
+  // processing. -1 (unset) is the "never populated" sentinel, matching
+  // this struct's own convention elsewhere.
+  int n_imu_samples = -1;
+
   // History (31-39): see docs/livo_recon_changelog.md#include-livo_recon-utils-data-measures.h-31
   std::vector<PointXYZCov> points;
 
