@@ -90,6 +90,10 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/n_c", copts_.n_c, 4);
   cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/spline_mode",
                  copts_.spline_mode, "raw_imu", {"raw_imu", "pose"});
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_acc", copts_.pose_imu_weight_acc, 1.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_gyr", copts_.pose_imu_weight_gyr, 1.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_curvature_weight_pos", copts_.pose_curvature_weight_pos, 0.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_curvature_weight_rot", copts_.pose_curvature_weight_rot, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
   cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/jacobian_time_mode",
@@ -1109,6 +1113,55 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           coupled_diag.p_rot_eig_mid_post = es_r_post.eigenvalues()(1);
           coupled_diag.p_rot_eig_max_post = es_r_post.eigenvalues()(2);
         }
+        // CQ-83: the remaining columns with a genuine coupled analogue,
+        // read off the member variables the diagnostics blocks earlier in
+        // this scan's own processing already filled (nees_diag.txt's
+        // write site, further up this function, reads several of the
+        // SAME members -- this is "route", not "recompute", exactly as
+        // the card asks).
+        coupled_diag.n_residuals   = coupled_n_residuals_;
+        coupled_diag.sum_weight    = coupled_sum_weight_;
+        coupled_diag.h_pp_min_eig  = coupled_h_pp_min_eig_;
+        coupled_diag.h_rr_min_eig  = coupled_h_rr_min_eig_;
+        coupled_diag.h_pp_max_eig  = coupled_h_pp_max_eig_;
+        coupled_diag.h_rr_trace    = coupled_h_rr_trace_;
+        coupled_diag.htth_pos_trace = coupled_htth_pos_trace_;
+        coupled_diag.htz_rot_norm  = coupled_htz_rot_norm_;
+        coupled_diag.htz_pos_norm  = coupled_htz_pos_norm_;
+        coupled_diag.ask           = coupled_ask_;
+        coupled_diag.got           = coupled_got_;
+        coupled_diag.refusal       = coupled_refusal_;
+        coupled_diag.iters         = coupled_iters_;
+        coupled_diag.dx_rot_deg    = coupled_dx_rot_deg_;
+        coupled_diag.dx_pos_mm     = coupled_dx_pos_mm_;
+        coupled_diag.sum_S           = coupled_sum_S_;
+        coupled_diag.floor_share     = coupled_floor_share_;
+        coupled_diag.sdiag_share     = coupled_sdiag_share_;
+        coupled_diag.pvar_share      = coupled_pvar_share_;
+        coupled_diag.prior_pose_share = coupled_prior_pose_share_;
+        coupled_diag.nis           = coupled_nis_;
+        coupled_diag.nis_est       = coupled_nis_est_;
+        coupled_diag.reduced_chi2  = coupled_reduced_chi2_;
+        coupled_diag.kappa_eff     = coupled_kappa_eff_;
+        coupled_diag.kappa_gev0 = coupled_kappa_gev_[0]; coupled_diag.kappa_gev1 = coupled_kappa_gev_[1];
+        coupled_diag.kappa_gev2 = coupled_kappa_gev_[2]; coupled_diag.kappa_gev3 = coupled_kappa_gev_[3];
+        coupled_diag.kappa_gev4 = coupled_kappa_gev_[4]; coupled_diag.kappa_gev5 = coupled_kappa_gev_[5];
+        coupled_diag.kappa_gev_ok  = coupled_kappa_gev_ok_;
+        // CQ-83: NO COUPLED ANALOGUE, left at their struct-default
+        // sentinel -- confirmed by direct search, none of
+        // residual_redundancy/ResidualRedundancyStats/collapse-axis/
+        // sigma_scale-axis machinery is referenced anywhere in this file.
+        // These features are applied inside decoupled's own ekf_.HtH
+        // accumulation/covariance-update path (see CQ-70's "coupled never
+        // calls applyCovarianceUpdate() at all" finding); coupled builds
+        // its own A/b directly from residuals_ with no such correction
+        // stage to report on: redund_groups, redund_n_raw, redund_n_eff,
+        // redund_info_ratio, redund_groups_seen,
+        // redund_groups_degenerate_pv, redund_groups_degenerate_var,
+        // naive_info_gain, woodbury_info_gain, collapse_groups_collapsed,
+        // collapse_residuals_removed, per_residual_touched,
+        // per_residual_renorm_factor, per_residual_mean_scale,
+        // sigma_scale_applied, sigma_scale_chi2_ema.
         if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) vm->noteLioFrameDiag(coupled_diag);
         logEigenspectrum18(voxel_map_->frame_idx_, mg.image.t + data_queues_->start_time, "coupled");
       }
@@ -1408,6 +1461,10 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   }
 
   const double total_dtheta_deg = total_dtheta.norm() * (180.0 / M_PI);
+  // CQ-83: mirrors decoupled's own dx_rot_deg/dx_pos_mm exactly (total
+  // accumulated correction this scan, same units).
+  coupled_dx_rot_deg_ = total_dtheta_deg;
+  coupled_dx_pos_mm_ = total_dt.norm() * 1000.0;
 
   // CQ-53 item 5, gravity-leak falsifier: coupled_prop_.poses[k].acc_head/
   // acc_tail are the CORRECTED world-frame accelerations (R*(a_body+
@@ -1920,6 +1977,19 @@ LioProcCoupled::CoupledSystemBuild LioProcCoupled::buildImuCorrectionSystem(
       sum_sdiag_S      += res.sigma_diag_squared;
       sum_pvar_S       += res.plane_var_term;
       sum_prior_pose_S += res.s_prior_pose;
+      // CQ-83: per-residual S = floor+sdiag+pvar+prior_pose, mirroring
+      // lio_decoupled.cpp's own nis/nis_est per-residual definition exactly.
+      const double res_S = res.floor_term + res.sigma_diag_squared +
+                            res.plane_var_term + res.s_prior_pose;
+      if (res_S > 0.0) {
+        build.sum_nis += (res.r * res.r) / res_S;
+        ++build.n_nis;
+        const double res_S_est = res_S - res.s_prior_pose;
+        if (res_S_est > 0.0) {
+          build.sum_nis_est += (res.r * res.r) / res_S_est;
+          ++build.n_nis_est;
+        }
+      }
     }
     // TQ-40 item 3: matches ekf_.HtH/Htz's own "+H'*W*r" convention exactly
     // (H here is the SAME 1x6 row, since Jrow.head(6) IS H*Phix_pt.topRows(6)
@@ -2156,6 +2226,11 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   Eigen::MatrixXd& phic_spread_sum = build.phic_spread_sum;
   double& phic_spread_sumsq = build.phic_spread_sumsq;
   int& phic_spread_n = build.phic_spread_n;
+  // CQ-83: expose the nis/nis_est accumulators the same way.
+  double& sum_nis = build.sum_nis;
+  int& n_nis = build.n_nis;
+  double& sum_nis_est = build.sum_nis_est;
+  int& n_nis_est = build.n_nis_est;
 
   // CQ-79: are the spline corrections pulling points toward their matched
   // planes, and does it differ across the scan? Report-only, reads
@@ -2261,7 +2336,15 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   {
     const double sum_S = sum_floor_S + sum_sdiag_S + sum_pvar_S + sum_prior_pose_S;
     coupled_sum_S_ = (sum_S > 0.0) ? sum_S : -1.0;
+    if (sum_S > 0.0) {
+      coupled_floor_share_      = sum_floor_S / sum_S;
+      coupled_sdiag_share_      = sum_sdiag_S / sum_S;
+      coupled_pvar_share_       = sum_pvar_S / sum_S;
+      coupled_prior_pose_share_ = sum_prior_pose_S / sum_S;
+    }
   }
+  coupled_nis_     = (n_nis > 0)     ? sum_nis / n_nis         : -1.0;
+  coupled_nis_est_ = (n_nis_est > 0) ? sum_nis_est / n_nis_est : -1.0;
   if (!hcol_reldiff.empty()) {
     std::sort(hcol_reldiff.begin(), hcol_reldiff.end());
     const size_t n = hcol_reldiff.size();
@@ -2275,6 +2358,13 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3, 3>> es_rr6(HtH_pose_lidar.block<3, 3>(0, 0));
     coupled_h_pp_min_eig_ = es_pp6.eigenvalues()(0);
     coupled_h_rr_min_eig_ = es_rr6.eigenvalues()(0);
+    // CQ-83: h_pp_max_eig off the SAME eigensolve as the pre-existing min
+    // (CQ-81 item B's own pattern); h_rr_trace/htth_pos_trace are plain
+    // traces of the same HtH_pose_lidar blocks (htth_pos_trace mirrors
+    // decoupled's "trace(HtH's position block), read directly off ekf_.HtH").
+    coupled_h_pp_max_eig_ = es_pp6.eigenvalues()(2);
+    coupled_h_rr_trace_ = HtH_pose_lidar.block<3, 3>(0, 0).trace();
+    coupled_htth_pos_trace_ = HtH_pose_lidar.block<3, 3>(3, 3).trace();
   }
 
   // CQ-53 item 1: pivot diagnostics on the joint matrix, READ-ONLY (three
@@ -2559,6 +2649,25 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
     coupled_ask_ = ask6;
     coupled_got_ = got6;
     coupled_refusal_ = (ask6 > 0.0) ? (1.0 - got6 / ask6) : std::numeric_limits<double>::quiet_NaN();
+    // CQ-83: kappa_eff/kappa_gev*, decoupled's own exact formulas
+    // (lio_decoupled.cpp) against coupled's HtH_pose_lidar/prior_cov_ in
+    // place of ekf_.HtH/that path's own prior_cov_ slice -- same 6x6
+    // rot-then-pos layout, so the identical block extraction applies.
+    coupled_kappa_eff_ = (got6 > 0.0) ? (std::sqrt(ask6 / got6) - 1.0) : -1.0;
+    if (prior_cov_.rows() >= StateGroup::idxR() + 6 &&
+        prior_cov_.cols() >= StateGroup::idxR() + 6) {
+      const Eigen::Matrix<double, 6, 6> P_prior_6 =
+          prior_cov_.block<6, 6>(StateGroup::idxR(), StateGroup::idxR());
+      Eigen::GeneralizedSelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>>
+          ges(HtH_pose_lidar, P_prior_6);
+      if (ges.info() == Eigen::Success) {
+        const auto& gev = ges.eigenvalues();
+        for (int i = 0; i < 6; ++i) coupled_kappa_gev_[i] = gev(i);
+        coupled_kappa_gev_ok_ = true;
+      }
+    }
+    coupled_htz_rot_norm_ = Htz_pose_lidar.segment<3>(0).norm();
+    coupled_htz_pos_norm_ = Htz_pose_lidar.segment<3>(3).norm();
   }
 
   // Item 3d(i): DC-component/bias-split diagnostics, overwritten every

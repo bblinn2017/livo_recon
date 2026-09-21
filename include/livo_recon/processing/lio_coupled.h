@@ -34,6 +34,15 @@ struct LioProcCoupledOptions
   std::string spline_mode = "raw_imu";
   static constexpr const char* SPLINE_MODES[] = { "raw_imu", "pose" };
   bool poseBasis() const { return spline_mode == "pose"; }
+
+  // CQ-82 Phase 2: pose-basis-only weights. Meaningless under raw_imu (the
+  // refusal wiring never checks these -- they simply aren't read unless
+  // poseBasis() is true). Config keys: estimator/coupled/pose_imu_weight_{acc,gyr},
+  // estimator/coupled/pose_curvature_weight_{pos,rot}.
+  double pose_imu_weight_acc = 1.0;
+  double pose_imu_weight_gyr = 1.0;
+  double pose_curvature_weight_pos = 0.0;
+  double pose_curvature_weight_rot = 0.0;
   // Item 3d(ii): the DC-component/bias split is exactly rank-deficient by 6
   // (a constant delta_a and a constant -delta_ba are indistinguishable over
   // one scan, same for delta_omega/delta_bg) and solvable only via the
@@ -445,6 +454,15 @@ private:
     Eigen::MatrixXd phic_spread_sum;
     double phic_spread_sumsq = 0.0;
     int phic_spread_n = 0;
+    // CQ-83: per-residual nu^2/S and nu^2/(S-s_prior_pose), accumulated
+    // alongside sum_floor_S et al (same acceptance condition: floor_term/
+    // sigma_diag_squared/s_prior_pose all >= 0.0) so LioFrameDiag's nis/
+    // nis_est columns have a genuine coupled source instead of sitting at
+    // their -1.0 sentinel forever.
+    double sum_nis = 0.0;
+    int n_nis = 0;
+    double sum_nis_est = 0.0;
+    int n_nis_est = 0;
   };
 
   // CQ-82 Phase 1: the shipped arm ("raw_imu"/"imu_correction"), MOVED
@@ -544,6 +562,32 @@ private:
   int    coupled_prev_n_residuals_ = -1;
   double coupled_sum_weight_ = -1.0;
   double coupled_h_pp_min_eig_ = -1.0, coupled_h_rr_min_eig_ = -1.0;
+  // CQ-83: the remaining LioFrameDiag columns with a genuine coupled
+  // analogue, routed here from quantities the dispatcher/builder already
+  // compute (HtH_pose_lidar/Htz_pose_lidar, the sum_*_S components, ask/
+  // got already wired above). h_pp_max_eig mirrors h_pp_min_eig's own
+  // eigensolve (just the top eigenvalue instead of the bottom); h_rr_trace/
+  // htth_pos_trace are plain traces of the same HtH_pose_lidar blocks;
+  // htz_*_norm read Htz_pose_lidar the same way decoupled reads ekf_.Htz;
+  // kappa_eff/kappa_gev* reuse decoupled's own formulas (kappa_eff =
+  // sqrt(ask/got)-1; kappa_gev* = GeneralizedSelfAdjointEigenSolver(HtH,P)
+  // eigenvalues) against coupled's own HtH_pose_lidar/prior_cov_ 6x6 block;
+  // floor_share/sdiag_share/pvar_share/prior_pose_share are each sum_*_S
+  // component's fraction of sum_S; nis/nis_est are the per-residual mean
+  // nu^2/S and nu^2/(S-s_prior_pose), accumulated alongside sum_floor_S et
+  // al in buildImuCorrectionSystem()'s own residual loop; dx_rot_deg/
+  // dx_pos_mm read the SAME total_dtheta/total_dt this scan already
+  // accumulates for its own engagement reporting.
+  double coupled_h_pp_max_eig_ = -1.0;
+  double coupled_h_rr_trace_ = -1.0, coupled_htth_pos_trace_ = -1.0;
+  double coupled_htz_rot_norm_ = -1.0, coupled_htz_pos_norm_ = -1.0;
+  double coupled_kappa_eff_ = -1.0;
+  double coupled_kappa_gev_[6] = { -1.0, -1.0, -1.0, -1.0, -1.0, -1.0 };
+  bool   coupled_kappa_gev_ok_ = false;
+  double coupled_floor_share_ = -1.0, coupled_sdiag_share_ = -1.0;
+  double coupled_pvar_share_ = -1.0, coupled_prior_pose_share_ = -1.0;
+  double coupled_nis_ = -1.0, coupled_nis_est_ = -1.0;
+  double coupled_dx_rot_deg_ = 0.0, coupled_dx_pos_mm_ = 0.0;
 
   // CQ-53 item 1: joint matrix's own LDLT pivot floor/ceiling (vectorD()
   // min/max), plus the SAME diagnostic restricted to the state sub-block
