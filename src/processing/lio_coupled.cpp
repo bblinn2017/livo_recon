@@ -3214,6 +3214,29 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
            << " n_c=" << n_c << " scan_id=" << voxel_map_->frame_idx_;
       throw std::runtime_error(diag.str());
     }
+    // POST-CQ-87-REVIEW FIX (safety hole flagged by external review, item
+    // 2): previously NEITHER ldlt_red.info() NOR delta_red.allFinite() was
+    // checked -- rule 58f ("a failed operation must not be able to look
+    // like a successful one") violated: a singular/ill-conditioned solve
+    // could silently hand NaN/Inf straight into coupled_c_pos_/
+    // coupled_c_rot_ -> state_->setPropagatedState() -> next scan's own
+    // mg.poses, i.e. exactly the "GN step corrupts state, next scan's
+    // fit() merely DISCOVERS it as kNonFinite" failure chain the review
+    // hypothesized. Fail loud here instead, at the actual point of
+    // corruption, so a future investigation doesn't have to rediscover
+    // that the reported kNonFinite scan can be a downstream symptom.
+    if (ldlt_red.info() != Eigen::Success || !delta_red.allFinite()) {
+      std::ostringstream diag;
+      diag << "[coupled/pose] FATAL: reduced head-coupled GN solve produced "
+              "a non-finite/failed result -- refusing to apply it to "
+              "state_. ldlt.info()=" << static_cast<int>(ldlt_red.info())
+           << " (0=Success) delta_red.allFinite()=" << delta_red.allFinite()
+           << " n_c=" << n_c << " n_free=" << reduced.n_free
+           << " iter=" << coupled_iters_ << " scan_id=" << voxel_map_->frame_idx_
+           << " max|c_pos so far|=" << [&]{ double m=0; for (auto& v: coupled_c_pos_) m=std::max(m, v.norm()); return m; }()
+           << " max|c_rot so far|=" << [&]{ double m=0; for (auto& v: coupled_c_rot_) m=std::max(m, v.norm()); return m; }();
+      throw std::runtime_error(diag.str());
+    }
     // Unpack: free control points (kTie..n_c-1) map back directly; the
     // shared [delta_phi0;delta_pos0] tail applies IDENTICALLY to every
     // tied head control point (0..kTie-1) -- delta_c for those rows is
@@ -3264,6 +3287,19 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
     }
     Eigen::LDLT<Eigen::MatrixXd> ldlt_free(A_free);
     const Eigen::VectorXd delta_free = ldlt_free.solve(b_free);
+    // POST-CQ-87-REVIEW FIX: same finite/info check as the n_frozen==0
+    // branch above -- this fallback arm (pose_head_freeze_cp>0) had the
+    // identical gap.
+    if (ldlt_free.info() != Eigen::Success || !delta_free.allFinite()) {
+      std::ostringstream diag;
+      diag << "[coupled/pose] FATAL: frozen-elimination GN solve produced "
+              "a non-finite/failed result -- refusing to apply it to "
+              "state_. ldlt.info()=" << static_cast<int>(ldlt_free.info())
+           << " (0=Success) delta_free.allFinite()=" << delta_free.allFinite()
+           << " n_c=" << n_c << " n_frozen=" << n_frozen
+           << " iter=" << coupled_iters_ << " scan_id=" << voxel_map_->frame_idx_;
+      throw std::runtime_error(diag.str());
+    }
     for (int r = 0; r < nf; ++r) delta_c(free_cols[r]) = delta_free(r);
     // Frozen columns of delta_c are left at their Zero() initialization --
     // exact elimination, not an approximation.
@@ -3293,6 +3329,56 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
   const M3D new_tail_R = trial_new.rotAt(t1);
   const V3D new_tail_p = trial_new.posAt(t1);
   const V3D new_tail_v = trial_new.velAt(t1);
+
+  // POST-CQ-87-REVIEW instrumentation (item "what I would instrument
+  // immediately"): per-GN-iteration step-size/spline-shape diagnostics,
+  // gated on the SAME estimator/coupled/psd_audit_en flag every other
+  // per-iteration pose-arm diagnostic in this function already uses
+  // (rank_cblock/phic_spread above). Answers, directly, the review's own
+  // "is delta_c or spline acceleration already exploding the iteration
+  // BEFORE a later scan's fit() reports kNonFinite" question -- rather
+  // than only discovering corruption after the fact via that downstream
+  // symptom.
+  if (copts_.psd_audit_en) {
+    double max_delta_cp = 0.0, max_delta_cphi = 0.0;
+    for (int j = 0; j < n_c; ++j) {
+      max_delta_cp   = std::max(max_delta_cp,   delta_c.segment<3>(3 * j).norm());
+      max_delta_cphi = std::max(max_delta_cphi, delta_c.segment<3>(3 * n_c + 3 * j).norm());
+    }
+    double max_cp = 0.0, max_cphi = 0.0;
+    for (int j = 0; j < n_c; ++j) {
+      max_cp   = std::max(max_cp,   coupled_c_pos_[j].norm());
+      max_cphi = std::max(max_cphi, coupled_c_rot_[j].norm());
+    }
+    // Sample acc/omega on a fixed grid across [t0,t1] (NOT at residual
+    // times -- residuals_ can be empty on a starved scan, and this is
+    // meant to characterize the spline's own shape, not the residual
+    // set) -- 20 points is cheap relative to the O(n_c^2) work already
+    // done above, and matches the "max_t ||pddot(t)||" quantity the
+    // review's own instrumentation list asks for directly.
+    double max_acc = 0.0, max_omega = 0.0;
+    constexpr int kGridN = 20;
+    for (int k = 0; k <= kGridN; ++k) {
+      const double t = coupled_pose_spline_.t0() +
+          (t1 - coupled_pose_spline_.t0()) * (static_cast<double>(k) / kGridN);
+      max_acc   = std::max(max_acc,   trial_new.accAt(t).norm());
+      max_omega = std::max(max_omega, trial_new.omegaBodyAt(t).norm());
+    }
+    const bool poses_finite = std::all_of(mg.poses.begin(), mg.poses.end(),
+        [](const Pose6D& p) { return p.pos.allFinite() && p.rot.allFinite(); });
+
+    static PersistentLogStream gn_log("pose_gn_debug.txt");
+    bool gn_first;
+    std::ofstream& gn_ofs = gn_log.stream(&gn_first);
+    if (gn_first)
+      gn_ofs << "scan_id,iter,n_c,mg_poses_finite,max_delta_cp,max_delta_cphi,"
+                "max_cp,max_cphi,max_acc,max_omega,head_tie\n";
+    gn_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << n_c << ","
+           << (poses_finite ? 1 : 0) << "," << max_delta_cp << "," << max_delta_cphi << ","
+           << max_cp << "," << max_cphi << "," << max_acc << "," << max_omega << ","
+           << (n_frozen == 0 ? "real" : "frozen") << "\n";
+    gn_ofs.flush();
+  }
 
   dtheta_out = Log(prev_tail_R.transpose() * new_tail_R);
   dt_out = new_tail_p - prev_tail_p;
