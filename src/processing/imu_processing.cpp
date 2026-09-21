@@ -120,7 +120,13 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   bool coupled_adaptive_sigma = false, coupled_bias_freeze_on_vibration = false;
   paramWarn<bool>(pnh, "estimator/coupled/adaptive_sigma", coupled_adaptive_sigma, false);
   paramWarn<bool>(pnh, "estimator/coupled/bias_freeze_on_vibration", coupled_bias_freeze_on_vibration, false);
-  opts_.keep_raw_samples = (spline_mode != "raw_imu") || coupled_adaptive_sigma || coupled_bias_freeze_on_vibration;
+  // CQ-82 Phase 2: the pose basis's IMU-as-measurement-factor term also
+  // needs the raw stream (buildPoseSplineCBlock()'s PoseSplineImuObs) --
+  // same cross-class read pattern as the two flags above, one more OR term.
+  std::string coupled_spline_mode = "raw_imu";
+  paramWarn<std::string>(pnh, "estimator/coupled/spline_mode", coupled_spline_mode, std::string("raw_imu"));
+  opts_.keep_raw_samples = (spline_mode != "raw_imu") || coupled_adaptive_sigma ||
+                           coupled_bias_freeze_on_vibration || (coupled_spline_mode == "pose");
   { std::lock_guard<std::mutex> lock(g_qhat_mtx); g_qhat_enabled = opts_.log_qhat_en; }
 
   std::ostringstream oss;
