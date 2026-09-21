@@ -88,7 +88,35 @@ struct PoseSplineCBlockBuild
   Eigen::VectorXd b;
   int    n_lidar = 0;
   int    n_imu   = 0;
+  // CQ-86 item 0: the LiDAR residual loop's OWN contribution to the c-block,
+  // isolated BEFORE the Tikhonov floor / smoothness prior are added (the
+  // pose-arm analogue of the raw_imu arm's "A.block(c) - Lambda" isolation
+  // in estimateCoupledCorrection() -- see lio_coupled.cpp's CQ-66 comment).
+  // Populated only when `psd_audit_en`-gated instrumentation is requested by
+  // the caller (see the `audit` param below); otherwise left empty (size 0)
+  // so the normal live solve path pays nothing for this.
+  Eigen::MatrixXd A_lidar_only;
+  // Single-pass spread (Var = E[||X||^2] - ||E[X]||^2, Frobenius) of the
+  // per-residual LiDAR Jacobian row Jrow (1 x ncol_c) across all lidar_obs --
+  // the pose-arm analogue of CQ-66 item 3's phic_spread. In "end_time" mode
+  // every residual's Jrow is identical by construction (Jrow depends on t
+  // only through the SAME fixed t1), so this is mathematically guaranteed
+  // to be exactly 0, matching raw_imu's own end_time guarantee.
+  double phic_spread = 0.0;
 };
+
+// CQ-86 item 0: at which time is the LiDAR term's basis-weight vector (and
+// therefore the rotation-Jacobian chain through Jr(phi)) evaluated for a
+// given residual? "point_time" (default, matches the shipped/only behavior
+// through CQ-82 round 5) uses each residual's OWN capture time obs.t --
+// dr_i/dc_p[j] = b_j(obs.t) n_i^T, so the basis-weight vector varies per
+// point. "end_time" instead evaluates b_j/Jr/rotAt at the FIXED scan-end
+// time `end_time_t1` for every residual (only the normal n_i and the raw
+// body point still vary), mirroring raw_imu's own jacobian_time_mode=
+// end_time construction -- this is the direct structural test of whether
+// the pose arm's rank advantage over raw_imu depends on retaining each
+// point's own capture time.
+enum class PoseSplineTimeMode { kPointTime, kEndTime };
 
 // Builds the pose-basis coefficient-block normal equations for a correction
 // c ON TOP OF `spline`'s CURRENT control points (spline is read-only here --
@@ -98,13 +126,21 @@ struct PoseSplineCBlockBuild
 // Tikhonov term (TIKHONOV_EPS below) is always added to the diagonal so A is
 // PD even when every weight is 0 -- required for item 6's own correctness
 // gate (LiDAR AND IMU terms both disabled) to have a well-posed solve at all.
+// `time_mode`/`end_time_t1` are CQ-86 item 0's diagnostic-only additions --
+// default kPointTime with end_time_t1 unused reproduces every prior call
+// site's behavior exactly (md5-inert to anything not passing kEndTime).
+// `audit`, if true, additionally populates A_lidar_only/phic_spread above
+// (two extra passes' worth of bookkeeping, opt-in for the same reason
+// psd_audit_en gates the raw_imu arm's own equivalent).
 PoseSplineCBlockBuild buildPoseSplineCBlock(
     const ScanSpline& spline,
     const std::vector<PoseSplineLidarObs>& lidar_obs,
     const std::vector<PoseSplineImuObs>& imu_obs,
     const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
     double pose_imu_weight_acc, double pose_imu_weight_gyr,
-    double pose_curvature_weight_pos, double pose_curvature_weight_rot);
+    double pose_curvature_weight_pos, double pose_curvature_weight_rot,
+    PoseSplineTimeMode time_mode = PoseSplineTimeMode::kPointTime,
+    double end_time_t1 = 0.0, bool audit = false);
 
 // The fixed regularizer floor -- see buildPoseSplineCBlock()'s own doc
 // comment. Small enough to be negligible whenever any real term is active,

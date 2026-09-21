@@ -47,7 +47,8 @@ PoseSplineCBlockBuild buildPoseSplineCBlock(
     const std::vector<PoseSplineImuObs>& imu_obs,
     const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
     double pose_imu_weight_acc, double pose_imu_weight_gyr,
-    double pose_curvature_weight_pos, double pose_curvature_weight_rot)
+    double pose_curvature_weight_pos, double pose_curvature_weight_rot,
+    PoseSplineTimeMode time_mode, double end_time_t1, bool audit)
 {
   const int n_c = spline.nControlPoints();
   const int ncol_c = 6 * n_c;  // [c_p(3n_c); c_phi(3n_c)]
@@ -57,6 +58,12 @@ PoseSplineCBlockBuild buildPoseSplineCBlock(
   build.b = Eigen::VectorXd::Zero(ncol_c);
   Eigen::MatrixXd& A = build.A;
   Eigen::VectorXd& b = build.b;
+
+  Eigen::MatrixXd A_lidar_only;
+  Eigen::MatrixXd phic_spread_sum;
+  double phic_spread_sumsq = 0.0;
+  int phic_spread_n = 0;
+  if (audit) A_lidar_only = Eigen::MatrixXd::Zero(ncol_c, ncol_c);
 
   // ---- smoothness (second-difference, separately weighted) ----
   if ((pose_curvature_weight_pos > 0.0 || pose_curvature_weight_rot > 0.0) && n_c >= 3) {
@@ -76,10 +83,17 @@ PoseSplineCBlockBuild buildPoseSplineCBlock(
   // ---- LiDAR term: linear in c_p, chain rule in c_phi via Jr(phi) ----
   build.n_lidar = static_cast<int>(lidar_obs.size());
   for (const auto& obs : lidar_obs) {
+    // CQ-86 item 0: point_time (default) evaluates the basis weight/rotation
+    // chain at this residual's OWN capture time obs.t, as the pose arm has
+    // always done. end_time instead pins that same evaluation to the FIXED
+    // scan-end time end_time_t1 for every residual -- only obs.normal and
+    // obs.raw_body_point still vary per point -- the direct structural
+    // mirror of raw_imu's own jacobian_time_mode=end_time construction.
+    const double basis_t = (time_mode == PoseSplineTimeMode::kEndTime) ? end_time_t1 : obs.t;
     int first_cp; Eigen::Vector4d bw, dbw, ddbw;
-    spline.basisAt(obs.t, first_cp, bw, dbw, ddbw);
-    const V3D hk = obs.raw_body_point.cross(spline.rotAt(obs.t).transpose() * obs.normal);
-    const M3D Jr_phi = Jr(spline.phiAt(obs.t));
+    spline.basisAt(basis_t, first_cp, bw, dbw, ddbw);
+    const V3D hk = obs.raw_body_point.cross(spline.rotAt(basis_t).transpose() * obs.normal);
+    const M3D Jr_phi = Jr(spline.phiAt(basis_t));
     const Eigen::RowVector3d dr_dtheta = (hk.transpose() * Jr_phi);
     const double w = 1.0 / std::max(obs.sigma2, 1e-18);
 
@@ -93,6 +107,28 @@ PoseSplineCBlockBuild buildPoseSplineCBlock(
     }
     A.noalias() += w * (Jrow.transpose() * Jrow);
     b.noalias() -= w * Jrow.transpose() * obs.r;
+
+    if (audit) {
+      // CQ-86 item 0: the residual-loop-only contribution (rank_cblock's
+      // own input) and the Jrow spread (phic_spread's own input) -- both
+      // UNWEIGHTED by sigma2, matching CQ-66's own H6_raw_accum/phic_spread
+      // convention of measuring the raw sensitivity structure, not the
+      // information-weighted one.
+      A_lidar_only.noalias() += Jrow.transpose() * Jrow;
+      if (phic_spread_sum.size() == 0) phic_spread_sum = Eigen::MatrixXd::Zero(1, ncol_c);
+      phic_spread_sum.noalias() += Jrow;
+      phic_spread_sumsq += Jrow.squaredNorm();
+      ++phic_spread_n;
+    }
+  }
+
+  if (audit) {
+    build.A_lidar_only = A_lidar_only;
+    if (phic_spread_n > 0) {
+      const Eigen::MatrixXd mean_jrow = phic_spread_sum / static_cast<double>(phic_spread_n);
+      const double var = phic_spread_sumsq / static_cast<double>(phic_spread_n) - mean_jrow.squaredNorm();
+      build.phic_spread = std::sqrt(std::max(var, 0.0));
+    }
   }
 
   // ---- IMU-as-measurement-factor: per raw sample, FD Jacobian ----

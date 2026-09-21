@@ -2907,11 +2907,48 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
     imu_obs.push_back(o);
   }
 
+  // CQ-86 item 0: reuse the SAME estimator/coupled/jacobian_time_mode knob
+  // the raw_imu arm reads (rather than adding a second, pose-arm-only key)
+  // so the two arms' rank/spread rows are directly comparable under an
+  // identical config value; "point_time"/"end_time" map onto the pose arm's
+  // own PoseSplineTimeMode, anything else (legacy_mismatched, the raw_imu
+  // arm's default) falls back to kPointTime -- the pose arm's own default
+  // and the only mode it has ever run under through round 5.
+  const PoseSplineTimeMode pose_time_mode =
+      (copts_.jacobian_time_mode == "end_time") ? PoseSplineTimeMode::kEndTime
+                                                 : PoseSplineTimeMode::kPointTime;
   const auto build = buildPoseSplineCBlock(
       trial, lidar_obs, imu_obs,
       state_->biasAcc(), state_->biasGyr(), state_->gravity(),
       copts_.pose_imu_weight_acc, copts_.pose_imu_weight_gyr,
-      copts_.pose_curvature_weight_pos, copts_.pose_curvature_weight_rot);
+      copts_.pose_curvature_weight_pos, copts_.pose_curvature_weight_rot,
+      pose_time_mode, t1, /*audit=*/copts_.psd_audit_en);
+
+  if (copts_.psd_audit_en) {
+    // CQ-86 item 0: rank_cblock = numerical rank of build.A_lidar_only (the
+    // LiDAR residual loop's own contribution, isolated from the Tikhonov
+    // floor and smoothness prior) -- the pose-arm analogue of CQ-66's
+    // "A.block(c) - Lambda" isolation on the raw_imu arm. phic_spread is
+    // build.phic_spread directly (already computed single-pass inside the
+    // builder). Same SVD/tolerance convention as cq66_rank.txt's rank_cblock
+    // column (scale-relative, Eigen-default-style).
+    Eigen::JacobiSVD<Eigen::MatrixXd> svd_c(build.A_lidar_only);
+    const Eigen::VectorXd sv_c = svd_c.singularValues();
+    const double cblock_tol = (sv_c.size() > 0 ? sv_c(0) : 0.0) * 1e-9 * (6 * n_c);
+    int rank_cblock = 0;
+    for (int i = 0; i < sv_c.size(); ++i) if (sv_c(i) > cblock_tol) ++rank_cblock;
+
+    static PersistentLogStream rank_log("cq86_rank.txt");
+    bool rank_first;
+    std::ofstream& rank_ofs = rank_log.stream(&rank_first);
+    if (rank_first)
+      rank_ofs << "scan_id,jacobian_time_mode,n_c,ncol_c,n_residuals,"
+                   "rank_cblock,cblock_tol,phic_spread\n";
+    rank_ofs << voxel_map_->frame_idx_ << "," << copts_.jacobian_time_mode << ","
+             << n_c << "," << (6 * n_c) << "," << residuals_.size() << ","
+             << rank_cblock << "," << cblock_tol << "," << build.phic_spread << "\n";
+    rank_ofs.flush();
+  }
 
   Eigen::LDLT<Eigen::MatrixXd> ldlt(build.A);
   const Eigen::VectorXd delta_c = ldlt.solve(build.b);
