@@ -288,6 +288,14 @@ struct LioProcCoupledOptions
   // 18x18 posterior AFTER the normal M*A^-1*M^T write -- requires
   // imu/log_qhat_en=true (enforced at load time), md5-inert at false.
   bool add_q_scan_to_posterior = false;
+  // CQ-75-R2: arm (e), isolating the map channel. final_redeskew still
+  // runs (governs the solve-side report/residual rebuild as before) --
+  // this flag ADDITIONALLY reverts mg.points to its pre-final-redeskew
+  // value right before returning, so updateMap() (called by the caller
+  // after this function returns) sees the ORIGINAL points rather than
+  // the final-redeskewed ones. Requires final_redeskew=true (enforced at
+  // load time, same pattern as final_relinearize_cov). md5-inert at false.
+  bool final_redeskew_map_uses_pre = false;
   // CQ-79: report-only, log-only, reads quantities the accumulation loop
   // already holds (struct Residual's own r/t/plane_id/sigma_squared) --
   // no new computation, never touches the solve. Default false,

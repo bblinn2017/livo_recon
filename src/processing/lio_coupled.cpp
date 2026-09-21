@@ -132,6 +132,12 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
         "trajectory was never actually re-deskewed/re-propagated against.");
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/prior_at_scan_start", copts_.prior_at_scan_start, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/add_q_scan_to_posterior", copts_.add_q_scan_to_posterior, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/final_redeskew_map_uses_pre", copts_.final_redeskew_map_uses_pre, false);
+  if (copts_.final_redeskew_map_uses_pre && !copts_.final_redeskew)
+    cfg.requireCombination(
+        "estimator/coupled/final_redeskew_map_uses_pre requires "
+        "estimator/coupled/final_redeskew=true -- there is nothing to "
+        "isolate the map from if the final redeskew pass never runs.");
   if (copts_.add_q_scan_to_posterior) {
     bool imu_log_qhat_en = false;
     pnh.param<bool>("imu/log_qhat_en", imu_log_qhat_en, false);
@@ -420,6 +426,12 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     const M3D rot_before_fr = state_->rot();
     const V3D pos_before_fr = state_->pos();
     state_->setPropagatedState(final_prop.rot1, final_prop.pos1, final_prop.vel1);
+    // CQ-75-R2 arm (e): snapshot mg.points BEFORE this pass overwrites it,
+    // so the map-channel isolation restore below has something to
+    // restore to. Cheap (a vector copy), only taken when the flag is
+    // live to keep the default path's cost unchanged.
+    const std::vector<PointXYZCov> points_before_final_redeskew =
+        copts_.final_redeskew_map_uses_pre ? mg.points : std::vector<PointXYZCov>{};
     std::vector<PointXYZCov> final_deskewed;
     deskewPoints(state_, final_prop.poses, t1, mg.lidar_points, opts_.deskew, final_deskewed);
     DsMode ds_mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
@@ -545,6 +557,12 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         // own real posterior is validly written by CQ-44's block either way.
       }
     }
+    // CQ-75-R2 arm (e): revert mg.points to its pre-final-redeskew value
+    // for the MAP channel only -- everything above (the residual report,
+    // arm (c)'s relinearized covariance) already ran against the post-
+    // redeskew points and is unaffected; only what the caller passes to
+    // updateMap() after this function returns changes.
+    if (copts_.final_redeskew_map_uses_pre) mg.points = points_before_final_redeskew;
   }
 
   // CQ-54 item 3: once per SCAN (not per GN iteration -- the loop above
