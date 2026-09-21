@@ -108,6 +108,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/bias_observable_only", copts_.bias_observable_only, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/prior/imu_deviation_weight", copts_.imu_deviation_weight, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/prior/mean_weight", copts_.mean_weight, 0.0);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/log_traj_dev_en", copts_.log_traj_dev_en, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/prior_per_axis_sigma", copts_.prior_per_axis_sigma, false);
   cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/robust_loss",
                  copts_.robust_loss, "none",
@@ -305,6 +306,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   coupled_c_gyr_.assign(copts_.n_c, V3D::Zero());
   coupled_iters_ = 0;
   coupled_solve_ms_ = 0.0;
+  coupled_prev_traj_dev_valid_ = false;  // CQ-72 item 3: no "previous iteration" at scan start
   coupled_prev_iter_planes_.clear();  // CQ-79: no "previous iteration" carries into a new scan
   coupled_delta_v_.setZero(); coupled_delta_bg_.setZero();
   coupled_delta_ba_.setZero(); coupled_delta_g_.setZero();
@@ -2380,6 +2382,49 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   for (int j = 0; j < n_c; ++j) {
     coupled_c_acc_[j] += delta_c.segment<3>(3 * j);
     coupled_c_gyr_[j] += delta_c.segment<3>(3 * n_c + 3 * j);
+  }
+
+  // CQ-72 item 3: how far does the trajectory the correction implies
+  // actually move, per iteration -- ||P_k c|| in METRES (P_k = phi_head[k]'s
+  // position rows, c = the CURRENT, just-updated coefficient vector, same
+  // c_vec layout [c_acc(3*n_c);c_gyr(3*n_c)] used everywhere else). One row
+  // per (scan_id, iter); the FINAL row for a given scan_id is that scan's
+  // own per-scan summary (the card asks for both, and a per-iteration log
+  // already contains the per-scan-final one as its last row -- no second
+  // write site needed). Logged one iteration AFTER the coefficient it
+  // describes was applied, matching coupled_iters_'s own post-increment
+  // convention below.
+  if (copts_.log_traj_dev_en) {
+    Eigen::VectorXd c_now(ncol_c);
+    for (int j = 0; j < n_c; ++j) {
+      c_now.segment<3>(3 * j) = coupled_c_acc_[j];
+      c_now.segment<3>(3 * n_c + 3 * j) = coupled_c_gyr_[j];
+    }
+    double max_norm = 0.0, sumsq = 0.0;
+    V3D end_vec = V3D::Zero();
+    const int n_k = static_cast<int>(coupled_prop_.phi_head.size());
+    for (int k = 0; k < n_k; ++k) {
+      const V3D traj_k = coupled_prop_.phi_head[k].middleRows<3>(3) * c_now;
+      const double norm_k = traj_k.norm();
+      max_norm = std::max(max_norm, norm_k);
+      sumsq += norm_k * norm_k;
+      if (k == n_k - 1) end_vec = traj_k;
+    }
+    const double end_norm = end_vec.norm();
+    const double rms_norm = (n_k > 0) ? std::sqrt(sumsq / static_cast<double>(n_k)) : 0.0;
+    const double step_norm = coupled_prev_traj_dev_valid_
+        ? (end_vec - coupled_prev_traj_dev_end_vec_).norm() : 0.0;
+    static PersistentLogStream traj_dev_log("cq72_traj_dev.csv");
+    bool traj_dev_first;
+    std::ofstream& traj_dev_ofs = traj_dev_log.stream(&traj_dev_first);
+    if (traj_dev_first)
+      traj_dev_ofs << "scan_id,iter,traj_dev_max_m,traj_dev_end_m,traj_dev_rms_m,traj_dev_step_m\n";
+    traj_dev_ofs << std::setprecision(9)
+                 << voxel_map_->frame_idx_ << "," << coupled_iters_ << ","
+                 << max_norm << "," << end_norm << "," << rms_norm << "," << step_norm << "\n";
+    traj_dev_ofs.flush();
+    coupled_prev_traj_dev_end_vec_ = end_vec;
+    coupled_prev_traj_dev_valid_ = true;
   }
 
   // TQ-40 item 3: ask/got/refusal, THIS iteration's own [delta_phi0,delta_p0]

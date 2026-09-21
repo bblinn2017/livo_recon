@@ -211,6 +211,13 @@ struct LioProcCoupledOptions
   // today's curvature_only=false/dc_weight=0.0 case, since dc_acc/dc_gyr
   // were already always 0 then).
   double mean_weight = 0.0;
+  // CQ-72 item 3: "how much does the trajectory the correction implies
+  // actually move, per iteration and per frame" -- the literal thing the
+  // card asks for and which delta_c_norm/delta_c_acc_norm/delta_c_gyr_norm
+  // (CQ-53 item 3, coefficient-space) do not answer, since coefficient
+  // space and trajectory space are different objects with different units.
+  // Default false, md5-inert (pure logging, touches no solve/state path).
+  bool log_traj_dev_en = false;
   // CQ-59 item 4: builds the Lambda VALUE term's 3x3 blocks as a diagonal
   // from the calibration's real per-axis noise floor (state_->varAccFloor()/
   // varGyrFloor(), now genuinely anisotropic -- see calib_processing.cpp)
@@ -586,6 +593,17 @@ private:
   // post-loop cp_constraint.csv write (processLIO(), after the loop) sees
   // the FINAL iteration's own step.
   Eigen::VectorXd coupled_last_delta_c_;
+
+  // CQ-72 item 3: the PREVIOUS GN iteration's own P_N*c VECTOR (P_N = the
+  // last IMU step's phi_head position rows) -- traj_dev_step_m is defined
+  // as ||P_N c_this_iter - P_N c_prev_iter||, a vector difference, not a
+  // difference of norms, so the vector itself (not just its magnitude) has
+  // to be kept. coupled_prev_traj_dev_valid_ = false at scan start
+  // (alongside coupled_iters_'s own reset) means "no previous iteration
+  // this scan", so the first iteration's own step is never reported
+  // against a stale value from the prior scan.
+  V3D coupled_prev_traj_dev_end_vec_ = V3D::Zero();
+  bool coupled_prev_traj_dev_valid_ = false;
 
   // CQ-53 item 4: per-scan RMS (not mean-absolute -- sum_abs_r/error above
   // is already mean-|r|) residual, in meters, over the FINAL GN iteration's
