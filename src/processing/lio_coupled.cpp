@@ -94,6 +94,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_gyr", copts_.pose_imu_weight_gyr, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_curvature_weight_pos", copts_.pose_curvature_weight_pos, 0.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_curvature_weight_rot", copts_.pose_curvature_weight_rot, 0.0);
+  cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/pose_head_freeze_cp", copts_.pose_head_freeze_cp, 0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
   cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/jacobian_time_mode",
@@ -2950,8 +2951,41 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
     rank_ofs.flush();
   }
 
-  Eigen::LDLT<Eigen::MatrixXd> ldlt(build.A);
-  const Eigen::VectorXd delta_c = ldlt.solve(build.b);
+  // CQ-86 item 1: the weaker head-freeze anchor. n_frozen columns of BOTH
+  // c_p and c_phi are eliminated from the linear system entirely (not just
+  // solved-then-discarded) -- their delta is EXACTLY zero, matching
+  // decoupled's own "clamped" semantics rather than a soft large-weight
+  // prior. Reduces to a plain LDLT solve on the surviving free columns
+  // when pose_head_freeze_cp==0 (the default), byte-identical to before
+  // this item -- free_idx == every column, no elimination performed.
+  const int n_frozen = std::max(0, std::min(copts_.pose_head_freeze_cp, n_c));
+  Eigen::VectorXd delta_c = Eigen::VectorXd::Zero(6 * n_c);
+  if (n_frozen == 0) {
+    Eigen::LDLT<Eigen::MatrixXd> ldlt(build.A);
+    delta_c = ldlt.solve(build.b);
+  } else {
+    // Build the full free-column index list: c_p free columns, then c_phi
+    // free columns, each expanded to its 3 scalar components.
+    std::vector<int> free_cols;
+    free_cols.reserve(3 * (n_c - n_frozen) * 2);
+    for (int j = n_frozen; j < n_c; ++j)
+      for (int a = 0; a < 3; ++a) free_cols.push_back(3 * j + a);
+    for (int j = n_frozen; j < n_c; ++j)
+      for (int a = 0; a < 3; ++a) free_cols.push_back(3 * n_c + 3 * j + a);
+
+    const int nf = static_cast<int>(free_cols.size());
+    Eigen::MatrixXd A_free(nf, nf);
+    Eigen::VectorXd b_free(nf);
+    for (int r = 0; r < nf; ++r) {
+      b_free(r) = build.b(free_cols[r]);
+      for (int c = 0; c < nf; ++c) A_free(r, c) = build.A(free_cols[r], free_cols[c]);
+    }
+    Eigen::LDLT<Eigen::MatrixXd> ldlt_free(A_free);
+    const Eigen::VectorXd delta_free = ldlt_free.solve(b_free);
+    for (int r = 0; r < nf; ++r) delta_c(free_cols[r]) = delta_free(r);
+    // Frozen columns of delta_c are left at their Zero() initialization --
+    // exact elimination, not an approximation.
+  }
   if (delta_c.size() != 6 * n_c) {
     std::ostringstream diag;
     diag << "[coupled/pose] DIAG delta_c size mismatch: delta_c.size()=" << delta_c.size()

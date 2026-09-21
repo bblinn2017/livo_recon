@@ -44,6 +44,20 @@ struct LioProcCoupledOptions
   double pose_imu_weight_gyr = 1.0;
   double pose_curvature_weight_pos = 0.0;
   double pose_curvature_weight_rot = 0.0;
+  // CQ-86 item 1: the WEAKER anchor the card's own fallback authorizes --
+  // "IF COUPLING s TO c IS MORE THAN THIS ROUND CAN CARRY... instead FREEZE
+  // the head control points to the raw-chain values". Freezes the first
+  // `pose_head_freeze_cp` control points' correction (both c_p and c_phi
+  // blocks) to EXACTLY ZERO by eliminating those columns from the linear
+  // solve entirely (not a soft/large-weight prior) -- the spline's HEAD
+  // stays at wherever this scan's ScanSpline::fit() (the IMU-propagated
+  // raw chain) put it, for as many control points as this covers; not a
+  // true p(t0)=p_start+delta_p0 s-coupling (that remains unimplemented --
+  // see estimateCoupledCorrectionPoseBasis()'s own doc comment). Default 0
+  // (off, md5-inert to every existing call site) -- a numerics DEFAULT is
+  // Bryce's call (rule 26); this round only PROPOSES turning it on. Config
+  // key: estimator/coupled/pose_head_freeze_cp.
+  int pose_head_freeze_cp = 0;
   // Item 3d(ii): the DC-component/bias split is exactly rank-deficient by 6
   // (a constant delta_a and a constant -delta_ba are indistinguishable over
   // one scan, same for delta_omega/delta_bg) and solvable only via the
