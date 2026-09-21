@@ -20,6 +20,20 @@ struct LioProcCoupledOptions
   // n_c control points for the correction basis (item 2: NOT
   // control_point_hz -- a separate resolution knob for a different spline).
   int n_c = 4;
+
+  // CQ-82 Phase 2: which basis the n_c control points parameterize.
+  //   "raw_imu" (DEFAULT): control points are corrections to the
+  //     accelerometer/gyro signal (the basis this whole file already
+  //     implements -- unchanged).
+  //   "pose": control points are POSITION and ATTITUDE, evaluated via
+  //     ScanSpline's own basis (spline.h) -- the LiDAR term is then linear
+  //     in c_p directly (no chain through the IMU state), and the IMU
+  //     enters as a measurement FACTOR (spline-implied accel/omega vs raw
+  //     IMU), not a prior. See buildPoseSplineSystem().
+  // Config key: estimator/coupled/spline_mode.
+  std::string spline_mode = "raw_imu";
+  static constexpr const char* SPLINE_MODES[] = { "raw_imu", "pose" };
+  bool poseBasis() const { return spline_mode == "pose"; }
   // Item 3d(ii): the DC-component/bias split is exactly rank-deficient by 6
   // (a constant delta_a and a constant -delta_ba are indistinguishable over
   // one scan, same for delta_omega/delta_bg) and solvable only via the

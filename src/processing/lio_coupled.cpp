@@ -88,6 +88,8 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   }
 
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/n_c", copts_.n_c, 4);
+  cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/spline_mode",
+                 copts_.spline_mode, "raw_imu", {"raw_imu", "pose"});
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
   cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/jacobian_time_mode",
@@ -168,6 +170,115 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
           "-- it reads the pre-propagation P snapshot that machinery already "
           "captures every scan; there is no separate capture path.");
   }
+  // CQ-82 Phase 2 item 4: under spline_mode=pose, every raw_imu-basis-
+  // specific knob describes a term/path the pose basis does not have --
+  // refuse loudly rather than silently ignore, so a config left over from a
+  // raw_imu sweep cannot silently no-op under the new basis.
+  if (copts_.poseBasis()) {
+    if (copts_.smoothness_weight_acc != 0.0 || copts_.smoothness_weight_gyr != 0.0)
+      cfg.requireCombination(
+          "estimator/coupled/spline_mode=pose refuses "
+          "estimator/coupled/prior/smoothness_weight_{acc,gyr} -- those "
+          "weight a curvature prior on the raw_imu coefficient basis, which "
+          "does not exist under the pose basis (see its own smoothness term).");
+    if (copts_.imu_deviation_weight != 1.0)
+      cfg.requireCombination(
+          "estimator/coupled/spline_mode=pose refuses "
+          "estimator/coupled/prior/imu_deviation_weight -- it weights the "
+          "raw_imu coefficient prior's gram term, which the pose basis does "
+          "not build (the IMU enters as a measurement factor there, not a prior).");
+    if (copts_.mean_weight != 0.0)
+      cfg.requireCombination(
+          "estimator/coupled/spline_mode=pose refuses "
+          "estimator/coupled/prior/mean_weight -- it weights the raw_imu "
+          "coefficient basis's zero-mean prior, meaningless for pose control points.");
+    if (copts_.traj_deviation_weight != 0.0)
+      cfg.requireCombination(
+          "estimator/coupled/spline_mode=pose refuses "
+          "estimator/coupled/prior/traj_deviation_weight -- it penalizes "
+          "deviation of the IMU-propagated trajectory from the raw_imu "
+          "correction basis, which has no analogue once position/attitude "
+          "ARE the control points.");
+    if (copts_.zero_mean)
+      cfg.requireCombination(
+          "estimator/coupled/spline_mode=pose refuses "
+          "estimator/coupled/zero_mean -- it constrains the raw_imu "
+          "coefficient basis's DC component, which the pose basis has no "
+          "equivalent of.");
+    if (copts_.prior_per_axis_sigma)
+      cfg.requireCombination(
+          "estimator/coupled/spline_mode=pose refuses "
+          "estimator/coupled/prior_per_axis_sigma -- it shapes the raw_imu "
+          "coefficient prior's per-axis precision, which the pose basis "
+          "does not build.");
+    if (copts_.bias_observable_only)
+      cfg.requireCombination(
+          "estimator/coupled/spline_mode=pose refuses "
+          "estimator/coupled/bias_observable_only -- it is a raw_imu-basis "
+          "bias-projection mechanism with no pose-basis analogue.");
+    if (copts_.bias_anchor)
+      cfg.requireCombination(
+          "estimator/coupled/spline_mode=pose refuses "
+          "estimator/coupled/bias_anchor -- it anchors the raw_imu "
+          "coefficient basis's bias-prior precision, meaningless here.");
+    if (copts_.freeze_bg)
+      cfg.requireCombination(
+          "estimator/coupled/spline_mode=pose refuses "
+          "estimator/coupled/freeze_bg -- it freezes the raw_imu gyro-bias "
+          "correction pathway, which the pose basis does not route through.");
+    if (copts_.q_out_of_band_en)
+      cfg.requireCombination(
+          "estimator/coupled/spline_mode=pose refuses "
+          "estimator/coupled/q_out_of_band_en -- it injects process noise "
+          "keyed to the raw_imu coefficient basis's own sigma, not built "
+          "under the pose basis.");
+    if (copts_.q_bias_rw_en)
+      cfg.requireCombination(
+          "estimator/coupled/spline_mode=pose refuses "
+          "estimator/coupled/q_bias_rw_en -- it is a raw_imu-basis bias "
+          "random-walk process-noise term with no pose-basis analogue.");
+    if (copts_.adaptive_sigma)
+      cfg.requireCombination(
+          "estimator/coupled/spline_mode=pose refuses "
+          "estimator/coupled/adaptive_sigma -- it adapts the raw_imu "
+          "coefficient basis's own noise floor, not read under the pose basis.");
+    if (copts_.disable_cgyr)
+      cfg.requireCombination(
+          "estimator/coupled/spline_mode=pose refuses "
+          "estimator/coupled/disable_cgyr -- it drops the raw_imu "
+          "rotation-correction coefficient block, which the pose basis "
+          "does not have (attitude control points replace it entirely).");
+    if (copts_.jacobian_time_mode == "legacy_mismatched")
+      cfg.requireCombination(
+          "estimator/coupled/spline_mode=pose refuses "
+          "estimator/coupled/jacobian_time_mode=legacy_mismatched (the "
+          "shipped raw_imu default) -- the pose basis's LiDAR term is "
+          "linear in c_p directly and carries no H-vs-Phi time mismatch to "
+          "describe; set end_time or point_time explicitly to acknowledge "
+          "this key is otherwise a no-op under the pose basis.");
+    // Item 4's final clause: force final_relinearize_cov on for the pose
+    // basis regardless of what was configured -- unlike the raw_imu case
+    // (where it's optional, gated on final_redeskew), the pose basis's own
+    // covariance is only meaningful evaluated at the basis actually solved.
+    copts_.final_relinearize_cov = true;
+
+    // CQ-82 Phase 2: the pose basis's own residual construction
+    // (buildPoseSplineSystem() -- LiDAR term linear in c_p, IMU-as-
+    // measurement-factor via ScanSpline's analytic accel/omega chained
+    // through Jr(phi), position/attitude smoothness) is not implemented
+    // yet. Refuse loudly here rather than let estimateCoupledCorrection()
+    // silently run the UNRELATED raw_imu basis math under this flag --
+    // "a fallback on an impossible condition aborts loudly; it never
+    // substitutes" is a standing rule, and mislabeling raw_imu output as a
+    // pose-basis result would be exactly that kind of silent substitution.
+    cfg.requireCombination(
+        "estimator/coupled/spline_mode=pose is accepted at config-parse "
+        "time (its refusal wiring for every raw_imu-only knob above is "
+        "live and tested) but its own residual construction is NOT YET "
+        "IMPLEMENTED -- refusing at startup rather than silently running "
+        "the raw_imu basis under a pose-basis label.");
+  }
+
   coupled_tier1_nees_ = Tier1NeesBuffer(opts_.nees_per_dof_en ? opts_.nees_tier1_window_scans : 0);
 
   // Every spline/* and adaptive_q/* key is unclaimed by this class by
@@ -184,6 +295,7 @@ std::string LioProcCoupled::engagementReport() const
 {
   std::ostringstream oss;
   oss << "[engagement] estimator=coupled n_c=" << copts_.n_c
+      << " spline_mode=" << copts_.spline_mode
       << " zero_mean=" << (copts_.zero_mean ? "true" : "false")
       << " disable_cgyr=" << (copts_.disable_cgyr ? "true" : "false")
       << " jacobian_time_mode=" << copts_.jacobian_time_mode
