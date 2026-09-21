@@ -1712,6 +1712,7 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
         const M3D H_rr_d = ekf_.HtH.block<3, 3>(0, 0);
         Eigen::SelfAdjointEigenSolver<M3D> es_pp(H_pp_d), es_rr(H_rr_d);
         diag.h_pp_min_eig = es_pp.eigenvalues()(0);
+        diag.h_pp_max_eig = es_pp.eigenvalues()(2);  // CQ-81 item B
         diag.h_rr_min_eig = es_rr.eigenvalues()(0);
         diag.h_rr_trace   = H_rr_d.trace();
         // CQ-36 item 1: read directly off ekf_.HtH, unlike sum_weight below

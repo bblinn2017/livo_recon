@@ -105,7 +105,11 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            // post-update trace -- see LioFrameDiag's own doc comment.
            ",trP_pos_post,p_rot_trace_post"
            ",p_rot_eig_mid_pre,p_rot_eig_max_pre"
-           ",p_rot_eig_min_post,p_rot_eig_mid_post,p_rot_eig_max_post\n";
+           ",p_rot_eig_min_post,p_rot_eig_mid_post,p_rot_eig_max_post"
+           // CQ-81 item B: h_pp_min_eig's own max-eigenvalue sibling -- see
+           // LioFrameDiag's doc comment. Appended, not interleaved, per this
+           // file's own convention (CQ-56 item 3).
+           ",h_pp_max_eig\n";
   first_call = false;
   // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
   // (6 significant figures) collapses every frame in a run to the same
@@ -154,6 +158,7 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.trP_pos_post << "," << lio.p_rot_trace_post
       << "," << lio.p_rot_eig_mid_pre << "," << lio.p_rot_eig_max_pre
       << "," << lio.p_rot_eig_min_post << "," << lio.p_rot_eig_mid_post << "," << lio.p_rot_eig_max_post
+      << "," << lio.h_pp_max_eig
       << "\n";
   ofs.flush();
 }

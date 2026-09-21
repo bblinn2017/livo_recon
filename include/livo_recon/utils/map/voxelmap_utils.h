@@ -569,6 +569,14 @@ struct LioFrameDiag
   int    n_residuals  = 0;    // point-to-plane residuals the ESIKF accumulated
   double h_pp_min_eig = -1.0; // min eigenvalue of HtH's position block
   double h_rr_min_eig = -1.0; // min eigenvalue of HtH's rotation block
+  // CQ-81 item B: max eigenvalue of HtH's position block, alongside the
+  // pre-existing min above -- H_pp = sum_i w_i * n_i * n_i^T over this
+  // scan's accepted residuals (dr/dpos == n_i^T for point-to-plane, so
+  // H_pp already IS the weighted plane-normal-diversity matrix CQ-81 asks
+  // for), so lambda_min/lambda_max together are the diversity spread
+  // without any new accumulation pass -- both read off the same
+  // SelfAdjointEigenSolver the min already used.
+  double h_pp_max_eig = -1.0;
   double sum_weight   = 0.0;  // total residual weight, i.e. how much information
   // CQ-36 item 1: trace(HtH's position block), read directly off ekf_.HtH --
   // unlike sum_weight above (summed from residuals_, structurally blind to
