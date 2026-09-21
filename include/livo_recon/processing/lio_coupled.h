@@ -429,6 +429,25 @@ public:
   double estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out);
 
 private:
+  // CQ-82 Phase 2, Artifact 1: the pose basis's own GN-iteration path.
+  // Branched to from estimateCoupledCorrection()'s very top when
+  // copts_.poseBasis() -- kept SEPARATE from the raw_imu dispatcher rather
+  // than threaded through it, since the raw_imu path's own downstream
+  // bookkeeping (bg-projection, delta_bg/delta_ba/delta_v/delta_g
+  // accumulation, coupled_c_acc_/coupled_c_gyr_'s own semantics) does not
+  // apply to a basis whose c-block is position/attitude, not accel/gyro
+  // corrections -- a single top-level branch is easier to verify never
+  // affects the raw_imu path than threading pose-specific conditionals
+  // through ~600 lines of shared code. Deskews against the current trial
+  // spline (coupled_pose_spline_ + coupled_c_pos_/coupled_c_rot_) via the
+  // EXISTING, already-shared deskewPointsSpline() (lio/deskew.h, also used
+  // by the decoupled spline path), reuses buildResiduals() (also shared,
+  // non-virtual), builds the c-block system via buildPoseSplineCBlock(),
+  // solves, applies the correction, and writes the resulting trajectory's
+  // tail pose into state_ directly (no propagateCoupled()-equivalent
+  // needed -- the pose basis's own trajectory already IS an absolute
+  // pose, not a correction requiring re-propagation).
+  double estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out);
   // CQ-82 Phase 1: everything buildImuCorrectionSystem() (and, in Phase 2,
   // its pose-basis sibling) hands back to the dispatcher besides A/b itself
   // -- every sum/accumulator the residual loop used to leave in a bare local

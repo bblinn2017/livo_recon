@@ -266,21 +266,15 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
     // covariance is only meaningful evaluated at the basis actually solved.
     copts_.final_relinearize_cov = true;
 
-    // CQ-82 Phase 2: the pose basis's own residual construction
-    // (buildPoseSplineSystem() -- LiDAR term linear in c_p, IMU-as-
-    // measurement-factor via ScanSpline's analytic accel/omega chained
-    // through Jr(phi), position/attitude smoothness) is not implemented
-    // yet. Refuse loudly here rather than let estimateCoupledCorrection()
-    // silently run the UNRELATED raw_imu basis math under this flag --
-    // "a fallback on an impossible condition aborts loudly; it never
-    // substitutes" is a standing rule, and mislabeling raw_imu output as a
-    // pose-basis result would be exactly that kind of silent substitution.
-    cfg.requireCombination(
-        "estimator/coupled/spline_mode=pose is accepted at config-parse "
-        "time (its refusal wiring for every raw_imu-only knob above is "
-        "live and tested) but its own residual construction is NOT YET "
-        "IMPLEMENTED -- refusing at startup rather than silently running "
-        "the raw_imu basis under a pose-basis label.");
+    // CQ-82 Phase 2: the pose basis's own residual construction now HAS a
+    // real implementation (estimateCoupledCorrectionPoseBasis(),
+    // buildPoseSplineCBlock()) -- the earlier NOT-YET-IMPLEMENTED refusal
+    // that lived here is gone. estimateCoupledCorrection()'s own top-level
+    // branch (copts_.poseBasis()) now dispatches to that real path instead
+    // of ever falling through to the raw_imu math, so the silent-
+    // substitution risk this refusal guarded against no longer applies --
+    // removing the refusal is itself gated on that branch existing, not a
+    // relaxation of the underlying safety property.
   }
 
   coupled_tier1_nees_ = Tier1NeesBuffer(opts_.nees_per_dof_en ? opts_.nees_tier1_window_scans : 0);
@@ -438,9 +432,9 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   // is shared with the decoupled spline path, so this works around that
   // rather than changing shared, already-shipped surface.
   if (copts_.poseBasis()) {
-    coupled_c_pos_.assign(copts_.n_c, V3D::Zero());
-    coupled_c_rot_.assign(copts_.n_c, V3D::Zero());
     coupled_pose_spline_valid_ = false;
+    coupled_c_pos_.clear();
+    coupled_c_rot_.clear();
     if (!mg.poses.empty() && mg.image.t > mg.poses.front().t) {
       const double t0 = mg.poses.front().t;
       const double t1 = mg.image.t;
@@ -448,6 +442,20 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       pose_fit_opts.control_point_hz = (copts_.n_c - 3) / std::max(t1 - t0, 1e-6);
       pose_fit_opts.end_constraint_velocity = true;
       coupled_pose_spline_valid_ = coupled_pose_spline_.fit(mg.poses, t0, t1, pose_fit_opts);
+      // BUGFIX (found via a live crash: SIGSEGV inside processLIO, an
+      // out-of-bounds Eigen column access): ScanSpline::fit() can silently
+      // CLAMP its actual control-point count below the REQUESTED
+      // copts_.n_c (its own doc comment: "fit() additionally clamps n_cp
+      // to n_samples - 1" -- a real scan can have too few pose samples in
+      // its own window, especially an early/short one). coupled_c_pos_/
+      // coupled_c_rot_ (and every loop bound in
+      // estimateCoupledCorrectionPoseBasis()) MUST be sized off the
+      // spline's own ACTUAL nControlPoints(), never off copts_.n_c
+      // directly -- copts_.n_c is a request, not a guarantee.
+      if (coupled_pose_spline_valid_) {
+        coupled_c_pos_.assign(coupled_pose_spline_.nControlPoints(), V3D::Zero());
+        coupled_c_rot_.assign(coupled_pose_spline_.nControlPoints(), V3D::Zero());
+      }
     }
   }
   // mg.poses.front().vel (NOT state_->vel()), for consistency with
@@ -508,6 +516,38 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     }
     if ((prev - error) / std::max(prev, 1e-6) < opts_.min_diff_error)
       { stop = "rel_diff"; break; }
+  }
+
+  // CQ-82 Phase 2: everything below this point (final_redeskew, bg-
+  // projection, relinearization, and most of the CQ-53/54/60/etc.
+  // diagnostics) is raw_imu-basis-specific bookkeeping -- built around
+  // coupled_last_A_/coupled_c_acc_/coupled_c_gyr_'s RAW_IMU shapes and
+  // semantics (e.g. coupled_last_A_ is assumed to be the FULL 18+6*n_c
+  // joint system with delta_bg/delta_ba at fixed offsets; the pose basis's
+  // own coupled_last_A_ is only the 6*n_c c-block, a different shape
+  // entirely). Auditing and re-deriving a pose-basis-appropriate version of
+  // ~1150 lines of this bookkeeping is real, separate work -- FOUND LIVE,
+  // via a real SIGSEGV crash (an out-of-bounds read on coupled_last_A_'s
+  // now-mismatched shape), not assumed. Returning here is honest about that
+  // scope rather than risking another silent out-of-bounds read: the GN
+  // loop itself (the actual novel numerics -- LiDAR/IMU-factor/smoothness
+  // terms, the solve, state_ write-back) already ran to real convergence
+  // (confirmed live: multiple iterations, stop="rel_diff", real dtheta/dt
+  // norms) by the time we reach here. mg.points is already correctly
+  // deskewed (by estimateCoupledCorrectionPoseBasis()'s own
+  // deskewPointsSpline() call each iteration) -- the caller's own map
+  // update (outside this function) is unaffected by skipping the rest.
+  if (copts_.poseBasis()) {
+    boundary_dpos_ = 0.0;
+    boundary_drot_deg_ = 0.0;
+    std::ostringstream oss;
+    oss << "[lio/ekf][pose-basis] iters=" << iter + 1 << "  stop=" << stop
+        << std::scientific << std::setprecision(1)
+        << "  |dtheta|=" << total_dtheta.norm() * (180.0 / M_PI) << " deg"
+        << "  |dt|=" << total_dt.norm() * 1000.0 << " mm"
+        << "  (post-loop bg-projection/relinearization/most diagnostics "
+        << "SKIPPED -- raw_imu-specific, not yet ported to this basis)";
+    return oss.str();
   }
 
   // CQ-75: final_redeskew. STRUCTURAL FINDING, VERIFIED BY CODE READ, THAT
@@ -2036,6 +2076,10 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   dtheta_out = V3D::Zero();
   dt_out = V3D::Zero();
   if (mg.poses.empty()) return 0.0;
+  // CQ-82 Phase 2: a single top-level branch, kept as far from the raw_imu
+  // path's own ~600 lines of downstream bookkeeping as possible -- see
+  // estimateCoupledCorrectionPoseBasis()'s own doc comment.
+  if (copts_.poseBasis()) return estimateCoupledCorrectionPoseBasis(mg, dtheta_out, dt_out);
 
   const auto t_start = std::chrono::steady_clock::now();
 
@@ -2776,6 +2820,134 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   const auto t_end = std::chrono::steady_clock::now();
   coupled_solve_ms_ += std::chrono::duration<double, std::milli>(t_end - t_start).count();
 
+  return residuals_.empty() ? 0.0 : sum_abs_r / static_cast<double>(residuals_.size());
+}
+
+// CQ-82 Phase 2, Artifact 1: see this function's own declaration-site
+// doc comment in lio_coupled.h.
+double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out)
+{
+  dtheta_out = V3D::Zero();
+  dt_out = V3D::Zero();
+  // "A fallback on an impossible condition aborts loudly; it never
+  // substitutes" -- a scan whose ScanSpline::fit() failed at scan start has
+  // no valid initial trajectory for this basis to correct; silently
+  // returning 0.0 here would let the GN loop believe the scan converged
+  // trivially, which is not true and would corrupt state_ silently.
+  if (!coupled_pose_spline_valid_) {
+    std::ostringstream diag;
+    diag << "[coupled/pose] estimateCoupledCorrectionPoseBasis(): this "
+            "scan's ScanSpline::fit() failed or never ran at scan start -- "
+            "no valid initial trajectory to correct. lastFitFailCause()="
+         << static_cast<int>(coupled_pose_spline_.lastFitFailCause())
+         << " mg.poses.size()=" << mg.poses.size()
+         << " n_c_requested=" << copts_.n_c
+         << " scan_id=" << voxel_map_->frame_idx_;
+    throw std::runtime_error(diag.str());
+  }
+
+  const double t1 = mg.image.t;
+  // BUGFIX: n_c here MUST be the spline's own ACTUAL control-point count
+  // (it can be clamped below copts_.n_c -- see the scan-start reset's own
+  // comment), never copts_.n_c directly. coupled_c_pos_/coupled_c_rot_ are
+  // already sized to this same actual count at scan-start reset time.
+  const int n_c = coupled_pose_spline_.nControlPoints();
+  // TEMPORARY diagnostic (not meant to stay): confirm every size this loop
+  // depends on actually agrees before touching any Eigen column.
+  if (static_cast<int>(coupled_c_pos_.size()) != n_c ||
+      static_cast<int>(coupled_c_rot_.size()) != n_c ||
+      coupled_pose_spline_.cpPos().cols() != n_c) {
+    std::ostringstream diag;
+    diag << "[coupled/pose] DIAG size mismatch: n_c(nControlPoints)=" << n_c
+         << " coupled_c_pos_.size()=" << coupled_c_pos_.size()
+         << " coupled_c_rot_.size()=" << coupled_c_rot_.size()
+         << " cpPos().cols()=" << coupled_pose_spline_.cpPos().cols()
+         << " n_c_requested=" << copts_.n_c
+         << " nControlPointsRequested()=" << coupled_pose_spline_.nControlPointsRequested()
+         << " clamped=" << coupled_pose_spline_.nControlPointsClamped();
+    throw std::runtime_error(diag.str());
+  }
+
+  // The trial spline: this scan's ONE-TIME fit, with the corrections
+  // accumulated so far THIS scan (across earlier GN iterations) applied.
+  ScanSpline trial = coupled_pose_spline_;
+  for (int j = 0; j < n_c; ++j) {
+    trial.cpPosMut().col(j) += coupled_c_pos_[j];
+    trial.cp_phi_.col(j)    += coupled_c_rot_[j];
+  }
+  const M3D prev_tail_R = trial.rotAt(t1);
+  const V3D prev_tail_p = trial.posAt(t1);
+
+  // Deskew against the trial spline -- deskewPointsSpline() is EXISTING,
+  // shared machinery (lio/deskew.h), already used by the decoupled spline
+  // path; not re-derived here. Downsample the same way the raw_imu arm
+  // does (shared opts_.ds_mode/ds_leaf_size).
+  std::vector<PointXYZCov> deskewed;
+  deskewPointsSpline(state_, trial, t1, mg.lidar_points, opts_.deskew, deskewed);
+  if (opts_.dsOn()) {
+    DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
+    voxelDownsample(deskewed, mg.points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
+  } else {
+    mg.points = deskewed;
+  }
+  buildResiduals(mg.points, residuals_, coupled_iters_ == 0);
+
+  std::vector<PoseSplineLidarObs> lidar_obs;
+  lidar_obs.reserve(residuals_.size());
+  for (const auto& res : residuals_) {
+    PoseSplineLidarObs o;
+    o.t = res.t; o.raw_body_point = res.raw_body_point; o.normal = res.normal;
+    o.r = res.r; o.sigma2 = res.sigma_squared;
+    lidar_obs.push_back(o);
+  }
+  std::vector<PoseSplineImuObs> imu_obs;
+  imu_obs.reserve(mg.imu_samples_raw.size());
+  for (const auto& s : mg.imu_samples_raw) {
+    PoseSplineImuObs o; o.t = s.t; o.acc = s.acc; o.gyr = s.gyro;
+    imu_obs.push_back(o);
+  }
+
+  const auto build = buildPoseSplineCBlock(
+      trial, lidar_obs, imu_obs,
+      state_->biasAcc(), state_->biasGyr(), state_->gravity(),
+      copts_.pose_imu_weight_acc, copts_.pose_imu_weight_gyr,
+      copts_.pose_curvature_weight_pos, copts_.pose_curvature_weight_rot);
+
+  Eigen::LDLT<Eigen::MatrixXd> ldlt(build.A);
+  const Eigen::VectorXd delta_c = ldlt.solve(build.b);
+  if (delta_c.size() != 6 * n_c) {
+    std::ostringstream diag;
+    diag << "[coupled/pose] DIAG delta_c size mismatch: delta_c.size()=" << delta_c.size()
+         << " expected 6*n_c=" << 6 * n_c << " n_c=" << n_c
+         << " build.A.rows()=" << build.A.rows() << " build.A.cols()=" << build.A.cols();
+    throw std::runtime_error(diag.str());
+  }
+
+  for (int j = 0; j < n_c; ++j) {
+    coupled_c_pos_[j] += delta_c.segment<3>(3 * j);
+    coupled_c_rot_[j] += delta_c.segment<3>(3 * n_c + 3 * j);
+  }
+
+  // Re-evaluate the tail pose with the NEWLY updated corrections, and write
+  // it into state_ directly -- the pose basis's own trajectory already IS
+  // an absolute pose; there is no propagateCoupled()-equivalent correction
+  // to re-apply the way the raw_imu arm needs.
+  ScanSpline trial_new = coupled_pose_spline_;
+  for (int j = 0; j < n_c; ++j) {
+    trial_new.cpPosMut().col(j) += coupled_c_pos_[j];
+    trial_new.cp_phi_.col(j)    += coupled_c_rot_[j];
+  }
+  const M3D new_tail_R = trial_new.rotAt(t1);
+  const V3D new_tail_p = trial_new.posAt(t1);
+  const V3D new_tail_v = trial_new.velAt(t1);
+
+  dtheta_out = Log(prev_tail_R.transpose() * new_tail_R);
+  dt_out = new_tail_p - prev_tail_p;
+  state_->setPropagatedState(new_tail_R, new_tail_p, new_tail_v);
+  coupled_last_A_ = build.A;
+
+  double sum_abs_r = 0.0;
+  for (const auto& res : residuals_) sum_abs_r += std::abs(res.r);
   return residuals_.empty() ? 0.0 : sum_abs_r / static_cast<double>(residuals_.size());
 }
 

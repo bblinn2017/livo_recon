@@ -133,6 +133,7 @@ add_executable(livo_recon_node
   src/lio/residual_redundancy.cpp
   src/lio/residual_weighting.cpp
   src/lio/coupled_estimator.cpp
+  src/lio/pose_spline_system.cpp
   src/map/voxelmap.cpp
   src/map/akf_map.cpp
   src/map/map_backend_factory.cpp
