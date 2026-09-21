@@ -74,6 +74,30 @@ struct LioProcCoupledOptions
   // estimator/coupled/pose_tikhonov_eps.
   double pose_tikhonov_eps = 1e-6;
 
+  // POST-CQ-87-REVIEW FIX (item 4, user follow-up 2026-09-21): the pose
+  // arm's IMU-factor weighting must use the SHIPPED config values
+  // directly -- state/cov/acc, state/cov/gyr (state.cpp's own
+  // paramWarn<double>(pnh, "state/cov/acc", ...), which seeds
+  // state_->var_acc_/var_gyr_ -- VARIANCE, (m/s^2)^2 / (rad/s)^2, same
+  // units/name as state.cpp's own local `var_acc`/`var_gyr`) -- rather
+  // than reading them indirectly through state_->varAcc()/varGyr(). Under
+  // the DEFAULT operating setup (CalibProcOptions::use_calib_var == false,
+  // the shipped default) those two happen to be numerically identical,
+  // since state_'s own members are seeded from these SAME two keys at
+  // startup and never mutated by this arm -- but state_'s copy CAN
+  // silently diverge from the config the moment use_calib_var=true (the
+  // calibration pass overwrites it) or the decoupled arm's own AdaptiveQ
+  // path runs (lio_decoupled.cpp:860, a DIFFERENT class's own mechanism
+  // that also calls state_->setNoiseParams()). Reading these two config
+  // keys directly, here, makes the pose arm's own weighting immune to
+  // either -- exactly "use the config directly," not "usually equals the
+  // config." Config keys: state/cov/acc, state/cov/gyr (the SAME keys
+  // state.cpp reads -- this is a second, independent read of the same
+  // param server entry, not a new key). Default 1e-4/1e-4 matches
+  // state.cpp's own paramWarn() default exactly.
+  double pose_imu_var_acc = 1e-4;
+  double pose_imu_var_gyr = 1e-4;
+
   // CQ-85 item 1: rule 58f's exact failure mode -- CQ-72's own 96-cell grid
   // produced a cell reporting completed=yes with ATE=396,499,288.300 mm (a
   // FAILED run that looked like a successful one; imu_deviation_weight=0,

@@ -96,6 +96,13 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_curvature_weight_rot", copts_.pose_curvature_weight_rot, 0.0);
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/pose_head_freeze_cp", copts_.pose_head_freeze_cp, 0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_tikhonov_eps", copts_.pose_tikhonov_eps, 1e-6);
+  // POST-CQ-87-REVIEW FIX (item 4, follow-up): read state/cov/acc,gyr
+  // DIRECTLY (the same two keys state.cpp itself reads to seed
+  // state_->var_acc_/var_gyr_) -- see copts_.pose_imu_var_acc/gyr's own
+  // doc comment for why this arm no longer goes through state_->varAcc()/
+  // varGyr() at all.
+  paramWarn<double>(pnh, "state/cov/acc", copts_.pose_imu_var_acc, 1e-4);
+  paramWarn<double>(pnh, "state/cov/gyr", copts_.pose_imu_var_gyr, 1e-4);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/max_scan_displacement_m", copts_.max_scan_displacement_m, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
@@ -3108,13 +3115,14 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
   const PoseSplineTimeMode pose_time_mode =
       (copts_.jacobian_time_mode == "end_time") ? PoseSplineTimeMode::kEndTime
                                                  : PoseSplineTimeMode::kPointTime;
-  // POST-CQ-87-REVIEW FIX (item 4): the SAME calibrated IMU noise the
-  // raw_imu arm solves against (state_->varAcc()/varGyr(), .mean()
-  // collapses to a scalar sigma -- the same convention this file already
-  // uses for varAccFloor()/varGyrFloor(), ~line 1175), not a hardcoded
-  // placeholder -- makes an A/B comparison against raw_imu fair.
-  const double pose_sigma_acc = std::sqrt(state_->varAcc().mean());
-  const double pose_sigma_gyr = std::sqrt(state_->varGyr().mean());
+  // POST-CQ-87-REVIEW FIX (item 4, follow-up 2026-09-21): read directly
+  // from copts_.pose_imu_var_acc/gyr (state/cov/acc,gyr, loaded straight
+  // off the param server in loadParameters() -- see that field's own doc
+  // comment) rather than state_->varAcc()/varGyr(), so this arm's
+  // weighting can never silently diverge from the shipped config value
+  // regardless of calibration/adaptive-Q state mutation elsewhere.
+  const double pose_sigma_acc = std::sqrt(copts_.pose_imu_var_acc);
+  const double pose_sigma_gyr = std::sqrt(copts_.pose_imu_var_gyr);
   // POST-CQ-87-REVIEW FIX (item 3): the correction ALREADY accumulated
   // this scan (across earlier GN iterations), flattened into the SAME
   // [c_p(3n_c); c_phi(3n_c)] layout buildPoseSplineCBlock() itself uses --
