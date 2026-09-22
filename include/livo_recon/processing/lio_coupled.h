@@ -240,12 +240,26 @@ struct LioProcCoupledOptions
   //     delta_v_scan, hard-constrained equal across every knot
   //     (v_j = v_j_nominal + delta_v_scan for all j); 3 optimized
   //     velocity DOFs total instead of 3*N.
-  // Implemented as ADDITIONAL homogeneous equality-constraint rows
-  // appended to the SAME nullspace-elimination machinery
-  // exact_deterministic_constraint_enable already uses (see
-  // estimateCoupledPoseKnotSpline()'s C_exact/Z_ns construction) --
-  // fixed_nominal/shared_scan therefore compose cleanly with that flag
-  // (both independently on/off), rather than needing a separate code path.
+  //   derivative_defined (2026-09-22, pose-spline-derivative-state
+  //     campaign) -- v_j is HARD-CONSTRAINED to equal the analytic
+  //     time-derivative of the position-only (Catmull-Rom) spline
+  //     through the position control points, NOT frozen and NOT free:
+  //     v_j = (p_{j+1}-p_{j-1}) / (t_{j+1}-t_{j-1}) for interior knots,
+  //     one-sided at the two boundary knots -- an AFFINE equality
+  //     constraint (nonzero d_exact, unlike fixed_nominal/shared_scan's
+  //     homogeneous rows), so v_j's optimized value changes automatically
+  //     whenever a neighboring POSITION control point's own correction
+  //     changes, with zero independent velocity DOFs. See
+  //     estimateCoupledPoseKnotSpline()'s own derivation comment at the
+  //     velmode_derivative constraint-row-fill site for the exact algebra
+  //     and why this reuses the exact-constraint nullspace-elimination
+  //     machinery rather than needing a new solver path.
+  // Implemented as ADDITIONAL equality-constraint rows appended to the
+  // SAME nullspace-elimination machinery exact_deterministic_constraint_
+  // enable already uses (see estimateCoupledPoseKnotSpline()'s C_exact/
+  // Z_ns construction) -- every velocity_mode value composes cleanly with
+  // that flag (both independently on/off), rather than needing a
+  // separate code path.
   std::string pose_knots_velocity_mode = "free_per_knot";
 
   // CQ-85 item 1: rule 58f's exact failure mode -- CQ-72's own 96-cell grid

@@ -119,7 +119,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/relinearize_fq", copts_.pose_knots_relinearize_fq, true);
   cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/velocity_mode",
                  copts_.pose_knots_velocity_mode, "free_per_knot",
-                 {"free_per_knot", "shared_scan", "fixed_nominal"});
+                 {"free_per_knot", "shared_scan", "fixed_nominal", "derivative_defined"});
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/max_scan_displacement_m", copts_.max_scan_displacement_m, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
@@ -3838,7 +3838,48 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // rank_c==n_constraints FATAL check below.
   const bool velmode_fixed = (copts_.pose_knots_velocity_mode == "fixed_nominal");
   const bool velmode_shared = (copts_.pose_knots_velocity_mode == "shared_scan");
-  const int n_velmode_constraints = velmode_fixed ? 3 * N : (velmode_shared ? 3 * (N - 1) : 0);
+  // pose-spline-derivative-state campaign (2026-09-22): v_j is hard-
+  // constrained to the analytic Catmull-Rom tangent of the POSITION-only
+  // spline through neighboring position control points --
+  //   interior j:  v_j = (p_{j+1}-p_{j-1}) / (t_{j+1}-t_{j-1})
+  //   j=0:         v_j = (p_1-p_0) / (t_1-t_0)              (one-sided)
+  //   j=N-1:       v_j = (p_{N-1}-p_{N-2}) / (t_{N-1}-t_{N-2}) (one-sided)
+  // As a constraint on the OPTIMIZATION INCREMENT (trial = nominal+delta),
+  // since this relation is LINEAR in absolute position, it is EXACTLY:
+  //   delta_vel_j - c_j*delta_pos_{j+1} + c_j*delta_pos_{j-1} = d_j
+  //   d_j := (p_{j+1}^nom - p_{j-1}^nom)*c_j - v_j^nom
+  // an AFFINE (nonzero d_exact) equality constraint -- unlike fixed_
+  // nominal/shared_scan's homogeneous rows, this one has a nonzero target
+  // because v_j's own NOMINAL value (from IMU propagation at scan init)
+  // generally disagrees with the Catmull-Rom tangent of the NOMINAL
+  // positions; the constraint drives the OPTIMIZED (not nominal) v_j to
+  // satisfy the derivative relation exactly. This is deliberately
+  // implemented as ADDITIONAL constraint rows on the SAME nullspace-
+  // elimination machinery (not a new solver path, not a modification to
+  // the Hermite basis/LiDAR Jacobian/F9-Q9/block-tridiagonal code) for
+  // three reasons, each verified rather than assumed:
+  //   1. The resulting v_j is then a genuine LINEAR function of neighbor
+  //      position corrections -- "must change automatically when the
+  //      position control points change, no independent velocity
+  //      variable" is satisfied exactly by construction of a linear
+  //      equality constraint, not approximated.
+  //   2. Covariance: A_inv=Z*(Z^T A Z)^-1*Z^T (already computed whenever
+  //      n_constraints>0) automatically propagates this exact linear
+  //      relation into v_j's own posterior covariance block, and the
+  //      pos-vel CROSS block of that same A_inv is automatically
+  //      Cov(pos_j,vel_j) too -- no separate "derived velocity
+  //      covariance" formula needs to be coded; it falls out of the
+  //      EXISTING covariance-extraction code with zero new lines.
+  //   3. This constraint touches THREE consecutive position knots
+  //      (j-1,j,j+1) per row -- wider than the block-tridiagonal
+  //      solver's adjacent-knot-pair assumption -- so
+  //      solveBlockTridiagonal9()'s cross-check is (correctly) skipped
+  //      by the ALREADY-existing `n_constraints>0` gate; no pentadiagonal
+  //      solver was written because the dense nullspace-elimination path
+  //      makes no bandwidth assumption at all.
+  const bool velmode_derivative = (copts_.pose_knots_velocity_mode == "derivative_defined");
+  const int n_velmode_constraints = (velmode_fixed || velmode_derivative) ? 3 * N
+                                     : (velmode_shared ? 3 * (N - 1) : 0);
   const int n_constraints = n_exact_constraints + n_velmode_constraints;
   Eigen::MatrixXd C_exact = Eigen::MatrixXd::Zero(n_constraints, total);
   Eigen::VectorXd d_exact = Eigen::VectorXd::Zero(n_constraints);
@@ -4115,6 +4156,40 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       const int row = n_exact_constraints + 3 * (j - 1);
       C_exact.block<3, 3>(row, kDim * 0 + 6) = M3D::Identity();
       C_exact.block<3, 3>(row, kDim * j + 6) = -M3D::Identity();
+    }
+  } else if (velmode_derivative) {
+    // See velmode_derivative's own declaration comment above for the
+    // full derivation. c_j is the Catmull-Rom tangent scale for knot j;
+    // (lo,hi) are the two neighbor knot indices that scale multiplies
+    // (with a sign: +c_j on the HIGH neighbor, -c_j on the LOW neighbor),
+    // matching v_j = c_j*(p_hi - p_lo).
+    //
+    // POST-SMOKE-TEST FIX: this constraint is on THIS ITERATION's OWN
+    // increment (delta_vel_j - c_j*delta_pos_hi + c_j*delta_pos_lo = d_j),
+    // to be satisfied on TOP OF whatever correction has already
+    // accumulated from PRIOR iterations (coupled_knot_delta_*_) -- so
+    // d_j must be built from the CURRENT TRIAL state (nominal + already-
+    // accumulated delta, i.e. `trial`, computed earlier in this function),
+    // exactly mirroring how exact_det_en's own r/d_exact above are built
+    // from `trial`-consistent accumulated deltas, NOT from the frozen
+    // scan-start nominal alone. Using nominal alone (the first version of
+    // this code) only satisfied the constraint at iteration 0 (where
+    // trial==nominal) and silently drifted every iteration after --
+    // caught via the pose_knots_raw_state.txt empirical check (Phase 7),
+    // not by inspection: max|v_j-CatmullRom(pos)| grew from 9e-13 at
+    // iter 0 to 2.5e-3 by iter 4 on a real scan before this fix.
+    for (int j = 0; j < N; ++j) {
+      int lo, hi;
+      if (j == 0)          { lo = 0;     hi = 1; }
+      else if (j == N - 1) { lo = N - 2; hi = N - 1; }
+      else                 { lo = j - 1; hi = j + 1; }
+      const double c_j = 1.0 / (coupled_pose_knots_.knot(hi).t - coupled_pose_knots_.knot(lo).t);
+      const int row = n_exact_constraints + 3 * j;
+      C_exact.block<3, 3>(row, kDim * j + 6) = M3D::Identity();
+      C_exact.block<3, 3>(row, kDim * hi + 3) += -c_j * M3D::Identity();
+      C_exact.block<3, 3>(row, kDim * lo + 3) += c_j * M3D::Identity();
+      const V3D m_j_trial = c_j * (trial.knot(hi).pos - trial.knot(lo).pos);
+      d_exact.segment<3>(row) = m_j_trial - trial.knot(j).vel;
     }
   }
 
@@ -5273,6 +5348,8 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
            << " expected=" << n_constraints << " (exact=" << n_exact_constraints
            << " velmode=" << n_velmode_constraints << ") N=" << N << " total=" << total
            << " iter=" << coupled_iters_ << " scan_id=" << voxel_map_->frame_idx_;
+      std::cerr << diag.str() << std::endl;
+      std::cerr.flush();
       throw std::runtime_error(diag.str());
     }
     if (copts_.psd_audit_en) {
@@ -5630,9 +5707,18 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     if (cov_first)
       cov_ofs << "scan_id,iter,knot,t,"
                  "tr_Pprior_pos,tr_Pprior_theta,tr_Pprior_vel,"
-                 "tr_Ppost_pos,tr_Ppost_theta,tr_Ppost_vel\n";
+                 "tr_Ppost_pos,tr_Ppost_theta,tr_Ppost_vel,tr_Ppost_pos_vel_cross\n";
     for (int j = 0; j < N; ++j) {
       const auto& Pprior = coupled_pose_knots_.knot(j).P_prior;
+      // pose-spline-derivative-state campaign Phase 6: pos-vel CROSS
+      // covariance trace, coupled_knot_cov_[j].block<3,3>(3,6) -- A_inv's
+      // OWN off-diagonal pos/vel block, needed no new derivation: whenever
+      // velocity_mode=derivative_defined, this is ALREADY exactly
+      // P_pv(t_j) = J_p*P_c*J_v^T (see velmode_derivative's own
+      // declaration comment for why this falls out of the existing
+      // constrained-covariance formula with zero new code). Reported
+      // regardless of velocity_mode so the free_per_knot/fixed_nominal/
+      // shared_scan cases give a direct comparison point.
       cov_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << j << ","
               << coupled_pose_knots_.knot(j).t << ","
               << Pprior.block<3, 3>(3, 3).trace() << ","
@@ -5640,7 +5726,8 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
               << Pprior.block<3, 3>(6, 6).trace() << ","
               << coupled_knot_cov_[j].block<3, 3>(3, 3).trace() << ","
               << coupled_knot_cov_[j].block<3, 3>(0, 0).trace() << ","
-              << coupled_knot_cov_[j].block<3, 3>(6, 6).trace() << "\n";
+              << coupled_knot_cov_[j].block<3, 3>(6, 6).trace() << ","
+              << coupled_knot_cov_[j].block<3, 3>(3, 6).trace() << "\n";
     }
     cov_ofs.flush();
 
@@ -5682,6 +5769,30 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   const M3D new_tail_R = trial_new.rotationAt(t1);
   const V3D new_tail_p = trial_new.positionAt(t1);
   const V3D new_tail_v = trial_new.velocityAt(t1);
+
+  // pose-spline-derivative-state campaign Phase 7 (2026-09-22): raw
+  // per-knot (pos,vel) state after THIS iteration's solve -- lets a
+  // post-hoc script empirically verify, on the REAL estimator's own
+  // solved output (not just the standalone Python model), that
+  // velocity_mode=derivative_defined's solved vel_j actually equals the
+  // Catmull-Rom tangent of the solved pos_{j-1}/pos_{j+1} to solver
+  // precision, and gives every velocity_mode a common raw-state dump for
+  // any other post-hoc check.
+  if (copts_.psd_audit_en) {
+    static PersistentLogStream raw_state_log("pose_knots_raw_state.txt");
+    bool raw_state_first;
+    std::ofstream& raw_state_ofs = raw_state_log.stream(&raw_state_first);
+    if (raw_state_first)
+      raw_state_ofs << "scan_id,iter,knot,t,pos_x,pos_y,pos_z,vel_x,vel_y,vel_z\n";
+    for (int j = 0; j < N; ++j) {
+      const auto& kn = trial_new.knot(j);
+      raw_state_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << j << ","
+                    << std::setprecision(17) << kn.t << "," << std::setprecision(12)
+                    << kn.pos.x() << "," << kn.pos.y() << "," << kn.pos.z() << ","
+                    << kn.vel.x() << "," << kn.vel.y() << "," << kn.vel.z() << "\n";
+    }
+    raw_state_ofs.flush();
+  }
 
   dtheta_out = Log(prev_tail_R.transpose() * new_tail_R);
   dt_out = new_tail_p - prev_tail_p;
