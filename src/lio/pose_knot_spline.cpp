@@ -337,20 +337,26 @@ void PoseKnotSpline::relinearizeSegment(int j, const M3D& rot_j, const V3D& pos_
                                         const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
                                         double q_alpha_acc, double q_alpha_gyr,
                                         const V3D& var_acc, const V3D& var_gyr, bool second_order,
-                                        Eigen::Matrix<double, 9, 9>& F9_out, Eigen::Matrix<double, 9, 9>& Q9_out) const
+                                        Eigen::Matrix<double, 9, 9>& F9_out, Eigen::Matrix<double, 9, 9>& Q9_out,
+                                        M3D* rot_out, V3D* pos_out, V3D* vel_out) const
 {
   F9_out = Eigen::Matrix<double, 9, 9>::Identity();
   Q9_out = Eigen::Matrix<double, 9, 9>::Zero();
-  const auto& samples = seg_samples_[j];
-  if (samples.size() < 2) return;  // degenerate segment -- leave as identity/zero (no-op factor)
-
   M3D rot_imu = rot_j;
   V3D pos_imu = pos_j, vel_imu = vel_j;
-  for (size_t k = 0; k + 1 < samples.size(); ++k) {
-    integrateAndAccumulateStep(samples[k], samples[k + 1], bias_acc, bias_gyr, gravity,
-                               var_acc, var_gyr, q_alpha_acc, q_alpha_gyr, second_order,
-                               rot_imu, pos_imu, vel_imu, F9_out, Q9_out);
+  const auto& samples = seg_samples_[j];
+  if (samples.size() >= 2) {
+    for (size_t k = 0; k + 1 < samples.size(); ++k) {
+      integrateAndAccumulateStep(samples[k], samples[k + 1], bias_acc, bias_gyr, gravity,
+                                 var_acc, var_gyr, q_alpha_acc, q_alpha_gyr, second_order,
+                                 rot_imu, pos_imu, vel_imu, F9_out, Q9_out);
+    }
   }
+  // degenerate (<2 samples): rot_imu/pos_imu/vel_imu stay at the input
+  // (identity transition) -- consistent with F9_out/Q9_out's own no-op.
+  if (rot_out) *rot_out = rot_imu;
+  if (pos_out) *pos_out = pos_imu;
+  if (vel_out) *vel_out = vel_imu;
 }
 
 }  // namespace livo_recon

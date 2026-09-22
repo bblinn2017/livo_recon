@@ -173,6 +173,10 @@ public:
   // taken on for this first implementation.
   const Eigen::Matrix<double, 9, 9>& segF9(int j) const { return seg_F9_[j]; }
   const Eigen::Matrix<double, 9, 9>& segQ9(int j) const { return seg_Q9_[j]; }
+  // Read-only access to the exact raw-sample sequence segment j was built
+  // from (item 2's own "independent analytic Q9 verification" needs the
+  // real dt/sample count per segment to reproduce the chain).
+  const std::vector<ImuSample>& segSamples(int j) const { return seg_samples_[j]; }
 
   // POST-REVIEW ADDITION (item 2, "the process Jacobians F_j are frozen
   // at initialization... recompute F_j(k) at every GN iteration"):
@@ -182,14 +186,20 @@ public:
   // (trial) state, rather than the nominal one -- so F9_out/Q9_out
   // reflect the current trial trajectory's own rotation (F9's world-
   // frame acceleration terms depend on rot_imu at each micro-step).
-  // Discards the re-integrated state (the solver already tracks the
-  // trial's own knot j+1 independently) -- only F9_out/Q9_out are new
-  // here; the trial's own p/R/v values are NOT overwritten by this call.
+  // Discards the re-integrated state by default (the solver already
+  // tracks the trial's own knot j+1 independently) -- only F9_out/Q9_out
+  // are new here; the trial's own p/R/v values are NOT overwritten by
+  // this call. USER REQUEST 2026-09-21 (Phase 1/3 diagnostics, "finite-
+  // difference validation of F9"): rot_out/pos_out/vel_out, if non-null,
+  // receive the actual integrated end-state -- lets a caller numerically
+  // perturb x_j and compare the TRUE nonlinear f(x_j+eps*dx) against the
+  // linear F9*eps*dx prediction, independent of the covariance question.
   void relinearizeSegment(int j, const M3D& rot_j, const V3D& pos_j, const V3D& vel_j,
                           const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
                           double q_alpha_acc, double q_alpha_gyr,
                           const V3D& var_acc, const V3D& var_gyr, bool second_order,
-                          Eigen::Matrix<double, 9, 9>& F9_out, Eigen::Matrix<double, 9, 9>& Q9_out) const;
+                          Eigen::Matrix<double, 9, 9>& F9_out, Eigen::Matrix<double, 9, 9>& Q9_out,
+                          M3D* rot_out = nullptr, V3D* pos_out = nullptr, V3D* vel_out = nullptr) const;
 
 private:
   std::vector<PoseKnot> knots_;

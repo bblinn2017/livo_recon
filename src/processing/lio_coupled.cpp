@@ -3977,6 +3977,299 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     logFactor("lidar", A_lidar);
     logFactor("smooth", A_smooth);
     decomp_ofs.flush();
+
+    // USER REQUEST 2026-09-21 (diagnostic round): the dominant eigenvector
+    // of the "problematic" direction -- lambda_min's own eigenvector
+    // (the direction A constrains WEAKEST, exactly where a near-cost-free
+    // drift would live) -- and each factor's own quadratic-form
+    // projection onto it: v^T A_x v, x in {prior,imu,lidar,smooth}. This
+    // answers "which factor actually controls the weakest direction"
+    // directly, rather than inferring it from each factor's own global
+    // eigenvalues (which don't say whether they agree on WHICH direction
+    // is weak).
+    {
+      const Eigen::VectorXd v = es_a.eigenvectors().col(0);  // Eigen sorts ascending -- col(0) == lambda_min
+      static PersistentLogStream veig_log("pose_knots_dominant_eigvec.txt");
+      bool veig_first;
+      std::ofstream& veig_ofs = veig_log.stream(&veig_first);
+      if (veig_first)
+        veig_ofs << "scan_id,iter,lambda_min,vT_Aprior_v,vT_Aimu_v,vT_Alidar_v,vT_Asmooth_v,vT_Atotal_v\n";
+      veig_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << lmin << ","
+               << (v.transpose() * A_prior * v)(0) << "," << (v.transpose() * A_imu * v)(0) << ","
+               << (v.transpose() * A_lidar * v)(0) << "," << (v.transpose() * A_smooth * v)(0) << ","
+               << (v.transpose() * A * v)(0) << "\n";
+      veig_ofs.flush();
+    }
+
+    // USER REQUEST: Q9's own 9-eigenvalue spectrum, block breakdown
+    // (theta-theta/pp/pv/vv), and rank at a range of relative thresholds
+    // -- for segment 0 only (the "one representative stationary
+    // interval" -- every segment this scan is stationary, segment 0 is
+    // as representative as any), scan 1, iteration 0 only (the spectrum
+    // is a property of the raw IMU samples + trial rotation, essentially
+    // static across the handful of iterations on a stationary scan --
+    // logging it once avoids N_iter redundant copies of the same answer).
+    if (voxel_map_->frame_idx_ == 1 && coupled_iters_ == 0 && N > 1) {
+      // Dump EVERY segment, not just one "representative" one -- the
+      // process-residual finding above shows segments are NOT
+      // interchangeable (segment 6, the chain midpoint, carries a much
+      // larger/growing residual than the others), so a single segment's
+      // spectrum could be misleading about whether the threshold matters.
+      static PersistentLogStream q9_log("pose_knots_q9_spectrum.txt");
+      bool q9_first;
+      std::ofstream& q9_ofs = q9_log.stream(&q9_first);
+      if (q9_first)
+        q9_ofs << "scan_id,seg,eig_idx,eigenvalue,relative_eigenvalue,"
+                  "tr_theta_theta,tr_pp,norm_pv,tr_vv,"
+                  "rank_1e-3,rank_1e-4,rank_1e-5,rank_1e-6,rank_1e-7,rank_1e-8\n";
+      for (int seg = 0; seg + 1 < N; ++seg) {
+        const Eigen::Matrix<double, 9, 9>& Q9_rep = coupled_pose_knots_.segQ9(seg);
+        const Eigen::Matrix<double, 9, 9> Q9s = 0.5 * (Q9_rep + Q9_rep.transpose());
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 9, 9>> es_q(Q9s);
+        const auto& qevals = es_q.eigenvalues();  // ascending
+        const double qmax = qevals.maxCoeff();
+        int rank_1e3 = 0, rank_1e4 = 0, rank_1e5 = 0, rank_1e6 = 0, rank_1e7 = 0, rank_1e8 = 0;
+        for (int k = 0; k < 9; ++k) {
+          const double rel = qevals(k) / std::max(qmax, 1e-300);
+          if (rel > 1e-3) ++rank_1e3;
+          if (rel > 1e-4) ++rank_1e4;
+          if (rel > 1e-5) ++rank_1e5;
+          if (rel > 1e-6) ++rank_1e6;
+          if (rel > 1e-7) ++rank_1e7;
+          if (rel > 1e-8) ++rank_1e8;
+        }
+        for (int k = 8; k >= 0; --k) {  // descending (largest first)
+          q9_ofs << voxel_map_->frame_idx_ << "," << seg << "," << (8 - k) << "," << qevals(k) << ","
+                 << (qevals(k) / std::max(qmax, 1e-300)) << ","
+                 << Q9s.block<3, 3>(0, 0).trace() << "," << Q9s.block<3, 3>(3, 3).trace() << ","
+                 << Q9s.block<3, 3>(3, 6).norm() << "," << Q9s.block<3, 3>(6, 6).trace() << ","
+                 << rank_1e3 << "," << rank_1e4 << "," << rank_1e5 << "," << rank_1e6 << ","
+                 << rank_1e7 << "," << rank_1e8 << "\n";
+        }
+      }
+      q9_ofs.flush();
+
+      // USER REQUEST 2026-09-21 (Phase 1, "nullspace projection of the
+      // bad A eigenvector" -- "test first, do not change the estimator"):
+      // for segments 0 and 6 (the two segments the process-residual log
+      // already showed are special), project v_min's own implied process
+      // residual r_j=[-F_j I]v_min onto Q_j's range vs null subspace, and
+      // report r^T Q_j^+ r -- directly tests whether the weak direction
+      // is a genuine zero-noise process mode (||r_null||>>||r_range||,
+      // r^T Q^+ r tiny) rather than inferring it from condition numbers.
+      const Eigen::VectorXd v_min = es_a.eigenvectors().col(0);
+      for (int seg : {0, 6}) {
+        if (seg + 1 >= N) continue;
+        const Eigen::Matrix<double, 9, 1> vj = v_min.segment<9>(kDim * seg);
+        const Eigen::Matrix<double, 9, 1> vj1 = v_min.segment<9>(kDim * (seg + 1));
+        // Same relinearized F9/Q9 this iteration's own solve used (trial
+        // == nominal at iter0, so this also matches segF9/segQ9 exactly).
+        Eigen::Matrix<double, 9, 9> F9_seg, Q9_seg;
+        coupled_pose_knots_.relinearizeSegment(
+            seg, trial.knot(seg).rot, trial.knot(seg).pos, trial.knot(seg).vel,
+            state_->biasAcc(), state_->biasGyr(), state_->gravity(),
+            copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr,
+            state_->varAcc(), state_->varGyr(), copts_.repro_second_order, F9_seg, Q9_seg);
+        const Eigen::Matrix<double, 9, 1> r = vj1 - F9_seg * vj;
+
+        const Eigen::Matrix<double, 9, 9> Q9s = 0.5 * (Q9_seg + Q9_seg.transpose());
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 9, 9>> es_q2(Q9s);
+        const auto& qevals2 = es_q2.eigenvalues();
+        const auto& qvecs2 = es_q2.eigenvectors();
+        const double qmax2 = std::max(qevals2.maxCoeff(), 0.0);
+        const double thresh2 = copts_.pose_knots_q_pinv_rel_thresh * qmax2;
+        Eigen::Matrix<double, 9, 1> r_range = Eigen::Matrix<double, 9, 1>::Zero();
+        Eigen::Matrix<double, 9, 1> r_null = Eigen::Matrix<double, 9, 1>::Zero();
+        Eigen::Matrix<double, 9, 9> Qplus = Eigen::Matrix<double, 9, 9>::Zero();
+        for (int k = 0; k < 9; ++k) {
+          const Eigen::Matrix<double, 9, 1> uk = qvecs2.col(k);
+          const double proj = uk.dot(r);
+          if (qevals2(k) > thresh2) {
+            r_range += proj * uk;
+            Qplus += (1.0 / qevals2(k)) * (uk * uk.transpose());
+          } else {
+            r_null += proj * uk;
+          }
+        }
+        const double rTQplusR = (r.transpose() * Qplus * r)(0);
+
+        static PersistentLogStream nullproj_log("pose_knots_nullspace_projection.txt");
+        bool nullproj_first;
+        std::ofstream& nullproj_ofs = nullproj_log.stream(&nullproj_first);
+        if (nullproj_first)
+          nullproj_ofs << "scan_id,seg,r_norm,r_range_norm,r_null_norm,rT_Qplus_r\n";
+        nullproj_ofs << voxel_map_->frame_idx_ << "," << seg << "," << r.norm() << ","
+                     << r_range.norm() << "," << r_null.norm() << "," << rTQplusR << "\n";
+        nullproj_ofs.flush();
+      }
+
+      // USER REQUEST (Phase 1, "finite-difference validation of F9"):
+      // independent of the covariance question -- perturb x_j (position/
+      // velocity/rotation, one axis at a time) and compare the TRUE
+      // re-integrated nonlinear end-state against F9's own linear
+      // prediction, for segments 0 and 6.
+      constexpr double kFdEpsSeg = 1e-6;
+      for (int seg : {0, 6}) {
+        if (seg + 1 >= N) continue;
+        Eigen::Matrix<double, 9, 9> F9_base, Q9_dummy;
+        coupled_pose_knots_.relinearizeSegment(
+            seg, trial.knot(seg).rot, trial.knot(seg).pos, trial.knot(seg).vel,
+            state_->biasAcc(), state_->biasGyr(), state_->gravity(),
+            copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr,
+            state_->varAcc(), state_->varGyr(), copts_.repro_second_order, F9_base, Q9_dummy);
+
+        auto integrateFrom = [&](const M3D& r0, const V3D& p0, const V3D& v0,
+                                 M3D& r1, V3D& p1, V3D& v1) {
+          Eigen::Matrix<double, 9, 9> Fd, Qd;
+          coupled_pose_knots_.relinearizeSegment(
+              seg, r0, p0, v0, state_->biasAcc(), state_->biasGyr(), state_->gravity(),
+              copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr,
+              state_->varAcc(), state_->varGyr(), copts_.repro_second_order, Fd, Qd, &r1, &p1, &v1);
+        };
+        double err_theta_sum = 0.0, err_pos_sum = 0.0, err_vel_sum = 0.0;
+        int n_theta = 0, n_pos = 0, n_vel = 0;
+        for (int cat = 0; cat < 3; ++cat) {  // 0=theta, 1=pos, 2=vel
+          for (int axis = 0; axis < 3; ++axis) {
+            M3D rp = trial.knot(seg).rot, rm = trial.knot(seg).rot;
+            V3D pp = trial.knot(seg).pos, pm = trial.knot(seg).pos;
+            V3D vp = trial.knot(seg).vel, vm = trial.knot(seg).vel;
+            const V3D e = V3D::Unit(axis);
+            if (cat == 0) { rp = rp * Exp(V3D(kFdEpsSeg * e)); rm = rm * Exp(V3D(-kFdEpsSeg * e)); }
+            else if (cat == 1) { pp += kFdEpsSeg * e; pm -= kFdEpsSeg * e; }
+            else { vp += kFdEpsSeg * e; vm -= kFdEpsSeg * e; }
+            M3D r1p, r1m; V3D p1p, p1m, v1p, v1m;
+            integrateFrom(rp, pp, vp, r1p, p1p, v1p);
+            integrateFrom(rm, pm, vm, r1m, p1m, v1m);
+            Eigen::Matrix<double, 9, 1> fd_col;
+            fd_col.segment<3>(0) = V3D(Log(M3D(r1m.transpose() * r1p))) / (2 * kFdEpsSeg);
+            fd_col.segment<3>(3) = (p1p - p1m) / (2 * kFdEpsSeg);
+            fd_col.segment<3>(6) = (v1p - v1m) / (2 * kFdEpsSeg);
+            const int col_idx = cat * 3 + axis;
+            const Eigen::Matrix<double, 9, 1> analytic_col = F9_base.col(col_idx);
+            const double rel_err = (fd_col - analytic_col).norm() / std::max(analytic_col.norm(), 1e-12);
+            if (cat == 0) { err_theta_sum += rel_err; ++n_theta; }
+            else if (cat == 1) { err_pos_sum += rel_err; ++n_pos; }
+            else { err_vel_sum += rel_err; ++n_vel; }
+          }
+        }
+        static PersistentLogStream fd_log("pose_knots_F9_fd_check.txt");
+        bool fd_first;
+        std::ofstream& fd_ofs = fd_log.stream(&fd_first);
+        if (fd_first) fd_ofs << "scan_id,seg,mean_rel_err_theta,mean_rel_err_pos,mean_rel_err_vel\n";
+        fd_ofs << voxel_map_->frame_idx_ << "," << seg << "," << err_theta_sum / n_theta << ","
+               << err_pos_sum / n_pos << "," << err_vel_sum / n_vel << "\n";
+        fd_ofs.flush();
+      }
+
+      // USER REQUEST 2026-09-21 (Phase 2, "independent analytic Q9
+      // verification"): build Q9 for segments 0/6 via a SEPARATELY-CODED
+      // chain (never calls buildImuStep9x9()'s own Q9 output -- only its
+      // F9 output, for the transition matrix, since Phase 3 above already
+      // validated F9 to near machine precision and re-deriving it again
+      // would test nothing new) using the explicit physical noise-map
+      // form: G_a=[0.5*R*dt^2;R*dt] (world frame), Q_pv,step = G_a *
+      // Sigma_a * G_a^T with Sigma_a=q_alpha_acc*diag(var_acc);
+      // Q_theta,step = dt^2*q_alpha_gyr*diag(var_gyr) (G_g=dt*I). This
+      // isolates the check to Q's own per-step construction and the
+      // chaining loop, independent of the shipped buildImuStep9x9()'s own
+      // Q9 block-assignment code path.
+      for (int seg : {0, 6}) {
+        if (seg + 1 >= N) continue;
+        const auto& samples = coupled_pose_knots_.segSamples(seg);
+        M3D rot_imu = trial.knot(seg).rot;
+        Eigen::Matrix<double, 9, 9> Q_analytic = Eigen::Matrix<double, 9, 9>::Zero();
+        double dt_total = 0.0;
+        int n_steps = 0;
+        for (size_t k = 0; k + 1 < samples.size(); ++k) {
+          const double dt = samples[k + 1].t - samples[k].t;
+          if (!(dt > 0.0)) continue;
+          dt_total += dt;
+          ++n_steps;
+          const M3D acc_noise_world = rot_imu * (copts_.repro_q_alpha_acc * state_->varAcc()).asDiagonal() * rot_imu.transpose();
+          Eigen::Matrix<double, 9, 9> Qstep = Eigen::Matrix<double, 9, 9>::Zero();
+          Qstep.block<3, 3>(0, 0) = (copts_.repro_q_alpha_gyr * state_->varGyr() * (dt * dt)).asDiagonal();
+          Qstep.block<3, 3>(3, 3) = 0.25 * dt * dt * dt * dt * acc_noise_world;
+          Qstep.block<3, 3>(3, 6) = 0.5 * dt * dt * dt * acc_noise_world;
+          Qstep.block<3, 3>(6, 3) = Qstep.block<3, 3>(3, 6);
+          Qstep.block<3, 3>(6, 6) = dt * dt * acc_noise_world;
+          const V3D acc_avr = 0.5 * (samples[k].acc + samples[k + 1].acc) - state_->biasAcc();
+          const V3D angvel_avr = 0.5 * (samples[k].gyro + samples[k + 1].gyro) - state_->biasGyr();
+          Eigen::Matrix<double, 9, 9> Fstep, Qstep_shipped_unused;
+          buildImuStep9x9(rot_imu, acc_avr, angvel_avr, dt, state_->varAcc(), state_->varGyr(),
+                          copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, copts_.repro_second_order,
+                          Fstep, Qstep_shipped_unused);
+          Q_analytic = Fstep * Q_analytic * Fstep.transpose() + Qstep;
+          rot_imu = rot_imu * Exp(angvel_avr, dt);
+        }
+        const Eigen::Matrix<double, 9, 9>& Q_code = coupled_pose_knots_.segQ9(seg);
+        const double fro_err = (Q_code - Q_analytic).norm();
+        const double fro_rel = fro_err / std::max(Q_analytic.norm(), 1e-300);
+
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 9, 9>> es_code(0.5 * (Q_code + Q_code.transpose()));
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 9, 9>> es_ana(0.5 * (Q_analytic + Q_analytic.transpose()));
+
+        static PersistentLogStream qcheck_log("pose_knots_q9_analytic_check.txt");
+        bool qcheck_first;
+        std::ofstream& qcheck_ofs = qcheck_log.stream(&qcheck_first);
+        if (qcheck_first)
+          qcheck_ofs << "scan_id,seg,n_steps,dt_total,mean_var_acc,mean_var_gyr,"
+                        "q_alpha_acc,q_alpha_gyr,fro_err,fro_rel,eig_idx,"
+                        "eig_code,eig_analytic\n";
+        for (int k = 8; k >= 0; --k) {
+          qcheck_ofs << voxel_map_->frame_idx_ << "," << seg << "," << n_steps << "," << dt_total << ","
+                     << state_->varAcc().mean() << "," << state_->varGyr().mean() << ","
+                     << copts_.repro_q_alpha_acc << "," << copts_.repro_q_alpha_gyr << ","
+                     << fro_err << "," << fro_rel << "," << (8 - k) << ","
+                     << es_code.eigenvalues()(k) << "," << es_ana.eigenvalues()(k) << "\n";
+        }
+        qcheck_ofs.flush();
+
+        // USER REQUEST 2026-09-21 (Phase 4, "deterministic constraint
+        // verification"): does Q9's own (already-validated) null
+        // eigenspace correspond to a genuine zero-noise KINEMATIC
+        // relation, or is it an arbitrary numerical artifact? Q9 has NO
+        // theta<->[p,v] coupling by construction (buildImuStep9x9 never
+        // writes Q9.block(iR,iP)/Q9.block(iR,iV)), so the 3 near-zero
+        // eigenvalues' own eigenvectors should live ENTIRELY in the 6-dim
+        // [p,v] sub-block -- verified explicitly (theta_norm below).
+        // For a SINGLE accelerometer-noise step, Q_pv,step = G_a*Sigma_a*
+        // G_a^T with G_a=[0.5*R*dt^2;R*dt] (Phase 2's own construction) --
+        // a standard linear-algebra fact (Sigma_a positive definite) gives
+        // null(Q_pv,step) = null(G_a^T) = {[n_p;n_v] : n_v=-0.5*dt*n_p}
+        // EXACTLY, for ANY n_p -- i.e. G_a^T serves as the deterministic-
+        // constraint matrix C DIRECTLY (C@G_a=0 holds trivially by this
+        // same construction, not something separately worth re-verifying
+        // numerically). For a MULTI-STEP chained segment (both 0 and 6
+        // are >1 step), the exact relation is no longer a single closed
+        // form (each step's null direction gets rotated/mixed by that
+        // step's own F), so this checks whether the FULL segment's own
+        // (already Phase-2-validated) null eigenvectors still
+        // approximately satisfy n_v=-0.5*dt_total*n_p -- reporting the
+        // fit residual honestly rather than assuming it.
+        for (int k = 0; k < 3; ++k) {  // ascending order -- the 3 smallest eigenvalues
+          const Eigen::Matrix<double, 9, 1> ek = es_code.eigenvectors().col(k);
+          const double theta_norm = ek.segment<3>(0).norm();
+          const V3D n_p = ek.segment<3>(3);
+          const V3D n_v = ek.segment<3>(6);
+          // Least-squares alpha such that n_v ~= -alpha*n_p (alpha's
+          // physical prediction, if the trapezoidal-like relation held,
+          // would be alpha=0.5*dt_total).
+          const double alpha_fit = (n_p.squaredNorm() > 1e-300) ? -(n_p.dot(n_v)) / n_p.squaredNorm() : 0.0;
+          const double resid = (n_v + alpha_fit * n_p).norm();  // residual of the BEST-FIT linear relation
+          static PersistentLogStream nullvec_log("pose_knots_q9_nullvec_check.txt");
+          bool nullvec_first;
+          std::ofstream& nullvec_ofs = nullvec_log.stream(&nullvec_first);
+          if (nullvec_first)
+            nullvec_ofs << "scan_id,seg,null_idx,eigenvalue,theta_norm,"
+                          "n_p_norm,n_v_norm,alpha_fit,half_dt_total,resid_norm\n";
+          nullvec_ofs << voxel_map_->frame_idx_ << "," << seg << "," << k << ","
+                     << es_code.eigenvalues()(k) << "," << theta_norm << ","
+                     << n_p.norm() << "," << n_v.norm() << "," << alpha_fit << ","
+                     << (0.5 * dt_total) << "," << resid << "\n";
+          nullvec_ofs.flush();
+        }
+      }
+    }
   }
 
   // ---- item 15's own step-size safeguard, carried over ----
@@ -4034,6 +4327,26 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     for (int j = 0; j < N; ++j) {
       max_step_pos = std::max(max_step_pos, delta.segment<3>(kDim * j + 3).norm());
       max_step_rot = std::max(max_step_rot, delta.segment<3>(kDim * j + 0).norm());
+    }
+    // USER REQUEST: GN telemetry -- ||delta_c_p||_inf, ||delta_c_phi||_inf
+    // (max_step_pos/rot above ARE exactly these, taken BEFORE the trust-
+    // region clamp below) and max spline acceleration over [t0,t1] this
+    // iteration's own trial.
+    if (copts_.psd_audit_en) {
+      double max_acc = 0.0;
+      constexpr int kAccGridN = 40;
+      const double t0g = coupled_pose_knots_.knot(0).t;
+      for (int k = 0; k <= kAccGridN; ++k) {
+        const double tg = t0g + (t1 - t0g) * (static_cast<double>(k) / kAccGridN);
+        max_acc = std::max(max_acc, trial.accelerationAt(tg).norm());
+      }
+      static PersistentLogStream gn_tel_log("pose_knots_gn_telemetry.txt");
+      bool gn_tel_first;
+      std::ofstream& gn_tel_ofs = gn_tel_log.stream(&gn_tel_first);
+      if (gn_tel_first) gn_tel_ofs << "scan_id,iter,max_delta_cp_inf,max_delta_cphi_inf,max_accel\n";
+      gn_tel_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << max_step_pos << ","
+                 << max_step_rot << "," << max_acc << "\n";
+      gn_tel_ofs.flush();
     }
     double scale = 1.0;
     if (copts_.pose_gn_max_step_pos_m > 0.0 && max_step_pos > copts_.pose_gn_max_step_pos_m)
