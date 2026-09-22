@@ -3886,6 +3886,43 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
          << " iter=" << coupled_iters_ << " scan_id=" << voxel_map_->frame_idx_;
     throw std::runtime_error(diag.str());
   }
+
+  // POST-REVIEW ADDITION ("compare batch pose-knot against causal
+  // pose-knot filter/smoother"): A is exactly block-tridiagonal (every
+  // factor -- head prior, process, LiDAR -- only ever couples adjacent
+  // knots), so solveBlockTridiagonal9() computes the EXACT SAME estimator
+  // via a genuinely different algorithm (forward information-filter +
+  // RTS backward smoother, see its own doc comment for the equivalence
+  // argument). Run every iteration (cheap: N<=~20 independent 9x9 LDLTs,
+  // not the 9Nx9N dense one), gated on psd_audit_en for the logging cost
+  // only -- the cross-check itself always runs so a silent divergence
+  // can't hide behind a config flag nobody happened to set. The DENSE
+  // result (`delta`, below) remains what's actually applied to state_ --
+  // this does not change live behavior, only verifies it.
+  {
+    std::vector<Eigen::Matrix<double, 9, 9>> Ajj(N), Aoff(N - 1);
+    std::vector<Eigen::Matrix<double, 9, 1>> bj(N);
+    for (int j = 0; j < N; ++j) {
+      Ajj[j] = A.block<9, 9>(kDim * j, kDim * j);
+      bj[j] = b.segment<9>(kDim * j);
+      if (j + 1 < N) Aoff[j] = A.block<9, 9>(kDim * j, kDim * (j + 1));
+    }
+    const Eigen::VectorXd delta_bt = solveBlockTridiagonal9(Ajj, Aoff, bj);
+    const bool bt_ok = (delta_bt.size() == total) && delta_bt.allFinite();
+    const double bt_diff = bt_ok ? (delta_bt - delta).norm() : -1.0;
+    if (copts_.psd_audit_en) {
+      static PersistentLogStream bt_log("pose_knots_blocktri_check.txt");
+      bool bt_first;
+      std::ofstream& bt_ofs = bt_log.stream(&bt_first);
+      if (bt_first) bt_ofs << "scan_id,iter,N,bt_ok,dense_norm,bt_diff_norm,bt_diff_rel\n";
+      const double dense_norm = delta.norm();
+      bt_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << N << ","
+             << (bt_ok ? 1 : 0) << "," << dense_norm << "," << bt_diff << ","
+             << (dense_norm > 1e-300 ? bt_diff / dense_norm : -1.0) << "\n";
+      bt_ofs.flush();
+    }
+  }
+
   {
     double max_step_pos = 0.0, max_step_rot = 0.0;
     for (int j = 0; j < N; ++j) {

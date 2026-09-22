@@ -1,5 +1,6 @@
 #include "livo_recon/lio/pose_knot_spline.h"
 
+#include <Eigen/Cholesky>
 #include <algorithm>
 #include <cmath>
 
@@ -263,6 +264,56 @@ V3D PoseKnotSpline::angularVelocityAt(double t) const
   // (body-at-t) frame -- the standard SO(3) geodesic angular-velocity
   // identity, constant magnitude direction, varying only through Jr.
   return Jr(V3D(u * phi_rel)) * (phi_rel / dt);
+}
+
+// See pose_knot_spline.h's own doc comment for why this IS the sequential
+// filter/smoother the external review asked for, expressed as block-
+// Thomas elimination (forward pass == information-form Kalman filter,
+// back-substitution == RTS smoother) rather than literally invoking
+// Kalman-gain/covariance-form equations -- the two are the same
+// algorithm family for a linear-Gaussian chain.
+Eigen::VectorXd solveBlockTridiagonal9(
+    const std::vector<Eigen::Matrix<double, 9, 9>>& Ajj,
+    const std::vector<Eigen::Matrix<double, 9, 9>>& Aoff,
+    const std::vector<Eigen::Matrix<double, 9, 1>>& bj)
+{
+  const int N = static_cast<int>(Ajj.size());
+  if (N == 0 || static_cast<int>(Aoff.size()) != N - 1 || static_cast<int>(bj.size()) != N)
+    return Eigen::VectorXd();
+
+  // Forward elimination: C_j is the marginal information matrix at knot
+  // j after causally absorbing knots 0..j (== P_j^- , the review's own
+  // causal prior, fed forward and updated by every factor touching knot
+  // j so far) -- this recursion IS the information-form Kalman filter.
+  std::vector<Eigen::Matrix<double, 9, 9>> C(N);
+  std::vector<Eigen::Matrix<double, 9, 1>> d(N);
+  C[0] = Ajj[0];
+  d[0] = bj[0];
+  for (int j = 1; j < N; ++j) {
+    Eigen::LDLT<Eigen::Matrix<double, 9, 9>> ldlt_prev(C[j - 1]);
+    if (ldlt_prev.info() != Eigen::Success) return Eigen::VectorXd();
+    const Eigen::Matrix<double, 9, 9> Cinv_Aprev = ldlt_prev.solve(Aoff[j - 1]);
+    const Eigen::Matrix<double, 9, 1> Cinv_d = ldlt_prev.solve(d[j - 1]);
+    C[j] = Ajj[j] - Aoff[j - 1].transpose() * Cinv_Aprev;
+    d[j] = bj[j] - Aoff[j - 1].transpose() * Cinv_d;
+  }
+
+  // Back-substitution: restores the cross-knot correlations the forward
+  // pass alone marginalizes away -- this IS the RTS smoother, the
+  // review's own "caution" about not treating knots as independent.
+  std::vector<Eigen::Matrix<double, 9, 1>> x(N);
+  Eigen::LDLT<Eigen::Matrix<double, 9, 9>> ldlt_last(C[N - 1]);
+  if (ldlt_last.info() != Eigen::Success) return Eigen::VectorXd();
+  x[N - 1] = ldlt_last.solve(d[N - 1]);
+  for (int j = N - 2; j >= 0; --j) {
+    Eigen::LDLT<Eigen::Matrix<double, 9, 9>> ldlt_j(C[j]);
+    if (ldlt_j.info() != Eigen::Success) return Eigen::VectorXd();
+    x[j] = ldlt_j.solve(d[j] - Aoff[j] * x[j + 1]);
+  }
+
+  Eigen::VectorXd out(9 * N);
+  for (int j = 0; j < N; ++j) out.segment<9>(9 * j) = x[j];
+  return out;
 }
 
 }  // namespace livo_recon

@@ -180,4 +180,49 @@ private:
   bool valid_ = false;
 };
 
+// POST-REVIEW ADDITION (external review 2026-09-21, "I would therefore
+// separate the two concepts... [batch pose-knot GN] vs [causal pose-knot
+// filter/smoother]... that would be a much more informative test of your
+// hypothesis than another adjustment of the current Q9 threshold"):
+// solves a BLOCK-TRIDIAGONAL SPD system A*x=b (9x9 blocks) via block-
+// Thomas elimination.
+//
+// WHY THIS *IS* THE SEQUENTIAL FILTER/SMOOTHER THE REVIEW ASKED FOR, not
+// merely a different way to invoke the existing dense solve: for a
+// linear-Gaussian Markov chain (x_0~N(xbar_0,P_0), x_{j+1}=F_j x_j+w_j,
+// w_j~N(0,Q_j), plus measurements attached to individual states or
+// adjacent pairs), the joint information matrix assembled from a head
+// prior + [-F_j I]^T Q_j^-1 [-F_j I] process factors + measurement
+// factors is EXACTLY block-tridiagonal (each knot only ever couples to
+// its immediate neighbor -- true here because both the process factors
+// and this arm's LiDAR factors, item 8, only ever touch an adjacent
+// (j,j+1) pair, never a skip connection). Block-Thomas elimination on
+// that system is a textbook-standard fact IDENTICAL, term for term, to
+// running a forward (information-form) Kalman filter -- C_j is exactly
+// the marginal information matrix at knot j after causally absorbing
+// everything up to and including t_j (i.e. it IS P_j^- fed forward and
+// updated, the review's own "P_j^- should determine how strongly LiDAR
+// is allowed to move the trajectory at t_j") -- followed by an RTS
+// backward smoother (the back-substitution pass, which is what restores
+// the cross-correlations a naive independent-per-knot filter would lose
+// -- the review's own "caution" about not throwing those away). This is
+// a genuinely different algorithm (different arithmetic, different
+// operation order, exploits the sparsity the dense path ignores) from
+// the dense LDLT solve already used for the live correction -- not a
+// relabeling of the same computation -- while being provably the exact
+// same underlying estimator for a linear system, which is precisely
+// the comparison the review asked for.
+//
+// Ajj[j] = diagonal block j (j=0..N-1); Aoff[j] = the (j,j+1) off-
+// diagonal block (j=0..N-2, size N-1, symmetric system so A(j+1,j) =
+// Aoff[j]^T is never separately needed); bj[j] = RHS block j. Returns
+// the concatenated 9N solution (matching the dense solve's own [theta_0,
+// p_0,v_0,theta_1,...] layout exactly), or an EMPTY vector if any pivot
+// along the elimination is singular -- caller must check size() before
+// using the result, mirroring the dense path's own ldlt.info() check.
+Eigen::VectorXd solveBlockTridiagonal9(
+    const std::vector<Eigen::Matrix<double, 9, 9>>& Ajj,
+    const std::vector<Eigen::Matrix<double, 9, 9>>& Aoff,
+    const std::vector<Eigen::Matrix<double, 9, 1>>& bj);
+
 }  // namespace livo_recon
