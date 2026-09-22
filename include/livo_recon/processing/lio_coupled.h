@@ -190,6 +190,27 @@ struct LioProcCoupledOptions
   bool pose_knots_det_constraint_en = false;
   double pose_knots_det_constraint_weight = 1.0e4;
 
+  // Phase-3 production candidate (2026-09-22): the soft penalty above
+  // demonstrated (4/4 md5 gate, 719m->0.04m stationary drift, 16080->1.05
+  // m/s^2 accel, kappa(A) 2.4e16->2.1e10 -- see the Phase-2 report) that
+  // the pathological pose_knots stationary drift is explained by the bare
+  // Q9 pseudoinverse omitting a DETERMINISTIC (zero-noise) component of
+  // the process model, not by tuning. This flag replaces the soft penalty
+  // with the mathematically exact version: N^T r = 0 enforced as a hard
+  // equality constraint via nullspace elimination (delta = delta_p + Z*eta,
+  // Z=null(C), C stacking each segment's N_j^T[-F_j I]), while the
+  // stochastic term keeps EXACTLY r_stochastic^T Q^+ r_stochastic (Lambda
+  // built from the SAME 6 non-null Q9 eigendirections N_j's complement
+  // spans, not the separately-thresholded q_pinv_rel_thresh -- avoids
+  // double-counting/gap between the two). Default false pending the
+  // Phase-3 validation the user requested (exact-constraint solution vs
+  // the lambda_C=1e6 soft-penalty solution on stationary eee_01 scan 1)
+  // before this becomes the production default. When true, takes
+  // precedence over pose_knots_det_constraint_en (soft path is skipped,
+  // with a one-time diagnostic warning if both are set -- they are
+  // mutually exclusive, not additive).
+  bool pose_knots_exact_det_constraint_en = false;
+
   // CQ-85 item 1: rule 58f's exact failure mode -- CQ-72's own 96-cell grid
   // produced a cell reporting completed=yes with ATE=396,499,288.300 mm (a
   // FAILED run that looked like a successful one; imu_deviation_weight=0,

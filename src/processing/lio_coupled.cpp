@@ -112,6 +112,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/q_pinv_rel_thresh", copts_.pose_knots_q_pinv_rel_thresh, 1e-6);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/deterministic_constraint_enable", copts_.pose_knots_det_constraint_en, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/deterministic_constraint_weight", copts_.pose_knots_det_constraint_weight, 1.0e4);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/exact_deterministic_constraint_enable", copts_.pose_knots_exact_det_constraint_en, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/max_scan_displacement_m", copts_.max_scan_displacement_m, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
@@ -3748,6 +3749,24 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // telemetry log can report E_lidar/E_process/E_det/E_total per iteration.
   double e_lidar_total = 0.0, e_process_total = 0.0, e_det_total = 0.0;
 
+  // Phase-3 (2026-09-22): exact deterministic equality constraint, via
+  // nullspace elimination -- C_exact stacks each segment's own
+  // C_j = N_j^T[-F_j I] (3x18, embedded into the 3x(9N) row block for
+  // knots j,j+1), d_exact stacks each segment's own -N_j^T*r_j (the
+  // target that drives N_j^T r toward zero over this GN step). Built
+  // only when pose_knots_exact_det_constraint_en && pose_knots_use_imu_factors.
+  const bool exact_det_en = copts_.pose_knots_exact_det_constraint_en && copts_.pose_knots_use_imu_factors;
+  const int n_exact_constraints = exact_det_en ? 3 * (N - 1) : 0;
+  Eigen::MatrixXd C_exact = Eigen::MatrixXd::Zero(n_exact_constraints, total);
+  Eigen::VectorXd d_exact = Eigen::VectorXd::Zero(n_exact_constraints);
+  if (copts_.pose_knots_exact_det_constraint_en && copts_.pose_knots_det_constraint_en) {
+    ROS_WARN_STREAM_ONCE(
+        "[coupled/pose_knots] both pose_knots_exact_det_constraint_en and "
+        "pose_knots_det_constraint_en are set -- the exact constraint takes "
+        "precedence, the soft penalty is skipped entirely (mutually "
+        "exclusive alternatives, not additive).");
+  }
+
   // POST-REVIEW FIX (external review 2026-09-21, "Q9 is rank-deficient
   // before the artificial floor... the code is artificially filling those
   // null directions with 1e-9... that can create enormous artificial
@@ -3806,7 +3825,33 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       // (default 1e-6, unchanged) rather than hardcoded -- see
       // copts_.pose_knots_q_pinv_rel_thresh's own doc comment for the
       // sensitivity-sweep this is meant to enable.
-      const Eigen::Matrix<double, 9, 9> Lambda = pseudoInverse9(Q9, copts_.pose_knots_q_pinv_rel_thresh);
+      //
+      // Phase-3 (2026-09-22): when exact_det_en, Lambda is instead built
+      // from the SAME eigendecomposition that supplies N_j below (6
+      // non-null directions only), rather than the separately-thresholded
+      // q_pinv_rel_thresh -- guarantees the stochastic term and the exact
+      // equality constraint partition Q9's spectrum with no gap/overlap
+      // (the 3 null directions get EXACTLY zero stochastic weight here,
+      // since that information is now supplied by C_exact/d_exact
+      // instead, not by an independently-thresholded pseudoinverse that
+      // might not zero exactly the same 3 directions).
+      Eigen::Matrix<double, 9, 9> Lambda;
+      Eigen::Matrix<double, 9, 3> N3;
+      if (exact_det_en) {
+        const Eigen::Matrix<double, 9, 9> Qs = 0.5 * (Q9 + Q9.transpose());
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 9, 9>> es_q(Qs);
+        N3 = es_q.eigenvectors().leftCols(3);
+        Lambda.setZero();
+        for (int k = 3; k < 9; ++k) {
+          const double ev = es_q.eigenvalues()(k);
+          if (ev > 1e-300) {
+            const Eigen::Matrix<double, 9, 1> ek = es_q.eigenvectors().col(k);
+            Lambda += (1.0 / ev) * (ek * ek.transpose());
+          }
+        }
+      } else {
+        Lambda = pseudoInverse9(Q9, copts_.pose_knots_q_pinv_rel_thresh);
+      }
       Eigen::Matrix<double, 9, 1> xj, xj1;
       xj.segment<3>(0) = coupled_knot_delta_theta_[j];
       xj.segment<3>(3) = coupled_knot_delta_pos_[j];
@@ -3828,6 +3873,27 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       b.segment<9>(kDim * (j + 1)) += -Lambda * r;
       e_process_total += (r.transpose() * Lambda * r)(0);
 
+      // Phase-3: fill this segment's own 3 constraint rows. C_j = N_j^T*J
+      // where J=[-F9,I] acts on [xj;xj1] -- embedded at columns
+      // [kDim*j:kDim*j+9] (=-N3^T*F9) and [kDim*(j+1):kDim*(j+1)+9]
+      // (=N3^T). Target d_j = -N3^T*r drives N3^T*r toward zero over this
+      // GN step (r linearizes as r+J*delta, want N3^T*(r+J*delta)=0).
+      if (exact_det_en) {
+        C_exact.block<3, 9>(3 * j, kDim * j)       = -N3.transpose() * F9;
+        C_exact.block<3, 9>(3 * j, kDim * (j + 1)) = N3.transpose();
+        const Eigen::Vector3d Ntr = N3.transpose() * r;
+        d_exact.segment<3>(3 * j) = -Ntr;
+        if (copts_.psd_audit_en) {
+          static PersistentLogStream exact_log("pose_knots_exact_constraint.txt");
+          bool exact_first;
+          std::ofstream& exact_ofs = exact_log.stream(&exact_first);
+          if (exact_first) exact_ofs << "scan_id,iter,seg,r_norm,Ntr_norm\n";
+          exact_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << j << ","
+                    << r.norm() << "," << Ntr.norm() << "\n";
+          exact_ofs.flush();
+        }
+      }
+
       // Phase-2 diagnostic (2026-09-22, user-specified experiment): temporary
       // soft deterministic-nullspace penalty lambda_C*||N^T r||^2 added on
       // top of the existing r^T Q^+ r process cost, where N spans THIS
@@ -3846,7 +3912,7 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       // b_det = -lambda_C*J_det^T*(N^T r). Expanding with NNt := N*N^T
       // reduces exactly to the existing Lambda-shaped block pattern with
       // Lambda -> lambda_C*NNt.
-      if (copts_.pose_knots_det_constraint_en) {
+      if (copts_.pose_knots_det_constraint_en && !exact_det_en) {
         const Eigen::Matrix<double, 9, 9> Qs = 0.5 * (Q9 + Q9.transpose());
         Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 9, 9>> es_q(Qs);
         const Eigen::Matrix<double, 9, 3> N = es_q.eigenvectors().leftCols(3);
@@ -4438,17 +4504,85 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   }
 
   // ---- item 15's own step-size safeguard, carried over ----
-  Eigen::LDLT<Eigen::MatrixXd> ldlt_a(A);
-  Eigen::VectorXd delta = ldlt_a.solve(b);
-  if (ldlt_a.info() != Eigen::Success || !delta.allFinite() || delta.size() != total) {
-    std::ostringstream diag;
-    diag << "[coupled/pose_knots] FATAL: joint GN solve produced a "
-            "non-finite/failed result -- refusing to apply it to state_. "
-            "ldlt.info()=" << static_cast<int>(ldlt_a.info())
-         << " (0=Success) allFinite=" << delta.allFinite()
-         << " N=" << N << " total=" << total
-         << " iter=" << coupled_iters_ << " scan_id=" << voxel_map_->frame_idx_;
-    throw std::runtime_error(diag.str());
+  // Phase-3 (2026-09-22): when exact_det_en, A/b as assembled above are
+  // the UNCONSTRAINED (stochastic-only) system -- Lambda already excludes
+  // the 3 null directions per segment entirely, so A alone is exactly as
+  // rank-deficient in those directions as Phase 1/2 found (that's by
+  // design: the missing information is supplied by the equality
+  // constraint C_exact*delta=d_exact via Lagrange multipliers/nullspace
+  // elimination below, NOT by regularizing A itself). Solving A*delta=b
+  // directly here (the old path) would let LiDAR+prior alone determine
+  // the constrained direction -- exactly the pathological mechanism Phase
+  // 1/2 diagnosed. So the exact-constraint delta MUST go through the
+  // reduced system, never through ldlt_a.solve(A,b) directly.
+  //
+  // Nullspace elimination: delta = delta_p + Z*eta, where delta_p is the
+  // minimum-norm particular solution of C_exact*delta_p=d_exact (via
+  // C_exact's own SVD) and Z=null(C_exact) (same SVD's V-columns below
+  // the rank). Standard equality-constrained normal equations reduce to
+  // (Z^T A Z) eta = Z^T (b - A*delta_p) -- see the commit message /
+  // config doc comment for the full derivation.
+  Eigen::MatrixXd Z_ns;             // null(C_exact) basis, total x (total-rank_c) -- only when exact_det_en
+  Eigen::MatrixXd A_reduced;        // Z^T A Z -- only when exact_det_en
+  Eigen::VectorXd delta;
+  if (exact_det_en && n_exact_constraints > 0) {
+    Eigen::JacobiSVD<Eigen::MatrixXd> svd_c(C_exact, Eigen::ComputeFullU | Eigen::ComputeFullV);
+    const Eigen::VectorXd& sv_c = svd_c.singularValues();
+    const double sv_c_max = sv_c.size() ? sv_c(0) : 0.0;
+    const double sv_c_thresh = 1e-6 * std::max(sv_c_max, 1.0);
+    int rank_c = 0;
+    for (int i = 0; i < sv_c.size(); ++i)
+      if (sv_c(i) > sv_c_thresh) ++rank_c;
+    const Eigen::MatrixXd& Vm = svd_c.matrixV();
+    const Eigen::MatrixXd& Um = svd_c.matrixU();
+    Z_ns = Vm.rightCols(total - rank_c);
+    Eigen::VectorXd delta_p = Eigen::VectorXd::Zero(total);
+    for (int i = 0; i < rank_c; ++i)
+      delta_p += (Um.col(i).dot(d_exact) / sv_c(i)) * Vm.col(i);
+    A_reduced = Z_ns.transpose() * A * Z_ns;
+    const Eigen::VectorXd b_reduced = Z_ns.transpose() * (b - A * delta_p);
+    Eigen::LDLT<Eigen::MatrixXd> ldlt_reduced(A_reduced);
+    const Eigen::VectorXd eta = ldlt_reduced.solve(b_reduced);
+    delta = delta_p + Z_ns * eta;
+    if (ldlt_reduced.info() != Eigen::Success || !delta.allFinite() ||
+        delta.size() != total || rank_c != n_exact_constraints) {
+      std::ostringstream diag;
+      diag << "[coupled/pose_knots] FATAL: exact-constraint nullspace-elimination "
+              "solve produced a non-finite/failed/rank-deficient result -- refusing "
+              "to apply it to state_. ldlt_reduced.info()=" << static_cast<int>(ldlt_reduced.info())
+           << " (0=Success) allFinite=" << delta.allFinite() << " rank_c=" << rank_c
+           << " expected=" << n_exact_constraints << " N=" << N << " total=" << total
+           << " iter=" << coupled_iters_ << " scan_id=" << voxel_map_->frame_idx_;
+      throw std::runtime_error(diag.str());
+    }
+    if (copts_.psd_audit_en) {
+      Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_red(A_reduced);
+      const double lmin_r = es_red.eigenvalues().minCoeff();
+      const double lmax_r = es_red.eigenvalues().maxCoeff();
+      static PersistentLogStream exact_solve_log("pose_knots_exact_solve_diag.txt");
+      bool exact_solve_first;
+      std::ofstream& exact_solve_ofs = exact_solve_log.stream(&exact_solve_first);
+      if (exact_solve_first)
+        exact_solve_ofs << "scan_id,iter,rank_c,expected_rank_c,reduced_dim,lambda_min_reduced,"
+                            "lambda_max_reduced,cond_reduced\n";
+      exact_solve_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << rank_c << ","
+                       << n_exact_constraints << "," << (total - rank_c) << "," << lmin_r << ","
+                       << lmax_r << "," << (lmin_r > 0.0 ? lmax_r / lmin_r : -1.0) << "\n";
+      exact_solve_ofs.flush();
+    }
+  } else {
+    Eigen::LDLT<Eigen::MatrixXd> ldlt_a(A);
+    delta = ldlt_a.solve(b);
+    if (ldlt_a.info() != Eigen::Success || !delta.allFinite() || delta.size() != total) {
+      std::ostringstream diag;
+      diag << "[coupled/pose_knots] FATAL: joint GN solve produced a "
+              "non-finite/failed result -- refusing to apply it to state_. "
+              "ldlt.info()=" << static_cast<int>(ldlt_a.info())
+           << " (0=Success) allFinite=" << delta.allFinite()
+           << " N=" << N << " total=" << total
+           << " iter=" << coupled_iters_ << " scan_id=" << voxel_map_->frame_idx_;
+      throw std::runtime_error(diag.str());
+    }
   }
 
   // POST-REVIEW ADDITION ("compare batch pose-knot against causal
@@ -4463,7 +4597,13 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // can't hide behind a config flag nobody happened to set. The DENSE
   // result (`delta`, below) remains what's actually applied to state_ --
   // this does not change live behavior, only verifies it.
-  {
+  //
+  // NOT applicable when exact_det_en: the equality-constrained
+  // nullspace-elimination solve above is not the plain block-tridiagonal
+  // information filter/smoother recursion this check verifies against --
+  // comparing them would report a spurious "large diff" that reflects the
+  // algorithm change, not a bug. Skipped entirely in that mode.
+  if (!exact_det_en) {
     std::vector<Eigen::Matrix<double, 9, 9>> Ajj(N), Aoff(N - 1);
     std::vector<Eigen::Matrix<double, 9, 1>> bj(N);
     for (int j = 0; j < N; ++j) {
@@ -4532,8 +4672,24 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
 
   // Items 12/13: read Cov(x_j,x_j) straight off A^-1's own diagonal
   // blocks -- x_j IS the physical knot state here, no chaining needed.
+  //
+  // Phase-3: when exact_det_en, plain A^-1 is wrong (A is deliberately
+  // rank-deficient along the 3 constrained directions per segment, same
+  // as noted at the solve site above) -- the correct posterior covariance
+  // restricted to the constraint manifold is Z*(Z^T A Z)^-1*Z^T (zero
+  // variance along the constrained directions themselves, which is
+  // correct: a deterministic zero-noise constraint has no uncertainty).
   {
-    Eigen::MatrixXd A_inv = ldlt_a.solve(Eigen::MatrixXd::Identity(total, total));
+    Eigen::MatrixXd A_inv;
+    if (exact_det_en && n_exact_constraints > 0) {
+      Eigen::LDLT<Eigen::MatrixXd> ldlt_reduced_cov(A_reduced);
+      const Eigen::MatrixXd A_reduced_inv =
+          ldlt_reduced_cov.solve(Eigen::MatrixXd::Identity(A_reduced.rows(), A_reduced.rows()));
+      A_inv = Z_ns * A_reduced_inv * Z_ns.transpose();
+    } else {
+      Eigen::LDLT<Eigen::MatrixXd> ldlt_a_cov(A);
+      A_inv = ldlt_a_cov.solve(Eigen::MatrixXd::Identity(total, total));
+    }
     for (int j = 0; j < N; ++j) coupled_knot_cov_[j] = A_inv.block<9, 9>(kDim * j, kDim * j);
   }
 
