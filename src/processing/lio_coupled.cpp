@@ -3647,6 +3647,15 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     const M3D cov_imu_end = state_->lidarToImu(M3D(R_rel * cov_lidar_i * R_rel.transpose()));
     deskewed[i] = PointXYZCov{p_imu_end, cov_imu_end};
     deskewed[i].t = pt.t;
+    // POST-REVIEW FIX (external review 2026-09-21, "the LiDAR residuals...
+    // are not actually evaluated against the trial pose-spline trajectory
+    // that the comments say they are"): raw_body_point was NOT being set
+    // here at all (defaulting to V3D::Zero()), even though it's exactly
+    // what the world-frame residual recomputation below needs -- the
+    // pre-warp, own-capture-time IMU-frame point, same convention
+    // deskewOnePointSpline() itself uses for the SAME field (deskew.cpp:
+    // "out.raw_body_point = p_imu_i").
+    deskewed[i].raw_body_point = p_imu_i;
   }
   if (opts_.dsOn()) {
     DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
@@ -3655,6 +3664,36 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     mg.points = deskewed;
   }
   buildResiduals(mg.points, residuals_, coupled_iters_ == 0);
+
+  // POST-REVIEW FIX, the P0 item ("the most important one"): buildResiduals()
+  // internally does `state_->toWorld(pts[i])` (lio_base.cpp) -- state_'s
+  // CURRENT pose, which state_->setPropagatedState() only updates at the
+  // very END of this function, i.e. from the PREVIOUS GN iteration's own
+  // result, not this iteration's trial. So every res.r above was computed
+  // against a point expressed via a STALE frame, inconsistent with the
+  // trial-based deskew that chose which plane it matched and inconsistent
+  // with the Jrow Jacobian built below (which IS w.r.t. trial). Fixed by
+  // adopting the review's own "Option A": recompute each residual's r
+  // directly in WORLD frame via trial, using the identity that a plane's
+  // own (n,d) doesn't depend on which point evaluation is used --
+  // d = res.r_stale - n.dot(res.world_point_stale) is recovered exactly
+  // from what buildResiduals() already computed, then r is rebuilt at
+  // trial's own q_i^w = R(t_i)*raw_body_point + p(t_i). This is EXACT, not
+  // an approximation (correspondence/plane MATCHING still uses the stale
+  // point -- a standard, acceptable ICP-style choice, since which plane a
+  // point associates with is a discrete decision refreshed every
+  // iteration regardless; only the residual VALUE and its Jacobian must be
+  // mutually consistent, which they now are). This ALSO resolves the
+  // review's second finding (the Jacobian missing the scan-end-pose
+  // dependence term) for free: a world-frame residual has NO p(t1)/R(t1)
+  // dependence at all, so the existing Jrow (already built purely w.r.t.
+  // knot j/j+1 at t_i, never referencing the endpoint) is now correct as
+  // written, rather than needing a second Jacobian block added.
+  for (auto& res : residuals_) {
+    const double d = res.r - res.normal.dot(res.world_point);
+    const V3D q_world_trial = trial.rotationAt(res.t) * res.raw_body_point + trial.positionAt(res.t);
+    res.r = res.normal.dot(q_world_trial) + d;
+  }
 
   const bool use_end_time = (copts_.jacobian_time_mode == "end_time");
 
