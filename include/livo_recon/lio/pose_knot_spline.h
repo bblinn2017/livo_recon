@@ -174,9 +174,27 @@ public:
   const Eigen::Matrix<double, 9, 9>& segF9(int j) const { return seg_F9_[j]; }
   const Eigen::Matrix<double, 9, 9>& segQ9(int j) const { return seg_Q9_[j]; }
 
+  // POST-REVIEW ADDITION (item 2, "the process Jacobians F_j are frozen
+  // at initialization... recompute F_j(k) at every GN iteration"):
+  // re-walks the EXACT SAME sample sequence segment j was built from
+  // (cached at init() time -- the set of samples belonging to a segment
+  // never changes, only knot VALUES do) starting from the CALLER-SUPPLIED
+  // (trial) state, rather than the nominal one -- so F9_out/Q9_out
+  // reflect the current trial trajectory's own rotation (F9's world-
+  // frame acceleration terms depend on rot_imu at each micro-step).
+  // Discards the re-integrated state (the solver already tracks the
+  // trial's own knot j+1 independently) -- only F9_out/Q9_out are new
+  // here; the trial's own p/R/v values are NOT overwritten by this call.
+  void relinearizeSegment(int j, const M3D& rot_j, const V3D& pos_j, const V3D& vel_j,
+                          const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
+                          double q_alpha_acc, double q_alpha_gyr,
+                          const V3D& var_acc, const V3D& var_gyr, bool second_order,
+                          Eigen::Matrix<double, 9, 9>& F9_out, Eigen::Matrix<double, 9, 9>& Q9_out) const;
+
 private:
   std::vector<PoseKnot> knots_;
   std::vector<Eigen::Matrix<double, 9, 9>> seg_F9_, seg_Q9_;
+  std::vector<std::vector<ImuSample>> seg_samples_;
   bool valid_ = false;
 };
 

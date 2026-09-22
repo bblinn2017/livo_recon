@@ -109,6 +109,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/smoothness_position", copts_.pose_knots_smoothness_pos, 0.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/smoothness_rotation", copts_.pose_knots_smoothness_rot, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/use_imu_factors", copts_.pose_knots_use_imu_factors, true);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/q_pinv_rel_thresh", copts_.pose_knots_q_pinv_rel_thresh, 1e-6);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/max_scan_displacement_m", copts_.max_scan_displacement_m, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
@@ -3776,17 +3777,25 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // ---- item 16: IMU process factors between adjacent knots ----
   if (copts_.pose_knots_use_imu_factors) {
     for (int j = 0; j + 1 < N; ++j) {
-      const auto& F9 = coupled_pose_knots_.segF9(j);
-      // POST-REVIEW FOLLOW-UP: 1e-9 (matching Omega0's own default) still
-      // left A's condition number at ~1e10-1e14 from scan 1 onward (see
-      // pose_knots_A_diag.txt) -- Q9's position/velocity sub-block is
-      // structurally low-rank (both derive from the same second-order
-      // acceleration noise scaled by dt^2/dt^3/dt^4, per the review) and a
-      // single relative-to-Q9's-own-max threshold does not aggressively
-      // enough suppress its near-null directions. 1e-6 is a first,
-      // unvalidated attempt at tightening this -- report the actual
-      // resulting condition number, don't assume this value is right.
-      const Eigen::Matrix<double, 9, 9> Lambda = pseudoInverse9(coupled_pose_knots_.segQ9(j), 1e-6);
+      // POST-REVIEW FIX (item 2, "the process Jacobians F_j are frozen at
+      // initialization... recompute F_j(k)=F(x_j(k),u_j) at every GN
+      // iteration"): re-walk this segment's own cached raw-sample
+      // sequence starting from the TRIAL's current knot-j state (not the
+      // frozen nominal) -- F9's world-frame acceleration terms depend on
+      // rot_imu at each micro-step, so this genuinely changes once the
+      // trajectory has moved (which the earlier stationary-window
+      // finding -- up to ~0.5m -- says it does, non-negligibly).
+      Eigen::Matrix<double, 9, 9> F9, Q9;
+      coupled_pose_knots_.relinearizeSegment(
+          j, trial.knot(j).rot, trial.knot(j).pos, trial.knot(j).vel,
+          state_->biasAcc(), state_->biasGyr(), state_->gravity(),
+          copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr,
+          state_->varAcc(), state_->varGyr(), copts_.repro_second_order, F9, Q9);
+      // POST-REVIEW FIX (item 3): threshold is now a live config knob
+      // (default 1e-6, unchanged) rather than hardcoded -- see
+      // copts_.pose_knots_q_pinv_rel_thresh's own doc comment for the
+      // sensitivity-sweep this is meant to enable.
+      const Eigen::Matrix<double, 9, 9> Lambda = pseudoInverse9(Q9, copts_.pose_knots_q_pinv_rel_thresh);
       Eigen::Matrix<double, 9, 1> xj, xj1;
       xj.segment<3>(0) = coupled_knot_delta_theta_[j];
       xj.segment<3>(3) = coupled_knot_delta_pos_[j];
@@ -4050,13 +4059,27 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // Item 27: trajectory covariance logging, gated the same way every
   // other per-iteration pose-arm diagnostic in this file is.
   if (copts_.psd_audit_en) {
+    // POST-REVIEW FIX (item 4, "the pose-knot covariance being logged is
+    // still a smoothed posterior, not P_prior... log both explicitly"):
+    // knot(j).P_prior is the IMU-propagated prior (P_j^-, fixed at
+    // init()); coupled_knot_cov_[j] (A^-1's own diagonal block) is the
+    // FULL-scan smoothed posterior (P_j^+ after every factor in the
+    // batch, including future LiDAR) -- materially different quantities,
+    // now both named and logged so neither can be mistaken for the other.
     static PersistentLogStream cov_log("pose_knots_cov.txt");
     bool cov_first;
     std::ofstream& cov_ofs = cov_log.stream(&cov_first);
-    if (cov_first) cov_ofs << "scan_id,iter,knot,t,tr_Pp,tr_Ptheta,tr_Pv\n";
+    if (cov_first)
+      cov_ofs << "scan_id,iter,knot,t,"
+                 "tr_Pprior_pos,tr_Pprior_theta,tr_Pprior_vel,"
+                 "tr_Ppost_pos,tr_Ppost_theta,tr_Ppost_vel\n";
     for (int j = 0; j < N; ++j) {
+      const auto& Pprior = coupled_pose_knots_.knot(j).P_prior;
       cov_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << j << ","
               << coupled_pose_knots_.knot(j).t << ","
+              << Pprior.block<3, 3>(3, 3).trace() << ","
+              << Pprior.block<3, 3>(0, 0).trace() << ","
+              << Pprior.block<3, 3>(6, 6).trace() << ","
               << coupled_knot_cov_[j].block<3, 3>(3, 3).trace() << ","
               << coupled_knot_cov_[j].block<3, 3>(0, 0).trace() << ","
               << coupled_knot_cov_[j].block<3, 3>(6, 6).trace() << "\n";

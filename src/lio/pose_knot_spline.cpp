@@ -148,8 +148,20 @@ bool PoseKnotSpline::init(double t0, double t1, int n_knots,
   Eigen::Matrix<double, 9, 9> F_seg = Eigen::Matrix<double, 9, 9>::Identity();
   Eigen::Matrix<double, 9, 9> Q_seg = Eigen::Matrix<double, 9, 9>::Zero();
 
+  // POST-REVIEW ADDITION (item 2, "the process Jacobians F_j are frozen
+  // at initialization... recompute F_j(k)=F(x_j(k),u_j) at every GN
+  // iteration"): cache the EXACT sample sequence (including every
+  // boundary-interpolated sample) each segment's F9/Q9 was built from, so
+  // relinearizeSegment() below can re-walk the IDENTICAL micro-steps from
+  // a DIFFERENT (trial) starting state without re-deriving the knot-
+  // boundary-crossing logic -- the set of samples belonging to segment j
+  // never changes (only knot VALUES do), so this is safe to cache once.
+  seg_samples_.assign(n_knots - 1, {});
+  std::vector<ImuSample> cur_seg_samples;
+
   int knot_idx = 1;
   ImuSample head = imu_raw.front();
+  cur_seg_samples.push_back(head);
   for (size_t i = 1; i < imu_raw.size() && knot_idx < n_knots; ++i) {
     ImuSample tail = imu_raw[i];
     // Interpolate a boundary sample at EVERY knot time this [head,tail]
@@ -171,6 +183,7 @@ bool PoseKnotSpline::init(double t0, double t1, int n_knots,
       integrateAndAccumulateStep(head, boundary, bias_acc, bias_gyr, gravity,
                                  var_acc, var_gyr, q_alpha_acc, q_alpha_gyr, second_order,
                                  rot_imu, pos_imu, vel_imu, F_seg, Q_seg);
+      cur_seg_samples.push_back(boundary);
       knots_[knot_idx].pos = pos_imu;
       knots_[knot_idx].rot = rot_imu;
       knots_[knot_idx].vel = vel_imu;
@@ -178,6 +191,9 @@ bool PoseKnotSpline::init(double t0, double t1, int n_knots,
       knots_[knot_idx].P_prior = P_running;
       seg_F9_[knot_idx - 1] = F_seg;
       seg_Q9_[knot_idx - 1] = Q_seg;
+      seg_samples_[knot_idx - 1] = cur_seg_samples;
+      cur_seg_samples.clear();
+      cur_seg_samples.push_back(boundary);  // first sample of the NEXT segment
       F_seg.setIdentity();
       Q_seg.setZero();
       head = boundary;
@@ -189,6 +205,7 @@ bool PoseKnotSpline::init(double t0, double t1, int n_knots,
       integrateAndAccumulateStep(head, tail, bias_acc, bias_gyr, gravity,
                                  var_acc, var_gyr, q_alpha_acc, q_alpha_gyr, second_order,
                                  rot_imu, pos_imu, vel_imu, F_seg, Q_seg);
+      cur_seg_samples.push_back(tail);
       head = tail;
     }
   }
@@ -314,6 +331,26 @@ Eigen::VectorXd solveBlockTridiagonal9(
   Eigen::VectorXd out(9 * N);
   for (int j = 0; j < N; ++j) out.segment<9>(9 * j) = x[j];
   return out;
+}
+
+void PoseKnotSpline::relinearizeSegment(int j, const M3D& rot_j, const V3D& pos_j, const V3D& vel_j,
+                                        const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
+                                        double q_alpha_acc, double q_alpha_gyr,
+                                        const V3D& var_acc, const V3D& var_gyr, bool second_order,
+                                        Eigen::Matrix<double, 9, 9>& F9_out, Eigen::Matrix<double, 9, 9>& Q9_out) const
+{
+  F9_out = Eigen::Matrix<double, 9, 9>::Identity();
+  Q9_out = Eigen::Matrix<double, 9, 9>::Zero();
+  const auto& samples = seg_samples_[j];
+  if (samples.size() < 2) return;  // degenerate segment -- leave as identity/zero (no-op factor)
+
+  M3D rot_imu = rot_j;
+  V3D pos_imu = pos_j, vel_imu = vel_j;
+  for (size_t k = 0; k + 1 < samples.size(); ++k) {
+    integrateAndAccumulateStep(samples[k], samples[k + 1], bias_acc, bias_gyr, gravity,
+                               var_acc, var_gyr, q_alpha_acc, q_alpha_gyr, second_order,
+                               rot_imu, pos_imu, vel_imu, F9_out, Q9_out);
+  }
 }
 
 }  // namespace livo_recon

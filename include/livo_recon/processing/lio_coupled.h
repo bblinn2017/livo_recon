@@ -164,6 +164,18 @@ struct LioProcCoupledOptions
   // LiDAR factors) -- a genuinely degenerate configuration, kept only for
   // testing that the IMU factor is actually doing something.
   bool pose_knots_use_imu_factors = true;
+  // POST-REVIEW ADDITION (item 3, "the threshold is still an arbitrary
+  // numerical cutoff... add a config parameter and test 1e-4...1e-8,
+  // record lambda_min(A)/lambda_max(A)/cond(A) plus the stationary
+  // trajectory error. If results are stable, this issue can be
+  // retired"): Q9's own pseudo-inverse relative eigenvalue threshold,
+  // now a live knob instead of the hardcoded 1e-6 (which remains the
+  // default -- this is deliberately NOT re-tuned by this change itself,
+  // only made sweepable). Config key: estimator/coupled/pose_knots/
+  // q_pinv_rel_thresh. Does NOT affect Omega0's own pseudo-inverse (the
+  // head prior P0^-1) -- that one is not the rank-deficient quantity the
+  // review is asking about, and stays at its own fixed 1e-6.
+  double pose_knots_q_pinv_rel_thresh = 1e-6;
 
   // CQ-85 item 1: rule 58f's exact failure mode -- CQ-72's own 96-cell grid
   // produced a cell reporting completed=yes with ATE=396,499,288.300 mm (a
