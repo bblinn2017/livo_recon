@@ -4675,22 +4675,26 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     // region clamp below) and max spline acceleration over [t0,t1] this
     // iteration's own trial.
     if (copts_.psd_audit_en) {
-      double max_acc = 0.0;
+      double max_acc = 0.0, max_angvel = 0.0;
       constexpr int kAccGridN = 40;
       const double t0g = coupled_pose_knots_.knot(0).t;
       for (int k = 0; k <= kAccGridN; ++k) {
         const double tg = t0g + (t1 - t0g) * (static_cast<double>(k) / kAccGridN);
         max_acc = std::max(max_acc, trial.accelerationAt(tg).norm());
+        // Phase-6 (2026-09-22, campaign CSV's max_spline_angular_velocity
+        // column): same grid, reusing PoseKnotSpline::angularVelocityAt().
+        max_angvel = std::max(max_angvel, trial.angularVelocityAt(tg).norm());
       }
       static PersistentLogStream gn_tel_log("pose_knots_gn_telemetry.txt");
       bool gn_tel_first;
       std::ofstream& gn_tel_ofs = gn_tel_log.stream(&gn_tel_first);
       if (gn_tel_first)
-        gn_tel_ofs << "scan_id,iter,max_delta_cp_inf,max_delta_cphi_inf,max_accel,"
+        gn_tel_ofs << "scan_id,iter,max_delta_cp_inf,max_delta_cphi_inf,max_accel,max_angvel,"
                       "e_lidar,e_process,e_det,e_total\n";
       gn_tel_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << max_step_pos << ","
-                 << max_step_rot << "," << max_acc << "," << e_lidar_total << "," << e_process_total
-                 << "," << e_det_total << "," << (e_lidar_total + e_process_total + e_det_total) << "\n";
+                 << max_step_rot << "," << max_acc << "," << max_angvel << "," << e_lidar_total << ","
+                 << e_process_total << "," << e_det_total << ","
+                 << (e_lidar_total + e_process_total + e_det_total) << "\n";
       gn_tel_ofs.flush();
     }
     double scale = 1.0;
