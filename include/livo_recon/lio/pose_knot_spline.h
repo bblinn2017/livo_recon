@@ -74,24 +74,54 @@ void buildImuStep9x9(const M3D& rot_imu, const V3D& acc_avr, const V3D& angvel_a
                      double q_alpha_acc, double q_alpha_gyr, bool second_order,
                      Eigen::Matrix<double, 9, 9>& F9, Eigen::Matrix<double, 9, 9>& Q9);
 
+// POST-REVIEW FIX (external review 2026-09-21, "the concrete bug I do see:
+// the IMU process factor has no nominal residual" + "the segment boundaries
+// are also wrong for arbitrary knot times" + "imu_raw isn't actually
+// used"): advances (rot,pos,vel) by ONE raw-IMU-sample-pair micro-step
+// [head,tail], via the EXACT SAME trapezoidal integration ImuProc::
+// propagate() uses for the STATE itself (not just its covariance), and
+// simultaneously accumulates F9/Q9 into the caller's running segment
+// accumulators via buildImuStep9x9() above. This is what makes knot j+1's
+// NOMINAL state the actual result of integrating knot j's nominal state
+// through the real IMU samples in [t_j,t_{j+1}) -- so the process
+// factor's residual (x_{j+1}-F_j*x_j, in estimateCoupledPoseKnotSpline())
+// is genuinely centered at 0 BY CONSTRUCTION, rather than assuming it
+// away: knot j+1 is DEFINED as f(knot j, raw samples), not independently
+// interpolated from a separately-computed mg.poses chain the way the
+// pre-fix version did (that mismatch -- interpolated nominal vs.
+// F/Q-implied prediction -- was the "no nominal residual" bug).
+void integrateAndAccumulateStep(
+    const ImuSample& head, const ImuSample& tail,
+    const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
+    const V3D& var_acc, const V3D& var_gyr,
+    double q_alpha_acc, double q_alpha_gyr, bool second_order,
+    M3D& rot_imu, V3D& pos_imu, V3D& vel_imu,
+    Eigen::Matrix<double, 9, 9>& F_seg, Eigen::Matrix<double, 9, 9>& Q_seg);
+
 class PoseKnotSpline
 {
 public:
-  // Item 3: initializes knot times t_j = t0 + j*dt (dt=(t1-t0)/(n_knots-1))
-  // and p_j/R_j/v_j from the EXISTING IMU-propagated trajectory (mg.poses,
-  // linear/SLERP-interpolated onto each t_j -- the ESIKF's own raw chain
-  // output, unchanged). Item 18: knot 0's covariance is seeded from the
-  // caller's P0 (state_->cov()'s own [theta,p,v] block at scan start), NOT
-  // a hard clamp -- see estimateCoupledPoseKnotSpline()'s own prior-factor
-  // construction for how that stays a SOFT prior, not an equality
-  // constraint (the physical-knot formulation makes the old clamped-
-  // B-spline head-tie machinery unnecessary: knot 0 IS p_0 directly, no
-  // basis-coefficient gap to close). Item 5/6: knots 1..N-1's covariance
-  // is causally forward-propagated ONCE here (P_j^-, pre-LiDAR) by walking
-  // `imu_raw` sample-by-sample between each pair of knot times, using
-  // buildImuStep9x9() -- the LiDAR-updated P_j^+ is the solver's own job,
-  // not this class's.
-  bool init(const std::vector<Pose6D>& imu_poses, double t0, double t1, int n_knots,
+  // Item 3/5/6, POST-REVIEW FIX: initializes knot times t_j = t0 + j*dt
+  // (dt=(t1-t0)/(n_knots-1)), then walks `imu_raw` (the scan's raw IMU
+  // stream, mg.imu_samples_raw -- ACTUALLY used now, not the imu_poses
+  // chain the pre-fix version silently substituted) exactly ONCE,
+  // interpolating a boundary sample at EVERY knot time it crosses
+  // (mirroring ImuProc::propagate()'s own single-boundary-at-t_curr
+  // interpolation, generalized to N-1 internal boundaries) via
+  // integrateAndAccumulateStep() -- so each segment's F9/Q9 (cached via
+  // segF9()/segQ9() below) and each knot's own nominal (pos,rot,vel)
+  // correspond EXACTLY to [t_j,t_{j+1}), never a whole raw-sample dt that
+  // overshoots/undershoots a knot boundary. Knot 0 is the caller's own
+  // (p0,R0,v0) (item 18, the ESIKF anchor); every later knot's nominal
+  // state is the INTEGRATED result, not an independent interpolation --
+  // this is what makes the process-factor's residual zero at init time by
+  // construction (see integrateAndAccumulateStep()'s own doc comment).
+  // Covariance: P_0 = P0 (item 18), P_{j+1} = F_seg*P_j*F_seg^T + Q_seg
+  // (items 5/6), stored per-knot for diagnostics -- the solver's own
+  // joint batch prior still only consumes P_0 and the cached F9/Q9,
+  // exactly as before (this fix changes WHAT F9/Q9/the nominal states
+  // are, not how the solver consumes them).
+  bool init(double t0, double t1, int n_knots,
             const V3D& p0, const M3D& R0, const V3D& v0,
             const Eigen::Matrix<double, 9, 9>& P0,
             const std::vector<ImuSample>& imu_raw,

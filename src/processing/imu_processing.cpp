@@ -125,8 +125,14 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // same cross-class read pattern as the two flags above, one more OR term.
   std::string coupled_spline_mode = "raw_imu";
   paramWarn<std::string>(pnh, "estimator/coupled/spline_mode", coupled_spline_mode, std::string("raw_imu"));
+  // POST-REVIEW FIX: pose_knots (PoseKnotSpline::init()) needs the raw
+  // stream just as much as "pose" does -- it was missing here entirely,
+  // so mg.imu_samples_raw stayed empty and init() correctly (but
+  // unhelpfully) refused every single scan with "no valid initial
+  // trajectory", discovered via a live crash on scan 1.
   opts_.keep_raw_samples = (spline_mode != "raw_imu") || coupled_adaptive_sigma ||
-                           coupled_bias_freeze_on_vibration || (coupled_spline_mode == "pose");
+                           coupled_bias_freeze_on_vibration ||
+                           (coupled_spline_mode == "pose") || (coupled_spline_mode == "pose_knots");
   { std::lock_guard<std::mutex> lock(g_qhat_mtx); g_qhat_enabled = opts_.log_qhat_en; }
 
   std::ostringstream oss;

@@ -550,8 +550,13 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       Eigen::Matrix<double, 9, 9> P0 = Eigen::Matrix<double, 9, 9>::Zero();
       const Eigen::MatrixXd& P_full = state_->cov();
       if (P_full.rows() >= 9 && P_full.cols() >= 9) P0 = P_full.block<9, 9>(0, 0);
+      // POST-REVIEW FIX: init() now walks mg.imu_samples_raw directly
+      // (previously silently ignored -- the review's own "imu_raw isn't
+      // actually used" finding) to build knots whose nominal states are
+      // the actual integrated IMU trajectory, not an independent
+      // interpolation of mg.poses.
       coupled_pose_knots_valid_ = coupled_pose_knots_.init(
-          mg.poses, t0, t1, copts_.pose_knots_n,
+          t0, t1, copts_.pose_knots_n,
           mg.poses.front().pos, mg.poses.front().rot, mg.poses.front().vel, P0,
           mg.imu_samples_raw, state_->biasAcc(), state_->biasGyr(), state_->gravity(),
           copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, state_->varAcc(), state_->varGyr(),
@@ -3662,12 +3667,34 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // and no LiDAR residuals this scan).
   A.diagonal().array() += 1e-6;
 
-  // ---- item 18: head prior, Omega0 = P0^-1 (P0 == knot 0's own P, set
+  // POST-REVIEW FIX (external review 2026-09-21, "Q9 is rank-deficient
+  // before the artificial floor... the code is artificially filling those
+  // null directions with 1e-9... that can create enormous artificial
+  // information along directions that have essentially zero modeled
+  // process noise"): a flat additive 1e-9 on Q9's diagonal is dimensionally
+  // meaningless (mixes rad^2/m^2/(m/s)^2) AND, for the structurally
+  // low-rank position/velocity sub-block (both derive from the same
+  // second-order acceleration noise), can dominate the inverse along the
+  // null directions that floor is filling. Fixed via a proper SPD
+  // pseudo-inverse: eigendecompose the symmetrized matrix, invert only
+  // eigenvalues above a RELATIVE (dimensionless) threshold, treat smaller
+  // ones as exactly-zero information rather than 1e9-scale fake precision.
+  auto pseudoInverse9 = [](const Eigen::Matrix<double, 9, 9>& M, double rel_thresh) {
+    const Eigen::Matrix<double, 9, 9> Ms = 0.5 * (M + M.transpose());
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 9, 9>> es(Ms);
+    const auto& evals = es.eigenvalues();
+    const auto& evecs = es.eigenvectors();
+    const double thresh = rel_thresh * std::max(evals.maxCoeff(), 0.0);
+    Eigen::Matrix<double, 9, 9> out = Eigen::Matrix<double, 9, 9>::Zero();
+    for (int k = 0; k < 9; ++k)
+      if (evals(k) > thresh) out += (1.0 / evals(k)) * (evecs.col(k) * evecs.col(k).transpose());
+    return out;
+  };
+
+  // ---- item 18: head prior, Omega0 = pinv(P0) (P0 == knot 0's own P, set
   // ONCE at init() from state_->cov(), never mutated) ----
   {
-    Eigen::Matrix<double, 9, 9> Omega0 = coupled_pose_knots_.knot(0).P;
-    Eigen::LDLT<Eigen::Matrix<double, 9, 9>> ldlt_p0(Omega0);
-    Omega0 = ldlt_p0.solve(Eigen::Matrix<double, 9, 9>::Identity());
+    const Eigen::Matrix<double, 9, 9> Omega0 = pseudoInverse9(coupled_pose_knots_.knot(0).P, 1e-6);
     Eigen::Matrix<double, 9, 1> s0;
     s0.segment<3>(0) = coupled_knot_delta_theta_[0];
     s0.segment<3>(3) = coupled_knot_delta_pos_[0];
@@ -3680,10 +3707,16 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   if (copts_.pose_knots_use_imu_factors) {
     for (int j = 0; j + 1 < N; ++j) {
       const auto& F9 = coupled_pose_knots_.segF9(j);
-      Eigen::Matrix<double, 9, 9> Q9 = coupled_pose_knots_.segQ9(j);
-      Q9.diagonal().array() += 1e-9;  // floor, matches the head-prior floor's spirit
-      Eigen::LDLT<Eigen::Matrix<double, 9, 9>> ldlt_q(Q9);
-      const Eigen::Matrix<double, 9, 9> Lambda = ldlt_q.solve(Eigen::Matrix<double, 9, 9>::Identity());
+      // POST-REVIEW FOLLOW-UP: 1e-9 (matching Omega0's own default) still
+      // left A's condition number at ~1e10-1e14 from scan 1 onward (see
+      // pose_knots_A_diag.txt) -- Q9's position/velocity sub-block is
+      // structurally low-rank (both derive from the same second-order
+      // acceleration noise scaled by dt^2/dt^3/dt^4, per the review) and a
+      // single relative-to-Q9's-own-max threshold does not aggressively
+      // enough suppress its near-null directions. 1e-6 is a first,
+      // unvalidated attempt at tightening this -- report the actual
+      // resulting condition number, don't assume this value is right.
+      const Eigen::Matrix<double, 9, 9> Lambda = pseudoInverse9(coupled_pose_knots_.segQ9(j), 1e-6);
       Eigen::Matrix<double, 9, 1> xj, xj1;
       xj.segment<3>(0) = coupled_knot_delta_theta_[j];
       xj.segment<3>(3) = coupled_knot_delta_pos_[j];
@@ -3774,6 +3807,31 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
 
     A.block<18, 18>(kDim * j, kDim * j).noalias() += w * (Jrow.transpose() * Jrow);
     b.segment<18>(kDim * j).noalias() -= w * Jrow.transpose() * res.r;
+  }
+
+  // POST-REVIEW FIX ("Test 1 -- prove whether A is genuinely indefinite"):
+  // symmetrize defensively (each off-diagonal block pair above was
+  // computed via two DIFFERENT matrix products -- e.g. -F9^T*Lambda vs
+  // -Lambda*F9 -- which are exact transposes analytically but not
+  // necessarily bit-identical in floating point) and log the symmetrized
+  // matrix's own min/max eigenvalue, condition number, and ||A-A^T||_F
+  // BEFORE inverting -- so a future negative "covariance" trace can be
+  // read against ground truth (lambda_min(A_s)<0 == a real construction
+  // problem; lambda_min(A_s)>0 but A^-1 still has negative diagonal ==
+  // the inversion itself is numerically unreliable) instead of asserted.
+  const double asym_norm = (A - A.transpose()).norm();
+  A = 0.5 * (A + A.transpose());
+  if (copts_.psd_audit_en) {
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_a(A);
+    const double lmin = es_a.eigenvalues().minCoeff();
+    const double lmax = es_a.eigenvalues().maxCoeff();
+    static PersistentLogStream a_diag_log("pose_knots_A_diag.txt");
+    bool a_diag_first;
+    std::ofstream& a_diag_ofs = a_diag_log.stream(&a_diag_first);
+    if (a_diag_first) a_diag_ofs << "scan_id,iter,N,total,lambda_min,lambda_max,cond,asym_norm\n";
+    a_diag_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << N << "," << total << ","
+               << lmin << "," << lmax << "," << (lmin > 0.0 ? lmax / lmin : -1.0) << "," << asym_norm << "\n";
+    a_diag_ofs.flush();
   }
 
   // ---- item 15's own step-size safeguard, carried over ----

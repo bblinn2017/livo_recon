@@ -70,10 +70,42 @@ void buildImuStep9x9(const M3D& rot_imu, const V3D& acc_avr, const V3D& angvel_a
   }
 }
 
-bool PoseKnotSpline::init(const std::vector<Pose6D>& imu_poses, double t0, double t1,
-                          int n_knots, const V3D& p0, const M3D& R0, const V3D& v0,
+void integrateAndAccumulateStep(
+    const ImuSample& head, const ImuSample& tail,
+    const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
+    const V3D& var_acc, const V3D& var_gyr,
+    double q_alpha_acc, double q_alpha_gyr, bool second_order,
+    M3D& rot_imu, V3D& pos_imu, V3D& vel_imu,
+    Eigen::Matrix<double, 9, 9>& F_seg, Eigen::Matrix<double, 9, 9>& Q_seg)
+{
+  const double dt = tail.t - head.t;
+  if (!(dt > 0.0)) return;
+  // EXACT match to ImuProc::propagate()'s own per-sample quantities.
+  const V3D acc_avr = 0.5 * (head.acc + tail.acc) - bias_acc;
+  const V3D angvel_avr = 0.5 * (head.gyro + tail.gyro) - bias_gyr;
+
+  Eigen::Matrix<double, 9, 9> F9, Q9;
+  buildImuStep9x9(rot_imu, acc_avr, angvel_avr, dt, var_acc, var_gyr,
+                  q_alpha_acc, q_alpha_gyr, second_order, F9, Q9);
+  F_seg = F9 * F_seg;
+  Q_seg = F9 * Q_seg * F9.transpose() + Q9;
+
+  // State update -- EXACT match to ImuProc::propagate()'s own
+  // acc_world_head/Exp_f/acc_world_tail/pos_imu/vel_imu construction (uses
+  // rot_imu BEFORE the update for the head term, after for the tail term).
+  const V3D acc_world_head = rot_imu * (head.acc - bias_acc) + gravity;
+  const M3D Exp_f = Exp(angvel_avr, dt);
+  rot_imu = rot_imu * Exp_f;
+  const V3D acc_world_tail = rot_imu * (tail.acc - bias_acc) + gravity;
+  const V3D acc_avr_world = 0.5 * (acc_world_head + acc_world_tail);
+  pos_imu = pos_imu + vel_imu * dt + 0.5 * acc_avr_world * dt * dt;
+  vel_imu = vel_imu + acc_avr_world * dt;
+}
+
+bool PoseKnotSpline::init(double t0, double t1, int n_knots,
+                          const V3D& p0, const M3D& R0, const V3D& v0,
                           const Eigen::Matrix<double, 9, 9>& P0,
-                          const std::vector<ImuSample>& /*imu_raw*/,
+                          const std::vector<ImuSample>& imu_raw,
                           const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
                           double q_alpha_acc, double q_alpha_gyr,
                           const V3D& var_acc, const V3D& var_gyr, bool second_order)
@@ -82,96 +114,91 @@ bool PoseKnotSpline::init(const std::vector<Pose6D>& imu_poses, double t0, doubl
   knots_.clear();
   seg_F9_.clear();
   seg_Q9_.clear();
-  if (n_knots < 2 || imu_poses.empty() || !(t1 > t0)) return false;
+  if (n_knots < 2 || imu_raw.size() < 2 || !(t1 > t0)) return false;
 
-  // Item 3: knot times, evenly spaced. Item 3's own preferred alternative
-  // ("reuse the exact control-point timing convention you've already
-  // established") is the SAME formula ScanSpline's control_point_hz uses
-  // when spread evenly -- kept as the plain, unambiguous n_knots form here
-  // since this class owns its own knot count, not a derived rate.
+  // Item 3: knot times, evenly spaced.
   knots_.resize(n_knots);
   const double dt_knot = (t1 - t0) / static_cast<double>(n_knots - 1);
   for (int j = 0; j < n_knots; ++j) knots_[j].t = t0 + j * dt_knot;
   knots_.back().t = t1;  // avoid roundoff drift on the last knot
 
-  // Item 3: initialize p_j/R_j/v_j from the existing IMU-propagated chain
-  // (imu_poses == mg.poses), linear-interpolating pos/vel and SLERPing
-  // rot between the two bracketing Pose6D samples. imu_poses stores each
-  // sample's HEAD state; the true tail-end state is (p0,R0,v0) themselves
-  // (the caller's own current ESIKF propagated state, mg.image.t == t1).
-  auto poseAtHead = [&](double t, V3D& p, M3D& R, V3D& v) {
-    if (t <= imu_poses.front().t) { p = imu_poses.front().pos; R = imu_poses.front().rot; v = imu_poses.front().vel; return; }
-    for (size_t i = 0; i + 1 < imu_poses.size(); ++i) {
-      if (t >= imu_poses[i].t && t <= imu_poses[i + 1].t) {
-        const double a = (t - imu_poses[i].t) / std::max(imu_poses[i + 1].t - imu_poses[i].t, 1e-12);
-        p = (1 - a) * imu_poses[i].pos + a * imu_poses[i + 1].pos;
-        v = (1 - a) * imu_poses[i].vel + a * imu_poses[i + 1].vel;
-        const M3D dR = imu_poses[i].rot.transpose() * imu_poses[i + 1].rot;
-        R = imu_poses[i].rot * Exp(V3D(a * Log(dR)));
-        return;
-      }
-    }
-    p = imu_poses.back().pos; R = imu_poses.back().rot; v = imu_poses.back().vel;
-  };
-  // Knot 0 is (p0,R0,v0) -- the caller's OWN scan-start ESIKF state,
-  // per item 18/3 ("do not allow the initial spline and the ESIKF state to
-  // start from different poses"). Interior knots are linear/SLERP-
-  // interpolated from imu_poses (item 3). The LAST knot has no bracketing
-  // Pose6D pair past it (imu_poses only stores HEAD states, up to but not
-  // including t1) -- forward-integrate ONE final half-step from the last
-  // Pose6D sample as its INITIAL GUESS ONLY (item 19: the tail is free to
-  // move during the solve, so approximation quality here doesn't matter).
+  // POST-REVIEW FIX: knot 0 is the caller's own ESIKF state (item 18) --
+  // P_0 = P0 (soft prior, consumed by the solver's own prior factor, not
+  // a hard clamp). Every LATER knot's nominal (pos,rot,vel) is now the
+  // ACTUAL INTEGRATED RESULT of walking imu_raw from knot 0 forward,
+  // interpolating a boundary sample at each knot time crossed -- so
+  // knot[j+1].{pos,rot,vel} == f(knot[j].{pos,rot,vel}, raw samples in
+  // [t_j,t_{j+1})) EXACTLY, by construction, rather than an independently
+  // interpolated mg.poses value that could (and did) disagree with what
+  // the process factor's own F9/Q9 implied. This is what makes
+  // estimateCoupledPoseKnotSpline()'s process-factor residual
+  // (x_{j+1}-F_j*x_j, in CORRECTION variables) genuinely centered at the
+  // true nominal-trajectory inconsistency (zero, here) rather than
+  // silently assuming it away.
   knots_[0].pos = p0; knots_[0].rot = R0; knots_[0].vel = v0;
-  for (int j = 1; j + 1 < n_knots; ++j) {
-    V3D p, v; M3D R;
-    poseAtHead(knots_[j].t, p, R, v);
-    knots_[j].pos = p; knots_[j].rot = R; knots_[j].vel = v;
-  }
-  if (n_knots >= 2) {
-    const auto& last = imu_poses.back();
-    knots_[n_knots - 1].pos = last.pos + last.vel * last.dt;
-    knots_[n_knots - 1].rot = last.rot * Exp(V3D(last.gyr * last.dt));
-    knots_[n_knots - 1].vel = last.vel;
-  }
-
-  // Item 18: knot 0's prior covariance is the caller's own P0 (state_->
-  // cov()'s [theta,p,v] block at scan start) -- a SOFT prior consumed by
-  // the solver's own prior factor, not written here as a hard value.
   knots_[0].P = P0;
 
-  // Items 5/6: causal forward propagation, knot j -> knot j+1, walking the
-  // Pose6D samples already computed by ImuProc::propagate() (imu_poses)
-  // that fall in [t_j, t_{j+1}) -- each Pose6D already carries dt/rot/
-  // acc_head(world)/gyr(body, bias-corrected) at its own head time, so
-  // buildImuStep9x9() is fed EXACTLY the same per-step inputs
-  // ImuProc::propagate() itself used, just re-derived here (see that
-  // function's own doc comment for why this is a copy, not a shared call).
   seg_F9_.assign(n_knots - 1, Eigen::Matrix<double, 9, 9>::Identity());
   seg_Q9_.assign(n_knots - 1, Eigen::Matrix<double, 9, 9>::Zero());
-  size_t sample_idx = 0;
-  for (int j = 0; j + 1 < n_knots; ++j) {
-    Eigen::Matrix<double, 9, 9> F_seg = Eigen::Matrix<double, 9, 9>::Identity();
-    Eigen::Matrix<double, 9, 9> Q_seg = Eigen::Matrix<double, 9, 9>::Zero();
-    while (sample_idx < imu_poses.size() && imu_poses[sample_idx].t < knots_[j + 1].t - 1e-9) {
-      const auto& ps = imu_poses[sample_idx];
-      if (ps.t >= knots_[j].t - 1e-9) {
-        const V3D acc_avr_body = ps.rot.transpose() * (ps.acc_head - gravity);
-        Eigen::Matrix<double, 9, 9> F9, Q9;
-        buildImuStep9x9(ps.rot, acc_avr_body, ps.gyr, ps.dt, var_acc, var_gyr,
-                        q_alpha_acc, q_alpha_gyr, second_order, F9, Q9);
-        F_seg = F9 * F_seg;
-        Q_seg = F9 * Q_seg * F9.transpose() + Q9;
-      }
-      ++sample_idx;
-    }
-    seg_F9_[j] = F_seg;
-    seg_Q9_[j] = Q_seg;
-    knots_[j + 1].P = F_seg * knots_[j].P * F_seg.transpose() + Q_seg;
-  }
-  (void)bias_acc; (void)bias_gyr;  // held fixed (item 22); accepted for interface symmetry/future use
 
-  valid_ = true;
-  return true;
+  M3D rot_imu = R0;
+  V3D pos_imu = p0, vel_imu = v0;
+  Eigen::Matrix<double, 9, 9> P_running = P0;
+  Eigen::Matrix<double, 9, 9> F_seg = Eigen::Matrix<double, 9, 9>::Identity();
+  Eigen::Matrix<double, 9, 9> Q_seg = Eigen::Matrix<double, 9, 9>::Zero();
+
+  int knot_idx = 1;
+  ImuSample head = imu_raw.front();
+  for (size_t i = 1; i < imu_raw.size() && knot_idx < n_knots; ++i) {
+    ImuSample tail = imu_raw[i];
+    // Interpolate a boundary sample at EVERY knot time this [head,tail]
+    // micro-interval crosses (mirroring ImuProc::propagate()'s own
+    // single-boundary-at-t_curr interpolation, generalized to N-1
+    // internal boundaries) -- fixes the pre-fix version's "segment
+    // boundaries do not align with knot times" bug.
+    while (knot_idx < n_knots && knots_[knot_idx].t <= tail.t + 1e-9) {
+      const double kt = knots_[knot_idx].t;
+      ImuSample boundary;
+      if (kt >= tail.t - 1e-12) {
+        boundary = tail;
+      } else {
+        const double a = (kt - head.t) / std::max(tail.t - head.t, 1e-12);
+        boundary.t = kt;
+        boundary.acc = (1.0 - a) * head.acc + a * tail.acc;
+        boundary.gyro = (1.0 - a) * head.gyro + a * tail.gyro;
+      }
+      integrateAndAccumulateStep(head, boundary, bias_acc, bias_gyr, gravity,
+                                 var_acc, var_gyr, q_alpha_acc, q_alpha_gyr, second_order,
+                                 rot_imu, pos_imu, vel_imu, F_seg, Q_seg);
+      knots_[knot_idx].pos = pos_imu;
+      knots_[knot_idx].rot = rot_imu;
+      knots_[knot_idx].vel = vel_imu;
+      P_running = F_seg * P_running * F_seg.transpose() + Q_seg;
+      knots_[knot_idx].P = P_running;
+      seg_F9_[knot_idx - 1] = F_seg;
+      seg_Q9_[knot_idx - 1] = Q_seg;
+      F_seg.setIdentity();
+      Q_seg.setZero();
+      head = boundary;
+      ++knot_idx;
+      if (boundary.t >= tail.t - 1e-12) break;  // boundary WAS tail -- nothing left in this micro-step
+    }
+    if (knot_idx >= n_knots) break;
+    if (tail.t > head.t + 1e-12) {
+      integrateAndAccumulateStep(head, tail, bias_acc, bias_gyr, gravity,
+                                 var_acc, var_gyr, q_alpha_acc, q_alpha_gyr, second_order,
+                                 rot_imu, pos_imu, vel_imu, F_seg, Q_seg);
+      head = tail;
+    }
+  }
+  // valid_ requires every knot to have actually been reached by the raw
+  // IMU stream -- imu_raw is documented (imu_processing.cpp) to span the
+  // whole scan window [t0,t1], and knots_.back().t==t1 exactly, so this
+  // should always succeed when imu_raw itself is well-formed; refuse
+  // loudly (report false) rather than leave trailing knots at their
+  // default-constructed Zero()/Identity() state if it doesn't.
+  valid_ = (knot_idx >= n_knots);
+  return valid_;
 }
 
 void PoseKnotSpline::bracket(double t, int& j, double& u) const
