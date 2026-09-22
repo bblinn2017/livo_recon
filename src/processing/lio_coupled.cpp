@@ -4154,6 +4154,18 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   std::vector<Eigen::VectorXd> b_thread(threads, Eigen::VectorXd::Zero(total));
   std::vector<double> e_lidar_thread(threads, 0.0);
   const int n_res = static_cast<int>(residuals_.size());
+  // Velocity-observability campaign Part 1 (2026-09-22, read-only): runtime
+  // Hermite Jacobian coefficient magnitudes actually used above
+  // (|h00|,|h01| for position, |h10*dt_seg|,|h11*dt_seg| for velocity),
+  // plus dt_seg itself -- collected per-thread (same no-contention pattern
+  // as every other accumulator in this loop) only when psd_audit_en, so
+  // there is zero extra cost with diagnostics off. Aggregated to
+  // mean/median/p95/max AFTER the parallel region, not per-residual-logged
+  // (per user's explicit "make sure it isn't inefficient" instruction --
+  // this avoids an O(n_residuals) file write every scan/iter).
+  const bool log_hermite_coeffs = copts_.psd_audit_en;
+  std::vector<std::vector<double>> h00_thread(threads), h01_thread(threads),
+      h10dt_thread(threads), h11dt_thread(threads), dtseg_thread(threads);
   #pragma omp parallel num_threads(threads)
   {
     PoseKnotSpline trial_local = trial;  // own copy per thread, perturbed in place below
@@ -4168,6 +4180,13 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       const double h00 = 2*u*u*u - 3*u*u + 1, h10 = u*u*u - 2*u*u + u;
       const double h01 = -2*u*u*u + 3*u*u,    h11 = u*u*u - u*u;
       const double w = 1.0 / std::max(res.sigma_squared, 1e-18);
+      if (log_hermite_coeffs) {
+        h00_thread[tid].push_back(std::abs(h00));
+        h01_thread[tid].push_back(std::abs(h01));
+        h10dt_thread[tid].push_back(std::abs(h10 * dt_seg));
+        h11dt_thread[tid].push_back(std::abs(h11 * dt_seg));
+        dtseg_thread[tid].push_back(dt_seg);
+      }
 
       Eigen::Matrix<double, 1, 18> Jrow;
       Jrow.setZero();
@@ -4217,6 +4236,82 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       A_lidar_by_seg[k].noalias() += A_lidar_by_seg_thread[t][k];
     b.noalias() += b_thread[t];
     e_lidar_total += e_lidar_thread[t];
+  }
+
+  // Velocity-observability campaign Part 1 (2026-09-22): merge the
+  // per-thread Hermite-coefficient samples and log distribution stats
+  // (mean/median/p95/max) for this scan/iter -- read-only, no effect on
+  // A/b/delta above (identical whether this block runs or not).
+  if (log_hermite_coeffs) {
+    std::vector<double> h00_all, h01_all, h10dt_all, h11dt_all, dtseg_all;
+    size_t n_total = 0;
+    for (int t = 0; t < threads; ++t) n_total += h00_thread[t].size();
+    h00_all.reserve(n_total); h01_all.reserve(n_total);
+    h10dt_all.reserve(n_total); h11dt_all.reserve(n_total); dtseg_all.reserve(n_total);
+    for (int t = 0; t < threads; ++t) {
+      h00_all.insert(h00_all.end(), h00_thread[t].begin(), h00_thread[t].end());
+      h01_all.insert(h01_all.end(), h01_thread[t].begin(), h01_thread[t].end());
+      h10dt_all.insert(h10dt_all.end(), h10dt_thread[t].begin(), h10dt_thread[t].end());
+      h11dt_all.insert(h11dt_all.end(), h11dt_thread[t].begin(), h11dt_thread[t].end());
+      dtseg_all.insert(dtseg_all.end(), dtseg_thread[t].begin(), dtseg_thread[t].end());
+    }
+    auto stats = [](std::vector<double>& v) {
+      struct S { double mean = NAN, median = NAN, p95 = NAN, max = NAN, min = NAN; };
+      S s;
+      if (v.empty()) return s;
+      std::sort(v.begin(), v.end());
+      const size_t n = v.size();
+      s.mean = std::accumulate(v.begin(), v.end(), 0.0) / static_cast<double>(n);
+      s.median = v[n / 2];
+      s.p95 = v[static_cast<size_t>(0.95 * (n - 1))];
+      s.max = v.back();
+      s.min = v.front();
+      return s;
+    };
+    const auto s_h00 = stats(h00_all);
+    const auto s_h01 = stats(h01_all);
+    const auto s_h10dt = stats(h10dt_all);
+    const auto s_h11dt = stats(h11dt_all);
+    const auto s_dtseg = stats(dtseg_all);
+    static PersistentLogStream hermite_log("pose_knots_hermite_jacobian_stats.txt");
+    bool hermite_first;
+    std::ofstream& hermite_ofs = hermite_log.stream(&hermite_first);
+    if (hermite_first)
+      hermite_ofs << "scan_id,iter,jacobian_time_mode,n_residuals,"
+                     "abs_h00_mean,abs_h00_median,abs_h00_p95,abs_h00_max,"
+                     "abs_h01_mean,abs_h01_median,abs_h01_p95,abs_h01_max,"
+                     "abs_h10dt_mean,abs_h10dt_median,abs_h10dt_p95,abs_h10dt_max,"
+                     "abs_h11dt_mean,abs_h11dt_median,abs_h11dt_p95,abs_h11dt_max,"
+                     "dt_seg_min,dt_seg_mean,dt_seg_max\n";
+    hermite_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << ","
+                << copts_.jacobian_time_mode << "," << n_total << ","
+                << s_h00.mean << "," << s_h00.median << "," << s_h00.p95 << "," << s_h00.max << ","
+                << s_h01.mean << "," << s_h01.median << "," << s_h01.p95 << "," << s_h01.max << ","
+                << s_h10dt.mean << "," << s_h10dt.median << "," << s_h10dt.p95 << "," << s_h10dt.max << ","
+                << s_h11dt.mean << "," << s_h11dt.median << "," << s_h11dt.p95 << "," << s_h11dt.max << ","
+                << s_dtseg.min << "," << s_dtseg.mean << "," << s_dtseg.max << "\n";
+    hermite_ofs.flush();
+
+    // Part 1's explicit numeric end_time zero-velocity-sensitivity check --
+    // only meaningful/logged once (scan 1, iter 0) since it's a structural
+    // property of the Hermite basis at u=1, not something that varies per
+    // scan. Computed directly from bracket(t1) on the trial spline (NOT
+    // an assumed-analytic h10(1)=h11(1)=0 -- an actual runtime evaluation).
+    if (use_end_time && voxel_map_->frame_idx_ == 1 && coupled_iters_ == 0) {
+      int j_end; double u_end;
+      trial.bracket(t1, j_end, u_end);
+      const double h10_end = u_end*u_end*u_end - 2*u_end*u_end + u_end;
+      const double h11_end = u_end*u_end*u_end - u_end*u_end;
+      const double dt_seg_end = coupled_pose_knots_.knot(j_end + 1).t - coupled_pose_knots_.knot(j_end).t;
+      static PersistentLogStream endtime_log("pose_knots_endtime_velocity_check.txt");
+      bool endtime_first;
+      std::ofstream& endtime_ofs = endtime_log.stream(&endtime_first);
+      if (endtime_first)
+        endtime_ofs << "scan_id,u_at_t1,h10_at_t1,h11_at_t1,h10dt_at_t1,h11dt_at_t1\n";
+      endtime_ofs << voxel_map_->frame_idx_ << "," << u_end << "," << h10_end << "," << h11_end << ","
+                  << (h10_end * dt_seg_end) << "," << (h11_end * dt_seg_end) << "\n";
+      endtime_ofs.flush();
+    }
   }
 
   // Phase-6A diagnostic campaign (2026-09-22, user request, read-only --
@@ -4399,7 +4494,15 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
                   "mode_prior,mode_imu,mode_lidar,mode_smooth,mode_det,"
                   "knot_index,mode_rot_norm,mode_pos_norm,mode_vel_norm,"
                   "mode_total_rot_fraction,mode_total_pos_fraction,mode_total_vel_fraction\n";
-      const int n_lidar_modes = std::min(5, nev);
+      // Widened 5->10 (2026-09-22, velocity-observability campaign Part 4:
+      // "the 10 weakest LiDAR eigenvectors") -- free reuse of es_lidar,
+      // only the loop bound changes.
+      const int n_lidar_modes = std::min(10, nev);
+      // Velocity-observability campaign Part 4: aggregate (whole-eigenvector,
+      // not per-knot) rot/pos/vel fractions + eigenvalue per mode, stashed
+      // here for the F_vel_weak weighted-aggregate computation below (same
+      // loop, no extra eigendecomposition).
+      std::vector<double> lidar_mode_lambda, lidar_mode_rotfrac, lidar_mode_posfrac, lidar_mode_velfrac;
       for (int m = 0; m < n_lidar_modes; ++m) {
         const Eigen::VectorXd v = es_lidar.eigenvectors().col(m);
         const double lam = es_lidar.eigenvalues()(m);
@@ -4416,15 +4519,222 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
           sumsq_vel += vn[j] * vn[j];
         }
         const double sumsq_tot = sumsq_rot + sumsq_pos + sumsq_vel;
+        const double rot_frac = sumsq_tot > 0.0 ? sumsq_rot / sumsq_tot : 0.0;
+        const double pos_frac = sumsq_tot > 0.0 ? sumsq_pos / sumsq_tot : 0.0;
+        const double vel_frac = sumsq_tot > 0.0 ? sumsq_vel / sumsq_tot : 0.0;
+        lidar_mode_lambda.push_back(lam);
+        lidar_mode_rotfrac.push_back(rot_frac);
+        lidar_mode_posfrac.push_back(pos_frac);
+        lidar_mode_velfrac.push_back(vel_frac);
         for (int j = 0; j < N; ++j) {
           wm_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << ",lidar," << m << ","
                  << lam << ",,,,,," << j << "," << rn[j] << "," << pn[j] << "," << vn[j] << ","
-                 << (sumsq_tot > 0.0 ? sumsq_rot / sumsq_tot : 0.0) << ","
-                 << (sumsq_tot > 0.0 ? sumsq_pos / sumsq_tot : 0.0) << ","
-                 << (sumsq_tot > 0.0 ? sumsq_vel / sumsq_tot : 0.0) << "\n";
+                 << rot_frac << "," << pos_frac << "," << vel_frac << "\n";
         }
       }
       wm_ofs.flush();
+
+      // Velocity-observability campaign Part 4: aggregate whole-eigenvector
+      // composition table (one row per mode, NOT per-knot) matching the
+      // requested schema directly, plus F_vel_weak (inverse-information-
+      // weighted velocity fraction over the weakest 10 modes). Zero/
+      // near-zero eigenvalue floor documented explicitly: any lambda below
+      // kLambdaFloor is clamped to kLambdaFloor before taking 1/lambda, so
+      // a genuinely-zero mode gets the LARGEST (not infinite/NaN) weight
+      // rather than blowing up the sum.
+      {
+        constexpr double kLambdaFloor = 1e-9;
+        static PersistentLogStream lidar_comp_log("pose_knots_lidar_weak_mode_composition.txt");
+        bool lidar_comp_first;
+        std::ofstream& lidar_comp_ofs = lidar_comp_log.stream(&lidar_comp_first);
+        if (lidar_comp_first)
+          lidar_comp_ofs << "scan_id,iter,lidar_mode_index,lidar_mode_eigenvalue,"
+                             "lidar_mode_rot_fraction,lidar_mode_pos_fraction,lidar_mode_vel_fraction\n";
+        double num = 0.0, den = 0.0;
+        for (size_t m = 0; m < lidar_mode_lambda.size(); ++m) {
+          lidar_comp_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << m << ","
+                         << lidar_mode_lambda[m] << "," << lidar_mode_rotfrac[m] << ","
+                         << lidar_mode_posfrac[m] << "," << lidar_mode_velfrac[m] << "\n";
+          const double lam_floored = std::max(lidar_mode_lambda[m], kLambdaFloor);
+          num += lidar_mode_velfrac[m] / lam_floored;
+          den += 1.0 / lam_floored;
+        }
+        lidar_comp_ofs.flush();
+        static PersistentLogStream fvel_log("pose_knots_weak10_velocity_fraction_weighted.txt");
+        bool fvel_first;
+        std::ofstream& fvel_ofs = fvel_log.stream(&fvel_first);
+        if (fvel_first) fvel_ofs << "scan_id,iter,lambda_floor,n_modes,weak10_velocity_fraction_weighted\n";
+        fvel_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << kLambdaFloor << ","
+                 << lidar_mode_lambda.size() << "," << (den > 0.0 ? num / den : NAN) << "\n";
+        fvel_ofs.flush();
+      }
+    }
+
+    // Velocity-observability campaign Part 2/3/6 (2026-09-22, read-only --
+    // pure logging, no change to A/b/delta): partition A_lidar by state
+    // type (rotation/position/velocity, each 3N-dim -- indices {9j+0..2},
+    // {9j+3..5}, {9j+6..8} across all N knots) and compute the conditional
+    // velocity information via the Schur complement, plus per-knot LiDAR
+    // velocity leverage.
+    {
+      auto extractBlockType = [&](const Eigen::MatrixXd& M, int offset) {
+        // Selects the 3-row/3-col sub-block at local offset (0=rot,3=pos,
+        // 6=vel) from EVERY knot's own 9-wide slot, concatenated into a
+        // 3N x 3N matrix -- e.g. offset=6 gives A_vv (all knots' velocity
+        // rows/cols, in knot order).
+        Eigen::MatrixXd out(3 * N, 3 * N);
+        for (int j = 0; j < N; ++j)
+          for (int k = 0; k < N; ++k)
+            out.block<3, 3>(3 * j, 3 * k) = M.block<3, 3>(kDim * j + offset, kDim * k + offset);
+        return out;
+      };
+      auto extractCrossType = [&](const Eigen::MatrixXd& M, int offset_row, int offset_col, int dim_row) {
+        // dim_row in {3,6}: selects offset_row-typed rows (dim_row/3 types,
+        // contiguous e.g. rot+pos=6) x offset_col-typed cols (velocity, 3)
+        // -- used for A_vq (3N x dim_row*N).
+        Eigen::MatrixXd out(3 * N, dim_row * N);
+        for (int j = 0; j < N; ++j)
+          for (int k = 0; k < N; ++k)
+            out.block(3 * j, dim_row * k, 3, dim_row) = M.block(kDim * j + offset_row, kDim * k + offset_col, 3, dim_row);
+        return out;
+      };
+      // Part 2: block traces/spectra.
+      const Eigen::MatrixXd A_rr = extractBlockType(A_lidar, 0);
+      const Eigen::MatrixXd A_pp_full = extractBlockType(A_lidar, 3);
+      const Eigen::MatrixXd A_vv_full = extractBlockType(A_lidar, 6);
+      Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_rr(A_rr), es_pp(A_pp_full), es_vv(A_vv_full);
+      static PersistentLogStream blockpart_log("pose_knots_lidar_block_partition.txt");
+      bool blockpart_first;
+      std::ofstream& blockpart_ofs = blockpart_log.stream(&blockpart_first);
+      if (blockpart_first)
+        blockpart_ofs << "scan_id,iter,trace_A_lidar_rot,trace_A_lidar_pos,trace_A_lidar_vel,"
+                          "lambda_min_A_lidar_rot,lambda_max_A_lidar_rot,"
+                          "lambda_min_A_lidar_pos,lambda_max_A_lidar_pos,"
+                          "lambda_min_A_lidar_vel,lambda_max_A_lidar_vel,trace_ratio_vel_pos\n";
+      const double tr_rr = A_rr.trace(), tr_pp = A_pp_full.trace(), tr_vv = A_vv_full.trace();
+      blockpart_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << tr_rr << ","
+                    << tr_pp << "," << tr_vv << "," << es_rr.eigenvalues().minCoeff() << ","
+                    << es_rr.eigenvalues().maxCoeff() << "," << es_pp.eigenvalues().minCoeff() << ","
+                    << es_pp.eigenvalues().maxCoeff() << "," << es_vv.eigenvalues().minCoeff() << ","
+                    << es_vv.eigenvalues().maxCoeff() << ","
+                    << (tr_pp > 0.0 ? tr_vv / tr_pp : NAN) << "\n";
+      blockpart_ofs.flush();
+
+      // Part 3: Schur complement, q=[rot,pos] (6N), conditioning A_vv on q.
+      // pinv via SVD with a documented relative threshold (matching this
+      // file's existing pseudoInverse9 convention: eigen/singular values
+      // below rel_thresh*max are treated as exactly-zero information).
+      constexpr double kSchurRelThresh = 1e-6;
+      auto svdPinv = [&](const Eigen::MatrixXd& M, double rel_thresh, int* rank_out) {
+        Eigen::JacobiSVD<Eigen::MatrixXd> svd(M, Eigen::ComputeThinU | Eigen::ComputeThinV);
+        const auto& sv = svd.singularValues();
+        const double smax = sv.size() ? sv(0) : 0.0;
+        const double thresh = rel_thresh * std::max(smax, 1e-300);
+        int rank = 0;
+        Eigen::MatrixXd out = Eigen::MatrixXd::Zero(M.rows(), M.cols());
+        for (int i = 0; i < sv.size(); ++i) {
+          if (sv(i) > thresh) {
+            out += (1.0 / sv(i)) * (svd.matrixV().col(i) * svd.matrixU().col(i).transpose());
+            ++rank;
+          }
+        }
+        if (rank_out) *rank_out = rank;
+        return out;
+      };
+      // Build q=[rot,pos] ordered block (6N x 6N) and the cross block A_vq
+      // (3N x 6N), both directly from A_lidar (NOT A -- Part 3 is explicitly
+      // about LiDAR information only).
+      Eigen::MatrixXd A_qq(6 * N, 6 * N);
+      A_qq.topLeftCorner(3 * N, 3 * N) = A_rr;
+      A_qq.topRightCorner(3 * N, 3 * N) = extractCrossType(A_lidar, 0, 3, 3);
+      A_qq.bottomLeftCorner(3 * N, 3 * N) = extractCrossType(A_lidar, 3, 0, 3);
+      A_qq.bottomRightCorner(3 * N, 3 * N) = A_pp_full;
+      Eigen::MatrixXd A_vq(3 * N, 6 * N);
+      A_vq.leftCols(3 * N) = extractCrossType(A_lidar, 6, 0, 3);
+      A_vq.rightCols(3 * N) = extractCrossType(A_lidar, 6, 3, 3);
+      int rank_qq = 0;
+      const Eigen::MatrixXd A_qq_pinv = svdPinv(A_qq, kSchurRelThresh, &rank_qq);
+      const Eigen::MatrixXd A_vv_cond = A_vv_full - A_vq * A_qq_pinv * A_vq.transpose();
+      const Eigen::MatrixXd A_vv_cond_sym = 0.5 * (A_vv_cond + A_vv_cond.transpose());
+      Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_vvc(A_vv_cond_sym);
+      const double vvc_lmin = es_vvc.eigenvalues().minCoeff();
+      const double vvc_lmax = es_vvc.eigenvalues().maxCoeff();
+      int rank_vvc = 0;
+      for (int i = 0; i < es_vvc.eigenvalues().size(); ++i)
+        if (es_vvc.eigenvalues()(i) > kSchurRelThresh * std::max(vvc_lmax, 1e-300)) ++rank_vvc;
+      const double trace_A_lidar_full = A_lidar.trace();
+      const double trace_vvc = A_vv_cond_sym.trace();
+
+      // Analogous conditional POSITION information (q'=[rot,vel]) for
+      // conditional_vel_to_pos_info_ratio -- Part 3's own instruction:
+      // "compute the analogous conditional position information ... rather
+      // than comparing incompatible marginal/conditional quantities."
+      Eigen::MatrixXd A_qq2(6 * N, 6 * N);
+      A_qq2.topLeftCorner(3 * N, 3 * N) = A_rr;
+      A_qq2.topRightCorner(3 * N, 3 * N) = extractCrossType(A_lidar, 0, 6, 3);
+      A_qq2.bottomLeftCorner(3 * N, 3 * N) = extractCrossType(A_lidar, 6, 0, 3);
+      A_qq2.bottomRightCorner(3 * N, 3 * N) = A_vv_full;
+      Eigen::MatrixXd A_pq2(3 * N, 6 * N);
+      A_pq2.leftCols(3 * N) = extractCrossType(A_lidar, 3, 0, 3);
+      A_pq2.rightCols(3 * N) = extractCrossType(A_lidar, 3, 6, 3);
+      int rank_qq2 = 0;
+      const Eigen::MatrixXd A_qq2_pinv = svdPinv(A_qq2, kSchurRelThresh, &rank_qq2);
+      const Eigen::MatrixXd A_pp_cond = A_pp_full - A_pq2 * A_qq2_pinv * A_pq2.transpose();
+      const double trace_ppc = (0.5 * (A_pp_cond + A_pp_cond.transpose())).trace();
+
+      static PersistentLogStream schur_log("pose_knots_velocity_schur_complement.txt");
+      bool schur_first;
+      std::ofstream& schur_ofs = schur_log.stream(&schur_first);
+      if (schur_first)
+        schur_ofs << "scan_id,iter,svd_rel_thresh,rank_A_qq,trace_A_vv_cond,lambda_min_A_vv_cond,"
+                     "lambda_max_A_vv_cond,condition_A_vv_cond,rank_A_vv_cond,"
+                     "conditional_vel_info_fraction,trace_A_pp_cond,conditional_vel_to_pos_info_ratio\n";
+      schur_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << kSchurRelThresh << ","
+                << rank_qq << "," << trace_vvc << "," << vvc_lmin << "," << vvc_lmax << ","
+                << (vvc_lmin > 0.0 ? vvc_lmax / vvc_lmin : -1.0) << "," << rank_vvc << ","
+                << (trace_A_lidar_full > 0.0 ? trace_vvc / trace_A_lidar_full : NAN) << ","
+                << trace_ppc << "," << (trace_ppc != 0.0 ? trace_vvc / trace_ppc : NAN) << "\n";
+      schur_ofs.flush();
+      (void)rank_qq2;
+
+      // Part 6: per-knot LiDAR velocity leverage -- diagonal 3x3 vv block
+      // at each knot (NOT the Schur-conditioned quantity -- a direct,
+      // cheap readout of A_lidar's own per-knot velocity block).
+      static PersistentLogStream knotvel_log("pose_knots_knot_velocity_leverage.txt");
+      bool knotvel_first;
+      std::ofstream& knotvel_ofs = knotvel_log.stream(&knotvel_first);
+      if (knotvel_first)
+        knotvel_ofs << "scan_id,iter,knot_index,trace_A_lidar_vv_knot,lambda_max_A_lidar_vv_knot,"
+                       "lambda_min_A_lidar_vv_knot,velocity_info_fraction_of_total,"
+                       "correspondence_count_by_interval,correspondence_fraction_by_interval\n";
+      double sum_tr_vv_knot = 0.0;
+      std::vector<double> tr_vv_knot(N), lmin_vv_knot(N), lmax_vv_knot(N);
+      for (int j = 0; j < N; ++j) {
+        const Eigen::Matrix<double, 3, 3> Avv_j =
+            0.5 * (A_lidar.block<3, 3>(kDim * j + 6, kDim * j + 6) +
+                   A_lidar.block<3, 3>(kDim * j + 6, kDim * j + 6).transpose());
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3, 3>> es_j(Avv_j);
+        tr_vv_knot[j] = Avv_j.trace();
+        lmin_vv_knot[j] = es_j.eigenvalues().minCoeff();
+        lmax_vv_knot[j] = es_j.eigenvalues().maxCoeff();
+        sum_tr_vv_knot += tr_vv_knot[j];
+      }
+      const int total_corr = static_cast<int>(residuals_.size());
+      for (int j = 0; j < N; ++j) {
+        // correspondence_count_by_interval/fraction: knot j's own two
+        // adjacent segments (j-1->j and j->j+1) summed, since a knot's
+        // velocity leverage draws on residuals from both its neighboring
+        // intervals, not a single one -- segment_counts has N-1 entries.
+        int corr_count = 0;
+        if (j - 1 >= 0 && j - 1 < static_cast<int>(segment_counts.size())) corr_count += segment_counts[j - 1];
+        if (j < static_cast<int>(segment_counts.size())) corr_count += segment_counts[j];
+        knotvel_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << j << ","
+                    << tr_vv_knot[j] << "," << lmax_vv_knot[j] << "," << lmin_vv_knot[j] << ","
+                    << (sum_tr_vv_knot > 0.0 ? tr_vv_knot[j] / sum_tr_vv_knot : NAN) << ","
+                    << corr_count << "," << (total_corr > 0 ? static_cast<double>(corr_count) / total_corr : NAN)
+                    << "\n";
+      }
+      knotvel_ofs.flush();
     }
   }
 
@@ -4980,6 +5290,42 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
         weak_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << (m + 1) << ","
                  << lam << "," << p_prior << "," << p_imu << "," << p_lidar << "," << p_smooth
                  << "," << p_det << "," << (p_prior + p_imu + p_lidar + p_smooth + p_det) << "\n";
+
+        // Velocity-observability campaign Part 5: aggregate (whole-
+        // eigenvector) rot/pos/vel fraction for this total-reduced mode,
+        // plus normalized factor shares (denominator = sum of the factor
+        // quadratic forms for this mode, per the user's own spec -- may
+        // be negative/near-zero for a genuinely weak mode, in which case
+        // shares are reported NaN rather than a meaningless huge ratio).
+        {
+          double sumsq_rot5 = 0.0, sumsq_pos5 = 0.0, sumsq_vel5 = 0.0;
+          for (int j = 0; j < N; ++j) {
+            sumsq_rot5 += v_full.segment<3>(kDim * j + 0).squaredNorm();
+            sumsq_pos5 += v_full.segment<3>(kDim * j + 3).squaredNorm();
+            sumsq_vel5 += v_full.segment<3>(kDim * j + 6).squaredNorm();
+          }
+          const double sumsq_tot5 = sumsq_rot5 + sumsq_pos5 + sumsq_vel5;
+          const double share_den = p_prior + p_imu + p_lidar + p_smooth + p_det;
+          static PersistentLogStream total_shares_log("pose_knots_total_weak_mode_shares.txt");
+          bool total_shares_first;
+          std::ofstream& total_shares_ofs = total_shares_log.stream(&total_shares_first);
+          if (total_shares_first)
+            total_shares_ofs << "scan_id,iter,total_mode_index,total_mode_eigenvalue,"
+                                 "total_mode_rot_fraction,total_mode_pos_fraction,total_mode_vel_fraction,"
+                                 "mode_prior,mode_imu,mode_lidar,mode_smooth,mode_det,"
+                                 "mode_prior_share,mode_imu_share,mode_lidar_share,mode_smooth_share,mode_det_share\n";
+          total_shares_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << (m + 1) << ","
+                           << lam << "," << (sumsq_tot5 > 0.0 ? sumsq_rot5 / sumsq_tot5 : 0.0) << ","
+                           << (sumsq_tot5 > 0.0 ? sumsq_pos5 / sumsq_tot5 : 0.0) << ","
+                           << (sumsq_tot5 > 0.0 ? sumsq_vel5 / sumsq_tot5 : 0.0) << ","
+                           << p_prior << "," << p_imu << "," << p_lidar << "," << p_smooth << "," << p_det << ","
+                           << (share_den != 0.0 ? p_prior / share_den : NAN) << ","
+                           << (share_den != 0.0 ? p_imu / share_den : NAN) << ","
+                           << (share_den != 0.0 ? p_lidar / share_den : NAN) << ","
+                           << (share_den != 0.0 ? p_smooth / share_den : NAN) << ","
+                           << (share_den != 0.0 ? p_det / share_den : NAN) << "\n";
+          total_shares_ofs.flush();
+        }
 
         // Phase-6A complete-diagnostic-results pass (2026-09-22): same
         // per-knot rot/pos/vel norm decomposition as the A_lidar weak
