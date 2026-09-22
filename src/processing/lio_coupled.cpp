@@ -548,7 +548,23 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       const double t0 = mg.poses.front().t;
       const double t1 = mg.image.t;
       Eigen::Matrix<double, 9, 9> P0 = Eigen::Matrix<double, 9, 9>::Zero();
-      const Eigen::MatrixXd& P_full = state_->cov();
+      // POST-REVIEW FIX (external review 2026-09-21, item 1, "P_prior for
+      // pose knots is still using the wrong covariance epoch"):
+      // processIMU() runs before processLIO(), and has already done
+      // P <- F P F^T + Q -- so state_->cov() here is the POST-propagation
+      // covariance, not the pre-scan one the raw_imu arm's own Pi_ss
+      // already knows to correct for via prior_at_scan_start (see that
+      // option's own use at ~line 2550, the identical pattern applied
+      // here). Falls back to state_->cov() if the peek isn't primed, same
+      // as the raw_imu arm's own fallback.
+      Eigen::MatrixXd P_full = state_->cov();
+      if (copts_.prior_at_scan_start) {
+        Eigen::MatrixXd p_before_peek;
+        if (imuProcQhatPeekPBefore(p_before_peek) &&
+            p_before_peek.rows() == P_full.rows() && p_before_peek.cols() == P_full.cols()) {
+          P_full = p_before_peek;
+        }
+      }
       if (P_full.rows() >= 9 && P_full.cols() >= 9) P0 = P_full.block<9, 9>(0, 0);
       // POST-REVIEW FIX: init() now walks mg.imu_samples_raw directly
       // (previously silently ignored -- the review's own "imu_raw isn't
@@ -3706,6 +3722,20 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // and no LiDAR residuals this scan).
   A.diagonal().array() += 1e-6;
 
+  // POST-REVIEW ADDITION (item 11, "factor-scale decomposition... this is
+  // how I'd answer the remaining fundamental question: why does the
+  // optimizer want ~0.5m of stationary motion? Without this, tuning Q,
+  // curvature, or LiDAR weights is mostly guesswork"): mirror every
+  // addition to A into the matching per-FACTOR-TYPE accumulator below, so
+  // each term's own eigenstructure/trace can be inspected in isolation.
+  // Zero extra cost when psd_audit_en is off (the accumulation itself is
+  // cheap -- one extra += per block write -- only the eigendecompositions
+  // at the bottom are gated).
+  Eigen::MatrixXd A_prior = Eigen::MatrixXd::Zero(total, total);
+  Eigen::MatrixXd A_imu = Eigen::MatrixXd::Zero(total, total);
+  Eigen::MatrixXd A_lidar = Eigen::MatrixXd::Zero(total, total);
+  Eigen::MatrixXd A_smooth = Eigen::MatrixXd::Zero(total, total);
+
   // POST-REVIEW FIX (external review 2026-09-21, "Q9 is rank-deficient
   // before the artificial floor... the code is artificially filling those
   // null directions with 1e-9... that can create enormous artificial
@@ -3739,6 +3769,7 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     s0.segment<3>(3) = coupled_knot_delta_pos_[0];
     s0.segment<3>(6) = coupled_knot_delta_vel_[0];
     A.block<9, 9>(0, 0) += Omega0;
+    A_prior.block<9, 9>(0, 0) += Omega0;
     b.segment<9>(0) -= Omega0 * s0;
   }
 
@@ -3769,8 +3800,40 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       A.block<9, 9>(kDim * j, kDim * (j + 1))   += -FtL;
       A.block<9, 9>(kDim * (j + 1), kDim * j)   += -Lambda * F9;
       A.block<9, 9>(kDim * (j + 1), kDim * (j + 1)) += Lambda;
+      A_imu.block<9, 9>(kDim * j, kDim * j)         += FtL * F9;
+      A_imu.block<9, 9>(kDim * j, kDim * (j + 1))   += -FtL;
+      A_imu.block<9, 9>(kDim * (j + 1), kDim * j)   += -Lambda * F9;
+      A_imu.block<9, 9>(kDim * (j + 1), kDim * (j + 1)) += Lambda;
       b.segment<9>(kDim * j)       += FtL * r;
       b.segment<9>(kDim * (j + 1)) += -Lambda * r;
+
+      // POST-REVIEW ADDITION (item 12, "add the actual nonlinear process
+      // residual to the diagnostics... this tells us whether the bizarre
+      // stationary trajectory is process-consistent (r~=0, LiDAR-driven
+      // motion the optimizer thinks IS compatible with the IMU) or
+      // process-inconsistent (r>>0, LiDAR dragging the spline away from
+      // inertial dynamics)"). NOTE ON SCOPE: `r` here is the residual in
+      // CORRECTION-SPACE against the FROZEN (at-init) F_j -- i.e. exactly
+      // what this GN system's own process factor penalizes -- not a
+      // freshly re-integrated nonlinear residual against the trial's own
+      // moved trajectory (that would need re-walking mg.imu_samples_raw
+      // per segment from the trial's own knot j state, duplicating
+      // init()'s own boundary-interpolation logic; not done this round).
+      // Still directly answers the question: r||_theta/p/v large means
+      // the CURRENT correction already disagrees with what the process
+      // model predicts, regardless of whether that disagreement is "real"
+      // nonlinearity or LiDAR overpowering the (frozen-linearized) prior.
+      if (copts_.psd_audit_en) {
+        static PersistentLogStream proc_res_log("pose_knots_process_residual.txt");
+        bool proc_res_first;
+        std::ofstream& proc_res_ofs = proc_res_log.stream(&proc_res_first);
+        if (proc_res_first)
+          proc_res_ofs << "scan_id,iter,seg,r_theta_norm,r_p_norm,r_v_norm\n";
+        proc_res_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << j << ","
+                     << r.segment<3>(0).norm() << "," << r.segment<3>(3).norm() << ","
+                     << r.segment<3>(6).norm() << "\n";
+        proc_res_ofs.flush();
+      }
     }
   }
 
@@ -3786,6 +3849,10 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
         A.block<3, 3>(kDim * j + 3, kDim * (j + 1) + 3)   += -lp * M3D::Identity();
         A.block<3, 3>(kDim * (j + 1) + 3, kDim * j + 3)   += -lp * M3D::Identity();
         A.block<3, 3>(kDim * (j + 1) + 3, kDim * (j + 1) + 3) += lp * M3D::Identity();
+        A_smooth.block<3, 3>(kDim * j + 3, kDim * j + 3)         += lp * M3D::Identity();
+        A_smooth.block<3, 3>(kDim * j + 3, kDim * (j + 1) + 3)   += -lp * M3D::Identity();
+        A_smooth.block<3, 3>(kDim * (j + 1) + 3, kDim * j + 3)   += -lp * M3D::Identity();
+        A_smooth.block<3, 3>(kDim * (j + 1) + 3, kDim * (j + 1) + 3) += lp * M3D::Identity();
         b.segment<3>(kDim * j + 3)       += lp * rp;
         b.segment<3>(kDim * (j + 1) + 3) += -lp * rp;
       }
@@ -3796,6 +3863,10 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
         A.block<3, 3>(kDim * j, kDim * (j + 1))           += -lr * M3D::Identity();
         A.block<3, 3>(kDim * (j + 1), kDim * j)           += -lr * M3D::Identity();
         A.block<3, 3>(kDim * (j + 1), kDim * (j + 1))     += lr * M3D::Identity();
+        A_smooth.block<3, 3>(kDim * j, kDim * j)                 += lr * M3D::Identity();
+        A_smooth.block<3, 3>(kDim * j, kDim * (j + 1))           += -lr * M3D::Identity();
+        A_smooth.block<3, 3>(kDim * (j + 1), kDim * j)           += -lr * M3D::Identity();
+        A_smooth.block<3, 3>(kDim * (j + 1), kDim * (j + 1))     += lr * M3D::Identity();
         b.segment<3>(kDim * j)       += lr * rr;
         b.segment<3>(kDim * (j + 1)) += -lr * rr;
       }
@@ -3845,6 +3916,7 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     }
 
     A.block<18, 18>(kDim * j, kDim * j).noalias() += w * (Jrow.transpose() * Jrow);
+    A_lidar.block<18, 18>(kDim * j, kDim * j).noalias() += w * (Jrow.transpose() * Jrow);
     b.segment<18>(kDim * j).noalias() -= w * Jrow.transpose() * res.r;
   }
 
@@ -3871,6 +3943,31 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     a_diag_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << N << "," << total << ","
                << lmin << "," << lmax << "," << (lmin > 0.0 ? lmax / lmin : -1.0) << "," << asym_norm << "\n";
     a_diag_ofs.flush();
+
+    // POST-REVIEW ADDITION (item 11, factor-scale decomposition): each
+    // term's own eigenstructure/trace, isolated. A_prior/A_imu/A_lidar/
+    // A_smooth are NOT individually PD in general (e.g. A_imu alone is
+    // singular wherever no process factor touches a given knot pair --
+    // only their SUM plus the Tikhonov floor is guaranteed PD), so this
+    // reports min/max/trace of the symmetrized matrix directly rather
+    // than pretending each is its own well-posed system.
+    static PersistentLogStream decomp_log("pose_knots_factor_decomp.txt");
+    bool decomp_first;
+    std::ofstream& decomp_ofs = decomp_log.stream(&decomp_first);
+    if (decomp_first)
+      decomp_ofs << "scan_id,iter,N,factor,lambda_min,lambda_max,trace\n";
+    auto logFactor = [&](const char* name, const Eigen::MatrixXd& Af) {
+      const Eigen::MatrixXd Afs = 0.5 * (Af + Af.transpose());
+      Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_f(Afs);
+      decomp_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << N << ","
+                 << name << "," << es_f.eigenvalues().minCoeff() << ","
+                 << es_f.eigenvalues().maxCoeff() << "," << Afs.trace() << "\n";
+    };
+    logFactor("prior", A_prior);
+    logFactor("imu", A_imu);
+    logFactor("lidar", A_lidar);
+    logFactor("smooth", A_smooth);
+    decomp_ofs.flush();
   }
 
   // ---- item 15's own step-size safeguard, carried over ----
