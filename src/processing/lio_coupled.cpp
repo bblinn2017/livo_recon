@@ -3752,6 +3752,11 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // vector), accumulated alongside their matrix blocks below so the GN
   // telemetry log can report E_lidar/E_process/E_det/E_total per iteration.
   double e_lidar_total = 0.0, e_process_total = 0.0, e_det_total = 0.0;
+  // Phase-6A (2026-09-22): smoothness_position/smoothness_rotation's own
+  // quadratic penalty was folded into A/b but never accumulated as a
+  // scalar objective term -- added here so gn_telemetry can report
+  // E_smooth alongside E_lidar/E_process/E_det, same r^T*W*r convention.
+  double e_smooth_total = 0.0;
 
   // Phase-3 (2026-09-22): exact deterministic equality constraint, via
   // nullspace elimination -- C_exact stacks each segment's own
@@ -4029,6 +4034,7 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
         A_smooth.block<3, 3>(kDim * (j + 1) + 3, kDim * (j + 1) + 3) += lp * M3D::Identity();
         b.segment<3>(kDim * j + 3)       += lp * rp;
         b.segment<3>(kDim * (j + 1) + 3) += -lp * rp;
+        e_smooth_total += lp * rp.squaredNorm();
       }
       if (copts_.pose_knots_smoothness_rot > 0.0) {
         const double lr = copts_.pose_knots_smoothness_rot;
@@ -4043,6 +4049,7 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
         A_smooth.block<3, 3>(kDim * (j + 1), kDim * (j + 1))     += lr * M3D::Identity();
         b.segment<3>(kDim * j)       += lr * rr;
         b.segment<3>(kDim * (j + 1)) += -lr * rr;
+        e_smooth_total += lr * rr.squaredNorm();
       }
     }
   }
@@ -4690,11 +4697,11 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       std::ofstream& gn_tel_ofs = gn_tel_log.stream(&gn_tel_first);
       if (gn_tel_first)
         gn_tel_ofs << "scan_id,iter,max_delta_cp_inf,max_delta_cphi_inf,max_accel,max_angvel,"
-                      "e_lidar,e_process,e_det,e_total\n";
+                      "e_lidar,e_process,e_det,e_smooth,e_total\n";
       gn_tel_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << max_step_pos << ","
                  << max_step_rot << "," << max_acc << "," << max_angvel << "," << e_lidar_total << ","
-                 << e_process_total << "," << e_det_total << ","
-                 << (e_lidar_total + e_process_total + e_det_total) << "\n";
+                 << e_process_total << "," << e_det_total << "," << e_smooth_total << ","
+                 << (e_lidar_total + e_process_total + e_det_total + e_smooth_total) << "\n";
       gn_tel_ofs.flush();
     }
     double scale = 1.0;
