@@ -211,6 +211,18 @@ struct LioProcCoupledOptions
   // mutually exclusive, not additive).
   bool pose_knots_exact_det_constraint_en = false;
 
+  // Phase-4 (2026-09-22): whether F9_j/Q9_j are recomputed every GN
+  // iteration from the trial's CURRENT (moving) state (true, matches
+  // shipped/all-prior-phase behavior) or relinearized ONCE per scan at
+  // the first iteration and then held fixed for the rest of that scan's
+  // GN iterations (false). Re-testing this axis now that the exact
+  // deterministic constraint exists -- the earlier finding ("frozen ->
+  // oscillatory stationary error, relinearized -> catastrophic
+  // divergence") was obtained while the process model was missing that
+  // constraint, so it needs to be reconsidered. Default true (unchanged
+  // live behavior).
+  bool pose_knots_relinearize_fq = true;
+
   // CQ-85 item 1: rule 58f's exact failure mode -- CQ-72's own 96-cell grid
   // produced a cell reporting completed=yes with ATE=396,499,288.300 mm (a
   // FAILED run that looked like a successful one; imu_deviation_weight=0,
@@ -738,6 +750,17 @@ private:
   // coefficient Jacobian chaining needed (see pose_knot_spline.h). Index
   // j holds knot j's own 9x9 [theta,p,v] marginal.
   std::vector<Eigen::Matrix<double, 9, 9>> coupled_knot_cov_;
+  // Phase-4 (2026-09-22, frozen vs relinearized F/Q re-test now that the
+  // exact deterministic process constraint exists): when
+  // pose_knots_relinearize_fq is false, F9_j/Q9_j are relinearized ONCE
+  // per scan (at the first GN iteration, from the scan-start trial --
+  // i.e. coupled_pose_knots_ itself, all deltas still zero) and cached
+  // here for reuse on every subsequent iteration of that same scan,
+  // instead of being recomputed from the moving trial each iteration.
+  // Sized N-1 (one per segment), reset alongside coupled_knot_delta_*
+  // above at scan start.
+  std::vector<Eigen::Matrix<double, 9, 9>> pose_knots_frozen_F9_, pose_knots_frozen_Q9_;
+  bool pose_knots_frozen_fq_valid_ = false;
   // CQ-79: this scan's PREVIOUS iteration's own set of matched-plane
   // hashes, for carry_frac -- reset to empty at scan start (alongside
   // coupled_iters_'s own reset), updated after every iteration's own

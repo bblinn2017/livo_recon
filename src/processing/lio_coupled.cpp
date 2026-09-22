@@ -113,6 +113,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/deterministic_constraint_enable", copts_.pose_knots_det_constraint_en, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/deterministic_constraint_weight", copts_.pose_knots_det_constraint_weight, 1.0e4);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/exact_deterministic_constraint_enable", copts_.pose_knots_exact_det_constraint_en, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/relinearize_fq", copts_.pose_knots_relinearize_fq, true);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/max_scan_displacement_m", copts_.max_scan_displacement_m, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
@@ -587,6 +588,9 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         coupled_knot_delta_pos_.assign(n, V3D::Zero());
         coupled_knot_delta_vel_.assign(n, V3D::Zero());
         coupled_knot_cov_.assign(n, Eigen::Matrix<double, 9, 9>::Zero());
+        pose_knots_frozen_F9_.assign(std::max(n - 1, 0), Eigen::Matrix<double, 9, 9>::Zero());
+        pose_knots_frozen_Q9_.assign(std::max(n - 1, 0), Eigen::Matrix<double, 9, 9>::Zero());
+        pose_knots_frozen_fq_valid_ = false;
       }
     }
   }
@@ -3815,12 +3819,45 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       // rot_imu at each micro-step, so this genuinely changes once the
       // trajectory has moved (which the earlier stationary-window
       // finding -- up to ~0.5m -- says it does, non-negligibly).
+      // Phase-4 (2026-09-22): pose_knots_relinearize_fq gates whether F9/Q9
+      // are recomputed from the trial's CURRENT (moving) state every GN
+      // iteration (true, unchanged prior behavior) or relinearized ONCE
+      // per scan at iteration 0 (from the still-zero-delta trial, i.e.
+      // the scan-start nominal) and held fixed for the rest of the scan's
+      // iterations (false). The iter-0 result is ALWAYS cached into
+      // pose_knots_frozen_F9_/Q9_ (regardless of this flag) so the
+      // relinearized-run diagnostic below (||F^(k)-F^(0)||_F/||F^(0)||_F)
+      // has a baseline to compare against even when relinearize_fq=true.
       Eigen::Matrix<double, 9, 9> F9, Q9;
-      coupled_pose_knots_.relinearizeSegment(
-          j, trial.knot(j).rot, trial.knot(j).pos, trial.knot(j).vel,
-          state_->biasAcc(), state_->biasGyr(), state_->gravity(),
-          copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr,
-          state_->varAcc(), state_->varGyr(), copts_.repro_second_order, F9, Q9);
+      if (copts_.pose_knots_relinearize_fq || coupled_iters_ == 0) {
+        coupled_pose_knots_.relinearizeSegment(
+            j, trial.knot(j).rot, trial.knot(j).pos, trial.knot(j).vel,
+            state_->biasAcc(), state_->biasGyr(), state_->gravity(),
+            copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr,
+            state_->varAcc(), state_->varGyr(), copts_.repro_second_order, F9, Q9);
+        if (coupled_iters_ == 0 && j < static_cast<int>(pose_knots_frozen_F9_.size())) {
+          pose_knots_frozen_F9_[j] = F9;
+          pose_knots_frozen_Q9_[j] = Q9;
+          pose_knots_frozen_fq_valid_ = true;
+        }
+      } else {
+        F9 = pose_knots_frozen_F9_[j];
+        Q9 = pose_knots_frozen_Q9_[j];
+      }
+      if (copts_.psd_audit_en && copts_.pose_knots_relinearize_fq && coupled_iters_ > 0 &&
+          pose_knots_frozen_fq_valid_ && (j == 0 || j == 6)) {
+        const Eigen::Matrix<double, 9, 9>& F0 = pose_knots_frozen_F9_[j];
+        const Eigen::Matrix<double, 9, 9>& Q0 = pose_knots_frozen_Q9_[j];
+        const double f_rel = F0.norm() > 1e-300 ? (F9 - F0).norm() / F0.norm() : -1.0;
+        const double q_rel = Q0.norm() > 1e-300 ? (Q9 - Q0).norm() / Q0.norm() : -1.0;
+        static PersistentLogStream fq_drift_log("pose_knots_fq_relin_drift.txt");
+        bool fq_drift_first;
+        std::ofstream& fq_drift_ofs = fq_drift_log.stream(&fq_drift_first);
+        if (fq_drift_first) fq_drift_ofs << "scan_id,iter,seg,F_rel_fro_diff,Q_rel_fro_diff\n";
+        fq_drift_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << j << ","
+                     << f_rel << "," << q_rel << "\n";
+        fq_drift_ofs.flush();
+      }
       // POST-REVIEW FIX (item 3): threshold is now a live config knob
       // (default 1e-6, unchanged) rather than hardcoded -- see
       // copts_.pose_knots_q_pinv_rel_thresh's own doc comment for the
