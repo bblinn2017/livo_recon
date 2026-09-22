@@ -117,6 +117,9 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/deterministic_constraint_weight", copts_.pose_knots_det_constraint_weight, 1.0e4);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/exact_deterministic_constraint_enable", copts_.pose_knots_exact_det_constraint_en, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/relinearize_fq", copts_.pose_knots_relinearize_fq, true);
+  cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/velocity_mode",
+                 copts_.pose_knots_velocity_mode, "free_per_knot",
+                 {"free_per_knot", "shared_scan", "fixed_nominal"});
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/max_scan_displacement_m", copts_.max_scan_displacement_m, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
@@ -3818,8 +3821,27 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // only when pose_knots_exact_det_constraint_en && pose_knots_use_imu_factors.
   const bool exact_det_en = copts_.pose_knots_exact_det_constraint_en && copts_.pose_knots_use_imu_factors;
   const int n_exact_constraints = exact_det_en ? 3 * (N - 1) : 0;
-  Eigen::MatrixXd C_exact = Eigen::MatrixXd::Zero(n_exact_constraints, total);
-  Eigen::VectorXd d_exact = Eigen::VectorXd::Zero(n_exact_constraints);
+  // Velocity-observability campaign Part 7: fixed_nominal/shared_scan are
+  // implemented as ADDITIONAL homogeneous equality-constraint rows on the
+  // SAME nullspace-elimination machinery exact_det_en already uses (see
+  // this block's own doc comment above) -- composes cleanly with
+  // exact_det_en on or off. fixed_nominal: delta_vel_j=0 for every knot
+  // (3N independent rows, one identity block per knot's own vel columns).
+  // shared_scan: delta_vel_j=delta_vel_0 for j=1..N-1 (3(N-1) rows, each
+  // touching only knot 0's and knot j's vel columns) -- realizes
+  // "v_j=v_j_nominal+delta_v_scan for all j" as a hard linear constraint.
+  // Both constraint sets are, by construction, full row-rank on their own
+  // (each row touches a column range no other row of the SAME set
+  // touches) and touch ONLY velocity columns, essentially disjoint from
+  // exact_det_en's own C_exact rows (which are dense over [theta,pos,vel])
+  // -- combined rank is verified, not assumed, by the existing
+  // rank_c==n_constraints FATAL check below.
+  const bool velmode_fixed = (copts_.pose_knots_velocity_mode == "fixed_nominal");
+  const bool velmode_shared = (copts_.pose_knots_velocity_mode == "shared_scan");
+  const int n_velmode_constraints = velmode_fixed ? 3 * N : (velmode_shared ? 3 * (N - 1) : 0);
+  const int n_constraints = n_exact_constraints + n_velmode_constraints;
+  Eigen::MatrixXd C_exact = Eigen::MatrixXd::Zero(n_constraints, total);
+  Eigen::VectorXd d_exact = Eigen::VectorXd::Zero(n_constraints);
   if (copts_.pose_knots_exact_det_constraint_en && copts_.pose_knots_det_constraint_en) {
     ROS_WARN_STREAM_ONCE(
         "[coupled/pose_knots] both pose_knots_exact_det_constraint_en and "
@@ -4076,6 +4098,23 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
                      << r.segment<3>(6).norm() << "\n";
         proc_res_ofs.flush();
       }
+    }
+  }
+
+  // Velocity-observability campaign Part 7: fill the velocity_mode
+  // constraint rows (see this block's declaration comment above). Purely
+  // structural (fixed 0/1 identity-block pattern), independent of any
+  // per-scan data -- filled unconditionally at rows
+  // [n_exact_constraints, n_constraints), regardless of whether
+  // exact_det_en also contributed rows [0, n_exact_constraints).
+  if (velmode_fixed) {
+    for (int j = 0; j < N; ++j)
+      C_exact.block<3, 3>(n_exact_constraints + 3 * j, kDim * j + 6) = M3D::Identity();
+  } else if (velmode_shared) {
+    for (int j = 1; j < N; ++j) {
+      const int row = n_exact_constraints + 3 * (j - 1);
+      C_exact.block<3, 3>(row, kDim * 0 + 6) = M3D::Identity();
+      C_exact.block<3, 3>(row, kDim * j + 6) = -M3D::Identity();
     }
   }
 
@@ -5202,10 +5241,10 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // the rank). Standard equality-constrained normal equations reduce to
   // (Z^T A Z) eta = Z^T (b - A*delta_p) -- see the commit message /
   // config doc comment for the full derivation.
-  Eigen::MatrixXd Z_ns;             // null(C_exact) basis, total x (total-rank_c) -- only when exact_det_en
-  Eigen::MatrixXd A_reduced;        // Z^T A Z -- only when exact_det_en
+  Eigen::MatrixXd Z_ns;             // null(C_exact) basis, total x (total-n_constraints) -- only when n_constraints>0
+  Eigen::MatrixXd A_reduced;        // Z^T A Z -- only when n_constraints>0
   Eigen::VectorXd delta;
-  if (exact_det_en && n_exact_constraints > 0) {
+  if (n_constraints > 0) {
     Eigen::JacobiSVD<Eigen::MatrixXd> svd_c(C_exact, Eigen::ComputeFullU | Eigen::ComputeFullV);
     const Eigen::VectorXd& sv_c = svd_c.singularValues();
     const double sv_c_max = sv_c.size() ? sv_c(0) : 0.0;
@@ -5225,13 +5264,14 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     const Eigen::VectorXd eta = ldlt_reduced.solve(b_reduced);
     delta = delta_p + Z_ns * eta;
     if (ldlt_reduced.info() != Eigen::Success || !delta.allFinite() ||
-        delta.size() != total || rank_c != n_exact_constraints) {
+        delta.size() != total || rank_c != n_constraints) {
       std::ostringstream diag;
-      diag << "[coupled/pose_knots] FATAL: exact-constraint nullspace-elimination "
+      diag << "[coupled/pose_knots] FATAL: constraint nullspace-elimination "
               "solve produced a non-finite/failed/rank-deficient result -- refusing "
               "to apply it to state_. ldlt_reduced.info()=" << static_cast<int>(ldlt_reduced.info())
            << " (0=Success) allFinite=" << delta.allFinite() << " rank_c=" << rank_c
-           << " expected=" << n_exact_constraints << " N=" << N << " total=" << total
+           << " expected=" << n_constraints << " (exact=" << n_exact_constraints
+           << " velmode=" << n_velmode_constraints << ") N=" << N << " total=" << total
            << " iter=" << coupled_iters_ << " scan_id=" << voxel_map_->frame_idx_;
       throw std::runtime_error(diag.str());
     }
@@ -5243,10 +5283,13 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       bool exact_solve_first;
       std::ofstream& exact_solve_ofs = exact_solve_log.stream(&exact_solve_first);
       if (exact_solve_first)
-        exact_solve_ofs << "scan_id,iter,rank_c,expected_rank_c,reduced_dim,lambda_min_reduced,"
+        exact_solve_ofs << "scan_id,iter,velocity_mode,rank_c,expected_rank_c,n_exact_constraints,"
+                            "n_velmode_constraints,reduced_dim,lambda_min_reduced,"
                             "lambda_max_reduced,cond_reduced\n";
-      exact_solve_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << rank_c << ","
-                       << n_exact_constraints << "," << (total - rank_c) << "," << lmin_r << ","
+      exact_solve_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << ","
+                       << copts_.pose_knots_velocity_mode << "," << rank_c << ","
+                       << n_constraints << "," << n_exact_constraints << "," << n_velmode_constraints
+                       << "," << (total - rank_c) << "," << lmin_r << ","
                        << lmax_r << "," << (lmin_r > 0.0 ? lmax_r / lmin_r : -1.0) << "\n";
       exact_solve_ofs.flush();
 
@@ -5431,12 +5474,13 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // result (`delta`, below) remains what's actually applied to state_ --
   // this does not change live behavior, only verifies it.
   //
-  // NOT applicable when exact_det_en: the equality-constrained
-  // nullspace-elimination solve above is not the plain block-tridiagonal
-  // information filter/smoother recursion this check verifies against --
-  // comparing them would report a spurious "large diff" that reflects the
-  // algorithm change, not a bug. Skipped entirely in that mode.
-  if (!exact_det_en) {
+  // NOT applicable when exact_det_en OR a velocity_mode constraint is
+  // active: the equality-constrained nullspace-elimination solve above is
+  // not the plain block-tridiagonal information filter/smoother recursion
+  // this check verifies against -- comparing them would report a
+  // spurious "large diff" that reflects the algorithm change, not a bug.
+  // Skipped entirely whenever any constraint rows are present.
+  if (n_constraints == 0) {
     std::vector<Eigen::Matrix<double, 9, 9>> Ajj(N), Aoff(N - 1);
     std::vector<Eigen::Matrix<double, 9, 1>> bj(N);
     for (int j = 0; j < N; ++j) {
@@ -5558,7 +5602,7 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // correct: a deterministic zero-noise constraint has no uncertainty).
   {
     Eigen::MatrixXd A_inv;
-    if (exact_det_en && n_exact_constraints > 0) {
+    if (n_constraints > 0) {
       Eigen::LDLT<Eigen::MatrixXd> ldlt_reduced_cov(A_reduced);
       const Eigen::MatrixXd A_reduced_inv =
           ldlt_reduced_cov.solve(Eigen::MatrixXd::Identity(A_reduced.rows(), A_reduced.rows()));

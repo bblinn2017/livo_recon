@@ -223,6 +223,31 @@ struct LioProcCoupledOptions
   // live behavior).
   bool pose_knots_relinearize_fq = true;
 
+  // Velocity-observability campaign (2026-09-22), Part 7: which knot
+  // velocity DOFs the GN solve actually optimizes. Meaningful only under
+  // spline_mode=pose_knots. Default "free_per_knot" is EXACTLY today's
+  // shipped behavior (no behavioral change at default). Config key:
+  // estimator/coupled/pose_knots/velocity_mode.
+  //   free_per_knot -- current implementation, N independent 3D velocity
+  //     corrections (one per knot), unchanged.
+  //   fixed_nominal -- knot velocities stay at their IMU-propagated
+  //     nominal values for the whole scan (delta_vel is a hard-
+  //     constrained-to-zero homogeneous equality, NOT a huge prior and
+  //     NOT set to zero VALUE -- the nominal velocity itself is whatever
+  //     the IMU predicted, typically nonzero); zero optimized velocity
+  //     DOFs.
+  //   shared_scan -- exactly one shared 3D velocity correction
+  //     delta_v_scan, hard-constrained equal across every knot
+  //     (v_j = v_j_nominal + delta_v_scan for all j); 3 optimized
+  //     velocity DOFs total instead of 3*N.
+  // Implemented as ADDITIONAL homogeneous equality-constraint rows
+  // appended to the SAME nullspace-elimination machinery
+  // exact_deterministic_constraint_enable already uses (see
+  // estimateCoupledPoseKnotSpline()'s C_exact/Z_ns construction) --
+  // fixed_nominal/shared_scan therefore compose cleanly with that flag
+  // (both independently on/off), rather than needing a separate code path.
+  std::string pose_knots_velocity_mode = "free_per_knot";
+
   // CQ-85 item 1: rule 58f's exact failure mode -- CQ-72's own 96-cell grid
   // produced a cell reporting completed=yes with ATE=396,499,288.300 mm (a
   // FAILED run that looked like a successful one; imu_deviation_weight=0,
