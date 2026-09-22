@@ -11,6 +11,7 @@
 #include <cmath>
 #include <fstream>
 #include <iomanip>
+#include <array>
 #include <limits>
 #include <sstream>
 
@@ -3627,6 +3628,17 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
 {
   dtheta_out = V3D::Zero();
   dt_out = V3D::Zero();
+  // Phase-6A complete-diagnostic-results pass (2026-09-22): ONE shared
+  // PersistentLogStream instance for pose_knots_weak_modes_by_knot.txt,
+  // written from two separate points below (A_lidar's weak modes,
+  // mode_source=lidar; the total reduced Hessian's weak modes,
+  // mode_source=total_reduced). PersistentLogStream truncates on its OWN
+  // first stream() call -- two independent function-local statics with
+  // the same basename would each think they're "first" and re-truncate
+  // the file out from under each other, corrupting it. Declaring it once
+  // here (unconditionally reached) and referencing it from both sites
+  // avoids that.
+  static PersistentLogStream wm_by_knot_log("pose_knots_weak_modes_by_knot.txt");
   if (!coupled_pose_knots_valid_) {
     std::ostringstream diag;
     diag << "[coupled/pose_knots] estimateCoupledPoseKnotSpline(): this "
@@ -4189,6 +4201,14 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     const double lidar_top2 = (nev >= 2) ? es_lidar.eigenvalues()(nev - 2) : NAN;
     const double lidar_top3 = (nev >= 3) ? es_lidar.eigenvalues()(nev - 3) : NAN;
 
+    // Phase-6A complete-diagnostic-results pass (2026-09-22): the 10
+    // smallest A_lidar eigenvalues -- pure logging addition, es_lidar is
+    // already computed above for lambda_min/max/rank/top3; ascending sort
+    // means indices 0..9 are exactly this. NaN-padded if total<10.
+    std::array<double, 10> lidar_eig_small;
+    for (int i = 0; i < 10; ++i)
+      lidar_eig_small[i] = (i < nev) ? es_lidar.eigenvalues()(i) : std::numeric_limits<double>::quiet_NaN();
+
     static PersistentLogStream lidar_geo_log("pose_knots_lidar_geometry.txt");
     bool lidar_geo_first;
     std::ofstream& lidar_geo_ofs = lidar_geo_log.stream(&lidar_geo_first);
@@ -4200,7 +4220,9 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
                         "corr_count_interval_3,lidar_hessian_lambda_min,lidar_hessian_lambda_max,"
                         "lidar_hessian_rank,lidar_hessian_condition,"
                         "lidar_hessian_lambda1_top,lidar_hessian_lambda2_top,lidar_hessian_lambda3_top,"
-                        "corr_count_by_segment\n";
+                        "corr_count_by_segment,"
+                        "lidar_eig_1,lidar_eig_2,lidar_eig_3,lidar_eig_4,lidar_eig_5,"
+                        "lidar_eig_6,lidar_eig_7,lidar_eig_8,lidar_eig_9,lidar_eig_10\n";
     lidar_geo_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << residuals_.size()
                   << "," << n_miss_coverage_ << "," << n_miss_mismatch_ << ","
                   << n_tier0_miss_coverage_ << "," << n_tier0_miss_mismatch_ << ","
@@ -4210,8 +4232,52 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
                   << lidar_lmax << "," << lidar_rank << ","
                   << (lidar_lmin > 0.0 ? lidar_lmax / lidar_lmin : -1.0) << ","
                   << lidar_top1 << "," << lidar_top2 << "," << lidar_top3 << ","
-                  << seg_counts_oss.str() << "\n";
+                  << seg_counts_oss.str();
+    for (int i = 0; i < 10; ++i) lidar_geo_ofs << "," << lidar_eig_small[i];
+    lidar_geo_ofs << "\n";
     lidar_geo_ofs.flush();
+
+    // Phase-6A complete-diagnostic-results pass (2026-09-22): per-knot
+    // rot/pos/vel norm decomposition of the 5 weakest A_lidar eigenvectors
+    // (mode_source=lidar). Same file also receives the total-reduced-
+    // Hessian's weak modes (mode_source=total_reduced) further below in
+    // this function, sharing this schema -- see that site's comment.
+    // Logged only for the FINAL GN iteration of a scan is not tracked
+    // separately here (matches this whole audit block's existing
+    // per-iteration cadence) -- consolidation selects max(iter) per scan.
+    {
+      bool wm_first;
+      std::ofstream& wm_ofs = wm_by_knot_log.stream(&wm_first);
+      if (wm_first)
+        wm_ofs << "scan_id,iter,mode_source,mode_index,mode_eigenvalue,"
+                  "mode_prior,mode_imu,mode_lidar,mode_smooth,mode_det,"
+                  "knot_index,mode_rot_norm,mode_pos_norm,mode_vel_norm,"
+                  "mode_total_rot_fraction,mode_total_pos_fraction,mode_total_vel_fraction\n";
+      const int n_lidar_modes = std::min(5, nev);
+      for (int m = 0; m < n_lidar_modes; ++m) {
+        const Eigen::VectorXd v = es_lidar.eigenvectors().col(m);
+        const double lam = es_lidar.eigenvalues()(m);
+        double sumsq_rot = 0.0, sumsq_pos = 0.0, sumsq_vel = 0.0;
+        std::vector<double> rn(N), pn(N), vn(N);
+        for (int j = 0; j < N; ++j) {
+          rn[j] = v.segment<3>(kDim * j + 0).norm();
+          pn[j] = v.segment<3>(kDim * j + 3).norm();
+          vn[j] = v.segment<3>(kDim * j + 6).norm();
+          sumsq_rot += rn[j] * rn[j];
+          sumsq_pos += pn[j] * pn[j];
+          sumsq_vel += vn[j] * vn[j];
+        }
+        const double sumsq_tot = sumsq_rot + sumsq_pos + sumsq_vel;
+        for (int j = 0; j < N; ++j) {
+          wm_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << ",lidar," << m << ","
+                 << lam << ",,,,,," << j << "," << rn[j] << "," << pn[j] << "," << vn[j] << ","
+                 << (sumsq_tot > 0.0 ? sumsq_rot / sumsq_tot : 0.0) << ","
+                 << (sumsq_tot > 0.0 ? sumsq_pos / sumsq_tot : 0.0) << ","
+                 << (sumsq_tot > 0.0 ? sumsq_vel / sumsq_tot : 0.0) << "\n";
+        }
+      }
+      wm_ofs.flush();
+    }
   }
 
   // POST-REVIEW FIX ("Test 1 -- prove whether A is genuinely indefinite"):
@@ -4759,6 +4825,42 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
         weak_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << (m + 1) << ","
                  << lam << "," << p_prior << "," << p_imu << "," << p_lidar << "," << p_smooth
                  << "," << p_det << "," << (p_prior + p_imu + p_lidar + p_smooth + p_det) << "\n";
+
+        // Phase-6A complete-diagnostic-results pass (2026-09-22): same
+        // per-knot rot/pos/vel norm decomposition as the A_lidar weak
+        // modes above (pose_knots_weak_modes_by_knot.txt), mode_source=
+        // total_reduced -- shares that file's schema, populating
+        // mode_prior..mode_det (already computed above for this mode)
+        // where the lidar-only rows above leave those blank.
+        {
+          bool wm_first;
+          std::ofstream& wm_ofs = wm_by_knot_log.stream(&wm_first);
+          if (wm_first)
+            wm_ofs << "scan_id,iter,mode_source,mode_index,mode_eigenvalue,"
+                      "mode_prior,mode_imu,mode_lidar,mode_smooth,mode_det,"
+                      "knot_index,mode_rot_norm,mode_pos_norm,mode_vel_norm,"
+                      "mode_total_rot_fraction,mode_total_pos_fraction,mode_total_vel_fraction\n";
+          double sumsq_rot = 0.0, sumsq_pos = 0.0, sumsq_vel = 0.0;
+          std::vector<double> rn(N), pn(N), vn(N);
+          for (int j = 0; j < N; ++j) {
+            rn[j] = v_full.segment<3>(kDim * j + 0).norm();
+            pn[j] = v_full.segment<3>(kDim * j + 3).norm();
+            vn[j] = v_full.segment<3>(kDim * j + 6).norm();
+            sumsq_rot += rn[j] * rn[j];
+            sumsq_pos += pn[j] * pn[j];
+            sumsq_vel += vn[j] * vn[j];
+          }
+          const double sumsq_tot = sumsq_rot + sumsq_pos + sumsq_vel;
+          for (int j = 0; j < N; ++j) {
+            wm_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << ",total_reduced," << m
+                   << "," << lam << "," << p_prior << "," << p_imu << "," << p_lidar << ","
+                   << p_smooth << "," << p_det << "," << j << "," << rn[j] << "," << pn[j] << ","
+                   << vn[j] << "," << (sumsq_tot > 0.0 ? sumsq_rot / sumsq_tot : 0.0) << ","
+                   << (sumsq_tot > 0.0 ? sumsq_pos / sumsq_tot : 0.0) << ","
+                   << (sumsq_tot > 0.0 ? sumsq_vel / sumsq_tot : 0.0) << "\n";
+          }
+          wm_ofs.flush();
+        }
       }
       weak_ofs.flush();
     }
@@ -4842,6 +4944,24 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       double max_acc = 0.0, max_angvel = 0.0, sumsq_acc = 0.0, sumsq_angvel = 0.0;
       constexpr int kAccGridN = 40;
       const double t0g = coupled_pose_knots_.knot(0).t;
+      // Phase-6A complete-diagnostic-results pass (2026-09-22): dense
+      // position samples of the ACTUAL optimized continuous spline (this
+      // iteration's `trial`, via PoseKnotSpline::positionAt() -- read-only
+      // query of already-solved state, no equation/residual changed) on
+      // the SAME grid used for max_accel/max_angvel above, so a Python
+      // post-processor can compute genuine within-scan position error
+      // against GT instead of approximating via linear interpolation
+      // between scan-endpoint poses (what EvoProc's own estimate stream
+      // does for every mode, pose-knots included, since it only ever
+      // receives one pose per MeasureGroup). Logged every iteration (not
+      // just the converged one) purely because detecting "last iter" isn't
+      // free at this point in the loop -- the consolidation script selects
+      // max(iter) per scan_id itself, same pattern already used for every
+      // other per-iteration diagnostic file here.
+      static PersistentLogStream dense_eval_log("pose_knots_spline_dense_eval.txt");
+      bool dense_eval_first;
+      std::ofstream& dense_eval_ofs = dense_eval_log.stream(&dense_eval_first);
+      if (dense_eval_first) dense_eval_ofs << "scan_id,iter,k,t_abs,px,py,pz\n";
       for (int k = 0; k <= kAccGridN; ++k) {
         const double tg = t0g + (t1 - t0g) * (static_cast<double>(k) / kAccGridN);
         const double acc_k = trial.accelerationAt(tg).norm();
@@ -4852,7 +4972,12 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
         max_angvel = std::max(max_angvel, angvel_k);
         sumsq_acc += acc_k * acc_k;
         sumsq_angvel += angvel_k * angvel_k;
+        const V3D pos_k = trial.positionAt(tg);
+        dense_eval_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << k << ","
+                       << std::setprecision(17) << tg << "," << std::setprecision(9)
+                       << pos_k.x() << "," << pos_k.y() << "," << pos_k.z() << "\n";
       }
+      dense_eval_ofs.flush();
       // Phase-6A diagnostic campaign (2026-09-22): RMS alongside max --
       // a single pathological point on the spline vs. a trajectory that's
       // bad everywhere are different situations, per user request.
