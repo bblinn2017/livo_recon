@@ -3639,6 +3639,17 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // here (unconditionally reached) and referencing it from both sites
   // avoids that.
   static PersistentLogStream wm_by_knot_log("pose_knots_weak_modes_by_knot.txt");
+  // phase6A_diagnostic_results_v2 Test 2 (2026-09-22): the 5 weakest
+  // A_lidar eigenvectors are computed and go out of scope inside the
+  // earlier psd_audit_en block; the 5 weakest total-reduced-Hessian
+  // eigenvectors (mapped to full space) are computed much later in this
+  // same function. Both live in the SAME "total"-dimensional ambient
+  // space (v_full = Z_ns * v_reduced is already full-space), so
+  // principal angles between the two 5-dim subspaces are meaningful --
+  // stash the lidar ones here (cleared+refilled each call) so they're
+  // still available at the later site.
+  std::vector<Eigen::VectorXd> weak_lidar_vecs_for_angle;
+  std::vector<double> weak_lidar_vals_for_angle;
   if (!coupled_pose_knots_valid_) {
     std::ostringstream diag;
     diag << "[coupled/pose_knots] estimateCoupledPoseKnotSpline(): this "
@@ -3767,6 +3778,18 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   Eigen::MatrixXd A_imu = Eigen::MatrixXd::Zero(total, total);
   Eigen::MatrixXd A_lidar = Eigen::MatrixXd::Zero(total, total);
   Eigen::MatrixXd A_smooth = Eigen::MatrixXd::Zero(total, total);
+  // phase6A_diagnostic_results_v2 Test 4 (2026-09-22): per-SEGMENT (knot
+  // j -> j+1) LiDAR-only Hessian contribution, kept SEPARATE from the
+  // globally-assembled A_lidar above -- A_lidar.block<18,18>(9*j,9*j)
+  // is NOT segment j's own contribution alone (an adjacent segment's
+  // residuals also touch the shared knot's diagonal block), so this is
+  // a genuinely separate accumulator, not a slice of A_lidar. Populated
+  // in the same per-residual LiDAR loop below (each residual already
+  // knows its own bracket segment j), read out (trace/lambda_min/max)
+  // only when psd_audit_en. This is the actual factor contribution to
+  // that interval, not an approximation from correspondence counts.
+  std::vector<Eigen::Matrix<double, 18, 18>> A_lidar_by_seg(
+      N > 0 ? N - 1 : 0, Eigen::Matrix<double, 18, 18>::Zero());
   // Phase-2 diagnostic accumulator (deterministic-nullspace soft penalty),
   // isolated the same way A_imu/A_lidar/etc are so v_min^T A_det v_min can
   // be reported below alongside the other factor-strength numbers.
@@ -4136,6 +4159,8 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
 
     A.block<18, 18>(kDim * j, kDim * j).noalias() += w * (Jrow.transpose() * Jrow);
     A_lidar.block<18, 18>(kDim * j, kDim * j).noalias() += w * (Jrow.transpose() * Jrow);
+    if (j >= 0 && j < static_cast<int>(A_lidar_by_seg.size()))
+      A_lidar_by_seg[j].noalias() += w * (Jrow.transpose() * Jrow);
     b.segment<18>(kDim * j).noalias() -= w * Jrow.transpose() * res.r;
     e_lidar_total += w * res.r * res.r;
   }
@@ -4237,6 +4262,29 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     lidar_geo_ofs << "\n";
     lidar_geo_ofs.flush();
 
+    // phase6A_diagnostic_results_v2 Test 4 (2026-09-22): per-segment
+    // (knot j -> j+1) LiDAR-only Hessian trace/lambda_min/lambda_max,
+    // from the SEPARATE A_lidar_by_seg accumulator (NOT a slice of the
+    // globally-assembled A_lidar -- see that variable's own comment) --
+    // the actual factor contribution to that interval, not an
+    // approximation from correspondence counts.
+    {
+      static PersistentLogStream interval_log("pose_knots_lidar_interval_hessian.txt");
+      bool interval_first;
+      std::ofstream& interval_ofs = interval_log.stream(&interval_first);
+      if (interval_first)
+        interval_ofs << "scan_id,iter,segment,correspondence_count,"
+                         "A_lidar_trace_interval,A_lidar_lambda_min_interval,"
+                         "A_lidar_lambda_max_interval\n";
+      for (size_t seg = 0; seg < A_lidar_by_seg.size(); ++seg) {
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 18, 18>> es_seg(A_lidar_by_seg[seg]);
+        interval_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << seg << ","
+                     << segment_counts[seg] << "," << A_lidar_by_seg[seg].trace() << ","
+                     << es_seg.eigenvalues().minCoeff() << "," << es_seg.eigenvalues().maxCoeff() << "\n";
+      }
+      interval_ofs.flush();
+    }
+
     // Phase-6A complete-diagnostic-results pass (2026-09-22): per-knot
     // rot/pos/vel norm decomposition of the 5 weakest A_lidar eigenvectors
     // (mode_source=lidar). Same file also receives the total-reduced-
@@ -4257,6 +4305,8 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       for (int m = 0; m < n_lidar_modes; ++m) {
         const Eigen::VectorXd v = es_lidar.eigenvectors().col(m);
         const double lam = es_lidar.eigenvalues()(m);
+        weak_lidar_vecs_for_angle.push_back(v);
+        weak_lidar_vals_for_angle.push_back(lam);
         double sumsq_rot = 0.0, sumsq_pos = 0.0, sumsq_vel = 0.0;
         std::vector<double> rn(N), pn(N), vn(N);
         for (int j = 0; j < N; ++j) {
@@ -4814,9 +4864,16 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       // Test 2): still free reuse of the same already-computed
       // decomposition, no extra cost.
       const int n_modes = std::min(5, static_cast<int>(es_red.eigenvectors().cols()));
+      // phase6A_diagnostic_results_v2 Test 2: collected across this loop,
+      // used after it ends to compute principal angles against
+      // weak_lidar_vecs_for_angle (both already full-"total"-dim).
+      std::vector<Eigen::VectorXd> weak_total_vecs_for_angle;
+      std::vector<double> weak_total_vals_for_angle;
       for (int m = 0; m < n_modes; ++m) {
         const Eigen::VectorXd v_full = Z_ns * es_red.eigenvectors().col(m);
         const double lam = es_red.eigenvalues()(m);
+        weak_total_vecs_for_angle.push_back(v_full);
+        weak_total_vals_for_angle.push_back(lam);
         const double p_prior = v_full.transpose() * A_prior * v_full;
         const double p_imu = v_full.transpose() * A_imu * v_full;
         const double p_lidar = v_full.transpose() * A_lidar * v_full;
@@ -4863,6 +4920,44 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
         }
       }
       weak_ofs.flush();
+
+      // phase6A_diagnostic_results_v2 Test 2 (2026-09-22): pairwise angle
+      // between each LiDAR-weak eigenvector (weak_lidar_vecs_for_angle,
+      // from the earlier psd_audit_en block) and each total-reduced-weak
+      // eigenvector (weak_total_vecs_for_angle, just built above) -- both
+      // already live in the same full "total"-dim ambient space, so
+      // acos(normalized_v_lidar . normalized_v_total) is a well-defined
+      // angle between the two directions. This is the all-pairs angle
+      // table the requested schema asks for (lidar_mode_index x
+      // total_mode_index), NOT the k-dimensional Bjorck/Golub subspace
+      // principal angles (which would need an SVD of the k1 x k2
+      // cross-Gram matrix and only report min(k1,k2) values with no
+      // per-mode identity) -- reported per-pair since the two
+      // eigensystems have no a priori reason to rank-order their
+      // directions the same way, and per-pair is what lets a reader
+      // determine e.g. "lidar mode 1 is nearly the SAME direction as
+      // total mode 3" rather than only a rank-blind subspace overlap.
+      if (!weak_lidar_vecs_for_angle.empty() && !weak_total_vecs_for_angle.empty()) {
+        static PersistentLogStream angle_log("pose_knots_weak_mode_principal_angles.txt");
+        bool angle_first;
+        std::ofstream& angle_ofs = angle_log.stream(&angle_first);
+        if (angle_first)
+          angle_ofs << "scan_id,iter,lidar_mode_index,total_mode_index,"
+                        "lidar_eigenvalue,total_eigenvalue,cos_principal_angle,principal_angle_deg\n";
+        for (size_t li = 0; li < weak_lidar_vecs_for_angle.size(); ++li) {
+          const Eigen::VectorXd vl = weak_lidar_vecs_for_angle[li].normalized();
+          for (size_t ti = 0; ti < weak_total_vecs_for_angle.size(); ++ti) {
+            const Eigen::VectorXd vt = weak_total_vecs_for_angle[ti].normalized();
+            double c = vl.dot(vt);
+            c = std::max(-1.0, std::min(1.0, c));
+            const double angle_deg = std::acos(c) * 180.0 / M_PI;
+            angle_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << li << "," << ti
+                      << "," << weak_lidar_vals_for_angle[li] << "," << weak_total_vals_for_angle[ti]
+                      << "," << c << "," << angle_deg << "\n";
+          }
+        }
+        angle_ofs.flush();
+      }
     }
   } else {
     Eigen::LDLT<Eigen::MatrixXd> ldlt_a(A);
