@@ -4205,6 +4205,61 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
         const double fro_err = (Q_code - Q_analytic).norm();
         const double fro_rel = fro_err / std::max(Q_analytic.norm(), 1e-300);
 
+        // USER REQUEST 2026-09-22 (redesigned Phase 1, "verify N^T G = 0
+        // and identify the deterministic nullspace... via the ACCUMULATED
+        // process noise map G_j, not just Q_j's own eigendecomposition"):
+        // build G_total (9 x 6*n_steps: rows=[theta,p,v], each step
+        // contributes 6 columns=[gyro-noise(3),accel-noise(3)]) by
+        // chaining G_new=[F_step*G_old, G_step] the SAME way Q itself
+        // chains (Q_new=F*Q_old*F^T+Q_step) -- a genuinely SEPARATE
+        // numerical object from Q_code/Q_analytic above, not a relabeling
+        // of the same eigendecomposition. rank(G_total) and its LEFT null
+        // space (via SVD) are then compared against Q9's own
+        // eigendecomposition-derived null space as two INDEPENDENTLY
+        // computed answers to the same question.
+        Eigen::MatrixXd G_total(9, 0);
+        {
+          M3D rot_g = trial.knot(seg).rot;
+          for (size_t k = 0; k + 1 < samples.size(); ++k) {
+            const double dt = samples[k + 1].t - samples[k].t;
+            if (!(dt > 0.0)) continue;
+            Eigen::Matrix<double, 9, 6> Gstep = Eigen::Matrix<double, 9, 6>::Zero();
+            Gstep.block<3, 3>(0, 0) = dt * M3D::Identity();          // theta <- gyro noise
+            Gstep.block<3, 3>(3, 3) = 0.5 * rot_g * dt * dt;         // p     <- accel noise
+            Gstep.block<3, 3>(6, 3) = rot_g * dt;                    // v     <- accel noise
+            const V3D acc_avr = 0.5 * (samples[k].acc + samples[k + 1].acc) - state_->biasAcc();
+            const V3D angvel_avr = 0.5 * (samples[k].gyro + samples[k + 1].gyro) - state_->biasGyr();
+            Eigen::Matrix<double, 9, 9> Fstep, Qstep_unused2;
+            buildImuStep9x9(rot_g, acc_avr, angvel_avr, dt, state_->varAcc(), state_->varGyr(),
+                            copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, copts_.repro_second_order,
+                            Fstep, Qstep_unused2);
+            Eigen::MatrixXd G_new(9, G_total.cols() + 6);
+            if (G_total.cols() > 0) G_new.leftCols(G_total.cols()) = Fstep * G_total;
+            G_new.rightCols(6) = Gstep;
+            G_total = G_new;
+            rot_g = rot_g * Exp(angvel_avr, dt);
+          }
+        }
+        Eigen::JacobiSVD<Eigen::MatrixXd> svd_g(G_total, Eigen::ComputeFullU);
+        const auto& sv_g = svd_g.singularValues();
+        const double sv_g_max = (sv_g.size() > 0) ? sv_g(0) : 0.0;
+        int rank_g = 0;
+        // USER FOLLOW-UP FIX: threshold on G's SINGULAR values must be the
+        // SQUARE ROOT of the threshold applied to Q's EIGENVALUES
+        // elsewhere (Q~G*Sigma*G^T => eigenvalue ratios ~ singular-value
+        // ratios SQUARED for the same direction) -- an inconsistent 1e-9
+        // (vs the shipped pose_knots_q_pinv_rel_thresh=1e-6 on Q)
+        // produced a MISLEADING rank_G=9/null_dim=0 (0-dim null space,
+        // making N^T*G and the principal angles vacuously zero) on the
+        // first run of this diagnostic. Fixed to sqrt(threshold) for a
+        // consistent comparison.
+        const double sv_thresh_rel = std::sqrt(copts_.pose_knots_q_pinv_rel_thresh);
+        for (int i = 0; i < sv_g.size(); ++i) if (sv_g(i) > sv_thresh_rel * std::max(sv_g_max, 1.0)) ++rank_g;
+        // U's LAST (9-rank_g) columns (JacobiSVD orders singular values
+        // descending) span G_total's own LEFT null space -- computed
+        // purely from G_total's own SVD, independent of Q9's eigenvectors.
+        const Eigen::MatrixXd U_null_g = svd_g.matrixU().rightCols(9 - rank_g);
+
         Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 9, 9>> es_code(0.5 * (Q_code + Q_code.transpose()));
         Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 9, 9>> es_ana(0.5 * (Q_analytic + Q_analytic.transpose()));
 
@@ -4223,6 +4278,51 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
                      << es_code.eigenvalues()(k) << "," << es_ana.eigenvalues()(k) << "\n";
         }
         qcheck_ofs.flush();
+
+        // USER REQUEST 2026-09-22 (redesigned Phase 1): N (Q9's own null
+        // eigenvectors, from es_code -- 9x9 ascending, columns 0..8-rank
+        // are the null ones) vs G_total's own SVD-derived left null space
+        // (U_null_g, computed above, entirely independently). Report
+        // ||N^T G_total||_F directly (should be ~0 given N spans
+        // null(Q)=null(G^T) exactly, PROVIDED Sigma is full rank -- this
+        // is the direct numerical confirmation the user asked for rather
+        // than an inference from Phase 2's matrix-level agreement), and
+        // the principal angles between subspace(N) and subspace(U_null_g)
+        // -- both computed FRESH here, not reused from earlier phases.
+        {
+          const int null_dim = 9 - rank_g;
+          const Eigen::MatrixXd N = es_code.eigenvectors().leftCols(std::max(null_dim, 0));
+          const double NtG_fro = (N.transpose() * G_total).norm();
+          // Principal angles: singular values of N^T * U_null_g are
+          // cos(theta_i) for the principal angles between the two
+          // subspaces (both orthonormal bases, N from a SelfAdjoint
+          // eigensolver, U_null_g from JacobiSVD -- both orthonormal by
+          // construction).
+          std::vector<double> angles_deg;
+          if (N.cols() > 0 && U_null_g.cols() > 0) {
+            Eigen::JacobiSVD<Eigen::MatrixXd> svd_pa(N.transpose() * U_null_g);
+            for (int i = 0; i < svd_pa.singularValues().size(); ++i) {
+              const double c = std::min(1.0, std::max(-1.0, svd_pa.singularValues()(i)));
+              angles_deg.push_back(std::acos(c) * 180.0 / M_PI);
+            }
+          }
+          static PersistentLogStream grank_log("pose_knots_G_rank_check.txt");
+          bool grank_first;
+          std::ofstream& grank_ofs = grank_log.stream(&grank_first);
+          if (grank_first)
+            grank_ofs << "scan_id,seg,n_steps,dt_total,rank_G,rank_Q,null_dim,"
+                         "NtG_fro,max_principal_angle_deg,mean_principal_angle_deg,"
+                         "sv_g_all\n";
+          double max_ang = 0.0, sum_ang = 0.0;
+          for (double a : angles_deg) { max_ang = std::max(max_ang, a); sum_ang += a; }
+          std::ostringstream sv_list;
+          for (int i = 0; i < sv_g.size(); ++i) sv_list << sv_g(i) << (i + 1 < sv_g.size() ? ";" : "");
+          grank_ofs << voxel_map_->frame_idx_ << "," << seg << "," << n_steps << "," << dt_total << ","
+                    << rank_g << "," << (9 - null_dim) << "," << null_dim << "," << NtG_fro << ","
+                    << max_ang << "," << (angles_deg.empty() ? 0.0 : sum_ang / angles_deg.size()) << ","
+                    << sv_list.str() << "\n";
+          grank_ofs.flush();
+        }
 
         // USER REQUEST 2026-09-21 (Phase 4, "deterministic constraint
         // verification"): does Q9's own (already-validated) null
