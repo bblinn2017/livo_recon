@@ -4151,6 +4151,13 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     int lidar_rank = 0;
     for (int i = 0; i < es_lidar.eigenvalues().size(); ++i)
       if (es_lidar.eigenvalues()(i) > kRankThresh * std::max(lidar_lmax, 1.0)) ++lidar_rank;
+    // Top-3 LARGEST A_lidar eigenvalues (2026-09-22, user request, Test
+    // 2/4's "lambda1,2,3(A_lidar)") -- Eigen sorts ascending, so these are
+    // the last (up to) 3 entries, free reuse of es_lidar above.
+    const int nev = static_cast<int>(es_lidar.eigenvalues().size());
+    const double lidar_top1 = es_lidar.eigenvalues()(nev - 1);
+    const double lidar_top2 = (nev >= 2) ? es_lidar.eigenvalues()(nev - 2) : NAN;
+    const double lidar_top3 = (nev >= 3) ? es_lidar.eigenvalues()(nev - 3) : NAN;
 
     static PersistentLogStream lidar_geo_log("pose_knots_lidar_geometry.txt");
     bool lidar_geo_first;
@@ -4161,7 +4168,8 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
                         "normal_cov_lambda1,normal_cov_lambda2,normal_cov_lambda3,"
                         "corr_count_interval_0,corr_count_interval_1,corr_count_interval_2,"
                         "corr_count_interval_3,lidar_hessian_lambda_min,lidar_hessian_lambda_max,"
-                        "lidar_hessian_rank,lidar_hessian_condition\n";
+                        "lidar_hessian_rank,lidar_hessian_condition,"
+                        "lidar_hessian_lambda1_top,lidar_hessian_lambda2_top,lidar_hessian_lambda3_top\n";
     lidar_geo_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << residuals_.size()
                   << "," << n_miss_coverage_ << "," << n_miss_mismatch_ << ","
                   << n_tier0_miss_coverage_ << "," << n_tier0_miss_mismatch_ << ","
@@ -4169,7 +4177,8 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
                   << "," << interval_counts[0] << "," << interval_counts[1] << ","
                   << interval_counts[2] << "," << interval_counts[3] << "," << lidar_lmin << ","
                   << lidar_lmax << "," << lidar_rank << ","
-                  << (lidar_lmin > 0.0 ? lidar_lmax / lidar_lmin : -1.0) << "\n";
+                  << (lidar_lmin > 0.0 ? lidar_lmax / lidar_lmin : -1.0) << ","
+                  << lidar_top1 << "," << lidar_top2 << "," << lidar_top3 << "\n";
     lidar_geo_ofs.flush();
   }
 
@@ -4703,7 +4712,10 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       if (weak_first)
         weak_ofs << "scan_id,iter,eig_rank,lambda,proj_prior,proj_imu,proj_lidar,proj_smooth,"
                      "proj_det,proj_total\n";
-      const int n_modes = std::min(3, static_cast<int>(es_red.eigenvectors().cols()));
+      // Widened 3->5 (2026-09-22, user request, pose_spline_campaign.csv
+      // Test 2): still free reuse of the same already-computed
+      // decomposition, no extra cost.
+      const int n_modes = std::min(5, static_cast<int>(es_red.eigenvectors().cols()));
       for (int m = 0; m < n_modes; ++m) {
         const Eigen::VectorXd v_full = Z_ns * es_red.eigenvectors().col(m);
         const double lam = es_red.eigenvalues()(m);
