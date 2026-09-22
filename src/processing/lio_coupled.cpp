@@ -4,6 +4,7 @@
 #include "livo_recon/utils/log/config_resolve.h"
 #include "livo_recon/utils/log/debug_log_dir.h"
 #include "livo_recon/utils/algo/math.h"
+#include "livo_recon/utils/algo/omp_utils.h"
 #include "livo_recon/map/voxelmap.h"
 
 #include <algorithm>
@@ -4119,65 +4120,103 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // ---- item 8/9/10: LiDAR factors, analytic position/velocity Jacobian
   // (Hermite weights), FD rotation Jacobian (item 16's own allowance) ----
   constexpr double kFdEps = 1e-6;
-  for (const auto& res : residuals_) {
-    const double t_eval = use_end_time ? t1 : res.t;
-    int j; double u;
-    trial.bracket(t_eval, j, u);
-    const double dt_seg = coupled_pose_knots_.knot(j + 1).t - coupled_pose_knots_.knot(j).t;
-    const double h00 = 2*u*u*u - 3*u*u + 1, h10 = u*u*u - 2*u*u + u;
-    const double h01 = -2*u*u*u + 3*u*u,    h11 = u*u*u - u*u;
-    const double w = 1.0 / std::max(res.sigma_squared, 1e-18);
+  // PERFORMANCE (2026-09-22): per-residual work here is independent until
+  // the final accumulation into the shared A/A_lidar/A_lidar_by_seg/b/
+  // e_lidar_total -- same per-thread-buffer-then-consolidate pattern
+  // already used for the residual-BUILDING loop (LioProcBase::
+  // buildResiduals(), lio_base.cpp -- build_thread_residuals_, merged in
+  // fixed thread-index order after the parallel region closes). Each
+  // thread gets its OWN copy of `trial` (perturb-in-place still needs
+  // exclusive access to the knot being perturbed, and threads process
+  // DIFFERENT residuals whose bracket knots can overlap) -- N per-thread
+  // copies instead of one, but that's `threads` copies total, not one per
+  // residual, so it doesn't reintroduce the O(n_residuals x n_knots) cost
+  // the FD-Jacobian fix above just removed.
+  //
+  // Determinism: cappedOmpThreads()'s thread count is pinned once at
+  // process start via pinOmpThreadsForDeterminism() (main.cpp, first
+  // statement), and the merge below sums per-thread partial matrices in
+  // FIXED thread-index order (0..threads-1), not whatever order threads
+  // happen to finish -- so A/A_lidar/b are bit-identical run-to-run
+  // despite the parallel construction, exactly like build_thread_
+  // residuals_'s own merge. This does NOT reproduce the old strictly-
+  // sequential-over-residuals summation order bit-for-bit (floating-point
+  // addition isn't associative, so a different grouping is a different
+  // rounding pattern) -- verified behavior-preserving via trajectory
+  // comparison against the pre-parallelization baseline, not exact ATE
+  // match (see commit message).
+  const int threads = cappedOmpThreads();
+  std::vector<Eigen::MatrixXd> A_thread(threads, Eigen::MatrixXd::Zero(total, total));
+  std::vector<Eigen::MatrixXd> A_lidar_thread(threads, Eigen::MatrixXd::Zero(total, total));
+  std::vector<std::vector<Eigen::Matrix<double, 18, 18>>> A_lidar_by_seg_thread(
+      threads, std::vector<Eigen::Matrix<double, 18, 18>>(
+                   A_lidar_by_seg.size(), Eigen::Matrix<double, 18, 18>::Zero()));
+  std::vector<Eigen::VectorXd> b_thread(threads, Eigen::VectorXd::Zero(total));
+  std::vector<double> e_lidar_thread(threads, 0.0);
+  const int n_res = static_cast<int>(residuals_.size());
+  #pragma omp parallel num_threads(threads)
+  {
+    PoseKnotSpline trial_local = trial;  // own copy per thread, perturbed in place below
+    const int tid = omp_get_thread_num();
+    #pragma omp for schedule(static)
+    for (int ri = 0; ri < n_res; ++ri) {
+      const Residual& res = residuals_[ri];
+      const double t_eval = use_end_time ? t1 : res.t;
+      int j; double u;
+      trial_local.bracket(t_eval, j, u);
+      const double dt_seg = coupled_pose_knots_.knot(j + 1).t - coupled_pose_knots_.knot(j).t;
+      const double h00 = 2*u*u*u - 3*u*u + 1, h10 = u*u*u - 2*u*u + u;
+      const double h01 = -2*u*u*u + 3*u*u,    h11 = u*u*u - u*u;
+      const double w = 1.0 / std::max(res.sigma_squared, 1e-18);
 
-    Eigen::Matrix<double, 1, 18> Jrow;
-    Jrow.setZero();
-    // Position/velocity columns: analytic (position does not depend on
-    // rotation at all under this Hermite parameterization -- decoupled).
-    Jrow.segment<3>(3)  = h00 * res.normal.transpose();          // d/d(delta_pos_j)
-    Jrow.segment<3>(6)  = h10 * dt_seg * res.normal.transpose(); // d/d(delta_vel_j)
-    Jrow.segment<3>(12) = h01 * res.normal.transpose();          // d/d(delta_pos_{j+1})
-    Jrow.segment<3>(15) = h11 * dt_seg * res.normal.transpose(); // d/d(delta_vel_{j+1})
-    // Rotation columns: central FD, perturbing the TRIAL knot's own
-    // rotation (right-multiplicative) and re-evaluating the true
-    // residual r(c) = n^T(R(t)q + p(t)) + d, d held fixed at THIS
-    // residual's own current value (res.r already IS r(c_current) since
-    // it was computed against the trial spline above).
-    //
-    // PERFORMANCE (2026-09-22, profiler-identified): rotationAt()/
-    // positionAt() only ever read knots_[j]/knots_[j+1] (the bracket
-    // pair for t_eval, confirmed in pose_knot_spline.cpp) -- NOT the
-    // whole spline -- so perturbing `trial`'s own knot in place,
-    // evaluating, then restoring the original rotation is exactly
-    // equivalent to evaluating against a full copy with that one knot
-    // perturbed, without the O(n_knots) copy this used to pay 6x per
-    // residual (3 axes x 2 knots x central-difference). No behavior
-    // change: same rotationAt()/positionAt() calls, same inputs, same
-    // floating-point result -- this loop is single-threaded (no OMP),
-    // so there is no concurrent access to `trial` to race with.
-    const double base_r = res.normal.dot(
-        trial.rotationAt(t_eval) * res.raw_body_point + trial.positionAt(t_eval));
-    auto residualAt = [&](int knot_idx, int axis, double eps) {
-      const M3D orig_rot = trial.knot(knot_idx).rot;
-      trial.knotMut(knot_idx).rot = orig_rot * Exp(V3D(eps * V3D::Unit(axis)));
-      const M3D R_t = trial.rotationAt(t_eval);
-      const V3D p_t = trial.positionAt(t_eval);
-      trial.knotMut(knot_idx).rot = orig_rot;
-      return res.normal.dot(R_t * res.raw_body_point + p_t) + (res.r - base_r);
-    };
-    for (int axis = 0; axis < 3; ++axis) {
-      const double rp = residualAt(j, axis, kFdEps);
-      const double rm = residualAt(j, axis, -kFdEps);
-      Jrow(0 + axis) = (rp - rm) / (2 * kFdEps);
-      const double rp1 = residualAt(j + 1, axis, kFdEps);
-      const double rm1 = residualAt(j + 1, axis, -kFdEps);
-      Jrow(9 + axis) = (rp1 - rm1) / (2 * kFdEps);
+      Eigen::Matrix<double, 1, 18> Jrow;
+      Jrow.setZero();
+      // Position/velocity columns: analytic (position does not depend on
+      // rotation at all under this Hermite parameterization -- decoupled).
+      Jrow.segment<3>(3)  = h00 * res.normal.transpose();          // d/d(delta_pos_j)
+      Jrow.segment<3>(6)  = h10 * dt_seg * res.normal.transpose(); // d/d(delta_vel_j)
+      Jrow.segment<3>(12) = h01 * res.normal.transpose();          // d/d(delta_pos_{j+1})
+      Jrow.segment<3>(15) = h11 * dt_seg * res.normal.transpose(); // d/d(delta_vel_{j+1})
+      // Rotation columns: central FD, perturbing the TRIAL knot's own
+      // rotation (right-multiplicative) and re-evaluating the true
+      // residual r(c) = n^T(R(t)q + p(t)) + d, d held fixed at THIS
+      // residual's own current value (res.r already IS r(c_current) since
+      // it was computed against the trial spline above).
+      const double base_r = res.normal.dot(
+          trial_local.rotationAt(t_eval) * res.raw_body_point + trial_local.positionAt(t_eval));
+      auto residualAt = [&](int knot_idx, int axis, double eps) {
+        const M3D orig_rot = trial_local.knot(knot_idx).rot;
+        trial_local.knotMut(knot_idx).rot = orig_rot * Exp(V3D(eps * V3D::Unit(axis)));
+        const M3D R_t = trial_local.rotationAt(t_eval);
+        const V3D p_t = trial_local.positionAt(t_eval);
+        trial_local.knotMut(knot_idx).rot = orig_rot;
+        return res.normal.dot(R_t * res.raw_body_point + p_t) + (res.r - base_r);
+      };
+      for (int axis = 0; axis < 3; ++axis) {
+        const double rp = residualAt(j, axis, kFdEps);
+        const double rm = residualAt(j, axis, -kFdEps);
+        Jrow(0 + axis) = (rp - rm) / (2 * kFdEps);
+        const double rp1 = residualAt(j + 1, axis, kFdEps);
+        const double rm1 = residualAt(j + 1, axis, -kFdEps);
+        Jrow(9 + axis) = (rp1 - rm1) / (2 * kFdEps);
+      }
+
+      A_thread[tid].block<18, 18>(kDim * j, kDim * j).noalias() += w * (Jrow.transpose() * Jrow);
+      A_lidar_thread[tid].block<18, 18>(kDim * j, kDim * j).noalias() += w * (Jrow.transpose() * Jrow);
+      if (j >= 0 && j < static_cast<int>(A_lidar_by_seg_thread[tid].size()))
+        A_lidar_by_seg_thread[tid][j].noalias() += w * (Jrow.transpose() * Jrow);
+      b_thread[tid].segment<18>(kDim * j).noalias() -= w * Jrow.transpose() * res.r;
+      e_lidar_thread[tid] += w * res.r * res.r;
     }
-
-    A.block<18, 18>(kDim * j, kDim * j).noalias() += w * (Jrow.transpose() * Jrow);
-    A_lidar.block<18, 18>(kDim * j, kDim * j).noalias() += w * (Jrow.transpose() * Jrow);
-    if (j >= 0 && j < static_cast<int>(A_lidar_by_seg.size()))
-      A_lidar_by_seg[j].noalias() += w * (Jrow.transpose() * Jrow);
-    b.segment<18>(kDim * j).noalias() -= w * Jrow.transpose() * res.r;
-    e_lidar_total += w * res.r * res.r;
+  }
+  // Sequential, fixed-order merge (0..threads-1) -- see determinism note above.
+  for (int t = 0; t < threads; ++t) {
+    A.noalias() += A_thread[t];
+    A_lidar.noalias() += A_lidar_thread[t];
+    for (size_t k = 0; k < A_lidar_by_seg.size(); ++k)
+      A_lidar_by_seg[k].noalias() += A_lidar_by_seg_thread[t][k];
+    b.noalias() += b_thread[t];
+    e_lidar_total += e_lidar_thread[t];
   }
 
   // Phase-6A diagnostic campaign (2026-09-22, user request, read-only --
