@@ -136,7 +136,7 @@ bool PoseKnotSpline::init(double t0, double t1, int n_knots,
   // true nominal-trajectory inconsistency (zero, here) rather than
   // silently assuming it away.
   knots_[0].pos = p0; knots_[0].rot = R0; knots_[0].vel = v0;
-  knots_[0].P = P0;
+  knots_[0].P_prior = P0;
 
   seg_F9_.assign(n_knots - 1, Eigen::Matrix<double, 9, 9>::Identity());
   seg_Q9_.assign(n_knots - 1, Eigen::Matrix<double, 9, 9>::Zero());
@@ -174,7 +174,7 @@ bool PoseKnotSpline::init(double t0, double t1, int n_knots,
       knots_[knot_idx].rot = rot_imu;
       knots_[knot_idx].vel = vel_imu;
       P_running = F_seg * P_running * F_seg.transpose() + Q_seg;
-      knots_[knot_idx].P = P_running;
+      knots_[knot_idx].P_prior = P_running;
       seg_F9_[knot_idx - 1] = F_seg;
       seg_Q9_[knot_idx - 1] = Q_seg;
       F_seg.setIdentity();

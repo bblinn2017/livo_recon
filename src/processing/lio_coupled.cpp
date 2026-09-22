@@ -3733,7 +3733,7 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // ---- item 18: head prior, Omega0 = pinv(P0) (P0 == knot 0's own P, set
   // ONCE at init() from state_->cov(), never mutated) ----
   {
-    const Eigen::Matrix<double, 9, 9> Omega0 = pseudoInverse9(coupled_pose_knots_.knot(0).P, 1e-6);
+    const Eigen::Matrix<double, 9, 9> Omega0 = pseudoInverse9(coupled_pose_knots_.knot(0).P_prior, 1e-6);
     Eigen::Matrix<double, 9, 1> s0;
     s0.segment<3>(0) = coupled_knot_delta_theta_[0];
     s0.segment<3>(3) = coupled_knot_delta_pos_[0];

@@ -49,10 +49,18 @@ struct PoseKnot
   V3D    pos = V3D::Zero();
   M3D    rot = M3D::Identity();
   V3D    vel = V3D::Zero();
-  // [theta,p,v] order, matching StateGroup::idxR()=0/idxP()=3/idxV()=6 --
-  // items 4/12/13: this IS Cov(x_j,x_j) directly, no basis-coefficient
-  // translation needed, unlike pose_spline_system.h's cp_p_/cp_phi_.
-  Eigen::Matrix<double, 9, 9> P = Eigen::Matrix<double, 9, 9>::Zero();
+  // [theta,p,v] order, matching StateGroup::idxR()=0/idxP()=3/idxV()=6.
+  // POST-REVIEW RENAME (external review 2026-09-21, "someone could easily
+  // read `knot.P` as the covariance of this OPTIMIZED knot -- but it's
+  // really P_j^IMU-propagated-prior... that distinction will prevent
+  // accidentally using the posterior where the causal prior belongs"):
+  // this is P_j^-, the IMU-propagated prior BEFORE any LiDAR information
+  // at or after t_j is folded in -- NOT a posterior, and NOT (currently)
+  // what estimateCoupledPoseKnotSpline()'s own coupled_knot_cov_ log
+  // reports (that's read from the joint batch solve's own A^-1, i.e. the
+  // FULL-scan posterior, a materially different quantity -- see that
+  // variable's own doc comment in lio_coupled.h).
+  Eigen::Matrix<double, 9, 9> P_prior = Eigen::Matrix<double, 9, 9>::Zero();
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 };
