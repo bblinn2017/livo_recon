@@ -89,7 +89,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
 
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/n_c", copts_.n_c, 4);
   cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/spline_mode",
-                 copts_.spline_mode, "raw_imu", {"raw_imu", "pose"});
+                 copts_.spline_mode, "raw_imu", {"raw_imu", "pose", "pose_knots"});
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_acc", copts_.pose_imu_weight_acc, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_gyr", copts_.pose_imu_weight_gyr, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_curvature_weight_pos", copts_.pose_curvature_weight_pos, 0.0);
@@ -105,6 +105,10 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "state/cov/gyr", copts_.pose_imu_var_gyr, 1e-4);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_gn_max_step_pos_m", copts_.pose_gn_max_step_pos_m, 0.5);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_gn_max_step_rot_rad", copts_.pose_gn_max_step_rot_rad, 0.2);
+  cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/n_knots", copts_.pose_knots_n, 13);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/smoothness_position", copts_.pose_knots_smoothness_pos, 0.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/smoothness_rotation", copts_.pose_knots_smoothness_rot, 0.0);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/use_imu_factors", copts_.pose_knots_use_imu_factors, true);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/max_scan_displacement_m", copts_.max_scan_displacement_m, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
@@ -524,6 +528,43 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       }
     }
   }
+  // User instruction 2026-09-21 items 1-6/18/19: the physical-knot arm's
+  // own scan-start init, mirroring the poseBasis() block above but built
+  // ONCE via PoseKnotSpline::init() rather than ScanSpline::fit() --
+  // item 18's prior (P0 = state_->cov()'s own [theta,p,v] block) and item
+  // 3's own initialization from mg.poses are both handled inside init()
+  // itself; there is no separate setFrozenBoundary()-style hard-clamp call
+  // here at all (items 4/19: the head is a SOFT prior consumed by the
+  // solver's own prior factor, the tail is free by construction -- see
+  // pose_knot_spline.h's own doc comment for why the old clamped-B-spline
+  // head-tie machinery has no analogue needed here).
+  if (copts_.poseKnotsBasis()) {
+    coupled_pose_knots_valid_ = false;
+    coupled_knot_delta_theta_.clear();
+    coupled_knot_delta_pos_.clear();
+    coupled_knot_delta_vel_.clear();
+    coupled_knot_cov_.clear();
+    if (!mg.poses.empty() && mg.image.t > mg.poses.front().t) {
+      const double t0 = mg.poses.front().t;
+      const double t1 = mg.image.t;
+      Eigen::Matrix<double, 9, 9> P0 = Eigen::Matrix<double, 9, 9>::Zero();
+      const Eigen::MatrixXd& P_full = state_->cov();
+      if (P_full.rows() >= 9 && P_full.cols() >= 9) P0 = P_full.block<9, 9>(0, 0);
+      coupled_pose_knots_valid_ = coupled_pose_knots_.init(
+          mg.poses, t0, t1, copts_.pose_knots_n,
+          mg.poses.front().pos, mg.poses.front().rot, mg.poses.front().vel, P0,
+          mg.imu_samples_raw, state_->biasAcc(), state_->biasGyr(), state_->gravity(),
+          copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, state_->varAcc(), state_->varGyr(),
+          copts_.repro_second_order);
+      if (coupled_pose_knots_valid_) {
+        const int n = coupled_pose_knots_.nKnots();
+        coupled_knot_delta_theta_.assign(n, V3D::Zero());
+        coupled_knot_delta_pos_.assign(n, V3D::Zero());
+        coupled_knot_delta_vel_.assign(n, V3D::Zero());
+        coupled_knot_cov_.assign(n, Eigen::Matrix<double, 9, 9>::Zero());
+      }
+    }
+  }
   // mg.poses.front().vel (NOT state_->vel()), for consistency with
   // rot0/pos0 in estimateCoupledCorrection() -- all three come from the
   // SAME raw-chain snapshot.
@@ -705,6 +746,75 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         << "  (post-loop bg-projection/final_redeskew/most CQ-53-era "
         << "diagnostics SKIPPED -- raw_imu-specific, not yet ported to "
         << "this basis, per CQ-87's own not-in-scope list)";
+    return oss.str();
+  }
+
+  // User instruction 2026-09-21 items 12/13/18/27: the physical-knot
+  // arm's own early return, parallel to poseBasis() above -- same
+  // rationale (the raw_imu-specific post-loop bookkeeping below has no
+  // analogue for this arm's own [theta,p,v]-only, N-knot state).
+  if (copts_.poseKnotsBasis()) {
+    boundary_dpos_ = 0.0;
+    boundary_drot_deg_ = 0.0;
+    // Item 18's own "this is also where your previously identified
+    // P(t0)/P(t1) issue needs to be resolved" -- the posterior write here
+    // uses the TAIL knot's own marginal (items 12/13), read directly off
+    // the joint solve's A^-1 diagonal block, not a basis-coefficient
+    // translation. Rotation/position/velocity are ALL written (unlike the
+    // coefficient-basis arm, which could only ever offer [rot,pos] since
+    // it never solved velocity jointly) -- bias/gravity remain untouched
+    // (item 22: held fixed this round).
+    if (!coupled_knot_cov_.empty()) {
+      Eigen::MatrixXd P_full = state_->cov();
+      const int iR = StateGroup::idxR(), iP = StateGroup::idxP(), iV = StateGroup::idxV();
+      if (P_full.rows() >= iV + 3 && P_full.cols() >= iV + 3) {
+        const auto& Ptail = coupled_knot_cov_.back();
+        P_full.block<3, 3>(iR, iR) = Ptail.block<3, 3>(0, 0);
+        P_full.block<3, 3>(iR, iP) = Ptail.block<3, 3>(0, 3);
+        P_full.block<3, 3>(iP, iR) = Ptail.block<3, 3>(3, 0);
+        P_full.block<3, 3>(iP, iP) = Ptail.block<3, 3>(3, 3);
+        P_full.block<3, 3>(iR, iV) = Ptail.block<3, 3>(0, 6);
+        P_full.block<3, 3>(iV, iR) = Ptail.block<3, 3>(6, 0);
+        P_full.block<3, 3>(iP, iV) = Ptail.block<3, 3>(3, 6);
+        P_full.block<3, 3>(iV, iP) = Ptail.block<3, 3>(6, 3);
+        P_full.block<3, 3>(iV, iV) = Ptail.block<3, 3>(6, 6);
+        state_->covMut() = P_full;
+      }
+    }
+    coupled_diag.n_residuals = static_cast<int>(residuals_.size());
+    coupled_diag.n_c_requested = copts_.pose_knots_n;
+    coupled_diag.n_c_actual    = coupled_pose_knots_.nKnots();
+    coupled_diag.n_c_clamped   = 0;  // PoseKnotSpline::init() has no clamp -- n_knots is exact, always.
+    coupled_diag.n_imu_samples = mg.n_imu_samples;
+    {
+      const Eigen::MatrixXd& P_post = state_->cov();
+      const int iR = StateGroup::idxR(), iP = StateGroup::idxP();
+      if (P_post.rows() >= iP + 3 && P_post.cols() >= iP + 3) {
+        const M3D P_pp_post = P_post.block<3, 3>(iP, iP);
+        Eigen::SelfAdjointEigenSolver<M3D> es_p_post(P_pp_post);
+        coupled_diag.p_pos_eig_min_post = es_p_post.eigenvalues()(0);
+        coupled_diag.p_pos_eig_mid_post = es_p_post.eigenvalues()(1);
+        coupled_diag.p_pos_eig_max_post = es_p_post.eigenvalues()(2);
+        coupled_diag.trP_pos_post = P_pp_post.trace();
+        const M3D P_rr_post = P_post.block<3, 3>(iR, iR);
+        Eigen::SelfAdjointEigenSolver<M3D> es_r_post(P_rr_post);
+        coupled_diag.p_rot_trace_post   = P_rr_post.trace();
+        coupled_diag.p_rot_eig_min_post = es_r_post.eigenvalues()(0);
+        coupled_diag.p_rot_eig_mid_post = es_r_post.eigenvalues()(1);
+        coupled_diag.p_rot_eig_max_post = es_r_post.eigenvalues()(2);
+      }
+    }
+    if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) vm->noteLioFrameDiag(coupled_diag);
+
+    std::ostringstream oss;
+    oss << "[lio/ekf][pose-knots] iters=" << iter + 1 << "  stop=" << stop
+        << std::scientific << std::setprecision(1)
+        << "  |dtheta|=" << total_dtheta.norm() * (180.0 / M_PI) << " deg"
+        << "  |dt|=" << total_dt.norm() * 1000.0 << " mm"
+        << "  n_knots=" << coupled_pose_knots_.nKnots()
+        << "  (post-loop bg-projection/final_redeskew/most CQ-53-era "
+        << "diagnostics SKIPPED -- raw_imu-specific, no analogue for this "
+        << "arm's own N-knot state, same as the coefficient-basis arm)";
     return oss.str();
   }
 
@@ -2288,6 +2398,7 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // path's own ~600 lines of downstream bookkeeping as possible -- see
   // estimateCoupledCorrectionPoseBasis()'s own doc comment.
   if (copts_.poseBasis()) return estimateCoupledCorrectionPoseBasis(mg, dtheta_out, dt_out);
+  if (copts_.poseKnotsBasis()) return estimateCoupledPoseKnotSpline(mg, dtheta_out, dt_out);
 
   const auto t_start = std::chrono::steady_clock::now();
 
@@ -3435,6 +3546,306 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
   dt_out = new_tail_p - prev_tail_p;
   state_->setPropagatedState(new_tail_R, new_tail_p, new_tail_v);
   coupled_last_A_ = build.A;
+
+  double sum_abs_r = 0.0;
+  for (const auto& res : residuals_) sum_abs_r += std::abs(res.r);
+  return residuals_.empty() ? 0.0 : sum_abs_r / static_cast<double>(residuals_.size());
+}
+
+// ============================================================================
+// User instruction 2026-09-21 items 1-27 ("do all of them"): the physical-
+// knot pose spline. See pose_knot_spline.h's own doc comment for the
+// architecture and this file's own scan-start init block (above) for
+// items 3/5/6/18. Every GN iteration:
+//   1. build a TRIAL copy of coupled_pose_knots_ with this scan's
+//      accumulated corrections applied (mirrors estimateCoupledCorrection-
+//      PoseBasis()'s own `trial` pattern exactly);
+//   2. deskew + buildResiduals() against it (item 8, point_time/end_time
+//      per item 9/10, via a local deskew loop -- deskewPointsSpline()
+//      itself is ScanSpline-specific, not reusable for this class);
+//   3. assemble the JOINT (9*N)x(9*N) information system (item 14's
+//      "mathematically clean" batch form, not independent per-knot
+//      updates): a head prior (item 18), IMU process factors between
+//      adjacent knots (item 16, using the CACHED per-segment F9/Q9 from
+//      init() -- see PoseKnotSpline::segF9/segQ9's own doc comment for the
+//      named simplification), an optional discrete smoothness prior (item
+//      20's own "simpler first implementation" fallback, off by default),
+//      and LiDAR factors (item 8, analytic position/velocity Jacobian via
+//      the Hermite weights, FD rotation Jacobian per item 16's own
+//      allowance to "retain FD initially for validation");
+//   4. the SAME step-size trust-region safeguard the coefficient-basis arm
+//      needed (copts_.pose_gn_max_step_pos_m/rot_rad) -- carried over as a
+//      precaution, not asked for again in this item list but clearly still
+//      warranted given the earlier round's own findings;
+//   5. solve, apply, and -- since x_j IS the physical knot state directly
+//      here -- read Cov(x_j,x_j) straight off A^-1's own diagonal blocks
+//      (items 12/13/27), no basis-coefficient Jacobian chaining needed at
+//      all (pose_knot_spline.h's own point).
+// ============================================================================
+double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out)
+{
+  dtheta_out = V3D::Zero();
+  dt_out = V3D::Zero();
+  if (!coupled_pose_knots_valid_) {
+    std::ostringstream diag;
+    diag << "[coupled/pose_knots] estimateCoupledPoseKnotSpline(): this "
+            "scan's PoseKnotSpline::init() failed or never ran at scan "
+            "start -- no valid initial trajectory to correct. "
+            "mg.poses.size()=" << mg.poses.size()
+         << " n_knots=" << copts_.pose_knots_n << " scan_id=" << voxel_map_->frame_idx_;
+    throw std::runtime_error(diag.str());
+  }
+
+  const double t1 = mg.image.t;
+  const int N = coupled_pose_knots_.nKnots();
+  if (static_cast<int>(coupled_knot_delta_theta_.size()) != N ||
+      static_cast<int>(coupled_knot_delta_pos_.size()) != N ||
+      static_cast<int>(coupled_knot_delta_vel_.size()) != N) {
+    std::ostringstream diag;
+    diag << "[coupled/pose_knots] DIAG size mismatch: N=" << N
+         << " delta_theta.size()=" << coupled_knot_delta_theta_.size()
+         << " delta_pos.size()=" << coupled_knot_delta_pos_.size()
+         << " delta_vel.size()=" << coupled_knot_delta_vel_.size();
+    throw std::runtime_error(diag.str());
+  }
+
+  // Trial: coupled_pose_knots_ itself is FIXED (this scan's one-time
+  // init() result, never mutated) -- a copy with this scan's accumulated
+  // corrections applied, exactly mirroring the coefficient-basis arm's own
+  // `ScanSpline trial = coupled_pose_spline_` pattern.
+  PoseKnotSpline trial = coupled_pose_knots_;
+  for (int j = 0; j < N; ++j) {
+    trial.knotMut(j).pos = coupled_pose_knots_.knot(j).pos + coupled_knot_delta_pos_[j];
+    trial.knotMut(j).rot = coupled_pose_knots_.knot(j).rot * Exp(coupled_knot_delta_theta_[j]);
+    trial.knotMut(j).vel = coupled_pose_knots_.knot(j).vel + coupled_knot_delta_vel_[j];
+  }
+  const M3D prev_tail_R = trial.rotationAt(t1);
+  const V3D prev_tail_p = trial.positionAt(t1);
+
+  // Item 8: deskew every point at its OWN capture-time pose against the
+  // trial trajectory, expressed in the scan-end frame -- the same
+  // computation deskewOnePointSpline() (lio/deskew.cpp) performs for
+  // ScanSpline, re-derived here since that function is not generic over
+  // PoseKnotSpline.
+  const M3D R_end_T = trial.rotationAt(t1).transpose();
+  const V3D p_end = trial.positionAt(t1);
+  std::vector<PointXYZCov> deskewed(mg.lidar_points.size());
+  for (size_t i = 0; i < mg.lidar_points.size(); ++i) {
+    const auto& pt = mg.lidar_points[i];
+    const M3D R_i = trial.rotationAt(pt.t);
+    const V3D p_i = trial.positionAt(pt.t);
+    const M3D R_rel = R_end_T * R_i;
+    const V3D t_rel = R_end_T * (p_i - p_end);
+    const V3D p_imu_i = state_->lidarToImu(pt.p);
+    const V3D p_imu_end = R_rel * p_imu_i + t_rel;
+    const M3D cov_lidar_i = getBodyCov(pt.p, opts_.deskew.sigma_r2, opts_.deskew.sigma_a2);
+    const M3D cov_imu_end = state_->lidarToImu(M3D(R_rel * cov_lidar_i * R_rel.transpose()));
+    deskewed[i] = PointXYZCov{p_imu_end, cov_imu_end};
+    deskewed[i].t = pt.t;
+  }
+  if (opts_.dsOn()) {
+    DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
+    voxelDownsample(deskewed, mg.points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
+  } else {
+    mg.points = deskewed;
+  }
+  buildResiduals(mg.points, residuals_, coupled_iters_ == 0);
+
+  const bool use_end_time = (copts_.jacobian_time_mode == "end_time");
+
+  constexpr int kDim = 9;
+  const int total = kDim * N;
+  Eigen::MatrixXd A = Eigen::MatrixXd::Zero(total, total);
+  Eigen::VectorXd b = Eigen::VectorXd::Zero(total);
+  // Small fixed floor, same role as POSE_SPLINE_TIKHONOV_EPS -- keeps A
+  // invertible even with every other term off (e.g. use_imu_factors=false
+  // and no LiDAR residuals this scan).
+  A.diagonal().array() += 1e-6;
+
+  // ---- item 18: head prior, Omega0 = P0^-1 (P0 == knot 0's own P, set
+  // ONCE at init() from state_->cov(), never mutated) ----
+  {
+    Eigen::Matrix<double, 9, 9> Omega0 = coupled_pose_knots_.knot(0).P;
+    Eigen::LDLT<Eigen::Matrix<double, 9, 9>> ldlt_p0(Omega0);
+    Omega0 = ldlt_p0.solve(Eigen::Matrix<double, 9, 9>::Identity());
+    Eigen::Matrix<double, 9, 1> s0;
+    s0.segment<3>(0) = coupled_knot_delta_theta_[0];
+    s0.segment<3>(3) = coupled_knot_delta_pos_[0];
+    s0.segment<3>(6) = coupled_knot_delta_vel_[0];
+    A.block<9, 9>(0, 0) += Omega0;
+    b.segment<9>(0) -= Omega0 * s0;
+  }
+
+  // ---- item 16: IMU process factors between adjacent knots ----
+  if (copts_.pose_knots_use_imu_factors) {
+    for (int j = 0; j + 1 < N; ++j) {
+      const auto& F9 = coupled_pose_knots_.segF9(j);
+      Eigen::Matrix<double, 9, 9> Q9 = coupled_pose_knots_.segQ9(j);
+      Q9.diagonal().array() += 1e-9;  // floor, matches the head-prior floor's spirit
+      Eigen::LDLT<Eigen::Matrix<double, 9, 9>> ldlt_q(Q9);
+      const Eigen::Matrix<double, 9, 9> Lambda = ldlt_q.solve(Eigen::Matrix<double, 9, 9>::Identity());
+      Eigen::Matrix<double, 9, 1> xj, xj1;
+      xj.segment<3>(0) = coupled_knot_delta_theta_[j];
+      xj.segment<3>(3) = coupled_knot_delta_pos_[j];
+      xj.segment<3>(6) = coupled_knot_delta_vel_[j];
+      xj1.segment<3>(0) = coupled_knot_delta_theta_[j + 1];
+      xj1.segment<3>(3) = coupled_knot_delta_pos_[j + 1];
+      xj1.segment<3>(6) = coupled_knot_delta_vel_[j + 1];
+      const Eigen::Matrix<double, 9, 1> r = xj1 - F9 * xj;
+      const Eigen::Matrix<double, 9, 9> FtL = F9.transpose() * Lambda;
+      A.block<9, 9>(kDim * j, kDim * j)         += FtL * F9;
+      A.block<9, 9>(kDim * j, kDim * (j + 1))   += -FtL;
+      A.block<9, 9>(kDim * (j + 1), kDim * j)   += -Lambda * F9;
+      A.block<9, 9>(kDim * (j + 1), kDim * (j + 1)) += Lambda;
+      b.segment<9>(kDim * j)       += FtL * r;
+      b.segment<9>(kDim * (j + 1)) += -Lambda * r;
+    }
+  }
+
+  // ---- item 20's own fallback: discrete first-difference smoothness,
+  // off (0.0) by default per item 31's own "first prove... then add
+  // smoothness" ----
+  if (copts_.pose_knots_smoothness_pos > 0.0 || copts_.pose_knots_smoothness_rot > 0.0) {
+    for (int j = 0; j + 1 < N; ++j) {
+      if (copts_.pose_knots_smoothness_pos > 0.0) {
+        const double lp = copts_.pose_knots_smoothness_pos;
+        const V3D rp = coupled_knot_delta_pos_[j + 1] - coupled_knot_delta_pos_[j];
+        A.block<3, 3>(kDim * j + 3, kDim * j + 3)         += lp * M3D::Identity();
+        A.block<3, 3>(kDim * j + 3, kDim * (j + 1) + 3)   += -lp * M3D::Identity();
+        A.block<3, 3>(kDim * (j + 1) + 3, kDim * j + 3)   += -lp * M3D::Identity();
+        A.block<3, 3>(kDim * (j + 1) + 3, kDim * (j + 1) + 3) += lp * M3D::Identity();
+        b.segment<3>(kDim * j + 3)       += lp * rp;
+        b.segment<3>(kDim * (j + 1) + 3) += -lp * rp;
+      }
+      if (copts_.pose_knots_smoothness_rot > 0.0) {
+        const double lr = copts_.pose_knots_smoothness_rot;
+        const V3D rr = coupled_knot_delta_theta_[j + 1] - coupled_knot_delta_theta_[j];
+        A.block<3, 3>(kDim * j, kDim * j)                 += lr * M3D::Identity();
+        A.block<3, 3>(kDim * j, kDim * (j + 1))           += -lr * M3D::Identity();
+        A.block<3, 3>(kDim * (j + 1), kDim * j)           += -lr * M3D::Identity();
+        A.block<3, 3>(kDim * (j + 1), kDim * (j + 1))     += lr * M3D::Identity();
+        b.segment<3>(kDim * j)       += lr * rr;
+        b.segment<3>(kDim * (j + 1)) += -lr * rr;
+      }
+    }
+  }
+
+  // ---- item 8/9/10: LiDAR factors, analytic position/velocity Jacobian
+  // (Hermite weights), FD rotation Jacobian (item 16's own allowance) ----
+  constexpr double kFdEps = 1e-6;
+  for (const auto& res : residuals_) {
+    const double t_eval = use_end_time ? t1 : res.t;
+    int j; double u;
+    trial.bracket(t_eval, j, u);
+    const double dt_seg = coupled_pose_knots_.knot(j + 1).t - coupled_pose_knots_.knot(j).t;
+    const double h00 = 2*u*u*u - 3*u*u + 1, h10 = u*u*u - 2*u*u + u;
+    const double h01 = -2*u*u*u + 3*u*u,    h11 = u*u*u - u*u;
+    const double w = 1.0 / std::max(res.sigma_squared, 1e-18);
+
+    Eigen::Matrix<double, 1, 18> Jrow;
+    Jrow.setZero();
+    // Position/velocity columns: analytic (position does not depend on
+    // rotation at all under this Hermite parameterization -- decoupled).
+    Jrow.segment<3>(3)  = h00 * res.normal.transpose();          // d/d(delta_pos_j)
+    Jrow.segment<3>(6)  = h10 * dt_seg * res.normal.transpose(); // d/d(delta_vel_j)
+    Jrow.segment<3>(12) = h01 * res.normal.transpose();          // d/d(delta_pos_{j+1})
+    Jrow.segment<3>(15) = h11 * dt_seg * res.normal.transpose(); // d/d(delta_vel_{j+1})
+    // Rotation columns: central FD, perturbing the TRIAL knot's own
+    // rotation (right-multiplicative) and re-evaluating the true
+    // residual r(c) = n^T(R(t)q + p(t)) + d, d held fixed at THIS
+    // residual's own current value (res.r already IS r(c_current) since
+    // it was computed against the trial spline above).
+    auto residualAt = [&](int knot_idx, int axis, double eps) {
+      PoseKnotSpline pert = trial;
+      pert.knotMut(knot_idx).rot = trial.knot(knot_idx).rot * Exp(V3D(eps * V3D::Unit(axis)));
+      const M3D R_t = pert.rotationAt(t_eval);
+      const V3D p_t = pert.positionAt(t_eval);
+      return res.normal.dot(R_t * res.raw_body_point + p_t) + (res.r - res.normal.dot(
+                 trial.rotationAt(t_eval) * res.raw_body_point + trial.positionAt(t_eval)));
+    };
+    for (int axis = 0; axis < 3; ++axis) {
+      const double rp = residualAt(j, axis, kFdEps);
+      const double rm = residualAt(j, axis, -kFdEps);
+      Jrow(0 + axis) = (rp - rm) / (2 * kFdEps);
+      const double rp1 = residualAt(j + 1, axis, kFdEps);
+      const double rm1 = residualAt(j + 1, axis, -kFdEps);
+      Jrow(9 + axis) = (rp1 - rm1) / (2 * kFdEps);
+    }
+
+    A.block<18, 18>(kDim * j, kDim * j).noalias() += w * (Jrow.transpose() * Jrow);
+    b.segment<18>(kDim * j).noalias() -= w * Jrow.transpose() * res.r;
+  }
+
+  // ---- item 15's own step-size safeguard, carried over ----
+  Eigen::LDLT<Eigen::MatrixXd> ldlt_a(A);
+  Eigen::VectorXd delta = ldlt_a.solve(b);
+  if (ldlt_a.info() != Eigen::Success || !delta.allFinite() || delta.size() != total) {
+    std::ostringstream diag;
+    diag << "[coupled/pose_knots] FATAL: joint GN solve produced a "
+            "non-finite/failed result -- refusing to apply it to state_. "
+            "ldlt.info()=" << static_cast<int>(ldlt_a.info())
+         << " (0=Success) allFinite=" << delta.allFinite()
+         << " N=" << N << " total=" << total
+         << " iter=" << coupled_iters_ << " scan_id=" << voxel_map_->frame_idx_;
+    throw std::runtime_error(diag.str());
+  }
+  {
+    double max_step_pos = 0.0, max_step_rot = 0.0;
+    for (int j = 0; j < N; ++j) {
+      max_step_pos = std::max(max_step_pos, delta.segment<3>(kDim * j + 3).norm());
+      max_step_rot = std::max(max_step_rot, delta.segment<3>(kDim * j + 0).norm());
+    }
+    double scale = 1.0;
+    if (copts_.pose_gn_max_step_pos_m > 0.0 && max_step_pos > copts_.pose_gn_max_step_pos_m)
+      scale = std::min(scale, copts_.pose_gn_max_step_pos_m / max_step_pos);
+    if (copts_.pose_gn_max_step_rot_rad > 0.0 && max_step_rot > copts_.pose_gn_max_step_rot_rad)
+      scale = std::min(scale, copts_.pose_gn_max_step_rot_rad / max_step_rot);
+    if (scale < 1.0) delta *= scale;
+  }
+
+  for (int j = 0; j < N; ++j) {
+    coupled_knot_delta_theta_[j] += delta.segment<3>(kDim * j + 0);
+    coupled_knot_delta_pos_[j]   += delta.segment<3>(kDim * j + 3);
+    coupled_knot_delta_vel_[j]   += delta.segment<3>(kDim * j + 6);
+  }
+
+  // Items 12/13: read Cov(x_j,x_j) straight off A^-1's own diagonal
+  // blocks -- x_j IS the physical knot state here, no chaining needed.
+  {
+    Eigen::MatrixXd A_inv = ldlt_a.solve(Eigen::MatrixXd::Identity(total, total));
+    for (int j = 0; j < N; ++j) coupled_knot_cov_[j] = A_inv.block<9, 9>(kDim * j, kDim * j);
+  }
+
+  // Item 27: trajectory covariance logging, gated the same way every
+  // other per-iteration pose-arm diagnostic in this file is.
+  if (copts_.psd_audit_en) {
+    static PersistentLogStream cov_log("pose_knots_cov.txt");
+    bool cov_first;
+    std::ofstream& cov_ofs = cov_log.stream(&cov_first);
+    if (cov_first) cov_ofs << "scan_id,iter,knot,t,tr_Pp,tr_Ptheta,tr_Pv\n";
+    for (int j = 0; j < N; ++j) {
+      cov_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << j << ","
+              << coupled_pose_knots_.knot(j).t << ","
+              << coupled_knot_cov_[j].block<3, 3>(3, 3).trace() << ","
+              << coupled_knot_cov_[j].block<3, 3>(0, 0).trace() << ","
+              << coupled_knot_cov_[j].block<3, 3>(6, 6).trace() << "\n";
+    }
+    cov_ofs.flush();
+  }
+
+  PoseKnotSpline trial_new = coupled_pose_knots_;
+  for (int j = 0; j < N; ++j) {
+    trial_new.knotMut(j).pos = coupled_pose_knots_.knot(j).pos + coupled_knot_delta_pos_[j];
+    trial_new.knotMut(j).rot = coupled_pose_knots_.knot(j).rot * Exp(coupled_knot_delta_theta_[j]);
+    trial_new.knotMut(j).vel = coupled_pose_knots_.knot(j).vel + coupled_knot_delta_vel_[j];
+  }
+  const M3D new_tail_R = trial_new.rotationAt(t1);
+  const V3D new_tail_p = trial_new.positionAt(t1);
+  const V3D new_tail_v = trial_new.velocityAt(t1);
+
+  dtheta_out = Log(prev_tail_R.transpose() * new_tail_R);
+  dt_out = new_tail_p - prev_tail_p;
+  state_->setPropagatedState(new_tail_R, new_tail_p, new_tail_v);
 
   double sum_abs_r = 0.0;
   for (const auto& res : residuals_) sum_abs_r += std::abs(res.r);

@@ -3,6 +3,7 @@
 #include "livo_recon/processing/lio_base.h"
 #include "livo_recon/lio/coupled_estimator.h"
 #include "livo_recon/lio/pose_spline_system.h"
+#include "livo_recon/lio/pose_knot_spline.h"
 #include "livo_recon/utils/eval/nees_logger.h"
 
 #include <limits>
@@ -31,10 +32,22 @@ struct LioProcCoupledOptions
   //     in c_p directly (no chain through the IMU state), and the IMU
   //     enters as a measurement FACTOR (spline-implied accel/omega vs raw
   //     IMU), not a prior. See buildPoseSplineSystem().
+  //   "pose_knots" (user instruction 2026-09-21, 32-item redesign):
+  //     control points are ACTUAL PHYSICAL TRAJECTORY KNOTS (p_j,R_j,v_j at
+  //     known times t_j -- PoseKnotSpline, pose_knot_spline.h) rather than
+  //     B-spline basis coefficients (cp_j != p(tj) under "pose" -- this
+  //     mode's whole point is closing that gap so a covariance genuinely
+  //     attached to knot j means Cov[p(tj),theta(tj)], not
+  //     Cov[coefficient j]). Kept as a THIRD, separate mode alongside
+  //     "pose" (item 23: "I would not replace ScanSpline globally... this
+  //     protects the existing decoupled estimator" -- and by the same
+  //     logic, protects the existing coefficient-basis "pose" mode too,
+  //     which stays exactly as shipped for comparison).
   // Config key: estimator/coupled/spline_mode.
   std::string spline_mode = "raw_imu";
-  static constexpr const char* SPLINE_MODES[] = { "raw_imu", "pose" };
+  static constexpr const char* SPLINE_MODES[] = { "raw_imu", "pose", "pose_knots" };
   bool poseBasis() const { return spline_mode == "pose"; }
+  bool poseKnotsBasis() const { return spline_mode == "pose_knots"; }
 
   // CQ-82 Phase 2: pose-basis-only weights. Meaningless under raw_imu (the
   // refusal wiring never checks these -- they simply aren't read unless
@@ -121,6 +134,36 @@ struct LioProcCoupledOptions
   // choice -- report the actual number this produces before trusting it.
   double pose_gn_max_step_pos_m = 0.5;
   double pose_gn_max_step_rot_rad = 0.2;
+
+  // ==========================================================================
+  // User instruction 2026-09-21 ("do all of them", the 32-item physical-
+  // knot redesign) -- estimator/coupled/pose_knots/*, meaningful only under
+  // spline_mode=pose_knots (poseKnotsBasis()). See pose_knot_spline.h and
+  // estimateCoupledPoseKnotSpline() for the actual mechanism; these are
+  // just its tunables. Item 31's own "first experiment" config: n_knots=13
+  // (matching this project's usual n_c range), smoothness OFF, IMU factors
+  // ON, point_time by default (this arm reuses the SAME
+  // estimator/coupled/jacobian_time_mode key the other two arms read --
+  // item 9's own "keep point_time/end_time as an orthogonal experiment").
+  // ==========================================================================
+  int pose_knots_n = 13;
+  // Item 20's own "simpler first implementation" fallback: a first-
+  // difference penalty between ADJACENT knots' position/rotation
+  // corrections (||delta_p_{j+1}-delta_p_j||^2 etc.), NOT the physically-
+  // motivated integral jerk/angular-acceleration form item 20 states as
+  // the ideal -- that would need a higher-order interpolation than the
+  // cubic Hermite this first implementation uses. 0.0 = off (item 31: "First
+  // prove physical knot representation + IMU factors + LiDAR works. Then
+  // add smoothness" -- this class of prior is deliberately NOT what
+  // enforces trajectory sanity in v1; the IMU process factor is).
+  double pose_knots_smoothness_pos = 0.0;
+  double pose_knots_smoothness_rot = 0.0;
+  // Ablation knob (item 31's own YAML lists it explicitly): with this off,
+  // consecutive knots have NO process-factor link at all (only the
+  // optional smoothness prior above, if nonzero, and each knot's own
+  // LiDAR factors) -- a genuinely degenerate configuration, kept only for
+  // testing that the IMU factor is actually doing something.
+  bool pose_knots_use_imu_factors = true;
 
   // CQ-85 item 1: rule 58f's exact failure mode -- CQ-72's own 96-cell grid
   // produced a cell reporting completed=yes with ATE=396,499,288.300 mm (a
@@ -540,6 +583,19 @@ private:
   // needed -- the pose basis's own trajectory already IS an absolute
   // pose, not a correction requiring re-propagation).
   double estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out);
+  // User instruction 2026-09-21 item 24: a NEW solver, not a further
+  // extension of estimateCoupledCorrectionPoseBasis() ("that name now
+  // describes the old coefficient-based architecture"). Owns: knot states/
+  // covariance (coupled_pose_knots_), the joint per-GN-iteration
+  // information system (item 14's "mathematically clean" batch form -- ALL
+  // knots solved together, not independent sequential updates), IMU
+  // process factors between adjacent knots (item 16), LiDAR factors
+  // attached to each residual's own bracketing knot pair (item 8/9), and
+  // the joint posterior A^-1 this class reads knot marginal/cross
+  // covariance from directly (items 12/13/27 -- see pose_knot_spline.h's
+  // own doc comment for why no basis-coefficient translation is needed
+  // here, unlike coupled_pose_head_cov_ above).
+  double estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out);
   // CQ-82 Phase 1: everything buildImuCorrectionSystem() (and, in Phase 2,
   // its pose-basis sibling) hands back to the dispatcher besides A/b itself
   // -- every sum/accumulator the residual loop used to leave in a bare local
@@ -618,6 +674,24 @@ private:
   // see item 4). Valid only when poseBasis() && pose_head_freeze_cp==0
   // (the real-coupling path); untouched, unread otherwise.
   Eigen::Matrix<double, 6, 6> coupled_pose_head_cov_ = Eigen::Matrix<double, 6, 6>::Zero();
+
+  // User instruction 2026-09-21 items 1-4/24: the physical-knot analogue
+  // of coupled_pose_spline_/coupled_c_pos_/coupled_c_rot_ above. Built
+  // ONCE per scan (first GN iteration) via PoseKnotSpline::init(); the
+  // ACCUMULATED per-knot [delta_theta,delta_p,delta_v] corrections (9*N,
+  // same flattened order as the joint solve) persist across this scan's
+  // GN iterations, reset at scan start, exactly mirroring coupled_c_pos_/
+  // coupled_c_rot_'s own pattern. Only meaningful when
+  // copts_.poseKnotsBasis().
+  PoseKnotSpline coupled_pose_knots_;
+  bool coupled_pose_knots_valid_ = false;
+  std::vector<V3D> coupled_knot_delta_theta_, coupled_knot_delta_pos_, coupled_knot_delta_vel_;
+  // The joint posterior's own knot-diagonal covariance blocks after the
+  // LAST (converged) GN iteration's solve -- items 12/13/27: read
+  // DIRECTLY off A^-1 at each knot's own row/col range, no basis-
+  // coefficient Jacobian chaining needed (see pose_knot_spline.h). Index
+  // j holds knot j's own 9x9 [theta,p,v] marginal.
+  std::vector<Eigen::Matrix<double, 9, 9>> coupled_knot_cov_;
   // CQ-79: this scan's PREVIOUS iteration's own set of matched-plane
   // hashes, for carry_frac -- reset to empty at scan start (alongside
   // coupled_iters_'s own reset), updated after every iteration's own
