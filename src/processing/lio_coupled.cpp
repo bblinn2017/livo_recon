@@ -746,6 +746,10 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     coupled_diag.n_c_actual    = coupled_pose_spline_.nControlPoints();
     coupled_diag.n_c_clamped   = coupled_pose_spline_.nControlPointsClamped() ? 1 : 0;
     coupled_diag.n_imu_samples = mg.n_imu_samples;
+    coupled_diag.n_miss_coverage = n_miss_coverage_;
+    coupled_diag.n_miss_mismatch = n_miss_mismatch_;
+    coupled_diag.n_tier0_miss_coverage = n_tier0_miss_coverage_;
+    coupled_diag.n_tier0_miss_mismatch = n_tier0_miss_mismatch_;
     {
       const Eigen::MatrixXd& P_post = state_->cov();
       const int iR = StateGroup::idxR(), iP = StateGroup::idxP();
@@ -815,6 +819,10 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     coupled_diag.n_c_actual    = coupled_pose_knots_.nKnots();
     coupled_diag.n_c_clamped   = 0;  // PoseKnotSpline::init() has no clamp -- n_knots is exact, always.
     coupled_diag.n_imu_samples = mg.n_imu_samples;
+    coupled_diag.n_miss_coverage = n_miss_coverage_;
+    coupled_diag.n_miss_mismatch = n_miss_mismatch_;
+    coupled_diag.n_tier0_miss_coverage = n_tier0_miss_coverage_;
+    coupled_diag.n_tier0_miss_mismatch = n_tier0_miss_mismatch_;
     {
       const Eigen::MatrixXd& P_post = state_->cov();
       const int iR = StateGroup::idxR(), iP = StateGroup::idxP();
@@ -1510,6 +1518,10 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         coupled_diag.kappa_gev4 = coupled_kappa_gev_[4]; coupled_diag.kappa_gev5 = coupled_kappa_gev_[5];
         coupled_diag.kappa_gev_ok  = coupled_kappa_gev_ok_;
         coupled_diag.n_imu_samples = mg.n_imu_samples;
+    coupled_diag.n_miss_coverage = n_miss_coverage_;
+    coupled_diag.n_miss_mismatch = n_miss_mismatch_;
+    coupled_diag.n_tier0_miss_coverage = n_tier0_miss_coverage_;
+    coupled_diag.n_tier0_miss_mismatch = n_tier0_miss_mismatch_;
         // CQ-87 item 8: raw_imu's own n_c never clamps (no per-scan
         // ScanSpline::fit() call on this arm at all) -- reported as
         // requested==actual, clamped=0, so this column reads consistently
@@ -4102,6 +4114,65 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     e_lidar_total += w * res.r * res.r;
   }
 
+  // Phase-6A diagnostic campaign (2026-09-22, user request, read-only --
+  // pure logging, no change to A/b/delta above): LiDAR correspondence
+  // counts + geometry (normal-direction spread, temporal occupancy) and
+  // the LiDAR-only Hessian block's own spectrum -- to distinguish
+  // correspondence-starvation failures (few/degenerate residuals, like
+  // C0's) from conditioning failures on a geometrically healthy
+  // correspondence set (many residuals, but concentrated in a narrow
+  // time window or normal direction).
+  if (copts_.psd_audit_en) {
+    const double t0i = coupled_pose_knots_.knot(0).t;
+    constexpr int kNIntervals = 4;
+    std::array<int, kNIntervals> interval_counts{};
+    M3D normal_sum_outer = M3D::Zero();
+    V3D normal_mean = V3D::Zero();
+    for (const auto& res : residuals_) normal_mean += res.normal;
+    if (!residuals_.empty()) normal_mean /= static_cast<double>(residuals_.size());
+    for (const auto& res : residuals_) {
+      const V3D d = res.normal - normal_mean;
+      normal_sum_outer += d * d.transpose();
+      const double frac = (t1 > t0i) ? (res.t - t0i) / (t1 - t0i) : 0.0;
+      int bin = static_cast<int>(frac * kNIntervals);
+      bin = std::max(0, std::min(kNIntervals - 1, bin));
+      interval_counts[bin]++;
+    }
+    Eigen::Vector3d normal_cov_eigs = Eigen::Vector3d::Zero();
+    if (residuals_.size() > 1) {
+      const M3D normal_cov = normal_sum_outer / static_cast<double>(residuals_.size() - 1);
+      Eigen::SelfAdjointEigenSolver<M3D> es_ncov(normal_cov);
+      normal_cov_eigs = es_ncov.eigenvalues();  // ascending
+    }
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_lidar(A_lidar);
+    const double lidar_lmin = es_lidar.eigenvalues().minCoeff();
+    const double lidar_lmax = es_lidar.eigenvalues().maxCoeff();
+    constexpr double kRankThresh = 1e-6;
+    int lidar_rank = 0;
+    for (int i = 0; i < es_lidar.eigenvalues().size(); ++i)
+      if (es_lidar.eigenvalues()(i) > kRankThresh * std::max(lidar_lmax, 1.0)) ++lidar_rank;
+
+    static PersistentLogStream lidar_geo_log("pose_knots_lidar_geometry.txt");
+    bool lidar_geo_first;
+    std::ofstream& lidar_geo_ofs = lidar_geo_log.stream(&lidar_geo_first);
+    if (lidar_geo_first)
+      lidar_geo_ofs << "scan_id,iter,n_residuals,n_miss_coverage,n_miss_mismatch,"
+                        "n_tier0_miss_coverage,n_tier0_miss_mismatch,"
+                        "normal_cov_lambda1,normal_cov_lambda2,normal_cov_lambda3,"
+                        "corr_count_interval_0,corr_count_interval_1,corr_count_interval_2,"
+                        "corr_count_interval_3,lidar_hessian_lambda_min,lidar_hessian_lambda_max,"
+                        "lidar_hessian_rank,lidar_hessian_condition\n";
+    lidar_geo_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << residuals_.size()
+                  << "," << n_miss_coverage_ << "," << n_miss_mismatch_ << ","
+                  << n_tier0_miss_coverage_ << "," << n_tier0_miss_mismatch_ << ","
+                  << normal_cov_eigs(0) << "," << normal_cov_eigs(1) << "," << normal_cov_eigs(2)
+                  << "," << interval_counts[0] << "," << interval_counts[1] << ","
+                  << interval_counts[2] << "," << interval_counts[3] << "," << lidar_lmin << ","
+                  << lidar_lmax << "," << lidar_rank << ","
+                  << (lidar_lmin > 0.0 ? lidar_lmax / lidar_lmin : -1.0) << "\n";
+    lidar_geo_ofs.flush();
+  }
+
   // POST-REVIEW FIX ("Test 1 -- prove whether A is genuinely indefinite"):
   // symmetrize defensively (each off-diagonal block pair above was
   // computed via two DIFFERENT matrix products -- e.g. -F9^T*Lambda vs
@@ -4613,6 +4684,39 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
                        << n_exact_constraints << "," << (total - rank_c) << "," << lmin_r << ","
                        << lmax_r << "," << (lmin_r > 0.0 ? lmax_r / lmin_r : -1.0) << "\n";
       exact_solve_ofs.flush();
+
+      // Phase-6A diagnostic campaign (2026-09-22, user request): weak-mode
+      // factor projections for the LOWEST 3 eigenvectors of the REDUCED
+      // (post-exact-constraint) Hessian -- es_red's eigenvectors() are
+      // already sorted ascending and already fully computed above (the
+      // default SelfAdjointEigenSolver ctor computes both eigenvalues and
+      // eigenvectors), so this is free reuse, not an extra decomposition.
+      // Each reduced-space eigenvector v_r maps back to full space via
+      // Z_ns (v_full = Z_ns*v_r); projecting v_full against each factor's
+      // own FULL-space Hessian block (A_prior/A_imu/A_lidar/A_smooth/
+      // A_det, all already accumulated above) gives v_full^T*A_factor*
+      // v_full, which sums to the eigenvalue itself for A_total (since
+      // v_r^T*A_reduced*v_r = v_r^T*(Z^T*A*Z)*v_r = v_full^T*A*v_full).
+      static PersistentLogStream weak_log("pose_knots_weak_modes.txt");
+      bool weak_first;
+      std::ofstream& weak_ofs = weak_log.stream(&weak_first);
+      if (weak_first)
+        weak_ofs << "scan_id,iter,eig_rank,lambda,proj_prior,proj_imu,proj_lidar,proj_smooth,"
+                     "proj_det,proj_total\n";
+      const int n_modes = std::min(3, static_cast<int>(es_red.eigenvectors().cols()));
+      for (int m = 0; m < n_modes; ++m) {
+        const Eigen::VectorXd v_full = Z_ns * es_red.eigenvectors().col(m);
+        const double lam = es_red.eigenvalues()(m);
+        const double p_prior = v_full.transpose() * A_prior * v_full;
+        const double p_imu = v_full.transpose() * A_imu * v_full;
+        const double p_lidar = v_full.transpose() * A_lidar * v_full;
+        const double p_smooth = v_full.transpose() * A_smooth * v_full;
+        const double p_det = v_full.transpose() * A_det * v_full;
+        weak_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << (m + 1) << ","
+                 << lam << "," << p_prior << "," << p_imu << "," << p_lidar << "," << p_smooth
+                 << "," << p_det << "," << (p_prior + p_imu + p_lidar + p_smooth + p_det) << "\n";
+      }
+      weak_ofs.flush();
     }
   } else {
     Eigen::LDLT<Eigen::MatrixXd> ldlt_a(A);
@@ -4681,34 +4785,49 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     // (max_step_pos/rot above ARE exactly these, taken BEFORE the trust-
     // region clamp below) and max spline acceleration over [t0,t1] this
     // iteration's own trial.
-    if (copts_.psd_audit_en) {
-      double max_acc = 0.0, max_angvel = 0.0;
-      constexpr int kAccGridN = 40;
-      const double t0g = coupled_pose_knots_.knot(0).t;
-      for (int k = 0; k <= kAccGridN; ++k) {
-        const double tg = t0g + (t1 - t0g) * (static_cast<double>(k) / kAccGridN);
-        max_acc = std::max(max_acc, trial.accelerationAt(tg).norm());
-        // Phase-6 (2026-09-22, campaign CSV's max_spline_angular_velocity
-        // column): same grid, reusing PoseKnotSpline::angularVelocityAt().
-        max_angvel = std::max(max_angvel, trial.angularVelocityAt(tg).norm());
-      }
-      static PersistentLogStream gn_tel_log("pose_knots_gn_telemetry.txt");
-      bool gn_tel_first;
-      std::ofstream& gn_tel_ofs = gn_tel_log.stream(&gn_tel_first);
-      if (gn_tel_first)
-        gn_tel_ofs << "scan_id,iter,max_delta_cp_inf,max_delta_cphi_inf,max_accel,max_angvel,"
-                      "e_lidar,e_process,e_det,e_smooth,e_total\n";
-      gn_tel_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << max_step_pos << ","
-                 << max_step_rot << "," << max_acc << "," << max_angvel << "," << e_lidar_total << ","
-                 << e_process_total << "," << e_det_total << "," << e_smooth_total << ","
-                 << (e_lidar_total + e_process_total + e_det_total + e_smooth_total) << "\n";
-      gn_tel_ofs.flush();
-    }
+    // gn_step_scale computed here (before the telemetry log below) so it
+    // can be logged alongside the update it actually applies to -- same
+    // value used for the real clamp further down, not recomputed.
     double scale = 1.0;
     if (copts_.pose_gn_max_step_pos_m > 0.0 && max_step_pos > copts_.pose_gn_max_step_pos_m)
       scale = std::min(scale, copts_.pose_gn_max_step_pos_m / max_step_pos);
     if (copts_.pose_gn_max_step_rot_rad > 0.0 && max_step_rot > copts_.pose_gn_max_step_rot_rad)
       scale = std::min(scale, copts_.pose_gn_max_step_rot_rad / max_step_rot);
+
+    if (copts_.psd_audit_en) {
+      double max_acc = 0.0, max_angvel = 0.0, sumsq_acc = 0.0, sumsq_angvel = 0.0;
+      constexpr int kAccGridN = 40;
+      const double t0g = coupled_pose_knots_.knot(0).t;
+      for (int k = 0; k <= kAccGridN; ++k) {
+        const double tg = t0g + (t1 - t0g) * (static_cast<double>(k) / kAccGridN);
+        const double acc_k = trial.accelerationAt(tg).norm();
+        const double angvel_k = trial.angularVelocityAt(tg).norm();
+        max_acc = std::max(max_acc, acc_k);
+        // Phase-6 (2026-09-22, campaign CSV's max_spline_angular_velocity
+        // column): same grid, reusing PoseKnotSpline::angularVelocityAt().
+        max_angvel = std::max(max_angvel, angvel_k);
+        sumsq_acc += acc_k * acc_k;
+        sumsq_angvel += angvel_k * angvel_k;
+      }
+      // Phase-6A diagnostic campaign (2026-09-22): RMS alongside max --
+      // a single pathological point on the spline vs. a trajectory that's
+      // bad everywhere are different situations, per user request.
+      const double rms_acc = std::sqrt(sumsq_acc / (kAccGridN + 1));
+      const double rms_angvel = std::sqrt(sumsq_angvel / (kAccGridN + 1));
+      static PersistentLogStream gn_tel_log("pose_knots_gn_telemetry.txt");
+      bool gn_tel_first;
+      std::ofstream& gn_tel_ofs = gn_tel_log.stream(&gn_tel_first);
+      if (gn_tel_first)
+        gn_tel_ofs << "scan_id,iter,max_delta_cp_inf,max_delta_cphi_inf,max_accel,rms_accel,"
+                      "max_angvel,rms_angvel,gn_step_scale,"
+                      "e_lidar,e_process,e_det,e_smooth,e_total\n";
+      gn_tel_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << max_step_pos << ","
+                 << max_step_rot << "," << max_acc << "," << rms_acc << "," << max_angvel << ","
+                 << rms_angvel << "," << scale << "," << e_lidar_total << ","
+                 << e_process_total << "," << e_det_total << "," << e_smooth_total << ","
+                 << (e_lidar_total + e_process_total + e_det_total + e_smooth_total) << "\n";
+      gn_tel_ofs.flush();
+    }
     if (scale < 1.0) delta *= scale;
   }
 

@@ -1667,6 +1667,10 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
       diag.n_points_after_pfn = static_cast<int>(mg.lidar_points.size());
       diag.n_points_after_ds  = static_cast<int>(mg.points.size());
       diag.n_imu_samples      = mg.n_imu_samples;
+      diag.n_miss_coverage = n_miss_coverage_;
+      diag.n_miss_mismatch = n_miss_mismatch_;
+      diag.n_tier0_miss_coverage = n_tier0_miss_coverage_;
+      diag.n_tier0_miss_mismatch = n_tier0_miss_mismatch_;
       // CQ-87 item 8: only meaningful when the spline is actually in use
       // this scan (spline.mode != raw_imu) -- left at their -1 defaults
       // otherwise, matching this struct's own "not applicable" convention.

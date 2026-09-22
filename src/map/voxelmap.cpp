@@ -117,7 +117,12 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            // CQ-87 item 8: ScanSpline::fit()'s silent clamp, reported on
            // both arms. Appended, not interleaved, per this file's own
            // convention.
-           ",n_c_requested,n_c_actual,n_c_clamped\n";
+           ",n_c_requested,n_c_actual,n_c_clamped"
+           // Phase-6A diagnostic campaign (2026-09-22): correspondence
+           // miss-classification counters, straight from LioProcBase --
+           // see LioFrameDiag's own doc comment. Appended, not
+           // interleaved, per this file's own convention.
+           ",n_miss_coverage,n_miss_mismatch,n_tier0_miss_coverage,n_tier0_miss_mismatch\n";
   first_call = false;
   // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
   // (6 significant figures) collapses every frame in a run to the same
@@ -169,6 +174,8 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.h_pp_max_eig
       << "," << lio.n_imu_samples
       << "," << lio.n_c_requested << "," << lio.n_c_actual << "," << lio.n_c_clamped
+      << "," << lio.n_miss_coverage << "," << lio.n_miss_mismatch
+      << "," << lio.n_tier0_miss_coverage << "," << lio.n_tier0_miss_mismatch
       << "\n";
   ofs.flush();
 }

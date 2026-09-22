@@ -632,6 +632,19 @@ struct LioFrameDiag
   int n_c_actual = -1;
   int n_c_clamped = -1;  // 0/1, -1 = not applicable/not populated
 
+  // Phase-6A diagnostic campaign (2026-09-22, user request): straight
+  // through from LioProcBase::n_miss_coverage_/n_miss_mismatch_/
+  // n_tier0_miss_coverage_/n_tier0_miss_mismatch_ (already computed by
+  // buildResiduals(), never logged before) -- lets a correspondence-
+  // starvation failure (few/degenerate residuals) be distinguished from a
+  // conditioning failure on an otherwise-healthy correspondence set,
+  // shared across raw_imu/decoupled/pose_knots since buildResiduals() is
+  // common machinery. -1 = not populated (caller didn't set it).
+  int n_miss_coverage = -1;
+  int n_miss_mismatch = -1;
+  int n_tier0_miss_coverage = -1;
+  int n_tier0_miss_mismatch = -1;
+
   // CQ-18 item (2).  S = floor_term + sigma_diag_squared + plane_var_term +
   // s_prior_pose, summed across this frame's residuals_; the four *_share
   // fields are each component's fraction of sum_S (sum to 1.0 to printing
