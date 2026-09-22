@@ -3769,6 +3769,9 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   // scalar objective term -- added here so gn_telemetry can report
   // E_smooth alongside E_lidar/E_process/E_det, same r^T*W*r convention.
   double e_smooth_total = 0.0;
+  // Phase-6A campaign (2026-09-22): gyro/accel chi2 proxies, see the
+  // e_process_total accumulation site's own comment for the exact caveat.
+  double e_process_gyr_proxy = 0.0, e_process_acc_proxy = 0.0;
 
   // Phase-3 (2026-09-22): exact deterministic equality constraint, via
   // nullspace elimination -- C_exact stacks each segment's own
@@ -3926,6 +3929,17 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       b.segment<9>(kDim * j)       += FtL * r;
       b.segment<9>(kDim * (j + 1)) += -Lambda * r;
       e_process_total += (r.transpose() * Lambda * r)(0);
+      // Phase-6A campaign (2026-09-22, user request, "mean_imu_acc_chi2/
+      // mean_imu_gyr_chi2" run-summary fields): approximate gyro/accel
+      // chi2 contributions using only the theta/vel DIAGONAL 3x3 blocks
+      // of Lambda (ignores cross-coupling with pos and with each other --
+      // Lambda is a full dense 9x9 in general, so this is a documented
+      // approximation, not the exact per-sensor decomposition of
+      // e_process_total, which does NOT split cleanly).
+      e_process_gyr_proxy += (r.segment<3>(0).transpose() * Lambda.block<3, 3>(0, 0)
+                               * r.segment<3>(0))(0);
+      e_process_acc_proxy += (r.segment<3>(6).transpose() * Lambda.block<3, 3>(6, 6)
+                               * r.segment<3>(6))(0);
 
       // Phase-3: fill this segment's own 3 constraint rows. C_j = N_j^T*J
       // where J=[-F9,I] acts on [xj;xj1] -- embedded at columns
@@ -4126,6 +4140,14 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     const double t0i = coupled_pose_knots_.knot(0).t;
     constexpr int kNIntervals = 4;
     std::array<int, kNIntervals> interval_counts{};
+    // Phase-6A campaign (2026-09-22, user request, "corr_count_knot_0..N"):
+    // per-SEGMENT (between knot j and j+1) correspondence counts, N-1 bins
+    // for N knots -- distinguishes "LiDAR information disappears globally"
+    // from "disappears for specific trajectory intervals" at the actual
+    // knot resolution, not an arbitrary fixed 4-way split. Variable width
+    // (depends on n_knots), so logged as one semicolon-joined field rather
+    // than exploding the column count per n_knots value.
+    std::vector<int> segment_counts(N > 0 ? N - 1 : 0, 0);
     M3D normal_sum_outer = M3D::Zero();
     V3D normal_mean = V3D::Zero();
     for (const auto& res : residuals_) normal_mean += res.normal;
@@ -4137,6 +4159,14 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       int bin = static_cast<int>(frac * kNIntervals);
       bin = std::max(0, std::min(kNIntervals - 1, bin));
       interval_counts[bin]++;
+      int seg_j; double seg_u;
+      trial.bracket(res.t, seg_j, seg_u);
+      if (seg_j >= 0 && seg_j < static_cast<int>(segment_counts.size())) segment_counts[seg_j]++;
+    }
+    std::ostringstream seg_counts_oss;
+    for (size_t k = 0; k < segment_counts.size(); ++k) {
+      if (k) seg_counts_oss << ";";
+      seg_counts_oss << segment_counts[k];
     }
     Eigen::Vector3d normal_cov_eigs = Eigen::Vector3d::Zero();
     if (residuals_.size() > 1) {
@@ -4169,7 +4199,8 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
                         "corr_count_interval_0,corr_count_interval_1,corr_count_interval_2,"
                         "corr_count_interval_3,lidar_hessian_lambda_min,lidar_hessian_lambda_max,"
                         "lidar_hessian_rank,lidar_hessian_condition,"
-                        "lidar_hessian_lambda1_top,lidar_hessian_lambda2_top,lidar_hessian_lambda3_top\n";
+                        "lidar_hessian_lambda1_top,lidar_hessian_lambda2_top,lidar_hessian_lambda3_top,"
+                        "corr_count_by_segment\n";
     lidar_geo_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << residuals_.size()
                   << "," << n_miss_coverage_ << "," << n_miss_mismatch_ << ","
                   << n_tier0_miss_coverage_ << "," << n_tier0_miss_mismatch_ << ","
@@ -4178,7 +4209,8 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
                   << interval_counts[2] << "," << interval_counts[3] << "," << lidar_lmin << ","
                   << lidar_lmax << "," << lidar_rank << ","
                   << (lidar_lmin > 0.0 ? lidar_lmax / lidar_lmin : -1.0) << ","
-                  << lidar_top1 << "," << lidar_top2 << "," << lidar_top3 << "\n";
+                  << lidar_top1 << "," << lidar_top2 << "," << lidar_top3 << ","
+                  << seg_counts_oss.str() << "\n";
     lidar_geo_ofs.flush();
   }
 
@@ -4832,11 +4864,13 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       if (gn_tel_first)
         gn_tel_ofs << "scan_id,iter,max_delta_cp_inf,max_delta_cphi_inf,max_accel,rms_accel,"
                       "max_angvel,rms_angvel,gn_step_scale,"
-                      "e_lidar,e_process,e_det,e_smooth,e_total\n";
+                      "e_lidar,e_process,e_process_gyr_proxy,e_process_acc_proxy,"
+                      "e_det,e_smooth,e_total\n";
       gn_tel_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << max_step_pos << ","
                  << max_step_rot << "," << max_acc << "," << rms_acc << "," << max_angvel << ","
                  << rms_angvel << "," << scale << "," << e_lidar_total << ","
-                 << e_process_total << "," << e_det_total << "," << e_smooth_total << ","
+                 << e_process_total << "," << e_process_gyr_proxy << "," << e_process_acc_proxy << ","
+                 << e_det_total << "," << e_smooth_total << ","
                  << (e_lidar_total + e_process_total + e_det_total + e_smooth_total) << "\n";
       gn_tel_ofs.flush();
     }
