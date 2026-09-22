@@ -4759,6 +4759,34 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
               << coupled_knot_cov_[j].block<3, 3>(6, 6).trace() << "\n";
     }
     cov_ofs.flush();
+
+    // Phase-5 (2026-09-22, prior_at_scan_start A/B): head-knot (j=0)
+    // prior eigenvalues (pos/theta blocks of P_prior, which is exactly
+    // the P0 fed into Omega0 at init() -- toggled by
+    // copts_.prior_at_scan_start between state_->cov() [P(t1), post-
+    // propagation] and the pre-propagation snapshot [P(t0)]) plus the
+    // actual converged correction magnitude ||delta_p0||/||delta_theta0||
+    // this iteration, so the two arms' effect on the actual optimized
+    // head state can be compared directly, not just their input priors.
+    if (N > 0) {
+      const auto& P0 = coupled_pose_knots_.knot(0).P_prior;
+      Eigen::SelfAdjointEigenSolver<M3D> es_p0(P0.block<3, 3>(3, 3));
+      Eigen::SelfAdjointEigenSolver<M3D> es_th0(P0.block<3, 3>(0, 0));
+      static PersistentLogStream head_prior_log("pose_knots_head_prior_diag.txt");
+      bool head_prior_first;
+      std::ofstream& head_prior_ofs = head_prior_log.stream(&head_prior_first);
+      if (head_prior_first)
+        head_prior_ofs << "scan_id,iter,tr_Pp0,eig_Pp0_min,eig_Pp0_max,"
+                           "tr_Pth0,eig_Pth0_min,eig_Pth0_max,"
+                           "delta_p0_norm,delta_theta0_norm\n";
+      head_prior_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << ","
+                     << P0.block<3, 3>(3, 3).trace() << "," << es_p0.eigenvalues().minCoeff() << ","
+                     << es_p0.eigenvalues().maxCoeff() << "," << P0.block<3, 3>(0, 0).trace() << ","
+                     << es_th0.eigenvalues().minCoeff() << "," << es_th0.eigenvalues().maxCoeff() << ","
+                     << coupled_knot_delta_pos_[0].norm() << "," << coupled_knot_delta_theta_[0].norm()
+                     << "\n";
+      head_prior_ofs.flush();
+    }
   }
 
   PoseKnotSpline trial_new = coupled_pose_knots_;
