@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <array>
 #include <limits>
+#include <numeric>
 #include <sstream>
 
 namespace livo_recon
@@ -4189,6 +4190,16 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     V3D normal_mean = V3D::Zero();
     for (const auto& res : residuals_) normal_mean += res.normal;
     if (!residuals_.empty()) normal_mean /= static_cast<double>(residuals_.size());
+    // VoxelMap diagnostic campaign (2026-09-22, user request, Part 4/5):
+    // per-plane confidence DISTRIBUTION (not just the frame-level max
+    // already in frame_stats.txt's max_plane_var_trace) among the planes
+    // actually used by THIS scan's residuals, plus a match-tier histogram
+    // -- both read straight off Residual::plane_var_term/match_tier,
+    // already-populated per-residual fields (see voxelmap_utils.h), no
+    // new tracking needed, just aggregation that didn't exist before.
+    std::vector<double> plane_var_terms;
+    plane_var_terms.reserve(residuals_.size());
+    std::array<int, 3> tier_counts{0, 0, 0};
     for (const auto& res : residuals_) {
       const V3D d = res.normal - normal_mean;
       normal_sum_outer += d * d.transpose();
@@ -4199,6 +4210,8 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       int seg_j; double seg_u;
       trial.bracket(res.t, seg_j, seg_u);
       if (seg_j >= 0 && seg_j < static_cast<int>(segment_counts.size())) segment_counts[seg_j]++;
+      if (res.plane_var_term >= 0.0) plane_var_terms.push_back(res.plane_var_term);
+      if (res.match_tier >= 0 && res.match_tier < 3) ++tier_counts[res.match_tier];
     }
     std::ostringstream seg_counts_oss;
     for (size_t k = 0; k < segment_counts.size(); ++k) {
@@ -4261,6 +4274,38 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     for (int i = 0; i < 10; ++i) lidar_geo_ofs << "," << lidar_eig_small[i];
     lidar_geo_ofs << "\n";
     lidar_geo_ofs.flush();
+
+    // VoxelMap diagnostic campaign (2026-09-22, user request, Part 4/5):
+    // plane_var_term distribution (mean/median/p95/max) among planes
+    // actually used this scan, plus the match-tier histogram (tier 0 =
+    // primary voxel, 1 = single directional neighbor, 2 = full
+    // neighborhood_size box search -- see Residual::match_tier's own doc
+    // comment). Distinguishes "correspondences from confident, converged
+    // planes" from "the estimator is falling back to marginal/fallback
+    // matches" -- max_plane_var_trace in frame_stats.txt is frame-level
+    // only, this is the actual per-plane spread.
+    {
+      static PersistentLogStream plane_dist_log("pose_knots_plane_confidence_dist.txt");
+      bool plane_dist_first;
+      std::ofstream& plane_dist_ofs = plane_dist_log.stream(&plane_dist_first);
+      if (plane_dist_first)
+        plane_dist_ofs << "scan_id,iter,n_planes_used,plane_var_mean,plane_var_median,"
+                           "plane_var_p95,plane_var_max,tier0_count,tier1_count,tier2_count\n";
+      double pv_mean = NAN, pv_median = NAN, pv_p95 = NAN, pv_max = NAN;
+      if (!plane_var_terms.empty()) {
+        std::vector<double> sorted_pv = plane_var_terms;
+        std::sort(sorted_pv.begin(), sorted_pv.end());
+        const size_t n = sorted_pv.size();
+        pv_mean = std::accumulate(sorted_pv.begin(), sorted_pv.end(), 0.0) / static_cast<double>(n);
+        pv_median = sorted_pv[n / 2];
+        pv_p95 = sorted_pv[static_cast<size_t>(0.95 * (n - 1))];
+        pv_max = sorted_pv.back();
+      }
+      plane_dist_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << plane_var_terms.size()
+                     << "," << pv_mean << "," << pv_median << "," << pv_p95 << "," << pv_max << ","
+                     << tier_counts[0] << "," << tier_counts[1] << "," << tier_counts[2] << "\n";
+      plane_dist_ofs.flush();
+    }
 
     // phase6A_diagnostic_results_v2 Test 4 (2026-09-22): per-segment
     // (knot j -> j+1) LiDAR-only Hessian trace/lambda_min/lambda_max,

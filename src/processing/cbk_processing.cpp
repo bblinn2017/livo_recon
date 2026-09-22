@@ -99,6 +99,7 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "data_queues/log_sync_debug", opts_.log_sync_debug, false);
   paramWarn<std::string>(pnh, "data_queues/sync_debug_log_path", opts_.sync_debug_log_path,
                           debugLogPath("livo_recon_sync_debug.txt"));
+  paramWarn<bool>(pnh, "data_queues/log_raw_point_count", opts_.log_raw_point_count, false);
   paramWarn<int>(pnh, "preprocess/image_subsample_n", opts_.image_subsample_n, 1);
 
   // Ground-truth topic ingestion -- see CbkProcOptions::evo_enable's doc
@@ -235,6 +236,16 @@ void CbkProc::lidarCallbackPcl(const sensor_msgs::PointCloud2::ConstPtr& msg)
 {
   TimedScope ts(profiler_, "cbk/lidar");
   const double scan_time = msg->header.stamp.toSec() + opts_.lidar_time_offset;
+  if (opts_.log_raw_point_count)
+  {
+    static PersistentLogStream raw_count_log("lidar_raw_point_count.txt");
+    bool raw_count_first;
+    std::ofstream& raw_count_ofs = raw_count_log.stream(&raw_count_first);
+    if (raw_count_first) raw_count_ofs << "scan_time,n_points_raw\n";
+    raw_count_ofs << std::setprecision(17) << scan_time << ","
+                  << (static_cast<size_t>(msg->width) * static_cast<size_t>(msg->height)) << "\n";
+    raw_count_ofs.flush();
+  }
   if (!measures_->isValid(scan_time))
   {
     ROS_WARN_STREAM("Received an old LiDAR scan. Ignoring. stamp=" << msg->header.stamp);

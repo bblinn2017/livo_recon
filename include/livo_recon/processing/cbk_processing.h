@@ -72,6 +72,19 @@ struct CbkProcOptions
   bool log_sync_debug = false;
   std::string sync_debug_log_path = "/tmp/livo_recon_sync_debug.txt";
 
+  // VoxelMap diagnostic campaign (2026-09-22, user request, Part 2/3):
+  // n_points_raw genuinely does not exist anywhere in the pipeline today
+  // -- point_filter_num's skip loop (lidar.cpp) discards the raw count
+  // before it's ever recorded. Writes (scan_time, n_raw) to a debug log
+  // directly in the callback -- a raw msg->width*msg->height read, no
+  // queue/MeasureGroup plumbing touched (lower blast radius than adding
+  // an accumulator into DataQueues, which is shared by every estimator
+  // mode's timing-critical consolidation path). Joined to frame_stats.txt/
+  // pose_pair.csv by nearest scan_time in post-processing, same pattern
+  // already used for GT alignment elsewhere in this campaign. OFF by
+  // default -- zero behavioral effect, purely an ofstream write.
+  bool log_raw_point_count = false;
+
   // History (86-98): see docs/livo_recon_changelog.md#include-livo_recon-processing-cbk_processing.h-86
   int image_subsample_n = 1;
 
