@@ -177,6 +177,19 @@ struct LioProcCoupledOptions
   // review is asking about, and stays at its own fixed 1e-6.
   double pose_knots_q_pinv_rel_thresh = 1e-6;
 
+  // Phase-2 diagnostic (2026-09-22 process-factor nullspace investigation):
+  // TEMPORARY soft penalty lambda_C*||N_j^T r_j||^2 added on top of the
+  // existing r_j^T Q_j^+ r_j process cost, where N_j spans the 3 lowest
+  // eigenvectors of that same GN iteration's relinearized Q9 (NOT the
+  // configurable q_pinv_rel_thresh nullspace -- deliberately fixed at "the 3
+  // smallest" per Phase 1's own dim(null(Q))=3 finding, to avoid confounding
+  // this experiment with a q_pinv_rel_thresh sweep). Does NOT touch the
+  // existing pseudoinverse, IMU/LiDAR weighting, or anything else -- this is
+  // an additive diagnostic term only, default off. See pose_knots_G_rank_check
+  // diagnostic / the nullspace-projection diagnostic this builds on.
+  bool pose_knots_det_constraint_en = false;
+  double pose_knots_det_constraint_weight = 1.0e4;
+
   // CQ-85 item 1: rule 58f's exact failure mode -- CQ-72's own 96-cell grid
   // produced a cell reporting completed=yes with ATE=396,499,288.300 mm (a
   // FAILED run that looked like a successful one; imu_deviation_weight=0,

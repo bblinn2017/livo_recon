@@ -110,6 +110,8 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/smoothness_rotation", copts_.pose_knots_smoothness_rot, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/use_imu_factors", copts_.pose_knots_use_imu_factors, true);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/q_pinv_rel_thresh", copts_.pose_knots_q_pinv_rel_thresh, 1e-6);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/deterministic_constraint_enable", copts_.pose_knots_det_constraint_en, false);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_knots/deterministic_constraint_weight", copts_.pose_knots_det_constraint_weight, 1.0e4);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/max_scan_displacement_m", copts_.max_scan_displacement_m, 0.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/zero_mean", copts_.zero_mean, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/disable_cgyr", copts_.disable_cgyr, false);
@@ -3736,6 +3738,15 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   Eigen::MatrixXd A_imu = Eigen::MatrixXd::Zero(total, total);
   Eigen::MatrixXd A_lidar = Eigen::MatrixXd::Zero(total, total);
   Eigen::MatrixXd A_smooth = Eigen::MatrixXd::Zero(total, total);
+  // Phase-2 diagnostic accumulator (deterministic-nullspace soft penalty),
+  // isolated the same way A_imu/A_lidar/etc are so v_min^T A_det v_min can
+  // be reported below alongside the other factor-strength numbers.
+  Eigen::MatrixXd A_det = Eigen::MatrixXd::Zero(total, total);
+  // Phase-2 telemetry: actual scalar objective-value contributions
+  // (r^T W r per factor, not just A's quadratic form at some arbitrary
+  // vector), accumulated alongside their matrix blocks below so the GN
+  // telemetry log can report E_lidar/E_process/E_det/E_total per iteration.
+  double e_lidar_total = 0.0, e_process_total = 0.0, e_det_total = 0.0;
 
   // POST-REVIEW FIX (external review 2026-09-21, "Q9 is rank-deficient
   // before the artificial floor... the code is artificially filling those
@@ -3815,6 +3826,57 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       A_imu.block<9, 9>(kDim * (j + 1), kDim * (j + 1)) += Lambda;
       b.segment<9>(kDim * j)       += FtL * r;
       b.segment<9>(kDim * (j + 1)) += -Lambda * r;
+      e_process_total += (r.transpose() * Lambda * r)(0);
+
+      // Phase-2 diagnostic (2026-09-22, user-specified experiment): temporary
+      // soft deterministic-nullspace penalty lambda_C*||N^T r||^2 added on
+      // top of the existing r^T Q^+ r process cost, where N spans THIS
+      // iteration's own 3 lowest Q9 eigenvectors (relinearized above, same
+      // Q9 the Lambda pseudoinverse just used -- NOT frozen at init, per the
+      // user's explicit instruction to keep this consistent with the
+      // per-iteration relinearization). Sign convention verified against the
+      // existing process factor immediately above: that factor implements
+      // J=[-F9,I], A+=J^T Lambda J, b+=-J^T Lambda r (i.e. FtL=F9^T*Lambda,
+      // b.left+=FtL*r=F9^T*Lambda*r, b.right+=-Lambda*r -- matches standard
+      // GN normal equations A dx=-J^T W r with W=Lambda). The deterministic
+      // term is the same J with W replaced by lambda_C*N*N^T (so that
+      // dx^T A_det dx = lambda_C*||N^T J dx||^2 exactly, and at r=0 the
+      // gradient contribution reduces to the same -J^T W r form). Derivation:
+      // J_det = N^T J = [-N^T F9, N^T]; A_det = lambda_C*J_det^T*J_det;
+      // b_det = -lambda_C*J_det^T*(N^T r). Expanding with NNt := N*N^T
+      // reduces exactly to the existing Lambda-shaped block pattern with
+      // Lambda -> lambda_C*NNt.
+      if (copts_.pose_knots_det_constraint_en) {
+        const Eigen::Matrix<double, 9, 9> Qs = 0.5 * (Q9 + Q9.transpose());
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 9, 9>> es_q(Qs);
+        const Eigen::Matrix<double, 9, 3> N = es_q.eigenvectors().leftCols(3);
+        const Eigen::Matrix<double, 9, 9> NNt = N * N.transpose();
+        const double lam_c = copts_.pose_knots_det_constraint_weight;
+        const Eigen::Matrix<double, 9, 9> FtNNt = F9.transpose() * NNt;
+        A.block<9, 9>(kDim * j, kDim * j)         += lam_c * FtNNt * F9;
+        A.block<9, 9>(kDim * j, kDim * (j + 1))   += -lam_c * FtNNt;
+        A.block<9, 9>(kDim * (j + 1), kDim * j)   += -lam_c * NNt * F9;
+        A.block<9, 9>(kDim * (j + 1), kDim * (j + 1)) += lam_c * NNt;
+        A_det.block<9, 9>(kDim * j, kDim * j)         += lam_c * FtNNt * F9;
+        A_det.block<9, 9>(kDim * j, kDim * (j + 1))   += -lam_c * FtNNt;
+        A_det.block<9, 9>(kDim * (j + 1), kDim * j)   += -lam_c * NNt * F9;
+        A_det.block<9, 9>(kDim * (j + 1), kDim * (j + 1)) += lam_c * NNt;
+        b.segment<9>(kDim * j)       += lam_c * FtNNt * r;
+        b.segment<9>(kDim * (j + 1)) += -lam_c * NNt * r;
+        const Eigen::Vector3d Ntr = N.transpose() * r;
+        e_det_total += lam_c * Ntr.squaredNorm();
+
+        if (copts_.psd_audit_en) {
+          static PersistentLogStream det_log("pose_knots_det_constraint.txt");
+          bool det_first;
+          std::ofstream& det_ofs = det_log.stream(&det_first);
+          if (det_first)
+            det_ofs << "scan_id,iter,seg,lambda_c,r_norm,Ntr_norm\n";
+          det_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << j << ","
+                   << lam_c << "," << r.norm() << "," << Ntr.norm() << "\n";
+          det_ofs.flush();
+        }
+      }
 
       // POST-REVIEW ADDITION (item 12, "add the actual nonlinear process
       // residual to the diagnostics... this tells us whether the bizarre
@@ -3927,6 +3989,7 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     A.block<18, 18>(kDim * j, kDim * j).noalias() += w * (Jrow.transpose() * Jrow);
     A_lidar.block<18, 18>(kDim * j, kDim * j).noalias() += w * (Jrow.transpose() * Jrow);
     b.segment<18>(kDim * j).noalias() -= w * Jrow.transpose() * res.r;
+    e_lidar_total += w * res.r * res.r;
   }
 
   // POST-REVIEW FIX ("Test 1 -- prove whether A is genuinely indefinite"):
@@ -3976,6 +4039,7 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     logFactor("imu", A_imu);
     logFactor("lidar", A_lidar);
     logFactor("smooth", A_smooth);
+    logFactor("det", A_det);
     decomp_ofs.flush();
 
     // USER REQUEST 2026-09-21 (diagnostic round): the dominant eigenvector
@@ -3993,10 +4057,11 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       bool veig_first;
       std::ofstream& veig_ofs = veig_log.stream(&veig_first);
       if (veig_first)
-        veig_ofs << "scan_id,iter,lambda_min,vT_Aprior_v,vT_Aimu_v,vT_Alidar_v,vT_Asmooth_v,vT_Atotal_v\n";
+        veig_ofs << "scan_id,iter,lambda_min,vT_Aprior_v,vT_Aimu_v,vT_Alidar_v,vT_Asmooth_v,vT_Adet_v,vT_Atotal_v\n";
       veig_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << lmin << ","
                << (v.transpose() * A_prior * v)(0) << "," << (v.transpose() * A_imu * v)(0) << ","
                << (v.transpose() * A_lidar * v)(0) << "," << (v.transpose() * A_smooth * v)(0) << ","
+               << (v.transpose() * A_det * v)(0) << ","
                << (v.transpose() * A * v)(0) << "\n";
       veig_ofs.flush();
     }
@@ -4443,9 +4508,12 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
       static PersistentLogStream gn_tel_log("pose_knots_gn_telemetry.txt");
       bool gn_tel_first;
       std::ofstream& gn_tel_ofs = gn_tel_log.stream(&gn_tel_first);
-      if (gn_tel_first) gn_tel_ofs << "scan_id,iter,max_delta_cp_inf,max_delta_cphi_inf,max_accel\n";
+      if (gn_tel_first)
+        gn_tel_ofs << "scan_id,iter,max_delta_cp_inf,max_delta_cphi_inf,max_accel,"
+                      "e_lidar,e_process,e_det,e_total\n";
       gn_tel_ofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << max_step_pos << ","
-                 << max_step_rot << "," << max_acc << "\n";
+                 << max_step_rot << "," << max_acc << "," << e_lidar_total << "," << e_process_total
+                 << "," << e_det_total << "," << (e_lidar_total + e_process_total + e_det_total) << "\n";
       gn_tel_ofs.flush();
     }
     double scale = 1.0;
