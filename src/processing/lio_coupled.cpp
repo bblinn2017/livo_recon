@@ -4141,13 +4141,27 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
     // residual r(c) = n^T(R(t)q + p(t)) + d, d held fixed at THIS
     // residual's own current value (res.r already IS r(c_current) since
     // it was computed against the trial spline above).
+    //
+    // PERFORMANCE (2026-09-22, profiler-identified): rotationAt()/
+    // positionAt() only ever read knots_[j]/knots_[j+1] (the bracket
+    // pair for t_eval, confirmed in pose_knot_spline.cpp) -- NOT the
+    // whole spline -- so perturbing `trial`'s own knot in place,
+    // evaluating, then restoring the original rotation is exactly
+    // equivalent to evaluating against a full copy with that one knot
+    // perturbed, without the O(n_knots) copy this used to pay 6x per
+    // residual (3 axes x 2 knots x central-difference). No behavior
+    // change: same rotationAt()/positionAt() calls, same inputs, same
+    // floating-point result -- this loop is single-threaded (no OMP),
+    // so there is no concurrent access to `trial` to race with.
+    const double base_r = res.normal.dot(
+        trial.rotationAt(t_eval) * res.raw_body_point + trial.positionAt(t_eval));
     auto residualAt = [&](int knot_idx, int axis, double eps) {
-      PoseKnotSpline pert = trial;
-      pert.knotMut(knot_idx).rot = trial.knot(knot_idx).rot * Exp(V3D(eps * V3D::Unit(axis)));
-      const M3D R_t = pert.rotationAt(t_eval);
-      const V3D p_t = pert.positionAt(t_eval);
-      return res.normal.dot(R_t * res.raw_body_point + p_t) + (res.r - res.normal.dot(
-                 trial.rotationAt(t_eval) * res.raw_body_point + trial.positionAt(t_eval)));
+      const M3D orig_rot = trial.knot(knot_idx).rot;
+      trial.knotMut(knot_idx).rot = orig_rot * Exp(V3D(eps * V3D::Unit(axis)));
+      const M3D R_t = trial.rotationAt(t_eval);
+      const V3D p_t = trial.positionAt(t_eval);
+      trial.knotMut(knot_idx).rot = orig_rot;
+      return res.normal.dot(R_t * res.raw_body_point + p_t) + (res.r - base_r);
     };
     for (int axis = 0; axis < 3; ++axis) {
       const double rp = residualAt(j, axis, kFdEps);
