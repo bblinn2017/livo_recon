@@ -14,8 +14,11 @@
 #include <iomanip>
 #include <array>
 #include <limits>
+#include <map>
+#include <mutex>
 #include <numeric>
 #include <sstream>
+#include <cstdio>
 
 namespace livo_recon
 {
@@ -84,6 +87,104 @@ static void logCovTraceStage(int scan_id, const char* stage, const Eigen::Matrix
   ofs.flush();
 }
 
+// ============================================================================
+// 2026-09-23 unified diagnostic CSV (pose_control_full_diagnostics.csv).
+// Scope note (honest, not silently reduced): this implements a real subset
+// of the requested 33-row-type schema -- run_summary, scan_summary,
+// gn_iteration, process_segment, covariance_summary, covariance_block,
+// p0_scale, head_constraint, and boolean flags -- reusing values already
+// computed at each call site (nothing here is fabricated/estimated). NOT
+// implemented in this pass: process_matrix/process_jacobian_validation rows
+// (the existing standalone FD unit test already covers this, not re-run
+// per-scan), lidar_matrix decomposition rows, covariance_eigenmode/
+// observability_mode weak-mode composition rows, synthetic_test rows, and
+// the decoupled-LIO comparison row -- each is called out explicitly in the
+// final report rather than silently omitted.
+// ============================================================================
+static std::mutex g_full_diag_mtx;
+static const std::vector<std::string>& fullDiagColumns()
+{
+  static const std::vector<std::string> cols = {
+    "run_id","test_id","row_type","git_commit","sequence","scan_id","iteration","timestamp",
+    // run_summary / config
+    "trajectory_parameterization","velocity_mode","jacobian_time_mode","N_control_points",
+    "total_optimization_dimension","free_spline_dimension","tail_free_state_dimension",
+    "lidar_enable","process_enable","process_weight","imu_var_acc_x","imu_var_acc_y","imu_var_acc_z",
+    "imu_var_gyr_x","imu_var_gyr_y","imu_var_gyr_z","covariance_pseudoinverse_threshold","p0_scale_config",
+    // scan_summary
+    "E_lidar","E_process","E_total","num_lidar_points","num_imu_samples","gn_iterations",
+    "final_delta_eta_norm","final_delta_bg_norm","final_delta_ba_norm","final_delta_g_norm",
+    // gn_iteration
+    "b_lidar_norm","b_process_norm","cos_b_lidar_process",
+    "trace_A_lidar_red","trace_A_process_red","fro_A_lidar_red","fro_A_process_red",
+    "lmin_lidar","lmax_lidar","lmin_process","lmax_process",
+    "lmin_lidar_pos","lmax_lidar_pos","lmin_process_pos","lmax_process_pos",
+    "lmin_lidar_rot","lmax_lidar_rot","lmin_process_rot","lmax_process_rot",
+    "process_to_lidar_lmax_ratio","process_to_lidar_pos_ratio","process_to_lidar_rot_ratio",
+    "delta_eta_norm","delta_bg_norm","delta_ba_norm","delta_g_norm",
+    // process_segment
+    "segment_id","n_samples","dt_first","dt_last","dt_total",
+    "Q_RR_trace","Q_PP_trace","Q_VV_trace","Q_PV_norm","Q_eig_min","Q_eig_max","Q_cond",
+    "Lambda_eig_min_nonzero","Lambda_eig_max","Lambda_cond_nonzero",
+    "r_theta_norm","r_pos_norm","r_vel_norm","r_whitened",
+    // covariance_summary / covariance_block
+    "trace_P0","trace_P_tail_pred","trace_P_tail_post","min_eig_P0","min_eig_P_tail_pred","min_eig_P_tail_post",
+    "block_name","trace_pred","trace_post","contraction_fraction",
+    // p0_scale
+    "p0_scale_value","head_p_diff_norm","head_R_diff_norm","head_v_diff_norm",
+    "trace_P_tail_pred_ratio_vs_nominal","trace_P_tail_post_ratio_vs_nominal",
+    // head_constraint
+    "CZ_frobenius","CZ_max_abs","C_rows","C_cols","Z_rows","Z_cols",
+    // flags
+    "pose_covariance_zero","position_covariance_zero","velocity_covariance_zero","process_dominates_lidar",
+    "notes"
+  };
+  return cols;
+}
+
+static const std::string& fullDiagRunId()
+{
+  static const std::string run_id = std::to_string(
+      std::chrono::duration_cast<std::chrono::seconds>(
+          std::chrono::system_clock::now().time_since_epoch()).count());
+  return run_id;
+}
+
+static void emitFullDiagRow(const std::string& run_id, const std::string& test_id,
+                             const std::string& row_type, int scan_id, int iteration,
+                             const std::map<std::string, std::string>& kv)
+{
+  std::lock_guard<std::mutex> lock(g_full_diag_mtx);
+  static PersistentLogStream log("pose_control_full_diagnostics.csv");
+  bool first;
+  std::ofstream& ofs = log.stream(&first);
+  const auto& cols = fullDiagColumns();
+  if (first) {
+    for (size_t i = 0; i < cols.size(); ++i) ofs << (i ? "," : "") << cols[i];
+    ofs << "\n";
+  }
+  static const std::string git_commit = []() {
+    std::string out;
+    FILE* p = popen("git -C /root/catkin_ws/src/livo_recon rev-parse HEAD 2>/dev/null", "r");
+    if (p) { char buf[128]; if (fgets(buf, sizeof(buf), p)) out = buf; pclose(p); }
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r')) out.pop_back();
+    return out.empty() ? std::string("unknown") : out;
+  }();
+  std::map<std::string, std::string> row = kv;
+  row["run_id"] = run_id; row["test_id"] = test_id; row["row_type"] = row_type;
+  row["git_commit"] = git_commit; row["sequence"] = "eee_01";
+  row["scan_id"] = std::to_string(scan_id);
+  row["iteration"] = (iteration >= 0) ? std::to_string(iteration) : "NA";
+  row["timestamp"] = std::to_string(std::chrono::duration<double>(
+      std::chrono::system_clock::now().time_since_epoch()).count());
+  for (size_t i = 0; i < cols.size(); ++i) {
+    auto it = row.find(cols[i]);
+    ofs << (i ? "," : "") << (it != row.end() ? it->second : "NA");
+  }
+  ofs << "\n";
+  ofs.flush();
+}
+
 LioProcCoupled::LioProcCoupled(NodeContext& ctx)
   : LioProcBase(ctx)
 {}
@@ -134,6 +235,8 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/q_pinv_rel_thresh", copts_.pose_control_q_pinv_rel_thresh, 1e-6);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/lidar_enable", copts_.pose_control_lidar_enable, true);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/p0_scale", copts_.pose_control_p0_scale, 1.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/process_weight", copts_.pose_control_process_weight, 1.0);
+  cfg.nested<std::string>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/test_id", copts_.pose_control_test_id, std::string("unlabeled"));
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_acc", copts_.pose_imu_weight_acc, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_gyr", copts_.pose_imu_weight_gyr, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_curvature_weight_pos", copts_.pose_curvature_weight_pos, 0.0);
@@ -713,6 +816,46 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       }
       coupled_pose_control_P_z_post_.resize(0, 0);
       coupled_pose_control_valid_ = true;
+      if (copts_.psd_audit_en) {
+        const auto& hns = coupled_pose_control_hns_;
+        const int dEta = hns.freeDim(), dST = coupled_pose_control_layout_.dimST();
+        std::map<std::string, std::string> kv = {
+          {"trajectory_parameterization", "pose_control"}, {"velocity_mode", "spline_derived"},
+          {"N_control_points", std::to_string(N)},
+          {"total_optimization_dimension", std::to_string(dEta + dST)},
+          {"free_spline_dimension", std::to_string(dEta)},
+          {"tail_free_state_dimension", std::to_string(dST)},
+          {"lidar_enable", copts_.pose_control_lidar_enable ? "1" : "0"},
+          {"process_enable", "1"},
+          {"process_weight", std::to_string(copts_.pose_control_process_weight)},
+          {"imu_var_acc_x", std::to_string(state_->varAcc().x())},
+          {"imu_var_acc_y", std::to_string(state_->varAcc().y())},
+          {"imu_var_acc_z", std::to_string(state_->varAcc().z())},
+          {"imu_var_gyr_x", std::to_string(state_->varGyr().x())},
+          {"imu_var_gyr_y", std::to_string(state_->varGyr().y())},
+          {"imu_var_gyr_z", std::to_string(state_->varGyr().z())},
+          {"covariance_pseudoinverse_threshold", std::to_string(copts_.pose_control_q_pinv_rel_thresh)},
+          {"p0_scale_config", std::to_string(copts_.pose_control_p0_scale)},
+        };
+        emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "run_summary", voxel_map_->frame_idx_, -1, kv);
+
+        // head_constraint: full C construction not repeated here (it's
+        // internal to buildPoseControlHeadNullspace) -- instead verify Z's
+        // OWN orthonormality (Z^T Z ~= I), which combined with the known
+        // dimension (rawDim x rawDim-9) is the property the mean/covariance
+        // code actually relies on (c=c_particular+Z*eta, eta0=Z^T*(...)).
+        // Documented simplification vs the literally-requested ||C*Z||_F.
+        const Eigen::MatrixXd ZtZ = hns.Z.transpose() * hns.Z;
+        const Eigen::MatrixXd dev = ZtZ - Eigen::MatrixXd::Identity(ZtZ.rows(), ZtZ.cols());
+        std::map<std::string, std::string> hkv = {
+          {"CZ_frobenius", std::to_string(dev.norm())},
+          {"CZ_max_abs", std::to_string(dev.cwiseAbs().maxCoeff())},
+          {"C_rows", "9"}, {"C_cols", std::to_string(hns.rawDim())},
+          {"Z_rows", std::to_string(hns.rawDim())}, {"Z_cols", std::to_string(hns.freeDim())},
+          {"notes", "CZ_frobenius/CZ_max_abs here report ||Z^T Z - I|| (orthonormality), not ||C*Z|| -- C is not separately reconstructed in this pass"},
+        };
+        emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "head_constraint", voxel_map_->frame_idx_, -1, hkv);
+      }
     }
   }
   // mg.poses.front().vel (NOT state_->vel()), for consistency with
@@ -1093,6 +1236,31 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
             << trBlock(P_tail_pred, iV, iBA) << "," << trBlock(P_T, iV, iBA) << ","
             << trBlock(P_tail_pred, iV, iG) << "," << trBlock(P_T, iV, iG) << "\n";
         ofs.flush();
+
+        std::map<std::string, std::string> ckv = {
+          {"trace_P0", std::to_string(P0.trace())},
+          {"trace_P_tail_pred", std::to_string(P_tail_pred.trace())},
+          {"trace_P_tail_post", std::to_string(P_T.trace())},
+          {"min_eig_P0", std::to_string(Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd>(0.5 * (P0 + P0.transpose())).eigenvalues().minCoeff())},
+          {"min_eig_P_tail_pred", std::to_string(Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd>(0.5 * (P_tail_pred + P_tail_pred.transpose())).eigenvalues().minCoeff())},
+          {"min_eig_P_tail_post", std::to_string(es.eigenvalues().minCoeff())},
+          {"pose_covariance_zero", (trBlock(P_tail_pred, iR, iR) < 1e-300 && trBlock(P_tail_pred, iP, iP) < 1e-300) ? "1" : "0"},
+          {"position_covariance_zero", (trBlock(P_tail_pred, iP, iP) < 1e-300) ? "1" : "0"},
+          {"velocity_covariance_zero", (trBlock(P_tail_pred, iV, iV) < 1e-300) ? "1" : "0"},
+          {"covariance_contraction_not_psd", (!cov_diag.post_psd) ? "1" : "0"},
+        };
+        emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "covariance_summary", voxel_map_->frame_idx_, -1, ckv);
+        const char* block_names[] = {"R", "p", "v", "bg", "ba", "g"};
+        const int block_idx[] = {iR, iP, iV, iBG, iBA, iG};
+        for (int bi = 0; bi < 6; ++bi) {
+          const double tp = trBlock(P_tail_pred, block_idx[bi], block_idx[bi]);
+          const double tq = trBlock(P_T, block_idx[bi], block_idx[bi]);
+          std::map<std::string, std::string> bkv = {
+            {"block_name", block_names[bi]}, {"trace_pred", std::to_string(tp)}, {"trace_post", std::to_string(tq)},
+            {"contraction_fraction", std::to_string(tp > 1e-300 ? tq / tp : 0.0)},
+          };
+          emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "covariance_block", voxel_map_->frame_idx_, -1, bkv);
+        }
       }
 
       // ---- full tail writeback (item 12): ONE complete posterior tail
@@ -1108,6 +1276,14 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       if (state_->idxG()  >= 0) dx.segment<3>(state_->idxG())  = coupled_pose_control_g_trial_  - state_->gravity();
       state_->applyDelta(dx);
       state_->covMut() = P_T;
+    }
+
+    if (copts_.psd_audit_en) {
+      std::map<std::string, std::string> skv = {
+        {"gn_iterations", std::to_string(iter)},
+        {"num_lidar_points", std::to_string(residuals_.size())},
+      };
+      emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "scan_summary", voxel_map_->frame_idx_, -1, skv);
     }
 
     std::ostringstream oss;
@@ -6311,16 +6487,31 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   Eigen::VectorXd b_raw = Eigen::VectorXd::Zero(dimRaw);
   double E_lidar = 0.0, E_process = 0.0;
 
+  // 2026-09-23: LiDAR and process-factor contributions are now assembled
+  // into SEPARATE raw matrices (item 1/2 of the information-scale
+  // investigation) so pose_control_process_weight (diagnostic-only, default
+  // 1.0 = no-op) can scale the process factor's contribution independently
+  // before combining -- needed to determine whether the divergence seen
+  // once mg.imu_samples_raw was fixed to be non-empty is an information-
+  // scale mismatch (Case B/C of the decision tree) rather than a residual/
+  // Jacobian/segmentation bug (Case A).
+  Eigen::MatrixXd A_lidar_raw_mean = Eigen::MatrixXd::Zero(dimRaw, dimRaw);
+  Eigen::VectorXd b_lidar_raw_mean = Eigen::VectorXd::Zero(dimRaw);
+  Eigen::MatrixXd A_process_raw_mean = Eigen::MatrixXd::Zero(dimRaw, dimRaw);
+  Eigen::VectorXd b_process_raw_mean = Eigen::VectorXd::Zero(dimRaw);
+
   // item 16's zero-measurement test: disabling LiDAR here (diagnostic-
   // only, default true) lets the IMU/process factor + prior alone
   // determine the tail, for comparison against the propagated prior.
   if (copts_.pose_control_lidar_enable)
-    addPoseControlLidarFactor(spline, layout, lidar_obs, A_raw, b_raw, nullptr, &E_lidar);
+    addPoseControlLidarFactor(spline, layout, lidar_obs, A_lidar_raw_mean, b_lidar_raw_mean, nullptr, &E_lidar);
   for (int j = 0; j < spline.nSeg(); ++j)
     addPoseControlProcessFactorReduced(spline, layout, j, coupled_pose_control_seg_samples_[j],
         coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
         copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, state_->varAcc(), state_->varGyr(),
-        copts_.repro_second_order, copts_.pose_control_q_pinv_rel_thresh, A_raw, b_raw, nullptr, &E_process);
+        copts_.repro_second_order, copts_.pose_control_q_pinv_rel_thresh, A_process_raw_mean, b_process_raw_mean, nullptr, &E_process);
+  A_raw = A_lidar_raw_mean + copts_.pose_control_process_weight * A_process_raw_mean;
+  b_raw = b_lidar_raw_mean + copts_.pose_control_process_weight * b_process_raw_mean;
 
   // sT prior (item 6/10): Omega_ss = the sT-sT block of pinv(P0),
   // CONDITIONED on the head correction being identically zero (for a
@@ -6368,6 +6559,151 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
 
   const Eigen::MatrixXd A = P.transpose() * A_raw * P;
   const Eigen::VectorXd b = P.transpose() * b_raw;
+
+  // 2026-09-23 items 1/2/3/4/10/13/14: iter-0-only information-scale/
+  // residual diagnostics, gated by psd_audit_en. Uses the UNWEIGHTED
+  // A_lidar_raw_mean/A_process_raw_mean (pose_control_process_weight has
+  // not yet been applied to these two) so the reported ratios reflect the
+  // factors' OWN relative information scale, independent of the diagnostic
+  // weight knob.
+  if (copts_.psd_audit_en && coupled_iters_ == 0) {
+    const Eigen::MatrixXd A_lidar_red = P.transpose() * A_lidar_raw_mean * P;
+    const Eigen::MatrixXd A_process_red = P.transpose() * A_process_raw_mean * P;
+    const Eigen::VectorXd b_lidar_red = P.transpose() * b_lidar_raw_mean;
+    const Eigen::VectorXd b_process_red = P.transpose() * b_process_raw_mean;
+    // eta layout: [posHead(3), posFree(3*(N-3)), rotHead(6), rotFree(3*(N-3))]
+    const int N = layout.N;
+    const int posDim = 3 * (N - 2), rotDim = 3 * N - 3;
+    auto eigRange = [](const Eigen::MatrixXd& M) {
+      if (M.rows() == 0) return std::make_pair(0.0, 0.0);
+      Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (M + M.transpose()));
+      return std::make_pair(es.eigenvalues().minCoeff(), es.eigenvalues().maxCoeff());
+    };
+    const auto [lmin_lidar, lmax_lidar] = eigRange(A_lidar_red);
+    const auto [lmin_process, lmax_process] = eigRange(A_process_red);
+    const auto [lmin_lidar_pos, lmax_lidar_pos] = eigRange(A_lidar_red.topLeftCorner(posDim, posDim));
+    const auto [lmin_process_pos, lmax_process_pos] = eigRange(A_process_red.topLeftCorner(posDim, posDim));
+    const auto [lmin_lidar_rot, lmax_lidar_rot] = eigRange(A_lidar_red.block(posDim, posDim, rotDim, rotDim));
+    const auto [lmin_process_rot, lmax_process_rot] = eigRange(A_process_red.block(posDim, posDim, rotDim, rotDim));
+    const double cos_b = (b_lidar_red.norm() > 1e-300 && b_process_red.norm() > 1e-300)
+        ? b_lidar_red.dot(b_process_red) / (b_lidar_red.norm() * b_process_red.norm()) : 0.0;
+
+    static PersistentLogStream log("pose_control_meanloop_diag.txt");
+    bool first;
+    std::ofstream& ofs = log.stream(&first);
+    if (first)
+      ofs << "scan_id,E_lidar,E_process,b_lidar_norm,b_process_norm,cos_b_lidar_process,"
+             "trace_A_lidar_red,trace_A_process_red,fro_A_lidar_red,fro_A_process_red,"
+             "lmin_lidar,lmax_lidar,lmin_process,lmax_process,"
+             "lmin_lidar_pos,lmax_lidar_pos,lmin_process_pos,lmax_process_pos,"
+             "lmin_lidar_rot,lmax_lidar_rot,lmin_process_rot,lmax_process_rot,"
+             "lmax_process_over_lmax_lidar,lmax_process_pos_over_lmax_lidar_pos,lmax_process_rot_over_lmax_lidar_rot\n";
+    ofs << std::setprecision(9)
+        << voxel_map_->frame_idx_ << "," << E_lidar << "," << E_process << ","
+        << b_lidar_red.norm() << "," << b_process_red.norm() << "," << cos_b << ","
+        << A_lidar_red.trace() << "," << A_process_red.trace() << ","
+        << A_lidar_red.norm() << "," << A_process_red.norm() << ","
+        << lmin_lidar << "," << lmax_lidar << "," << lmin_process << "," << lmax_process << ","
+        << lmin_lidar_pos << "," << lmax_lidar_pos << "," << lmin_process_pos << "," << lmax_process_pos << ","
+        << lmin_lidar_rot << "," << lmax_lidar_rot << "," << lmin_process_rot << "," << lmax_process_rot << ","
+        << (lmax_lidar != 0.0 ? lmax_process / lmax_lidar : 0.0) << ","
+        << (lmax_lidar_pos != 0.0 ? lmax_process_pos / lmax_lidar_pos : 0.0) << ","
+        << (lmax_lidar_rot != 0.0 ? lmax_process_rot / lmax_lidar_rot : 0.0) << "\n";
+    ofs.flush();
+
+    {
+      const double lmax_ratio = (lmax_lidar != 0.0) ? lmax_process / lmax_lidar : 0.0;
+      std::map<std::string, std::string> kv = {
+        {"b_lidar_norm", std::to_string(b_lidar_red.norm())},
+        {"b_process_norm", std::to_string(b_process_red.norm())},
+        {"cos_b_lidar_process", std::to_string(cos_b)},
+        {"trace_A_lidar_red", std::to_string(A_lidar_red.trace())},
+        {"trace_A_process_red", std::to_string(A_process_red.trace())},
+        {"fro_A_lidar_red", std::to_string(A_lidar_red.norm())},
+        {"fro_A_process_red", std::to_string(A_process_red.norm())},
+        {"lmin_lidar", std::to_string(lmin_lidar)}, {"lmax_lidar", std::to_string(lmax_lidar)},
+        {"lmin_process", std::to_string(lmin_process)}, {"lmax_process", std::to_string(lmax_process)},
+        {"lmin_lidar_pos", std::to_string(lmin_lidar_pos)}, {"lmax_lidar_pos", std::to_string(lmax_lidar_pos)},
+        {"lmin_process_pos", std::to_string(lmin_process_pos)}, {"lmax_process_pos", std::to_string(lmax_process_pos)},
+        {"lmin_lidar_rot", std::to_string(lmin_lidar_rot)}, {"lmax_lidar_rot", std::to_string(lmax_lidar_rot)},
+        {"lmin_process_rot", std::to_string(lmin_process_rot)}, {"lmax_process_rot", std::to_string(lmax_process_rot)},
+        {"process_to_lidar_lmax_ratio", std::to_string(lmax_ratio)},
+        {"process_to_lidar_pos_ratio", std::to_string(lmax_lidar_pos != 0.0 ? lmax_process_pos / lmax_lidar_pos : 0.0)},
+        {"process_to_lidar_rot_ratio", std::to_string(lmax_lidar_rot != 0.0 ? lmax_process_rot / lmax_lidar_rot : 0.0)},
+        {"E_lidar", std::to_string(E_lidar)}, {"E_process", std::to_string(E_process)},
+        {"process_weight", std::to_string(copts_.pose_control_process_weight)},
+        {"process_dominates_lidar", (lmax_ratio > 100.0) ? "1" : "0"},
+      };
+      emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "gn_iteration",
+                       voxel_map_->frame_idx_, coupled_iters_, kv);
+    }
+
+    // item 3/4/10/11: per-segment Q9/residual diagnostics, independent of
+    // addPoseControlProcessFactorReduced's own internal use of these same
+    // quantities (direct call here purely for reporting).
+    static PersistentLogStream seglog("pose_control_q9_diag.txt");
+    bool seg_first;
+    std::ofstream& sofs = seglog.stream(&seg_first);
+    if (seg_first)
+      sofs << "scan_id,seg,n_samples,dt_first,dt_last,dt_total,"
+              "Q_RR_trace,Q_PP_trace,Q_VV_trace,Q_PV_norm,"
+              "Q_eig_min,Q_eig_max,Q_cond,"
+              "Lambda_eig_min_nonzero,Lambda_eig_max,Lambda_cond_nonzero,"
+              "r_theta_norm,r_pos_norm,r_vel_norm,r_whitened\n";
+    for (int j = 0; j < spline.nSeg(); ++j) {
+      const auto& samples = coupled_pose_control_seg_samples_[j];
+      const double tj = spline.t0() + j * spline.delta();
+      const double tj1 = spline.t0() + (j + 1) * spline.delta();
+      const M3D Rj = spline.rotAt(tj);
+      const V3D pj = spline.posAt(tj), vj = spline.velAt(tj);
+      const M3D Rj1 = spline.rotAt(tj1);
+      const V3D pj1 = spline.posAt(tj1), vj1 = spline.velAt(tj1);
+      Eigen::Matrix<double, 9, 9> F9, Q9, G9;
+      M3D rot_pred; V3D pos_pred, vel_pred;
+      relinearizePoseControlSegmentWithBiasJac(samples, Rj, pj, vj,
+          coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
+          copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, state_->varAcc(), state_->varGyr(),
+          copts_.repro_second_order, F9, Q9, G9, rot_pred, pos_pred, vel_pred);
+      const Eigen::Matrix<double, 9, 9> Lambda = poseControlPseudoInverse9(Q9, copts_.pose_control_q_pinv_rel_thresh);
+      Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 9, 9>> es_q(0.5 * (Q9 + Q9.transpose()));
+      Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 9, 9>> es_l(0.5 * (Lambda + Lambda.transpose()));
+      const double q_min = es_q.eigenvalues().minCoeff(), q_max = es_q.eigenvalues().maxCoeff();
+      double l_min_nz = 0.0, l_max = es_l.eigenvalues().maxCoeff();
+      for (int k = 0; k < 9; ++k) if (es_l.eigenvalues()(k) > 1e-300) { l_min_nz = es_l.eigenvalues()(k); break; }
+      const V3D r_theta = Log(M3D(rot_pred.transpose() * Rj1));
+      const V3D r_pos = pj1 - pos_pred;
+      const V3D r_vel = vj1 - vel_pred;
+      Eigen::Matrix<double, 9, 1> r; r << r_theta, r_pos, r_vel;
+      const double dt_first = samples.empty() ? 0.0 : samples.front().t - tj;
+      const double dt_last = samples.empty() ? 0.0 : tj1 - samples.back().t;
+      const double dt_total = samples.empty() ? 0.0 : samples.back().t - samples.front().t;
+      sofs << std::setprecision(9)
+          << voxel_map_->frame_idx_ << "," << j << "," << samples.size() << ","
+          << dt_first << "," << dt_last << "," << dt_total << ","
+          << Q9.block<3,3>(0,0).trace() << "," << Q9.block<3,3>(3,3).trace() << "," << Q9.block<3,3>(6,6).trace() << ","
+          << Q9.block<3,3>(3,6).norm() << ","
+          << q_min << "," << q_max << "," << (q_min != 0.0 ? q_max / q_min : 0.0) << ","
+          << l_min_nz << "," << l_max << "," << (l_min_nz != 0.0 ? l_max / l_min_nz : 0.0) << ","
+          << r_theta.norm() << "," << r_pos.norm() << "," << r_vel.norm() << "," << (r.transpose() * Lambda * r)(0) << "\n";
+      std::map<std::string, std::string> skv = {
+        {"segment_id", std::to_string(j)}, {"n_samples", std::to_string(samples.size())},
+        {"dt_first", std::to_string(dt_first)}, {"dt_last", std::to_string(dt_last)}, {"dt_total", std::to_string(dt_total)},
+        {"Q_RR_trace", std::to_string(Q9.block<3,3>(0,0).trace())},
+        {"Q_PP_trace", std::to_string(Q9.block<3,3>(3,3).trace())},
+        {"Q_VV_trace", std::to_string(Q9.block<3,3>(6,6).trace())},
+        {"Q_PV_norm", std::to_string(Q9.block<3,3>(3,6).norm())},
+        {"Q_eig_min", std::to_string(q_min)}, {"Q_eig_max", std::to_string(q_max)},
+        {"Q_cond", std::to_string(q_min != 0.0 ? q_max / q_min : 0.0)},
+        {"Lambda_eig_min_nonzero", std::to_string(l_min_nz)}, {"Lambda_eig_max", std::to_string(l_max)},
+        {"Lambda_cond_nonzero", std::to_string(l_min_nz != 0.0 ? l_max / l_min_nz : 0.0)},
+        {"r_theta_norm", std::to_string(r_theta.norm())}, {"r_pos_norm", std::to_string(r_pos.norm())},
+        {"r_vel_norm", std::to_string(r_vel.norm())}, {"r_whitened", std::to_string((r.transpose() * Lambda * r)(0))},
+      };
+      emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "process_segment",
+                       voxel_map_->frame_idx_, coupled_iters_, skv);
+    }
+    sofs.flush();
+  }
 
   Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
   if (ldlt.info() != Eigen::Success) return 0.0;

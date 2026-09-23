@@ -70,6 +70,21 @@ struct LioProcCoupledOptions
   // estimator/coupled/pose_control/{lidar_enable,p0_scale}.
   bool pose_control_lidar_enable = true;
   double pose_control_p0_scale = 1.0;
+  // 2026-09-23 DIAGNOSTIC ONLY (item 6 of the process/LiDAR information-scale
+  // investigation) -- scales A_process/b_process (equivalently Lambda_process)
+  // in the MEAN solve by this scalar before combining with A_lidar/b_lidar.
+  // Default 1.0 is a no-op. This does NOT reuse pose_imu_weight_acc/gyr (those
+  // knobs are NOT wired into the pose_control process factor at all -- do not
+  // assume they have any effect here). Not yet a production weighting
+  // mechanism -- purely for isolating whether the divergence seen once
+  // mg.imu_samples_raw was fixed to be non-empty is an information-SCALE
+  // mismatch between the process factor and LiDAR.
+  double pose_control_process_weight = 1.0;
+  // 2026-09-23: free-text test label, written into pose_control_full_
+  // diagnostics.csv's test_id column so multiple diagnostic runs (ablation
+  // A/B/C, weight sweep, P0-scale sweep) can be told apart in the one
+  // shared CSV. Purely a label, no effect on estimator behavior.
+  std::string pose_control_test_id = "unlabeled";
 
   // CQ-82 Phase 2: pose-basis-only weights. Meaningless under raw_imu (the
   // refusal wiring never checks these -- they simply aren't read unless
