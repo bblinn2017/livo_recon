@@ -1,6 +1,7 @@
 #pragma once
 
 #include "livo_recon/lio/pose_control_spline.h"
+#include "livo_recon/lio/pose_control_layout.h"
 #include "livo_recon/lio/pose_knot_spline.h"   // buildImuStep9x9/integrateAndAccumulateStep
 
 // ============================================================================
@@ -132,6 +133,42 @@ void addPoseControlProcessFactor(
     const V3D& var_acc, const V3D& var_gyr, bool second_order,
     double q_pinv_rel_thresh,
     Eigen::MatrixXd& A, Eigen::VectorXd& b,
+    double* out_E_process = nullptr);
+
+// Accumulated head-block contribution (see pose_control_covariance.h's
+// Schur-complement mechanism): A_hh (9x9, head-head, columns/rows
+// [theta0,pos0,vel0]) and A_hf (9 x layout.dim(), head-free cross block).
+// Every segment contributes to A_hh/A_hf's THETA0 columns (rotation's head
+// sensitivity is GLOBAL -- see poseControlHeadRotJacobian()'s header
+// comment); only segments whose 4-control-point window overlaps cp[0..2]
+// (j<=2) contribute nonzero POS0/VEL0 columns (position's head
+// sensitivity is LOCAL).
+struct PoseControlProcessFactorHeadBlock
+{
+  Eigen::Matrix<double, 9, 9> A_hh = Eigen::Matrix<double, 9, 9>::Zero();
+  Eigen::MatrixXd A_hf;   // lazily sized to (9, layout.dim()) on first use
+};
+
+// REDUCED-layout version of addPoseControlProcessFactor(): builds against
+// z=[c_free; sT] (layout.dim() total) instead of the full 6N. Fixed
+// (head, k<3) control-point columns are simply omitted from the free
+// Jacobian (they are not GN variables); their sensitivity is captured
+// separately in head_block via poseControlHeadRotJacobian()/
+// poseControlHeadPosJacobians() (pass nullptr to skip that bookkeeping).
+// sT gets a genuine Jacobian column via G9 (relinearizePoseControlSegmentWithBiasJac)
+// -- the only channel information can reach bg/ba/g in this architecture
+// (the head correction being fixed at zero removes decoupled LIO's usual
+// pose-correction-via-prior-cross-covariance pathway -- see that
+// function's header comment).
+void addPoseControlProcessFactorReduced(
+    const PoseControlSpline& spline, const PoseControlFreeLayout& layout, int j,
+    const std::vector<ImuSample>& samples,
+    const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
+    double q_alpha_acc, double q_alpha_gyr,
+    const V3D& var_acc, const V3D& var_gyr, bool second_order,
+    double q_pinv_rel_thresh,
+    Eigen::MatrixXd& A, Eigen::VectorXd& b,
+    PoseControlProcessFactorHeadBlock* head_block,
     double* out_E_process = nullptr);
 
 }  // namespace livo_recon

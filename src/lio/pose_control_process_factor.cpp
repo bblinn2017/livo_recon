@@ -297,4 +297,158 @@ void addPoseControlProcessFactor(
   if (out_E_process) *out_E_process += 0.5 * r.dot(Lambda * r);
 }
 
+namespace
+{
+// Shared chain: given a variable v's LOCAL 9xM contribution to x_j and to
+// x_{j+1} (each already fully-formed, e.g. [dtheta;dpos;dvel] columns for
+// v), returns v's contribution to Jcur (9xM) via the SAME
+// dr/dx_j=-F9(with JrInv*g^T on the theta row)/dr/dx_{j+1}=I(with JrInv on
+// the theta row) chain every process-factor column uses. Used for BOTH
+// free control-point columns and head (theta0/pos0/vel0) columns -- they
+// are the same chain, only the "local contribution to x_j/x_{j+1}" input
+// differs (per-control-point basis weights vs. head-sensitivity
+// Jacobians).
+Eigen::MatrixXd chainProcessFactorJacobian(
+    const Eigen::Matrix<double, 9, 9>& F9, const M3D& g, const M3D& JrInvR,
+    const Eigen::MatrixXd& Jxj_M, const Eigen::MatrixXd& Jxj1_M)
+{
+  const int M = static_cast<int>(Jxj_M.cols());
+  Eigen::MatrixXd out(9, M);
+  const Eigen::MatrixXd F9Jxj = F9 * Jxj_M;
+  out.block(0, 0, 3, M) = JrInvR * (Jxj1_M.block(0, 0, 3, M) - g.transpose() * F9Jxj.block(0, 0, 3, M));
+  out.block(3, 0, 3, M) = Jxj1_M.block(3, 0, 3, M) - F9Jxj.block(3, 0, 3, M);
+  out.block(6, 0, 3, M) = Jxj1_M.block(6, 0, 3, M) - F9Jxj.block(6, 0, 3, M);
+  return out;
+}
+}  // namespace
+
+void addPoseControlProcessFactorReduced(
+    const PoseControlSpline& spline, const PoseControlFreeLayout& layout, int j,
+    const std::vector<ImuSample>& samples,
+    const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
+    double q_alpha_acc, double q_alpha_gyr,
+    const V3D& var_acc, const V3D& var_gyr, bool second_order,
+    double q_pinv_rel_thresh,
+    Eigen::MatrixXd& A, Eigen::VectorXd& b,
+    PoseControlProcessFactorHeadBlock* head_block,
+    double* out_E_process)
+{
+  const double tj = spline.t0() + j * spline.delta();
+  const double tj1 = spline.t0() + (j + 1) * spline.delta();
+
+  const M3D Rj = spline.rotAt(tj);
+  const V3D pj = spline.posAt(tj), vj = spline.velAt(tj);
+  const V3D pj1 = spline.posAt(tj1), vj1 = spline.velAt(tj1);
+  const M3D Rj1 = spline.rotAt(tj1);
+
+  Eigen::Matrix<double, 9, 9> F9, Q9, G9;
+  M3D rot_pred; V3D pos_pred, vel_pred;
+  relinearizePoseControlSegmentWithBiasJac(samples, Rj, pj, vj, bias_acc, bias_gyr, gravity,
+                                           q_alpha_acc, q_alpha_gyr, var_acc, var_gyr, second_order,
+                                           F9, Q9, G9, rot_pred, pos_pred, vel_pred);
+
+  Eigen::Matrix<double, 9, 1> r;
+  r.segment<3>(0) = Log(M3D(rot_pred.transpose() * Rj1));
+  r.segment<3>(3) = pj1 - pos_pred;
+  r.segment<3>(6) = vj1 - vel_pred;
+
+  const Eigen::Matrix<double, 9, 9> Lambda = poseControlPseudoInverse9(Q9, q_pinv_rel_thresh);
+  const M3D g = rot_pred.transpose() * Rj1;
+  const M3D JrInvR = jrInvLocal(r.segment<3>(0));
+
+  const auto jac_j = spline.jacobianAt(tj), jac_j1 = spline.jacobianAt(tj1);
+  const int dimZ = layout.dim();
+  Eigen::MatrixXd Jred = Eigen::MatrixXd::Zero(9, dimZ);
+
+  // ---- free control-point columns (k with abs index >= 3 only) ---------
+  for (int k = 0; k < 4; ++k)
+  {
+    const int abs_j = jac_j.s + k;
+    if (abs_j >= 3)
+    {
+      Eigen::MatrixXd Jxj_col(9, 3), Jxj1_col(9, 3);
+      Jxj_col.setZero(); Jxj1_col.setZero();
+      Jxj_col.block<3, 3>(0, 0) = spline.dThetaDcphi(jac_j, k, tj);
+      const int colp = layout.colPhi(abs_j);
+      if (colp >= 0)
+        Jred.block(0, colp, 9, 3) += chainProcessFactorJacobian(F9, g, JrInvR, Jxj_col,
+            Eigen::MatrixXd::Zero(9, 3));
+
+      Eigen::MatrixXd Jxj_pos(9, 3); Jxj_pos.setZero();
+      Jxj_pos.block<3, 3>(3, 0) = PoseControlSpline::dPosDcp(jac_j, k);
+      Jxj_pos.block<3, 3>(6, 0) = PoseControlSpline::dVelDcp(jac_j, k);
+      const int colpp = layout.colPos(abs_j);
+      if (colpp >= 0)
+        Jred.block(0, colpp, 9, 3) += chainProcessFactorJacobian(F9, g, JrInvR, Jxj_pos,
+            Eigen::MatrixXd::Zero(9, 3));
+    }
+
+    const int abs_j1 = jac_j1.s + k;
+    if (abs_j1 >= 3)
+    {
+      Eigen::MatrixXd Jxj1_col(9, 3); Jxj1_col.setZero();
+      Jxj1_col.block<3, 3>(0, 0) = spline.dThetaDcphi(jac_j1, k, tj1);
+      const int colp1 = layout.colPhi(abs_j1);
+      if (colp1 >= 0)
+        Jred.block(0, colp1, 9, 3) += chainProcessFactorJacobian(F9, g, JrInvR,
+            Eigen::MatrixXd::Zero(9, 3), Jxj1_col);
+
+      Eigen::MatrixXd Jxj1_pos(9, 3); Jxj1_pos.setZero();
+      Jxj1_pos.block<3, 3>(3, 0) = PoseControlSpline::dPosDcp(jac_j1, k);
+      Jxj1_pos.block<3, 3>(6, 0) = PoseControlSpline::dVelDcp(jac_j1, k);
+      const int colpp1 = layout.colPos(abs_j1);
+      if (colpp1 >= 0)
+        Jred.block(0, colpp1, 9, 3) += chainProcessFactorJacobian(F9, g, JrInvR,
+            Eigen::MatrixXd::Zero(9, 3), Jxj1_pos);
+    }
+  }
+
+  // ---- sT columns (present for every segment; direct via G9, no F9/g^T
+  // chain -- sT enters f() itself, not through x_j) --------------------
+  {
+    Eigen::Matrix<double, 3, 9> Jcur_sT_theta = -JrInvR * g.transpose() * G9.block<3, 9>(0, 0);
+    Eigen::Matrix<double, 3, 9> Jcur_sT_pos = -G9.block<3, 9>(3, 0);
+    Eigen::Matrix<double, 3, 9> Jcur_sT_vel = -G9.block<3, 9>(6, 0);
+    auto writeSt = [&](int col9, int colZ) {
+      if (colZ < 0) return;
+      Jred.block<3, 1>(0, colZ) += Jcur_sT_theta.col(col9);
+      Jred.block<3, 1>(3, colZ) += Jcur_sT_pos.col(col9);
+      Jred.block<3, 1>(6, colZ) += Jcur_sT_vel.col(col9);
+    };
+    for (int a = 0; a < 3; ++a) {
+      if (layout.colBG() >= 0) writeSt(0 + a, layout.colBG() + a);
+      if (layout.colBA() >= 0) writeSt(3 + a, layout.colBA() + a);
+      if (layout.colG()  >= 0) writeSt(6 + a, layout.colG()  + a);
+    }
+  }
+
+  const Eigen::MatrixXd JtL = Jred.transpose() * Lambda;
+  A += JtL * Jred;
+  b += -JtL * r;
+  if (out_E_process) *out_E_process += 0.5 * r.dot(Lambda * r);
+
+  // ---- head block (theta0/pos0/vel0) -- rotation is GLOBAL (every
+  // segment contributes), position is LOCAL (only j<=2). ----------------
+  if (head_block)
+  {
+    Eigen::MatrixXd Jxj_head = Eigen::MatrixXd::Zero(9, 9), Jxj1_head = Eigen::MatrixXd::Zero(9, 9);
+    Jxj_head.block<3, 3>(0, 0) = poseControlHeadRotJacobian(spline, tj);
+    Jxj1_head.block<3, 3>(0, 0) = poseControlHeadRotJacobian(spline, tj1);
+
+    auto hs = poseControlHeadPosSensitivity(spline);
+    M3D dp_dp0, dp_dv0, dv_dp0, dv_dv0;
+    poseControlHeadPosJacobians(spline, hs, tj, dp_dp0, dp_dv0, dv_dp0, dv_dv0);
+    Jxj_head.block<3, 3>(3, 3) = dp_dp0; Jxj_head.block<3, 3>(3, 6) = dp_dv0;
+    Jxj_head.block<3, 3>(6, 3) = dv_dp0; Jxj_head.block<3, 3>(6, 6) = dv_dv0;
+    poseControlHeadPosJacobians(spline, hs, tj1, dp_dp0, dp_dv0, dv_dp0, dv_dv0);
+    Jxj1_head.block<3, 3>(3, 3) = dp_dp0; Jxj1_head.block<3, 3>(3, 6) = dp_dv0;
+    Jxj1_head.block<3, 3>(6, 3) = dv_dp0; Jxj1_head.block<3, 3>(6, 6) = dv_dv0;
+
+    const Eigen::MatrixXd Jhead = chainProcessFactorJacobian(F9, g, JrInvR, Jxj_head, Jxj1_head);
+    head_block->A_hh += Jhead.transpose() * Lambda * Jhead;
+    if (head_block->A_hf.size() == 0) head_block->A_hf = Eigen::MatrixXd::Zero(9, dimZ);
+    head_block->A_hf += Jhead.transpose() * Lambda * Jred;
+  }
+}
+
 }  // namespace livo_recon
