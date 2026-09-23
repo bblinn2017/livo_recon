@@ -148,4 +148,52 @@ private:
   double t0_ = 0.0, t1_ = 0.0, delta_ = 0.0, inv_delta_ = 0.0;
 };
 
+// ============================================================================
+// HARD head constraint (spec item 4, 2026-09-22): "Do NOT use a soft
+// covariance prior to merely discourage head movement... hard-constrain the
+// spline so p(t0)=p0, R(t0)=R0, v(t0)=v0, omega(t0)=omega0... zero
+// optimization DOFs corresponding to head motion." Implemented as genuine
+// linear EQUALITY constraint rows (a KKT-augmented solve), not elimination
+// of control-point variables and not a soft prior -- this is what keeps
+// raw_parameter_dimension == reduced_parameter_dimension == 6N (spec item
+// 15): the state truly is 6N control-point coordinates throughout; the KKT
+// multipliers are bookkeeping for the equality rows, not hidden state.
+//
+// R_ANCHOR CONVENTION: the caller sets spline.R_anchor = R0 (the scan-start
+// attitude) BEFORE calling buildHeadConstraintRows() -- this makes the
+// target phi(t0) exactly 0, so the rotation constraint is
+//     phi(t0) = 0,   phidot(t0) = omega0        (since Jr(0) = I exactly)
+// rather than needing Jr(phi0)^-1 for a nonzero phi0 target.
+//
+// TAIL IS DELIBERATELY UNCONSTRAINED (spec item 5): only 12 rows are ever
+// built here (2 constraints [value, rate] x 3 axes x 2 channels [pos, rot],
+// all touching only cp_p[0..2]/cp_phi[0..2] -- the basis weight/rate-weight
+// of control point 3 is exactly 0 at u=0, same identity ScanSpline's own
+// buildEndConstraints() exploits at BOTH ends).  p(t1)/v(t1)/R(t1)/
+// omega(t1) are evaluated from the OPTIMIZED spline after solving -- never
+// clamped, never read from an independently-tracked tail-velocity variable.
+//
+// Flattened state-vector layout used by C/delta_c below: index(k,axis) =
+// 3*k+axis for c_p's block [0, 3N); 3N + 3*k+axis for c_phi's block
+// [3N, 6N). This is the SAME layout every caller (process factor, LiDAR
+// factor, covariance) must use when assembling A/b.
+void buildHeadConstraintRows(const PoseControlSpline& spline,
+                              const V3D& p0, const V3D& v0, const V3D& omega0,
+                              Eigen::MatrixXd& C, Eigen::VectorXd& d);
+
+// Solves [A C^T; C 0][delta_c; lambda] = [b; d] via LDLT (indefinite,
+// symmetric) and returns delta_c (size 6N) -- the correction that,
+// applied to the CURRENT trial control points, satisfies the head
+// constraint rows exactly (to solver tolerance) while otherwise
+// minimizing the quadratic cost A/b already encodes (LiDAR + process
+// factor normal equations, assembled elsewhere). A is 6N x 6N, b is 6N,
+// C is 12 x 6N, d is 12 -- exactly buildHeadConstraintRows()'s output
+// re-expressed as a residual against the CURRENT trial (see that
+// function's caller in the estimator for how d is built each GN
+// iteration: d = target - (current value), so delta_c=0 solves a
+// system already exactly at the head target).
+bool solvePoseControlKkt(const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
+                          const Eigen::MatrixXd& C, const Eigen::VectorXd& d,
+                          Eigen::VectorXd& delta_c);
+
 }  // namespace livo_recon

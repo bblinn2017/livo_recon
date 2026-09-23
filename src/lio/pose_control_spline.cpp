@@ -111,6 +111,77 @@ void PoseControlSpline::poseAt(double t, M3D& R, V3D& p) const
   p = posAt(t);
 }
 
+void buildHeadConstraintRows(const PoseControlSpline& spline,
+                              const V3D& p0, const V3D& v0, const V3D& omega0,
+                              Eigen::MatrixXd& C, Eigen::VectorXd& d)
+{
+  const int N = spline.N();
+  const int dim = 6 * N;
+  const double inv_delta = 1.0 / spline.delta();
+  C = Eigen::MatrixXd::Zero(12, dim);
+  d = Eigen::VectorXd::Zero(12);
+
+  auto idx_p = [&](int k, int axis) { return 3 * k + axis; };
+  auto idx_phi = [&](int k, int axis) { return 3 * N + 3 * k + axis; };
+
+  const V3D p_cur   = spline.posAt(spline.t0());
+  const V3D v_cur    = spline.velAt(spline.t0());
+  const V3D phi_cur  = spline.phiAt(spline.t0());
+  const V3D wdot_cur = spline.phiDotAt(spline.t0());
+
+  for (int a = 0; a < 3; ++a)
+  {
+    // position value: (1/6,4/6,1/6,0) . cp_p[0..3]
+    int r0 = a;
+    C(r0, idx_p(0, a)) = 1.0 / 6.0;
+    C(r0, idx_p(1, a)) = 4.0 / 6.0;
+    C(r0, idx_p(2, a)) = 1.0 / 6.0;
+    d(r0) = p0(a) - p_cur(a);
+
+    // position rate: inv_delta*(-1/2,0,1/2,0) . cp_p[0..3]
+    int r1 = 3 + a;
+    C(r1, idx_p(0, a)) = -0.5 * inv_delta;
+    C(r1, idx_p(2, a)) = 0.5 * inv_delta;
+    d(r1) = v0(a) - v_cur(a);
+
+    // rotation value: phi(t0) target 0 (R_anchor convention -- see header)
+    int r2 = 6 + a;
+    C(r2, idx_phi(0, a)) = 1.0 / 6.0;
+    C(r2, idx_phi(1, a)) = 4.0 / 6.0;
+    C(r2, idx_phi(2, a)) = 1.0 / 6.0;
+    d(r2) = 0.0 - phi_cur(a);
+
+    // rotation rate: phidot(t0) target omega0 (Jr(0)=I)
+    int r3 = 9 + a;
+    C(r3, idx_phi(0, a)) = -0.5 * inv_delta;
+    C(r3, idx_phi(2, a)) = 0.5 * inv_delta;
+    d(r3) = omega0(a) - wdot_cur(a);
+  }
+}
+
+bool solvePoseControlKkt(const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
+                          const Eigen::MatrixXd& C, const Eigen::VectorXd& d,
+                          Eigen::VectorXd& delta_c)
+{
+  const int n = static_cast<int>(A.rows());
+  const int k = static_cast<int>(C.rows());
+  Eigen::MatrixXd KKT = Eigen::MatrixXd::Zero(n + k, n + k);
+  KKT.topLeftCorner(n, n) = A;
+  KKT.topRightCorner(n, k) = C.transpose();
+  KKT.bottomLeftCorner(k, n) = C;
+
+  Eigen::VectorXd rhs(n + k);
+  rhs.head(n) = b;
+  rhs.tail(k) = d;
+
+  Eigen::LDLT<Eigen::MatrixXd> ldlt(KKT);
+  if (ldlt.info() != Eigen::Success) return false;
+  const Eigen::VectorXd sol = ldlt.solve(rhs);
+  if (!sol.allFinite()) return false;
+  delta_c = sol.head(n);
+  return true;
+}
+
 M3D PoseControlSpline::dOmegaDcphi(const PoseControlJac& j, int k, double t) const
 {
   // omega(t) = Jr(phi(t)) * phidot(t). Leading-order (exact at phi=0,

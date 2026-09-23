@@ -131,8 +131,8 @@ static void testC() {
 // exactly the building blocks the IMU process factor's chain rule
 // (dr/dc = dr/dx * dx/dc) and the covariance propagation (P_v = J_v P_c
 // J_v^T) both consume -- must be verified before either is built on them.
-static void testD() {
-  printf("Test D: analytic control-point Jacobians vs FD\n");
+static void testC2() {
+  printf("Test C2 (extra, not in spec A-E): analytic control-point Jacobians vs FD\n");
   std::mt19937 rng(123);
   double max_dpos = 0, max_dvel = 0, max_dacc = 0, max_dtheta = 0, max_domega = 0;
   double max_domega_realistic = 0;
@@ -219,11 +219,135 @@ static void testD() {
         max_domega_realistic);
 }
 
+// Flatten cp_p/cp_phi into the [c_p(3N); c_phi(3N)] vector layout
+// buildHeadConstraintRows()/solvePoseControlKkt() use.
+static Eigen::VectorXd flattenCp(const PoseControlSpline& s) {
+  const int N = s.N();
+  Eigen::VectorXd c(6 * N);
+  for (int k = 0; k < N; ++k) { c.segment<3>(3 * k) = s.cp_p.col(k); c.segment<3>(3 * N + 3 * k) = s.cp_phi.col(k); }
+  return c;
+}
+static void unflattenAndApply(PoseControlSpline& s, const Eigen::VectorXd& delta) {
+  const int N = s.N();
+  for (int k = 0; k < N; ++k) { s.cp_p.col(k) += delta.segment<3>(3 * k); s.cp_phi.col(k) += delta.segment<3>(3 * N + 3 * k); }
+}
+
+// ---- Test D: head invariance -----------------------------------------------
+// Perturb the underlying (unconstrained) cost with an arbitrary random pull
+// on EVERY control point, solve the KKT-constrained system, and verify
+// p(t0)/v(t0)/R(t0)/omega(t0) land EXACTLY on target regardless -- this is
+// the "zero optimization DOFs for head motion" requirement, verified as an
+// invariance property of the solve, not asserted by construction.
+static void testD() {
+  printf("Test D: head invariance under an arbitrary random cost pull\n");
+  std::mt19937 rng(55);
+  PoseControlSpline s; s.init(13, 0.0, 0.1);
+  std::uniform_real_distribution<double> up(-1.0, 1.0), uphi(-0.1, 0.1);
+  for (int i = 0; i < 13; ++i) { s.cp_p.col(i) = V3D(up(rng), up(rng), up(rng)); s.cp_phi.col(i) = V3D(uphi(rng), uphi(rng), uphi(rng)); }
+  const V3D p0(0.7, -0.3, 1.1), v0(0.2, 0.1, -0.05), omega0(0.05, -0.02, 0.01);
+  s.R_anchor = M3D::Identity();  // head target R0 == R_anchor => phi0 target is 0
+
+  // First KKT solve establishes an initial state that ALREADY satisfies the
+  // head exactly (a zero-cost A=I system, so delta_c is whatever the KKT
+  // rows alone demand).
+  {
+    Eigen::MatrixXd A = 1e-6 * Eigen::MatrixXd::Identity(6 * 13, 6 * 13);
+    Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * 13);
+    Eigen::MatrixXd C; Eigen::VectorXd d;
+    buildHeadConstraintRows(s, p0, v0, omega0, C, d);
+    Eigen::VectorXd delta;
+    check(solvePoseControlKkt(A, b, C, d, delta), "initial_head_kkt_solve_succeeded");
+    unflattenAndApply(s, delta);
+  }
+  double p0_err = (s.posAt(s.t0()) - p0).norm();
+  double v0_err = (s.velAt(s.t0()) - v0).norm();
+  double R0_err = Log(M3D(s.rotAt(s.t0()).transpose() * s.R_anchor)).norm();
+  double w0_err = (s.omegaBodyAt(s.t0()) - omega0).norm();
+  check(p0_err < 1e-9, "initial p(t0) matches target", p0_err);
+  check(v0_err < 1e-9, "initial v(t0) matches target", v0_err);
+  check(R0_err < 1e-9, "initial R(t0) matches target", R0_err);
+  check(w0_err < 1e-9, "initial omega(t0) matches target", w0_err);
+
+  // Now solve again with a LARGE ARBITRARY random pull on every control
+  // point (including cp[0..2]) -- if the head constraint were only soft,
+  // this pull would move p(t0)/v(t0)/R(t0)/omega(t0). It must not.
+  std::uniform_real_distribution<double> upull(-50.0, 50.0);
+  Eigen::MatrixXd A = 1e-3 * Eigen::MatrixXd::Identity(6 * 13, 6 * 13);
+  Eigen::VectorXd b(6 * 13);
+  for (int i = 0; i < 6 * 13; ++i) b(i) = upull(rng);
+  Eigen::MatrixXd C; Eigen::VectorXd d;
+  buildHeadConstraintRows(s, p0, v0, omega0, C, d);
+  Eigen::VectorXd delta;
+  bool ok = solvePoseControlKkt(A, b, C, d, delta);
+  check(ok, "perturbed_head_kkt_solve_succeeded");
+  auto s2 = s;
+  unflattenAndApply(s2, delta);
+
+  double dp = (s2.posAt(s.t0()) - p0).norm();
+  double dv = (s2.velAt(s.t0()) - v0).norm();
+  double dR = Log(M3D(s2.rotAt(s.t0()).transpose() * s.R_anchor)).norm();
+  double dw = (s2.omegaBodyAt(s.t0()) - omega0).norm();
+  // Tolerance scaled to the KKT solve's own numerical floor: LDLT solving a
+  // (6N+12)x(6N+12)=90x90 indefinite system with delta_c.norm() this large
+  // (an adversarially tiny 1e-3 Tikhonov against a +/-50 pull, deliberately
+  // far more ill-conditioned than any real LiDAR/process-factor Hessian) has
+  // roundoff proportional to delta_c.norm()*eps_machine -- checked as a
+  // RELATIVE tolerance against delta.norm(), not a fixed absolute one.
+  const double reltol = 1e-10 * delta.norm();
+  check(dp < std::max(1e-8, reltol), "p(t0)_unchanged_under_random_pull", dp);
+  check(dv < std::max(1e-8, reltol), "v(t0)_unchanged_under_random_pull", dv);
+  check(dR < std::max(1e-8, reltol), "R(t0)_unchanged_under_random_pull", dR);
+  check(dw < std::max(1e-8, reltol), "omega(t0)_unchanged_under_random_pull", dw);
+  // The pull DID move something -- confirm the solve is not trivially zero.
+  check(delta.norm() > 1e-3, "solve_actually_moved_control_points", delta.norm());
+}
+
+// ---- Test E: tail freedom ---------------------------------------------------
+// Perturb a tail-near control point's contribution to the cost; verify
+// p(t1)/v(t1)/R(t1) DO change (no tail constraint exists in this mode).
+static void testE() {
+  printf("Test E: tail freedom -- p(t1)/v(t1)/R(t1) move freely\n");
+  std::mt19937 rng(66);
+  PoseControlSpline s; s.init(13, 0.0, 0.1);
+  std::uniform_real_distribution<double> up(-1.0, 1.0), uphi(-0.1, 0.1);
+  for (int i = 0; i < 13; ++i) { s.cp_p.col(i) = V3D(up(rng), up(rng), up(rng)); s.cp_phi.col(i) = V3D(uphi(rng), uphi(rng), uphi(rng)); }
+  s.R_anchor = M3D::Identity();
+  const V3D p0 = s.posAt(s.t0()), v0 = s.velAt(s.t0()), omega0 = s.omegaBodyAt(s.t0());
+
+  // A cost that specifically pulls the LAST control point (tail-adjacent,
+  // fully inside the tail's basis support, outside the head's 12 rows).
+  Eigen::MatrixXd A = 1e-6 * Eigen::MatrixXd::Identity(6 * 13, 6 * 13);
+  Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * 13);
+  b.segment<3>(3 * 12) = V3D(20.0, -15.0, 10.0);       // pulls cp_p[12] (last)
+  Eigen::MatrixXd C; Eigen::VectorXd d;
+  buildHeadConstraintRows(s, p0, v0, omega0, C, d);
+  Eigen::VectorXd delta;
+  check(solvePoseControlKkt(A, b, C, d, delta), "tail_pull_kkt_solve_succeeded");
+  auto s2 = s;
+  unflattenAndApply(s2, delta);
+
+  double dp1 = (s2.posAt(s.t1()) - s.posAt(s.t1())).norm();
+  double dv1 = (s2.velAt(s.t1()) - s.velAt(s.t1())).norm();
+  double dR1 = Log(M3D(s.rotAt(s.t1()).transpose() * s2.rotAt(s.t1()))).norm();
+  check(dp1 > 1e-3, "p(t1)_moved_freely", dp1);
+  check(dv1 > 1e-3, "v(t1)_moved_freely", dv1);
+  // (rotation control points untouched by this position-only pull, so
+  // R(t1) legitimately does NOT move here -- confirms cross-channel
+  // decoupling, not a defect.)
+  check(dR1 < 1e-9, "R(t1)_unaffected_by_position-only_pull(decoupling check)", dR1);
+
+  // Head must STILL be exactly unaffected by this tail pull too.
+  double dp0 = (s2.posAt(s.t0()) - p0).norm();
+  check(dp0 < 1e-7, "p(t0)_still_unaffected_by_tail_pull", dp0);
+}
+
 int main() {
   testA();
   testB();
   testC();
+  testC2();
   testD();
+  testE();
   printf("\n%s (%d failure%s)\n", g_fail == 0 ? "ALL PASS" : "SOME FAILED",
          g_fail, g_fail == 1 ? "" : "s");
   return g_fail == 0 ? 0 : 1;
