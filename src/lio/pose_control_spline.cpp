@@ -324,16 +324,70 @@ void solveHeadControlPoints(const PoseControlSpline& spline,
   }
 }
 
-M3D PoseControlSpline::dOmegaDcphi(const PoseControlJac& j, int k, double t) const
+M3D PoseControlSpline::dOmegaDcphiLeadingOrder(const PoseControlJac& j, int k, double t) const
 {
-  // omega(t) = Jr(phi(t)) * phidot(t). Leading-order (exact at phi=0,
-  // accurate to the ~15 deg per-scan chords this codebase's own
-  // CHART_MAX_PHI_RAD=1.0 rad regime assumes -- see this class's header
-  // comment):
-  //   d(Jr(phi)v)/dphi[dphi] ~= 0.5*[v]_x*dphi   (v = phidot(t) held fixed)
-  //   d(phidot term)/dc_phi[k] = Jr(phi(t)) * bdot_k(t)
+  // Leading-order-in-phi approximation (exact only at phi=0) -- kept ONLY
+  // for the diagnostic comparison in the unit test. NOT used anywhere in
+  // the estimator; see dOmegaDcphi() for the exact version.
   const V3D wdot = phiDotAt(t);
   return j.db[k] * j.inv_delta * Jr(phiAt(t)) + 0.5 * j.b[k] * skew3(wdot);
+}
+
+M3D PoseControlSpline::dOmegaDcphi(const PoseControlJac& j, int k, double t) const
+{
+  // EXACT derivative of omega(t) = Jr(phi(t)) * phidot(t) w.r.t. c_phi[k]
+  // (2026-09-22 correction, item 13 -- "derive the exact analytic
+  // d(omega_body)/d(c_phi) including the derivative of Jr(phi) and the
+  // derivative of phidot").
+  //
+  // phi(t;c_phi[k]+eps*e) = phi(t) + eps*b_k(t)*e   (exact, phi is LINEAR
+  // in c_phi), phidot similarly with bdot_k(t) -- so:
+  //   d(omega)/deps = [d(Jr(phi)v)/dphi](b_k(t)*e) + Jr(phi(t))*(bdot_k(t)*e),
+  //   v := phidot(t) held fixed in the first term.
+  // The second term is already exact (linear). The first term needs the
+  // EXACT derivative of f(phi):=Jr(phi)*v w.r.t. phi, which -- writing
+  // Jr(phi) = I - A(th)*K + B(th)*K^2 (K=[phi]_x, th=|phi|,
+  // A(th)=(1-cos th)/th^2, B(th)=(th-sin th)/th^3, matching this
+  // codebase's own Jr()/JrInv() series conventions) and using
+  // K*v = phi x v = -[v]_x*phi, K^2*v = phi*(phi.v) - v*th^2 -- expands to
+  //   f(phi) = v + A(th)*[v]_x*phi + B(th)*(phi*(phi.v) - v*th^2)
+  // Differentiating term-by-term (dth/dphi = phi^T/th):
+  //   d(A(th)*[v]_x*phi)/dphi
+  //     = ([v]_x*phi) * (A'(th)/th) * phi^T + A(th)*[v]_x
+  //   d(-B(th)*v*th^2)/dphi = -v * (B'(th)*th + 2*B(th)) * phi^T
+  //   d(B(th)*phi*(phi.v))/dphi
+  //     = (phi*(phi.v)) * (B'(th)/th) * phi^T
+  //       + B(th)*[ (phi.v)*I + phi*v^T ]
+  // summed and validated against FD (see test_pose_control_spline.cpp) --
+  // NOT assumed correct from the algebra alone.
+  const V3D phi = phiAt(t);
+  const V3D v = phiDotAt(t);
+  const double th = phi.norm();
+  double A, Ap, B, Bp;   // A(th), A'(th), B(th), B'(th)
+  if (th < 1e-4) {
+    // Series (matches Jr()/JrInv()'s own small-angle conventions).
+    A  = 0.5 - th * th / 24.0;
+    Ap = -th / 12.0;
+    B  = 1.0 / 6.0 - th * th / 120.0;
+    Bp = -th / 60.0;
+  } else {
+    const double s = std::sin(th), c = std::cos(th);
+    A  = (1.0 - c) / (th * th);
+    Ap = (s * th - 2.0 * (1.0 - c)) / (th * th * th);
+    B  = (th - s) / (th * th * th);
+    Bp = ((1.0 - c) * th - 3.0 * (th - s)) / (th * th * th * th);
+  }
+  const V3D vxphi = skew3(v) * phi;              // [v]_x * phi
+  const V3D phiPhiV = phi * phi.dot(v);          // phi*(phi.v)
+
+  M3D dfdphi = M3D::Zero();
+  dfdphi += vxphi * (Ap / std::max(th, 1e-12)) * phi.transpose();
+  dfdphi += A * skew3(v);
+  dfdphi += -v * (Bp * th + 2.0 * B) * phi.transpose();
+  dfdphi += phiPhiV * (Bp / std::max(th, 1e-12)) * phi.transpose();
+  dfdphi += B * (phi.dot(v) * M3D::Identity() + phi * v.transpose());
+
+  return dfdphi * (j.b[k]) + Jr(phi) * (j.db[k] * j.inv_delta);
 }
 
 }  // namespace livo_recon

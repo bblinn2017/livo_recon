@@ -135,9 +135,16 @@ public:
   static M3D dAccDcp(const PoseControlJac& j, int k)   { return (j.ddb[k] * j.inv_delta2) * M3D::Identity(); }
   M3D dThetaDcphi(const PoseControlJac& j, int k, double t) const
   { return j.b[k] * Jr(phiAt(t)); }
-  // See this class's header comment -- leading-order term only, validated
-  // against FD in the unit test, not assumed exact.
+  // EXACT (2026-09-22 correction, item 13): the full analytic derivative
+  // of omega(t)=Jr(phi(t))*phidot(t) w.r.t. c_phi[jac.s+k], including the
+  // derivative of Jr(phi) itself (previously only a leading-order-in-phi
+  // approximation -- see dOmegaDcphiLeadingOrder() below, kept only as a
+  // secondary cross-check). Validated against FD in
+  // test_pose_control_spline.cpp (FD is the ORACLE only, never used here).
   M3D dOmegaDcphi(const PoseControlJac& j, int k, double t) const;
+  // The original leading-order-in-phi approximation, kept for the
+  // diagnostic comparison in the unit test (NOT used by the estimator).
+  M3D dOmegaDcphiLeadingOrder(const PoseControlJac& j, int k, double t) const;
 
   Eigen::Matrix<double, 3, Eigen::Dynamic>       cp_p;    // 3 x N, world position
   Eigen::Matrix<double, 3, Eigen::Dynamic>       cp_phi;  // 3 x N, tangent-chart rotation

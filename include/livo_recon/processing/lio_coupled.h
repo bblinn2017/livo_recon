@@ -829,32 +829,38 @@ private:
   std::vector<Eigen::Matrix<double, 9, 9>> pose_knots_frozen_F9_, pose_knots_frozen_Q9_;
   bool pose_knots_frozen_fq_valid_ = false;
   // The pose-control-point analogue of coupled_pose_knots_ above -- only
-  // meaningful when copts_.poseControlSplineBasis(). The spline itself
-  // (cp_p/cp_phi) IS the accumulated state (mutated in place each GN
-  // iteration, unlike coupled_pose_knots_'s separate-delta-accumulator
-  // pattern -- simpler since there is no nullspace-elimination machinery
-  // to keep a clean nominal/delta split for here).
+  // meaningful when copts_.poseControlSplineBasis().
+  //
+  // 2026-09-22 correction: the head is a TRUE NULLSPACE ELIMINATION
+  // (coupled_pose_control_hns_, built ONCE at scan start from p0/v0/R0 --
+  // see buildPoseControlHeadNullspace()) over the RAW 6N control-point
+  // space, not a fixed-control-point scheme. The actual GN mean variable
+  // is coupled_pose_control_eta_ (6N-9 dim); the spline's cp_p/cp_phi are
+  // a DERIVED view (c = c_particular + Z*eta), recomputed via
+  // poseControlUnflatten() every time eta changes -- cp_p/cp_phi are
+  // never treated as the optimization variable directly.
   PoseControlSpline coupled_pose_control_spline_;
   bool coupled_pose_control_valid_ = false;
   PoseControlFreeLayout coupled_pose_control_layout_;
-  // sT = [bg,ba,g] -- the free non-trajectory tail state (see
-  // pose_control_layout.h). ABSOLUTE values (not corrections), mutated in
-  // place each GN iteration, seeded from state_->biasGyr()/biasAcc()/
-  // gravity() at scan start.
-  V3D coupled_pose_control_bg_ = V3D::Zero(), coupled_pose_control_ba_ = V3D::Zero(),
-      coupled_pose_control_g_ = V3D::Zero();
+  PoseControlHeadNullspace coupled_pose_control_hns_;
+  Eigen::VectorXd coupled_pose_control_eta_;
+  // Tail trial state (item 3/4 of the correction): tail_trial is the ONE
+  // coherent current non-trajectory tail state, updated by INCREMENT
+  // (delta_bg/ba/g solved by the GN step) every iteration -- never treated
+  // as itself the optimization variable (the variable is the increment).
+  // tail_prior is the FIXED scan-entry value the increment is measured
+  // against (mean prior residual = tail_trial - tail_prior, consistent
+  // with the covariance prior's own Omega_ss block -- item 10).
+  V3D coupled_pose_control_bg_trial_ = V3D::Zero(), coupled_pose_control_ba_trial_ = V3D::Zero(),
+      coupled_pose_control_g_trial_ = V3D::Zero();
+  V3D coupled_pose_control_bg_prior_ = V3D::Zero(), coupled_pose_control_ba_prior_ = V3D::Zero(),
+      coupled_pose_control_g_prior_ = V3D::Zero();
   // Raw IMU samples bucketed onto the spline's own breakpoint grid ONCE at
   // scan start (bucketing depends only on fixed breakpoint times, not on
   // the moving trial trajectory) -- reused every GN iteration, mirroring
   // coupled_pose_knots_'s own seg_samples_ caching.
   std::vector<std::vector<ImuSample>> coupled_pose_control_seg_samples_;
-  // Continuity: the PREVIOUS scan's own optimized tail angular velocity,
-  // fed as this scan's omega0 head-boundary target (no StateGroup analog
-  // exists for this -- see estimateCoupledPoseControlSpline()'s own doc
-  // comment). Zero/invalid on the very first scan of a run.
-  V3D coupled_pose_control_tail_omega_ = V3D::Zero();
-  bool coupled_pose_control_tail_omega_valid_ = false;
-  // The reduced posterior z=[c_free;sT] covariance from the LAST
+  // The reduced posterior z=[eta;delta_sT] covariance from the LAST
   // (converged) GN iteration's own information matrix -- written once,
   // post-loop, in processLIO()'s own poseControlSplineBasis() block (never
   // inside the per-iteration solve -- spec: mean every iteration,

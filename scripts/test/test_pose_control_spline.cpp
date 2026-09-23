@@ -134,7 +134,7 @@ static void testC() {
 static void testC2() {
   printf("Test C2 (extra, not in spec A-E): analytic control-point Jacobians vs FD\n");
   std::mt19937 rng(123);
-  double max_dpos = 0, max_dvel = 0, max_dacc = 0, max_dtheta = 0, max_domega = 0;
+  double max_dpos = 0, max_dvel = 0, max_dacc = 0, max_dtheta = 0, max_domega = 0, max_domega_leading = 0;
   double max_domega_realistic = 0;
   const double h = 1e-6;
   for (int trial = 0; trial < 10; ++trial) {
@@ -168,6 +168,8 @@ static void testC2() {
 
           V3D domega_fd = (tp.omegaBodyAt(t) - tm.omegaBodyAt(t)) / (2 * h);
           max_domega = std::max(max_domega, (s.dOmegaDcphi(jac, c, t) * e - domega_fd).norm());
+          max_domega_leading = std::max(max_domega_leading,
+              (s.dOmegaDcphiLeadingOrder(jac, c, t) * e - domega_fd).norm());
         }
       }
     }
@@ -176,20 +178,20 @@ static void testC2() {
   check(max_dvel < 1e-6, "max_abs_dVelDcp_error", max_dvel);
   check(max_dacc < 1e-4, "max_abs_dAccDcp_error", max_dacc);
   check(max_dtheta < 1e-6, "max_abs_dThetaDcphi_error", max_dtheta);
-  // dOmegaDcphi is a documented LEADING-ORDER (first-order-in-phi)
-  // approximation -- dropping Jr(phi)'s O(phi^2) term means its OWN
-  // derivative carries an O(phi) residual (confirmed algebraically: error
-  // scales linearly with |phi|, not quadratically). At this test's
-  // deliberately large synthetic |cp_phi| (+/-0.3 rad/axis) that residual
-  // is O(1) against an omega Jacobian of O(10-30) -- a real, honestly
-  // reported limitation, NOT tightened by fiat.
-  check(max_domega < 5.0, "max_abs_dOmegaDcphi_error(leading-order,|phi|~0.3)", max_domega);
+  // 2026-09-22 correction, item 13: dOmegaDcphi() is now the EXACT
+  // analytic derivative (including d(Jr(phi))/dphi), not a leading-order
+  // approximation -- validated here at the SAME deliberately-large
+  // synthetic |cp_phi| (+/-0.3 rad/axis) where the OLD leading-order
+  // formula (kept as dOmegaDcphiLeadingOrder(), reported alongside for
+  // contrast) had an O(1) error. The exact version's error at this scale
+  // is FD-noise-floor level, not merely improved.
+  check(max_domega < 1e-6, "max_abs_dOmegaDcphi_error(EXACT,|phi|~0.3)", max_domega);
+  check(max_domega_leading > 0.5, "max_abs_dOmegaDcphiLeadingOrder_error(for contrast,|phi|~0.3)",
+        max_domega_leading);
 
   // Same check at the |cp_phi| magnitude this codebase's own scans
   // actually produce (SP-4a: max_rot_chord_deg ~6 deg end-to-end; per-
-  // control-point differences are a further fraction of that) -- this is
-  // the regime dOmegaDcphi is actually used in (covariance reporting only,
-  // never the state estimate -- see header comment).
+  // control-point differences are a further fraction of that).
   std::mt19937 rng_small(321);
   for (int trial = 0; trial < 10; ++trial) {
     PoseControlSpline s; s.init(13, 0.0, 0.1);
@@ -215,7 +217,7 @@ static void testC2() {
       }
     }
   }
-  check(max_domega_realistic < 0.1, "max_abs_dOmegaDcphi_error(leading-order,realistic|phi|~0.02)",
+  check(max_domega_realistic < 1e-6, "max_abs_dOmegaDcphi_error(EXACT,realistic|phi|~0.02)",
         max_domega_realistic);
 }
 
