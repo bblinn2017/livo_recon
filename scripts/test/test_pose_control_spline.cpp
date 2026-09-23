@@ -461,6 +461,60 @@ static void testG() {
   check(dtheta_dtheta0_tail.norm() > 0.1, "rotation_sensitivity_nonzero_at_tail(global effect)", dtheta_dtheta0_tail.norm());
 }
 
+// ---- Test H: nullspace head elimination (2026-09-22 correction) --
+// exactly 9 constraints (p0 value+rate, phi0 value only -- NO omega0/
+// acceleration rows), and the remaining 69 (for N=13) DOF must be
+// genuinely free: any eta must give p(t0)=p0/v(t0)=v0/R(t0)=R0 exactly,
+// while a(t0)/omega(t0) actually change as eta varies (not artificially
+// pinned).
+static void testH() {
+  printf("Test H: nullspace head elimination (9 constraints, not 12 or control-point-fixing)\n");
+  const int N = 13;
+  PoseControlSpline s; s.init(N, 0.0, 0.1);
+  const V3D p0(0.7, -0.3, 1.1), v0(0.2, 0.1, -0.05);
+  const M3D R0 = Exp(V3D(0.15, -0.08, 0.03));
+  s.R_anchor = R0;
+
+  auto hs = buildPoseControlHeadNullspace(s, p0, v0);
+  check(hs.rawDim() == 6 * N, "raw dim = 6N = 78", hs.rawDim());
+  check(hs.freeDim() == 6 * N - 9, "free dim = 6N-9 = 69", hs.freeDim());
+
+  // Orthonormality (Z^T Z = I) -- confirms a genuine orthonormal nullspace
+  // basis, not an arbitrary spanning set.
+  double orthoErr = (hs.Z.transpose() * hs.Z - Eigen::MatrixXd::Identity(hs.freeDim(), hs.freeDim())).norm();
+  check(orthoErr < 1e-9, "Z columns orthonormal", orthoErr);
+
+  std::mt19937 rng(2468);
+  std::uniform_real_distribution<double> ue(-5, 5);
+  double max_p0_err = 0, max_v0_err = 0, max_R0_err = 0;
+  double max_a0_variation = 0, max_omega0_variation = 0;
+  V3D a0_base, omega0_base;
+  bool first = true;
+  for (int trial = 0; trial < 10; ++trial) {
+    Eigen::VectorXd eta(hs.freeDim());
+    for (int i = 0; i < hs.freeDim(); ++i) eta(i) = ue(rng);
+    Eigen::VectorXd c = hs.c_particular + hs.Z * eta;
+    PoseControlSpline sp = s;
+    poseControlUnflatten(c, sp);
+
+    max_p0_err = std::max(max_p0_err, (sp.posAt(0.0) - p0).norm());
+    max_v0_err = std::max(max_v0_err, (sp.velAt(0.0) - v0).norm());
+    max_R0_err = std::max(max_R0_err, Log(M3D(sp.rotAt(0.0).transpose() * R0)).norm());
+
+    V3D a0 = sp.accAt(0.0), omega0 = sp.omegaBodyAt(0.0);
+    if (first) { a0_base = a0; omega0_base = omega0; first = false; }
+    else {
+      max_a0_variation = std::max(max_a0_variation, (a0 - a0_base).norm());
+      max_omega0_variation = std::max(max_omega0_variation, (omega0 - omega0_base).norm());
+    }
+  }
+  check(max_p0_err < 1e-9, "p(t0)=p0 exact for every eta", max_p0_err);
+  check(max_v0_err < 1e-8, "v(t0)=v0 exact for every eta", max_v0_err);
+  check(max_R0_err < 1e-9, "R(t0)=R0 exact for every eta", max_R0_err);
+  check(max_a0_variation > 1e-3, "a(t0) genuinely varies with eta (not artificially fixed)", max_a0_variation);
+  check(max_omega0_variation > 1e-3, "omega(t0) genuinely varies with eta (not artificially fixed)", max_omega0_variation);
+}
+
 int main() {
   testA();
   testB();
@@ -470,6 +524,7 @@ int main() {
   testE();
   testF();
   testG();
+  testH();
   printf("\n%s (%d failure%s)\n", g_fail == 0 ? "ALL PASS" : "SOME FAILED",
          g_fail, g_fail == 1 ? "" : "s");
   return g_fail == 0 ? 0 : 1;

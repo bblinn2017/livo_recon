@@ -203,6 +203,84 @@ M3D poseControlHeadRotJacobian(const PoseControlSpline& spline, double t)
   return spline.rotAt(t).transpose() * spline.R_anchor;
 }
 
+PoseControlHeadNullspace buildPoseControlHeadNullspace(
+    const PoseControlSpline& spline, const V3D& p0, const V3D& v0)
+{
+  const int N = spline.N();
+  const int raw = 6 * N;
+  const double invd = 1.0 / spline.delta();
+
+  // Per-axis constraint matrices -- IDENTICAL for x/y/z, computed once.
+  Eigen::Matrix<double, 2, 3> C_pos;
+  C_pos << 1.0 / 6.0, 4.0 / 6.0, 1.0 / 6.0,
+          -0.5 * invd, 0.0, 0.5 * invd;
+  Eigen::Matrix<double, 1, 3> C_rot;
+  C_rot << 1.0 / 6.0, 4.0 / 6.0, 1.0 / 6.0;
+
+  Eigen::JacobiSVD<Eigen::MatrixXd> svd_pos(C_pos, Eigen::ComputeFullV | Eigen::ComputeThinU);
+  Eigen::JacobiSVD<Eigen::MatrixXd> svd_rot(C_rot, Eigen::ComputeFullV | Eigen::ComputeThinU);
+  const Eigen::VectorXd null_pos = svd_pos.matrixV().col(2);       // 3x1, 1 free direction
+  const Eigen::MatrixXd null_rot = svd_rot.matrixV().rightCols(2); // 3x2, 2 free directions
+
+  PoseControlHeadNullspace out;
+  out.Z = Eigen::MatrixXd::Zero(raw, raw - 9);
+  out.c_particular = Eigen::VectorXd::Zero(raw);
+
+  const int posHeadCols = 3, posFreeCols = 3 * (N - 3);
+  const int rotHeadCols = 6;
+
+  for (int a = 0; a < 3; ++a)
+  {
+    // Minimum-norm particular solution: pinv(C_pos) * [p0(a); v0(a)].
+    Eigen::Vector2d rhs(p0(a), v0(a));
+    const Eigen::Vector3d part = svd_pos.solve(rhs);
+    for (int k = 0; k < 3; ++k) out.c_particular(3 * k + a) = part(k);
+
+    // Position head-nullspace column (index a, one per axis).
+    for (int k = 0; k < 3; ++k) out.Z(3 * k + a, a) = null_pos(k);
+    // Rotation particular solution is 0 (target phi0=0), already zeroed.
+  }
+  // Rotation head-nullspace columns laid out as columns
+  // [posHeadCols+posFreeCols, posHeadCols+posFreeCols+6), 2 per axis.
+  const int rotHeadColStart = posHeadCols + posFreeCols;
+  for (int a = 0; a < 3; ++a)
+    for (int j = 0; j < 2; ++j)
+      for (int k = 0; k < 3; ++k)
+        out.Z(3 * N + 3 * k + a, rotHeadColStart + 2 * a + j) = null_rot(k, j);
+
+  // Free (non-head) control points cp[3..N-1]: identity columns.
+  int col = posHeadCols;
+  for (int k = 3; k < N; ++k)
+    for (int a = 0; a < 3; ++a, ++col)
+      out.Z(3 * k + a, col) = 1.0;
+  col = rotHeadColStart + rotHeadCols;
+  for (int k = 3; k < N; ++k)
+    for (int a = 0; a < 3; ++a, ++col)
+      out.Z(3 * N + 3 * k + a, col) = 1.0;
+
+  return out;
+}
+
+Eigen::VectorXd poseControlFlatten(const PoseControlSpline& spline)
+{
+  const int N = spline.N();
+  Eigen::VectorXd c(6 * N);
+  for (int k = 0; k < N; ++k) {
+    c.segment<3>(3 * k) = spline.cp_p.col(k);
+    c.segment<3>(3 * N + 3 * k) = spline.cp_phi.col(k);
+  }
+  return c;
+}
+
+void poseControlUnflatten(const Eigen::VectorXd& c, PoseControlSpline& spline)
+{
+  const int N = spline.N();
+  for (int k = 0; k < N; ++k) {
+    spline.cp_p.col(k) = c.segment<3>(3 * k);
+    spline.cp_phi.col(k) = c.segment<3>(3 * N + 3 * k);
+  }
+}
+
 bool solvePoseControlKkt(const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
                           const Eigen::MatrixXd& C, const Eigen::VectorXd& d,
                           Eigen::VectorXd& delta_c)

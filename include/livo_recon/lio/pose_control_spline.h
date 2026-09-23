@@ -265,4 +265,52 @@ void poseControlHeadPosJacobians(const PoseControlSpline& spline,
 // d(theta_pert(t))/d(theta0), exact, for any t (see header comment above).
 M3D poseControlHeadRotJacobian(const PoseControlSpline& spline, double t);
 
+// ============================================================================
+// NULLSPACE HEAD ELIMINATION -- 2026-09-22 correction, SUPERSEDES both the
+// KKT-augmented mechanism above (12 rows including a phidot(t0)=omega0 row
+// that must NOT exist -- omega isn't a StateGroup variable) and the
+// control-point-FIXING mechanism above (solveHeadControlPoints(), which
+// over-constrains by using 3 conditions per channel -- p0/v0/a0=0 and
+// phi0/omega0/alpha0=0 -- freezing cp[0..2]/cp_phi[0..2] ENTIRELY and
+// removing 9 raw DOF that should stay available to the GN solve).
+//
+// The correct head is EXACTLY 9 linear equality constraints on the raw 6N
+// spline state, nothing more:
+//     B(t0)   . c_p   = p0     (3 rows, value)
+//     dB/dt(t0) . c_p = v0     (3 rows, rate)
+//     B(t0)   . c_phi = 0      (3 rows, phi(t0)=0, since R_anchor:=R0)
+// NO phidot(t0) row (that would fix omega(t0), which must be free to change
+// as attitude control points move), NO 2nd-derivative row (that would fix
+// acceleration(t0)). Both channels' constraint matrices only touch
+// cp_p[0..2]/cp_phi[0..2] (basis weight of cp[3] is exactly 0 at u=0).
+//
+// c = c_particular + Z*eta: Z (6N x (6N-9)) is an orthonormal basis for the
+// constraint nullspace (SVD-based, mirrors the EXACT deterministic-
+// constraint nullspace-elimination pattern already used elsewhere in this
+// codebase's own pose_knots exact_deterministic_constraint machinery --
+// same technique, not reinvented), c_particular is any one solution
+// satisfying the 9 constraints (minimum-norm). eta (6N-9 dim, 69 for N=13)
+// is the actual free-position-and-rotation GN variable -- this is what
+// "the mean solve operates directly in the nullspace of these 9
+// constraints" means: eta, not c, is optimized; c is always recovered as
+// c_particular + Z*eta before being read back into the spline.
+struct PoseControlHeadNullspace
+{
+  Eigen::MatrixXd Z;              // 6N x (6N-9)
+  Eigen::VectorXd c_particular;   // 6N, satisfies the 9 constraints exactly
+  int rawDim() const { return static_cast<int>(Z.rows()); }
+  int freeDim() const { return static_cast<int>(Z.cols()); }
+};
+
+// spline.R_anchor must already be set to R0 by the caller (phi0 target 0).
+PoseControlHeadNullspace buildPoseControlHeadNullspace(
+    const PoseControlSpline& spline, const V3D& p0, const V3D& v0);
+
+// Flattens spline.cp_p/cp_phi into the SAME [c_p(3N);c_phi(3N)] layout
+// buildHeadConstraintRows() used, for projecting an initial guess onto eta
+// (eta0 = Z^T * (c_initial - c_particular), valid since Z has orthonormal
+// columns) or reading c back out after eta changes.
+Eigen::VectorXd poseControlFlatten(const PoseControlSpline& spline);
+void poseControlUnflatten(const Eigen::VectorXd& c, PoseControlSpline& spline);
+
 }  // namespace livo_recon
