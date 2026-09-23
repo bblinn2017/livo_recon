@@ -45,9 +45,21 @@ namespace livo_recon
 
 // Returns false (leaves P_free untouched) if A_hh is not invertible via
 // LDLT or the resulting Schur complement is not PD/invertible.
+// rel_thresh: BOTH the A_hh^-1 step and the final A_ff_schur^-1 step use a
+// relative-eigenvalue-floored pseudo-inverse (generalPseudoInverse(), the
+// SAME philosophy already used for Q9/Omega0 throughout this estimator --
+// near-zero-information directions get treated as exactly zero, not
+// inverted into astronomical false precision) rather than a raw LDLT
+// solve. REQUIRED in practice, not merely a safety margin: live testing
+// on eee_01 confirmed a plain LDLT-based A_hh^-1 (the original
+// implementation) blows up to ~1e19-1e20 trace(P_post) when head_block's
+// measurement-sensitivity terms (O(1e10), see pose_control_process_factor_
+// reduced's own test) dominate a near-singular direction of A_hh that a
+// synthetic well-conditioned unit test never exercised.
 bool schurComplementFreeCovariance(
     const Eigen::MatrixXd& A_hh, const Eigen::MatrixXd& A_hf,
-    const Eigen::MatrixXd& A_ff, Eigen::MatrixXd& P_free);
+    const Eigen::MatrixXd& A_ff, Eigen::MatrixXd& P_free,
+    double rel_thresh = 1e-9);
 
 // Dynamic-size SPD pseudo-inverse via eigendecomposition of the
 // symmetrized matrix, relative eigenvalue floor -- the SAME algorithm/

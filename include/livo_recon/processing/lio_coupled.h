@@ -64,6 +64,12 @@ struct LioProcCoupledOptions
   // Config key: estimator/coupled/pose_control/q_pinv_rel_thresh -- same
   // convention as pose_knots_q_pinv_rel_thresh below.
   double pose_control_q_pinv_rel_thresh = 1e-6;
+  // Diagnostic-only knobs for the 2026-09-22 correction's required
+  // scan-1 test suite (items 16/18) -- both default to shipping behavior
+  // (LiDAR on, P0 unscaled). Config keys:
+  // estimator/coupled/pose_control/{lidar_enable,p0_scale}.
+  bool pose_control_lidar_enable = true;
+  double pose_control_p0_scale = 1.0;
 
   // CQ-82 Phase 2: pose-basis-only weights. Meaningless under raw_imu (the
   // refusal wiring never checks these -- they simply aren't read unless

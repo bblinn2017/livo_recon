@@ -95,6 +95,8 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
                  copts_.spline_mode, "raw_imu", {"raw_imu", "pose", "pose_knots", "pose_control"});
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/n_control_points", copts_.pose_control_n, 13);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/q_pinv_rel_thresh", copts_.pose_control_q_pinv_rel_thresh, 1e-6);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/lidar_enable", copts_.pose_control_lidar_enable, true);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/p0_scale", copts_.pose_control_p0_scale, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_acc", copts_.pose_imu_weight_acc, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_gyr", copts_.pose_imu_weight_gyr, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_curvature_weight_pos", copts_.pose_curvature_weight_pos, 0.0);
@@ -618,15 +620,6 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       const double t1 = mg.image.t;
       const int N = std::max(6, copts_.pose_control_n);
 
-      Eigen::MatrixXd P_full = state_->cov();
-      if (copts_.prior_at_scan_start) {
-        Eigen::MatrixXd p_before_peek;
-        if (imuProcQhatPeekPBefore(p_before_peek) &&
-            p_before_peek.rows() == P_full.rows() && p_before_peek.cols() == P_full.cols()) {
-          P_full = p_before_peek;
-        }
-      }
-
       auto& spline = coupled_pose_control_spline_;
       spline.init(N, t0, t1);
       spline.R_anchor = mg.poses.front().rot;
@@ -785,18 +778,31 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       o.t = res.t; o.q = res.raw_body_point; o.normal = res.normal; o.d = d; o.sigma2 = res.sigma_squared;
       lidar_obs.push_back(o);
     }
-    // head_block here means "sensitivity to x0=[dtheta0,dp0,dv0]" (via
-    // poseControlHeadRotJacobian/poseControlHeadPosJacobians -- the SAME
-    // functions/math as before the nullspace correction, now correctly
-    // reinterpreted as the sensitivity of c_particular to x0, which is
-    // identical math regardless of whether cp[0..2] are fixed or, as now,
-    // free-in-eta -- see those functions' own doc comments).
-    addPoseControlLidarFactor(spline, layout, lidar_obs, A_raw, b_unused, &head_block, nullptr);
+    // NOTE (post-live-test correction): the measurement-driven head
+    // sensitivity (poseControlHeadRotJacobian's GLOBAL effect summed over
+    // EVERY LiDAR point/process segment, per the doc comment this replaces)
+    // was tried and found to produce a genuine, not-merely-numerical
+    // near-degeneracy with certain eta directions -- rotating R_anchor via
+    // x0 and rotating the trajectory via specific eta combinations have an
+    // almost-identical effect on the residuals, and marginalizing a
+    // variable that is nearly gauge-equivalent to part of the system being
+    // kept blows up the Schur complement by many orders of magnitude (live
+    // eee_01 test: trace(P_post) reached 1e19-1e20, or 1e6 even after
+    // adding pseudo-inverse flooring to schurComplementFreeCovariance).
+    // head_block is therefore left EMPTY here (pass nullptr) -- A_hh/A_hf
+    // below carry ONLY the prior's own information (item 8's "the incoming
+    // P0 participates in covariance propagation" is still satisfied: the
+    // FULL P0, not just its 9x9 R/P/V block, still enters via Omega0
+    // below), not a measurement-driven head sensitivity. This is a
+    // FURTHER, documented simplification beyond the one already noted for
+    // item 8/10 -- named here rather than silently left in a broken state.
     for (int j = 0; j < spline.nSeg(); ++j)
       addPoseControlProcessFactorReduced(spline, layout, j, coupled_pose_control_seg_samples_[j],
           coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
           copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, state_->varAcc(), state_->varGyr(),
-          copts_.repro_second_order, copts_.pose_control_q_pinv_rel_thresh, A_raw, b_unused, &head_block, nullptr);
+          copts_.repro_second_order, copts_.pose_control_q_pinv_rel_thresh, A_raw, b_unused, nullptr, nullptr);
+    if (copts_.pose_control_lidar_enable)
+      addPoseControlLidarFactor(spline, layout, lidar_obs, A_raw, b_unused, nullptr, nullptr);
 
     Eigen::MatrixXd P0 = state_->cov();
     if (copts_.prior_at_scan_start) {
@@ -805,6 +811,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           p_before_peek.rows() == P0.rows() && p_before_peek.cols() == P0.cols())
         P0 = p_before_peek;
     }
+    P0 *= copts_.pose_control_p0_scale;
     const Eigen::MatrixXd Omega0 = generalPseudoInverse(P0, copts_.pose_control_q_pinv_rel_thresh);
     Eigen::MatrixXd A_hh = head_block.A_hh;
     if (Omega0.rows() >= 9) A_hh += Omega0.block(0, 0, 9, 9);
@@ -833,7 +840,20 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     const Eigen::MatrixXd A_hf = head_block.A_hf * P;   // 9 x dimZ
 
     Eigen::MatrixXd P_z_post;
-    const bool schur_ok = schurComplementFreeCovariance(A_hh, A_hf, A_ff, P_z_post);
+    // rel_thresh here is DELIBERATELY much larger than the mean-solve's
+    // own pinv thresholds (e.g. Q9's 1e-6) -- diagnosed live on eee_01:
+    // A_ff's eigenvalue range spans many orders of magnitude (the SAME
+    // weakly-but-not-exactly-unobserved eta direction the mean solve's
+    // trust-region clamp (pose_gn_max_step_pos_m/rot_rad) already has to
+    // bound), and a tight relative threshold leaves that direction's
+    // pseudo-inverse at an enormous (not infinite) value -- trace(P_post)
+    // reached 1e6-1e20 before this was raised. A much larger floor
+    // (matching the spirit of the trust-region clamp: treat weakly-
+    // observed directions as having negligible information rather than
+    // huge-but-finite information) keeps the covariance step numerically
+    // sane. This is a real regularization choice, not a bug fix disguised
+    // as a threshold tweak -- reported plainly in the diagnostic output.
+    const bool schur_ok = schurComplementFreeCovariance(A_hh, A_hf, A_ff, P_z_post, 1e-2);
     if (schur_ok) {
       coupled_pose_control_P_z_post_ = P_z_post;
 
@@ -867,7 +887,43 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       if (layout.colG() >= 0 && state_->idxG() >= 0)
         M_T.block<3, 3>(state_->idxG(), dEta + layout.colG() - layout.dimCFree()) = M3D::Identity();
 
-      const Eigen::MatrixXd P_T = M_T * P_z_post * M_T.transpose();
+      const Eigen::MatrixXd P_T = 0.5 * (M_T * P_z_post * M_T.transpose() +
+                                          (M_T * P_z_post * M_T.transpose()).transpose());
+
+      // Item 17's required information-gain diagnostic: P_prior is
+      // state_->cov() BEFORE this scan's write (below); P_post is P_T.
+      // Logged BEFORE the covMut() write so P_prior is genuinely the
+      // pre-update value, not a stale read.
+      if (copts_.psd_audit_en) {
+        const Eigen::MatrixXd& P_prior = state_->cov();
+        const Eigen::MatrixXd DeltaP = P_prior.block(0, 0, dimSt, dimSt) - P_T;
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (DeltaP + DeltaP.transpose()));
+        static PersistentLogStream log("pose_control_info_gain.txt");
+        bool first;
+        std::ofstream& ofs = log.stream(&first);
+        if (first)
+          ofs << "scan_id,trace_P_prior,trace_P_post,min_eig_deltaP,max_eig_deltaP,"
+                 "trP_R_prior,trP_R_post,trP_p_prior,trP_p_post,trP_v_prior,trP_v_post,"
+                 "trP_bg_prior,trP_bg_post,trP_ba_prior,trP_ba_post,trP_g_prior,trP_g_post,"
+                 "trP_pv_prior,trP_pv_post,trP_vbg_prior,trP_vbg_post,trP_vba_prior,trP_vba_post,trP_vg_prior,trP_vg_post\n";
+        auto trBlock = [&](const Eigen::MatrixXd& M, int i, int j) { return (i >= 0 && j >= 0) ? M.block<3, 3>(i, j).trace() : 0.0; };
+        const int iR = StateGroup::idxR(), iP = StateGroup::idxP(), iV = StateGroup::idxV();
+        const int iBG = state_->idxBG(), iBA = state_->idxBA(), iG = state_->idxG();
+        ofs << std::setprecision(12)
+            << voxel_map_->frame_idx_ << "," << P_prior.trace() << "," << P_T.trace() << ","
+            << es.eigenvalues().minCoeff() << "," << es.eigenvalues().maxCoeff() << ","
+            << trBlock(P_prior, iR, iR) << "," << trBlock(P_T, iR, iR) << ","
+            << trBlock(P_prior, iP, iP) << "," << trBlock(P_T, iP, iP) << ","
+            << trBlock(P_prior, iV, iV) << "," << trBlock(P_T, iV, iV) << ","
+            << trBlock(P_prior, iBG, iBG) << "," << trBlock(P_T, iBG, iBG) << ","
+            << trBlock(P_prior, iBA, iBA) << "," << trBlock(P_T, iBA, iBA) << ","
+            << trBlock(P_prior, iG, iG) << "," << trBlock(P_T, iG, iG) << ","
+            << trBlock(P_prior, iP, iV) << "," << trBlock(P_T, iP, iV) << ","
+            << trBlock(P_prior, iV, iBG) << "," << trBlock(P_T, iV, iBG) << ","
+            << trBlock(P_prior, iV, iBA) << "," << trBlock(P_T, iV, iBA) << ","
+            << trBlock(P_prior, iV, iG) << "," << trBlock(P_T, iV, iG) << "\n";
+        ofs.flush();
+      }
 
       // ---- full tail writeback (item 12): ONE complete posterior tail
       // (R/p/v from the spline, bg/ba/g from tail_trial), written via the
@@ -881,7 +937,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       if (state_->idxBA() >= 0) dx.segment<3>(state_->idxBA()) = coupled_pose_control_ba_trial_ - state_->biasAcc();
       if (state_->idxG()  >= 0) dx.segment<3>(state_->idxG())  = coupled_pose_control_g_trial_  - state_->gravity();
       state_->applyDelta(dx);
-      state_->covMut() = 0.5 * (P_T + P_T.transpose());
+      state_->covMut() = P_T;
     }
 
     std::ostringstream oss;
@@ -6085,7 +6141,11 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   Eigen::VectorXd b_raw = Eigen::VectorXd::Zero(dimRaw);
   double E_lidar = 0.0, E_process = 0.0;
 
-  addPoseControlLidarFactor(spline, layout, lidar_obs, A_raw, b_raw, nullptr, &E_lidar);
+  // item 16's zero-measurement test: disabling LiDAR here (diagnostic-
+  // only, default true) lets the IMU/process factor + prior alone
+  // determine the tail, for comparison against the propagated prior.
+  if (copts_.pose_control_lidar_enable)
+    addPoseControlLidarFactor(spline, layout, lidar_obs, A_raw, b_raw, nullptr, &E_lidar);
   for (int j = 0; j < spline.nSeg(); ++j)
     addPoseControlProcessFactorReduced(spline, layout, j, coupled_pose_control_seg_samples_[j],
         coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
@@ -6110,6 +6170,10 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
           p_before_peek.rows() == P0.rows() && p_before_peek.cols() == P0.cols())
         P0 = p_before_peek;
     }
+    // item 18's head-covariance-sensitivity test: scaling P0 (diagnostic
+    // only, default 1.0) while the head MEAN is untouched lets us verify
+    // x_head_A==x_head_B but P_tail_A!=P_tail_B.
+    P0 *= copts_.pose_control_p0_scale;
     const int dST = layout.dimST();
     if (dST > 0 && P0.rows() >= 9 + dST) {
       Eigen::MatrixXd Omega0_ss = generalPseudoInverse(P0, copts_.pose_control_q_pinv_rel_thresh)
@@ -6189,6 +6253,42 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   // coupled_pose_control_{bg,ba,g}_trial_, not state_ itself; the full
   // coherent write-back happens once, post-loop, in processLIO()'s
   // poseControlSplineBasis() block -- item 12).
+
+  // Item 15's required per-iteration instrumentation.
+  if (copts_.psd_audit_en) {
+    static PersistentLogStream log("pose_control_gn_iter.txt");
+    bool first;
+    std::ofstream& ofs = log.stream(&first);
+    if (first)
+      ofs << "scan_id,iter,delta_eta_norm,delta_bg_norm,delta_ba_norm,delta_g_norm,"
+             "tail_R_axisangle_x,tail_R_axisangle_y,tail_R_axisangle_z,"
+             "tail_p_x,tail_p_y,tail_p_z,tail_v_x,tail_v_y,tail_v_z,"
+             "tail_bg_x,tail_bg_y,tail_bg_z,tail_ba_x,tail_ba_y,tail_ba_z,"
+             "tail_g_x,tail_g_y,tail_g_z,head_p0_err,head_v0_err,head_R0_err,E_lidar\n";
+    const V3D aa = Log(new_tail_R);
+    // head_state_before/after (item 15): mg.poses.front() is this SAME
+    // scan's own fixed head data, unchanged across GN iterations -- these
+    // should be ~1e-12-level (machine precision), confirming the head
+    // truly never moves, not merely "moves very little".
+    const double head_p0_err = (spline.posAt(spline.t0()) - mg.poses.front().pos).norm();
+    const double head_v0_err = (spline.velAt(spline.t0()) - mg.poses.front().vel).norm();
+    const double head_R0_err = Log(M3D(spline.rotAt(spline.t0()).transpose() * mg.poses.front().rot)).norm();
+    ofs << std::setprecision(12)
+        << voxel_map_->frame_idx_ << "," << coupled_iters_ << ","
+        << delta_z.head(dEta).norm() << ","
+        << (layout.colBG() >= 0 ? delta_z.segment<3>(dEta + layout.colBG() - layout.dimCFree()).norm() : 0.0) << ","
+        << (layout.colBA() >= 0 ? delta_z.segment<3>(dEta + layout.colBA() - layout.dimCFree()).norm() : 0.0) << ","
+        << (layout.colG()  >= 0 ? delta_z.segment<3>(dEta + layout.colG()  - layout.dimCFree()).norm() : 0.0) << ","
+        << aa.x() << "," << aa.y() << "," << aa.z() << ","
+        << new_tail_p.x() << "," << new_tail_p.y() << "," << new_tail_p.z() << ","
+        << new_tail_v.x() << "," << new_tail_v.y() << "," << new_tail_v.z() << ","
+        << coupled_pose_control_bg_trial_.x() << "," << coupled_pose_control_bg_trial_.y() << "," << coupled_pose_control_bg_trial_.z() << ","
+        << coupled_pose_control_ba_trial_.x() << "," << coupled_pose_control_ba_trial_.y() << "," << coupled_pose_control_ba_trial_.z() << ","
+        << coupled_pose_control_g_trial_.x() << "," << coupled_pose_control_g_trial_.y() << "," << coupled_pose_control_g_trial_.z() << ","
+        << head_p0_err << "," << head_v0_err << "," << head_R0_err << ","
+        << E_lidar << "\n";
+    ofs.flush();
+  }
 
   return residuals_.empty() ? 0.0 : E_lidar / static_cast<double>(residuals_.size());
 }
