@@ -341,10 +341,23 @@ EvoProc::StageMetrics EvoProc::logStage(const char* stage_name, const char* mode
     static PersistentLogStream log("lio_gt_matched.csv");
     bool first;
     std::ofstream& ofs = log.stream(&first);
-    if (first) ofs << "t_abs,est_px,est_py,est_pz,gt_px,gt_py,gt_pz\n";
+    // 2026-09-23 90s-motion-campaign item 2/13: added est/gt rotation
+    // (quaternion, raw -- not lever-arm-corrected, since the lever arm is a
+    // pure translation offset) alongside the pre-existing position columns,
+    // so post-processing can compute a real rotation_error/NEES_R through
+    // the motion interval, not just the stationary-truth R_gt=const
+    // assumption used for t<48s. Position columns UNCHANGED (same values,
+    // same column order) -- this is a pure addition, verified
+    // behavior-preserving for anything already consuming this file.
+    if (first) ofs << "t_abs,est_px,est_py,est_pz,gt_px,gt_py,gt_pz,"
+                      "est_qw,est_qx,est_qy,est_qz,gt_qw,gt_qx,gt_qy,gt_qz\n";
+    const Eigen::Quaterniond est_q(est_rot);
+    const Eigen::Quaterniond gt_q(gt_rot);
     ofs << std::setprecision(12) << t_abs << ','
         << est_pos_corrected.x() << ',' << est_pos_corrected.y() << ',' << est_pos_corrected.z() << ','
-        << gt_pos.x() << ',' << gt_pos.y() << ',' << gt_pos.z() << '\n';
+        << gt_pos.x() << ',' << gt_pos.y() << ',' << gt_pos.z() << ','
+        << est_q.w() << ',' << est_q.x() << ',' << est_q.y() << ',' << est_q.z() << ','
+        << gt_q.w() << ',' << gt_q.x() << ',' << gt_q.y() << ',' << gt_q.z() << '\n';
     ofs.flush();
   }
 
