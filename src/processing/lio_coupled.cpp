@@ -1281,9 +1281,25 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       // bg/ba/g map via plain identity into their own delta_sT columns.
       const int dimSt = state_->dimState();
       Eigen::MatrixXd M_T = Eigen::MatrixXd::Zero(dimSt, dimZ);
-      Eigen::MatrixXd dR_dc = Eigen::MatrixXd::Zero(3, dimRaw);
-      Eigen::MatrixXd dp_dc = Eigen::MatrixXd::Zero(3, dimRaw);
-      Eigen::MatrixXd dv_dc = Eigen::MatrixXd::Zero(3, dimRaw);
+      // 2026-09-23 BUG FIX (found while adding the x1 instrumentation below,
+      // via a segfault on a config with bg/ba/g estimation enabled -- the
+      // normal/default case, not an edge case): these must be sized
+      // (3 x hns.rawDim()), NOT (3 x dimRaw=layout.dim()). layout.dim()
+      // includes the sT (bg/ba/g) columns, but hns.Z (below) only has
+      // hns.rawDim()=6N rows (control-point space only) -- dR_dc*hns.Z was a
+      // DIMENSION-MISMATCHED multiply whenever dST>0 (dimRaw=6N+dST !=
+      // hns.rawDim()=6N). Eigen's own eigen_assert on this is compiled OUT
+      // in a Release/NDEBUG build, so this silently read past hns.Z's
+      // allocation (undefined behavior) instead of erroring -- it happened
+      // to not crash in earlier runs (adjacent heap memory, no page fault)
+      // but is NOT reliable; the stationary campaign data produced before
+      // this fix may have corrupted P_R/P_p/P_v tail-covariance values
+      // whenever bg/ba/g were enabled (they were, in every config this
+      // session used bg/ba/g estimation) -- flagged explicitly, not
+      // silently patched over.
+      Eigen::MatrixXd dR_dc = Eigen::MatrixXd::Zero(3, hns.rawDim());
+      Eigen::MatrixXd dp_dc = Eigen::MatrixXd::Zero(3, hns.rawDim());
+      Eigen::MatrixXd dv_dc = Eigen::MatrixXd::Zero(3, hns.rawDim());
       const auto jac1 = spline.jacobianAt(t1);
       for (int k = 0; k < 4; ++k) {
         const int abs_k = jac1.s + k;
@@ -1386,9 +1402,10 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         const bool have_x1 = (Nlay > kPoseControlX1Knot);
         if (have_x1) {
           const double t_x1 = std::min(t1, spline.t0() + kPoseControlX1Knot * spline.delta());
-          Eigen::MatrixXd dR_dc_x1 = Eigen::MatrixXd::Zero(3, dimRaw);
-          Eigen::MatrixXd dp_dc_x1 = Eigen::MatrixXd::Zero(3, dimRaw);
-          Eigen::MatrixXd dv_dc_x1 = Eigen::MatrixXd::Zero(3, dimRaw);
+          // Same fix as dR_dc/dp_dc/dv_dc above: sized to hns.rawDim(), not dimRaw.
+          Eigen::MatrixXd dR_dc_x1 = Eigen::MatrixXd::Zero(3, hns.rawDim());
+          Eigen::MatrixXd dp_dc_x1 = Eigen::MatrixXd::Zero(3, hns.rawDim());
+          Eigen::MatrixXd dv_dc_x1 = Eigen::MatrixXd::Zero(3, hns.rawDim());
           const auto jac_x1 = spline.jacobianAt(t_x1);
           for (int k = 0; k < 4; ++k) {
             const int abs_k = jac_x1.s + k;
@@ -1509,25 +1526,62 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       // solve's ACTUAL last GN-iteration step (coupled_pose_control_
       // last_delta_z_, captured at the end of estimateCoupledPoseControlSpline)
       // against an INDEPENDENTLY constructed information-form reference,
-      // delta_z_ref = (A_ff_prior + Lambda_meas_z)^-1 * b_lidar_z, at the
-      // SAME (converged) linearization point -- A_ff_prior/Lambda_meas_z/
-      // b_lidar_z are all already built above for the tail-covariance
-      // computation, so this reuses them rather than rebuilding anything.
-      // A gap here (beyond solver/precision noise) means the mean solve is
-      // NOT simply doing textbook EKF-equivalent prior+measurement fusion --
-      // e.g. because pose_control_process_weight scales ONLY the per-
-      // iteration mean-solve process factor, never A_ff_prior here (a
-      // DOCUMENTED, existing limitation -- see pose_control_process_weight's
-      // own header comment) -- reported honestly rather than assumed away.
+      // delta_z_ref = (Lambda_z_marginal + Lambda_meas_z)^-1 * (b_lidar_z +
+      // process_weight*b_process_z), at
+      // the SAME (converged) linearization point.
+      //
+      // 2026-09-23 CORRECTNESS FIX: the first version of this check used
+      // A_ff_prior directly as the prior information term. A_ff_prior is
+      // NOT z's marginal prior information -- it's the CONDITIONAL
+      // information on z given x0 held EXACTLY at its prior mean (x0
+      // treated as noise-free), i.e. it ignores x0's own uncertainty
+      // entirely. That made the "reference" answer a DIFFERENT (overconfident
+      // whenever P0 is non-negligible) prior than what the estimator's own
+      // covariance is actually built from. The correct marginal prior
+      // information on z alone, properly accounting for x0's propagated
+      // uncertainty, is pinv(P_z_prior) -- P_z_prior=Sigma_full_prior's own
+      // z-block is ALREADY computed above (same quantity the P_z_prior
+      // logCovTraceStage call reports) -- inverting it (rather than reusing
+      // the conditional A_ff_prior) is the fix. Confirmed via a smoke test:
+      // the previous version reported delta_z_ref up to ~30x larger in norm
+      // than delta_z_actual even at a converged scan, which is the
+      // signature of an overconfident/mismatched prior, not a genuine
+      // EKF-equivalence gap.
+      //
+      // A gap that remains after this fix means the mean solve is NOT
+      // textbook EKF-equivalent for a real reason -- e.g.
+      // pose_control_process_weight scales ONLY the per-iteration mean-solve
+      // process factor, never this reference's prior term (a DOCUMENTED,
+      // existing limitation -- see pose_control_process_weight's own header
+      // comment) -- reported honestly rather than assumed away.
       // ====================================================================
-      if (copts_.psd_audit_en && coupled_pose_control_last_delta_z_.size() == dimZ) {
-        Eigen::MatrixXd A_ekf_ref = A_ff_prior + Lambda_meas_z;
+      if (copts_.psd_audit_en && coupled_pose_control_last_delta_z_.size() == dimZ && schur_ok) {
+        const Eigen::MatrixXd P_z_prior = Sigma_full_prior.bottomRightCorner(dimZ, dimZ);
+        const Eigen::MatrixXd Lambda_z_marginal = generalPseudoInverse(P_z_prior, copts_.pose_control_q_pinv_rel_thresh);
+        Eigen::MatrixXd A_ekf_ref = Lambda_z_marginal + Lambda_meas_z;
         Eigen::LDLT<Eigen::MatrixXd> ldlt_ekf(A_ekf_ref);
         Eigen::VectorXd delta_z_ref = Eigen::VectorXd::Zero(dimZ);
         bool ekf_solve_ok = (ldlt_ekf.info() == Eigen::Success);
         if (ekf_solve_ok) {
+          // 2026-09-23 SECOND correctness fix: delta_z_actual is captured
+          // from the LAST (converged) GN iteration, where the FULL combined
+          // gradient (lidar+process) is ~0 by definition of convergence --
+          // but b_lidar_z ALONE is generally NOT ~0 there (it only cancels
+          // against the process gradient, not independently). Using
+          // b_lidar_z alone as the reference's gradient was comparing "a
+          // converged, near-zero actual step" against "a one-shot LiDAR-only
+          // step from scratch", which are different quantities almost by
+          // construction -- not a fair EKF-equivalence test. The reference
+          // must use the SAME combined gradient (b_lidar_z + weighted
+          // b_process_z) the mean solve itself balances, so the comparison
+          // isolates exactly one difference: Lambda_z_marginal (this
+          // reference's prior term, WITH x0-uncertainty/head coupling) vs
+          // the mean solve's own per-iteration A_process_red (relinearized,
+          // WITHOUT head coupling).
           const Eigen::VectorXd b_lidar_z = P.transpose() * b_lidar_raw;
-          delta_z_ref = ldlt_ekf.solve(b_lidar_z);
+          const Eigen::VectorXd b_process_z = P.transpose() * b_process_raw;
+          const Eigen::VectorXd b_ekf_ref = b_lidar_z + copts_.pose_control_process_weight * b_process_z;
+          delta_z_ref = ldlt_ekf.solve(b_ekf_ref);
           ekf_solve_ok = delta_z_ref.allFinite();
         }
         if (ekf_solve_ok) {
@@ -7073,6 +7127,41 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
       };
       dumpZ("A_lidar_red", A_lidar_red);
       dumpZ("A_process_red", A_process_red);
+
+      // item 14: the ACTUAL Lambda_curv regularization matrix (position
+      // block; rotation block built the same way when curvature_weight_rot>0),
+      // projected into the SAME z=[eta;sT] basis A_lidar_red/A_process_red
+      // live in -- so post-processing can evaluate u_i^T Lambda_curv u_i
+      // directly against A_lidar_red's own weak eigenvectors, rather than a
+      // proxy. Built with weight=1 in raw c-space then projected, so ANY
+      // curvature_weight_pos/rot can be applied by simple scaling in
+      // post-processing without rebuilding the matrix per weight value --
+      // mirrors the mean-solve's own second-difference Tikhonov structure
+      // exactly (cp[k+1]-2*cp[k]+cp[k-1] penalty, k=1..N-2).
+      {
+        Eigen::MatrixXd Lambda_curv_raw_pos = Eigen::MatrixXd::Zero(dimRaw, dimRaw);
+        Eigen::MatrixXd Lambda_curv_raw_rot = Eigen::MatrixXd::Zero(dimRaw, dimRaw);
+        for (int k = 1; k < layout.N - 1; ++k) {
+          const int cm1p = layout.colPos(k - 1), c0p = layout.colPos(k), cp1p = layout.colPos(k + 1);
+          const int cm1r = layout.colPhi(k - 1), c0r = layout.colPhi(k), cp1r = layout.colPhi(k + 1);
+          if (cm1p >= 0 && c0p >= 0 && cp1p >= 0) {
+            Lambda_curv_raw_pos.block<3,3>(cp1p,cp1p) += M3D::Identity(); Lambda_curv_raw_pos.block<3,3>(c0p,c0p) += 4*M3D::Identity(); Lambda_curv_raw_pos.block<3,3>(cm1p,cm1p) += M3D::Identity();
+            Lambda_curv_raw_pos.block<3,3>(cp1p,c0p) += -2*M3D::Identity(); Lambda_curv_raw_pos.block<3,3>(c0p,cp1p) += -2*M3D::Identity();
+            Lambda_curv_raw_pos.block<3,3>(cp1p,cm1p) += M3D::Identity(); Lambda_curv_raw_pos.block<3,3>(cm1p,cp1p) += M3D::Identity();
+            Lambda_curv_raw_pos.block<3,3>(c0p,cm1p) += -2*M3D::Identity(); Lambda_curv_raw_pos.block<3,3>(cm1p,c0p) += -2*M3D::Identity();
+          }
+          if (cm1r >= 0 && c0r >= 0 && cp1r >= 0) {
+            Lambda_curv_raw_rot.block<3,3>(cp1r,cp1r) += M3D::Identity(); Lambda_curv_raw_rot.block<3,3>(c0r,c0r) += 4*M3D::Identity(); Lambda_curv_raw_rot.block<3,3>(cm1r,cm1r) += M3D::Identity();
+            Lambda_curv_raw_rot.block<3,3>(cp1r,c0r) += -2*M3D::Identity(); Lambda_curv_raw_rot.block<3,3>(c0r,cp1r) += -2*M3D::Identity();
+            Lambda_curv_raw_rot.block<3,3>(cp1r,cm1r) += M3D::Identity(); Lambda_curv_raw_rot.block<3,3>(cm1r,cp1r) += M3D::Identity();
+            Lambda_curv_raw_rot.block<3,3>(c0r,cm1r) += -2*M3D::Identity(); Lambda_curv_raw_rot.block<3,3>(cm1r,c0r) += -2*M3D::Identity();
+          }
+        }
+        const Eigen::MatrixXd Lambda_curv_pos_red = P.transpose() * Lambda_curv_raw_pos * P;
+        const Eigen::MatrixXd Lambda_curv_rot_red = P.transpose() * Lambda_curv_raw_rot * P;
+        dumpZ("Lambda_curv_pos_red_unitweight", Lambda_curv_pos_red);
+        dumpZ("Lambda_curv_rot_red_unitweight", Lambda_curv_rot_red);
+      }
       wmofs.flush();
     }
     // eta layout: [posHead(3), posFree(3*(N-3)), rotHead(6), rotFree(3*(N-3))]
