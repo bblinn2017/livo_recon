@@ -95,6 +95,19 @@ struct LioProcCoupledOptions
   // A/B/C, weight sweep, P0-scale sweep) can be told apart in the one
   // shared CSV. Purely a label, no effect on estimator behavior.
   std::string pose_control_test_id = "unlabeled";
+  // 2026-09-23 x1/head-propagation campaign, item 16: OFF-by-default
+  // diagnostic mode. When true, the per-iteration relinearizing process
+  // factor (addPoseControlProcessFactorReduced, called fresh every GN
+  // iteration in estimateCoupledPoseControlSpline) is REPLACED by a single
+  // FROZEN Gaussian prior on eta, r_prior = eta - eta_imu, Lambda_prior =
+  // pinv(A_ff_prior_scanstart) -- both computed ONCE at scan-start from the
+  // real process/head-coupling machinery (never an arbitrary diagonal) --
+  // added into every GN iteration's A_raw/b_raw instead of the per-iteration
+  // process factor. Comparing this mode's mean update against the default
+  // answers item 16/17's question: is the per-iteration relinearizing
+  // process factor mathematically equivalent to a static uncertainty-
+  // weighted trajectory prior, or does relinearization matter?
+  bool pose_control_explicit_imu_prior = false;
 
   // CQ-82 Phase 2: pose-basis-only weights. Meaningless under raw_imu (the
   // refusal wiring never checks these -- they simply aren't read unless
@@ -904,6 +917,18 @@ private:
   // inside the per-iteration solve -- spec: mean every iteration,
   // covariance once after convergence).
   Eigen::MatrixXd coupled_pose_control_P_z_post_;
+  // 2026-09-23 x1/head-propagation campaign: the LAST GN iteration's own
+  // delta_z (mean-solve step, z=[eta;delta_sT]) -- captured so the
+  // post-loop covariance block (item 7's EKF-reference check) can compare
+  // it against an independently-constructed information-form reference
+  // update AT THE SAME (converged) linearization point.
+  Eigen::VectorXd coupled_pose_control_last_delta_z_;
+  // Item 16's explicit-IMU-prior diagnostic mode: eta_imu/Lambda_prior_eta
+  // are computed ONCE at scan-start (frozen for the whole GN loop, unlike
+  // the default per-iteration relinearizing process factor) when
+  // pose_control_explicit_imu_prior is true. Unused/empty otherwise.
+  Eigen::VectorXd coupled_pose_control_eta_imu_;
+  Eigen::MatrixXd coupled_pose_control_lambda_prior_eta_;
   // CQ-79: this scan's PREVIOUS iteration's own set of matched-plane
   // hashes, for carry_frac -- reset to empty at scan start (alongside
   // coupled_iters_'s own reset), updated after every iteration's own
