@@ -130,9 +130,23 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // so mg.imu_samples_raw stayed empty and init() correctly (but
   // unhelpfully) refused every single scan with "no valid initial
   // trajectory", discovered via a live crash on scan 1.
+  // 2026-09-22: pose_control was missing from this enumeration -- same
+  // stale-list bug the comment above already documents fixing once for
+  // pose_knots. mg.imu_samples_raw stayed permanently EMPTY for every
+  // pose_control run to date (confirmed live via pose_control_seg_debug.txt
+  // instrumentation: imu_samples_raw.size()=0 on every scan), which meant
+  // the ENTIRE process factor (addPoseControlProcessFactorReduced, both in
+  // the mean GN solve and the covariance block) silently contributed ZERO
+  // information on every call (empty per-segment sample buckets ->
+  // Q9==0 -> Lambda==pseudoInverse9(Q9)==0) -- this is the true root cause
+  // of the trace(P_R)=trace(P_p)=0 covariance bug (not a Jacobian/pinv
+  // issue), and also means every pose_control trajectory to date was
+  // fit by LiDAR alone, with the process/IMU factor never actually
+  // engaging despite appearing to converge.
   opts_.keep_raw_samples = (spline_mode != "raw_imu") || coupled_adaptive_sigma ||
                            coupled_bias_freeze_on_vibration ||
-                           (coupled_spline_mode == "pose") || (coupled_spline_mode == "pose_knots");
+                           (coupled_spline_mode == "pose") || (coupled_spline_mode == "pose_knots") ||
+                           (coupled_spline_mode == "pose_control");
   { std::lock_guard<std::mutex> lock(g_qhat_mtx); g_qhat_enabled = opts_.log_qhat_en; }
 
   std::ostringstream oss;

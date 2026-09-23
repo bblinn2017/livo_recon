@@ -360,11 +360,23 @@ void addPoseControlProcessFactorReduced(
   const int dimZ = layout.dim();
   Eigen::MatrixXd Jred = Eigen::MatrixXd::Zero(9, dimZ);
 
-  // ---- free control-point columns (k with abs index >= 3 only) ---------
+  // ---- free control-point columns ---------------------------------------
+  // 2026-09-22 fix: this loop used to gate on "abs index >= 3" directly,
+  // which was correct ONLY under the superseded fix_head=true scheme where
+  // cp[0..2] genuinely were not GN variables at all. Under the current
+  // nullspace-elimination architecture (fix_head=false, the live default),
+  // cp[0..2]/cp_phi[0..2] ARE real raw coordinates -- reachable through
+  // eta via hns.Z's own head-nullspace columns -- so unconditionally
+  // skipping them here silently zeroed the process factor's entire
+  // contribution to those 9 raw directions (root cause of a live bug: this
+  // fed a completely-zero information PATH from cp[0..2] into eta's head-
+  // nullspace columns, contributing to trace(P_R)=trace(P_p)=0 in the
+  // covariance postprocessing). layout.colPhi()/colPos() already return -1
+  // exactly when a column is genuinely invalid (fix_head=true, k<3) -- that
+  // check alone is sufficient; the redundant/wrong abs_j>=3 gate is removed.
   for (int k = 0; k < 4; ++k)
   {
     const int abs_j = jac_j.s + k;
-    if (abs_j >= 3)
     {
       Eigen::MatrixXd Jxj_col(9, 3), Jxj1_col(9, 3);
       Jxj_col.setZero(); Jxj1_col.setZero();
@@ -384,7 +396,6 @@ void addPoseControlProcessFactorReduced(
     }
 
     const int abs_j1 = jac_j1.s + k;
-    if (abs_j1 >= 3)
     {
       Eigen::MatrixXd Jxj1_col(9, 3); Jxj1_col.setZero();
       Jxj1_col.block<3, 3>(0, 0) = spline.dThetaDcphi(jac_j1, k, tj1);

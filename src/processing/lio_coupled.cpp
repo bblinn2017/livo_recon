@@ -47,6 +47,43 @@ static void logPsdStage(int scan_id, int iter, const char* stage, const Eigen::M
   ofs.flush();
 }
 
+// 2026-09-22 item 1 instrumentation: trace(P_R)=trace(P_p)=0 root-cause
+// hunt. Reports shape/trace/Frobenius/min-max eig/rank estimate/exact-zero
+// row-or-column count for an arbitrary matrix at a named pipeline stage --
+// gated behind psd_audit_en, written to its own file so it never mixes with
+// psd_stage_audit.txt's narrower (min/max eig only) columns.
+static void logCovTraceStage(int scan_id, const char* stage, const Eigen::MatrixXd& X)
+{
+  const int rows = static_cast<int>(X.rows()), cols = static_cast<int>(X.cols());
+  const Eigen::MatrixXd Xsym = (rows == cols) ? Eigen::MatrixXd(0.5 * (X + X.transpose())) : X;
+  double min_eig = 0.0, max_eig = 0.0, trace = 0.0;
+  int rank_est = -1;
+  if (rows == cols && rows > 0) {
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(Xsym);
+    min_eig = es.eigenvalues().minCoeff();
+    max_eig = es.eigenvalues().maxCoeff();
+    trace = X.trace();
+    const double thresh = 1e-9 * std::max(std::abs(max_eig), 1.0);
+    rank_est = 0;
+    for (int i = 0; i < es.eigenvalues().size(); ++i)
+      if (std::abs(es.eigenvalues()(i)) > thresh) ++rank_est;
+  }
+  const double fro = X.norm();
+  int zero_rows = 0, zero_cols = 0;
+  for (int i = 0; i < rows; ++i) if (X.row(i).cwiseAbs().maxCoeff() < 1e-300) ++zero_rows;
+  for (int j = 0; j < cols; ++j) if (X.col(j).cwiseAbs().maxCoeff() < 1e-300) ++zero_cols;
+
+  static PersistentLogStream log("pose_control_cov_trace.txt");
+  bool first;
+  std::ofstream& ofs = log.stream(&first);
+  if (first)
+    ofs << "scan_id,stage,rows,cols,trace,frobenius,min_eig,max_eig,rank_est,zero_rows,zero_cols\n";
+  ofs << scan_id << "," << stage << "," << rows << "," << cols << ","
+      << std::setprecision(9) << trace << "," << fro << "," << min_eig << "," << max_eig << ","
+      << rank_est << "," << zero_rows << "," << zero_cols << "\n";
+  ofs.flush();
+}
+
 LioProcCoupled::LioProcCoupled(NodeContext& ctx)
   : LioProcBase(ctx)
 {}
@@ -663,6 +700,17 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       coupled_pose_control_layout_.fix_head = false;
       coupled_pose_control_seg_samples_ =
           bucketPoseControlImuSamples(mg.imu_samples_raw, spline).seg_samples;
+      if (copts_.psd_audit_en) {
+        std::ostringstream ss;
+        ss << "scan=" << voxel_map_->frame_idx_ << " imu_samples_raw.size()=" << mg.imu_samples_raw.size()
+           << " nSeg=" << spline.nSeg() << " seg_sizes=[";
+        for (auto& s : coupled_pose_control_seg_samples_) ss << s.size() << ",";
+        ss << "]";
+        static PersistentLogStream log("pose_control_seg_debug.txt");
+        std::ofstream& ofs = log.stream();
+        ofs << ss.str() << "\n";
+        ofs.flush();
+      }
       coupled_pose_control_P_z_post_.resize(0, 0);
       coupled_pose_control_valid_ = true;
     }
@@ -787,22 +835,44 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       o.t = res.t; o.q = res.raw_body_point; o.normal = res.normal; o.d = d; o.sigma2 = res.sigma_squared;
       lidar_obs.push_back(o);
     }
-    // Measurement-driven head sensitivity (poseControlHeadRotJacobian's
-    // GLOBAL rotation effect, summed over every LiDAR point/process
-    // segment) is still excluded from A_hh/A_hf (head_block=nullptr) --
-    // it produces a genuine near-exact gauge degeneracy with certain eta
-    // directions (rotating the fixed head vs. rotating the trajectory via
-    // specific free-control-point combinations have almost identical
-    // residual effects), confirmed live on eee_01. A_hh/A_hf below carry
-    // ONLY the prior's own information; the FULL P0 (not just its 9x9
-    // R/P/V block) still participates via Omega0.
+    // 2026-09-22 SECOND covariance correction: x0 (the incoming, mean-fixed
+    // head StateGroup [theta0,p0,v0]) is uncertain even though it has no GN
+    // DOF -- P0's R/P/V uncertainty must propagate into the physical tail
+    // through the PROCESS FACTOR's own head sensitivity
+    // (poseControlHeadRotJacobian: GLOBAL; poseControlHeadPosJacobians:
+    // LOCAL to j<=2), not just through the sT block. The PREVIOUS version of
+    // this block passed head_block=nullptr here, which meant A_hf_prior
+    // never received any coupling into the eta-related raw columns at all
+    // (only the sT columns, via Omega0's cross term below) -- eta's own
+    // marginal covariance was therefore built ONLY from process-noise
+    // information conditional on a FIXED head, never from the incoming
+    // state's actual R/P/V uncertainty. That is the root cause of the
+    // trace(P_R)=trace(P_p)=0 bug: it wasn't a Jacobian/threshold bug, it
+    // was a missing physical coupling term entirely (confirmed correct by
+    // inspection with logCovTraceStage instrumentation added this pass).
+    // The head_block below is now real (process-only) -- LiDAR's own head
+    // sensitivity is STILL excluded (head_block=nullptr on the LiDAR call
+    // just below) because that specific coupling was found to create a
+    // near-exact numerical gauge degeneracy with certain eta directions;
+    // excluding it there only means LiDAR itself can't directly resolve the
+    // global head rotation (physically reasonable -- LiDAR only weakly
+    // separates "rotate the whole scan" from "rotate several interior
+    // control points together"), it does NOT prevent P0's prior uncertainty
+    // from reaching the tail via the process-factor path below.
+    PoseControlProcessFactorHeadBlock head_block_process;
     for (int j = 0; j < spline.nSeg(); ++j)
       addPoseControlProcessFactorReduced(spline, layout, j, coupled_pose_control_seg_samples_[j],
           coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
           copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, state_->varAcc(), state_->varGyr(),
-          copts_.repro_second_order, copts_.pose_control_q_pinv_rel_thresh, A_process_raw, b_unused, nullptr, nullptr);
+          copts_.repro_second_order, copts_.pose_control_q_pinv_rel_thresh, A_process_raw, b_unused,
+          &head_block_process, nullptr);
     if (copts_.pose_control_lidar_enable)
       addPoseControlLidarFactor(spline, layout, lidar_obs, A_lidar_raw, b_unused, nullptr, nullptr);
+    if (copts_.psd_audit_en) {
+      logCovTraceStage(voxel_map_->frame_idx_, "A_process_raw_cfree_block", A_process_raw.topLeftCorner(layout.dimCFree(), layout.dimCFree()));
+      logCovTraceStage(voxel_map_->frame_idx_, "head_block_process_A_hh", head_block_process.A_hh);
+      logCovTraceStage(voxel_map_->frame_idx_, "head_block_process_A_hf", head_block_process.A_hf);
+    }
 
     Eigen::MatrixXd P0 = state_->cov();
     if (copts_.prior_at_scan_start) {
@@ -812,10 +882,17 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         P0 = p_before_peek;
     }
     P0 *= copts_.pose_control_p0_scale;
+    if (copts_.psd_audit_en) logCovTraceStage(voxel_map_->frame_idx_, "P0", P0);
     const Eigen::MatrixXd Omega0 = generalPseudoInverse(P0, copts_.pose_control_q_pinv_rel_thresh);
-    Eigen::MatrixXd A_hh_prior = Eigen::MatrixXd::Zero(9, 9);
-    Eigen::MatrixXd A_hf_prior = Eigen::MatrixXd::Zero(9, dimRaw);
-    if (Omega0.rows() >= 9) A_hh_prior = Omega0.block(0, 0, 9, 9);
+    // A_hh_prior/A_hf_prior now start from the PROCESS FACTOR's own head
+    // coupling (head_block_process, real physical sensitivity of the
+    // trajectory to x0) rather than zero -- Omega0's R/P/V block is x0's
+    // OWN prior information (added on top, standard KKT-variable-with-a-
+    // prior construction), not the only source of A_hh.
+    Eigen::MatrixXd A_hh_prior = head_block_process.A_hh;
+    Eigen::MatrixXd A_hf_prior = (head_block_process.A_hf.size() > 0)
+        ? head_block_process.A_hf : Eigen::MatrixXd::Zero(9, dimRaw);
+    if (Omega0.rows() >= 9) A_hh_prior += Omega0.block(0, 0, 9, 9);
     if (dST > 0 && Omega0.rows() >= 9 + dST) {
       A_process_raw.block(layout.dimCFree(), layout.dimCFree(), dST, dST) += Omega0.block(9, 9, dST, dST);
       // Head-sT cross prior (item 8's "preserve all cross-covariances"):
@@ -833,20 +910,67 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     const Eigen::MatrixXd A_ff_prior = P.transpose() * A_process_raw * P;
     const Eigen::MatrixXd A_hf_prior_z = A_hf_prior * P;   // 9 x dimZ
     const Eigen::MatrixXd Lambda_meas_z = P.transpose() * A_lidar_raw * P;  // LiDAR ONLY, in z-space
+    if (copts_.psd_audit_en) {
+      logCovTraceStage(voxel_map_->frame_idx_, "A_ff_prior", A_ff_prior);
+      logCovTraceStage(voxel_map_->frame_idx_, "A_ff_prior_eta_block", A_ff_prior.topLeftCorner(dEta, dEta));
+      logCovTraceStage(voxel_map_->frame_idx_, "A_ff_prior_sT_block", A_ff_prior.bottomRightCorner(dST, dST));
+      logCovTraceStage(voxel_map_->frame_idx_, "Lambda_meas_z", Lambda_meas_z);
+      logCovTraceStage(voxel_map_->frame_idx_, "Lambda_meas_z_eta_block", Lambda_meas_z.topLeftCorner(dEta, dEta));
+    }
 
-    Eigen::MatrixXd P_z_prior;
-    // A legitimate pinv use (item 3): P_z_prior is "process+prior only"
-    // information, inverted to get its OWN covariance -- a direction with
-    // genuinely zero prior/process information maps to a large-but-finite
-    // (pinv-floored) prior variance there, which is the textbook meaning
-    // of "no prior information", not a measurement-information discard.
-    const bool schur_ok = schurComplementFreeCovariance(A_hh_prior, A_hf_prior_z, A_ff_prior, P_z_prior, 1e-9);
+    // 2026-09-22 THIRD covariance correction: x0 is kept as an EXPLICIT
+    // block in the joint prior system (never Schur-eliminated before
+    // inversion) so that BOTH channels by which P0's R/P/V uncertainty
+    // reaches the physical tail are captured:
+    //   (a) indirectly, via x0's coupling into eta's own marginal
+    //       covariance (A_hf_prior_z, from head_block_process above) --
+    //       this is what a naive Schur-complement-then-map-via-M_T-only
+    //       approach WOULD capture, and
+    //   (b) directly, via x0's own linear effect on the tail state itself
+    //       (J_h_tail below, dxT/dx0 -- e.g. rotating the whole trajectory's
+    //       anchor rotates R(t1) too) -- which (a) alone cannot capture,
+    //       since M_T only ever multiplies z=[eta;delta_sT], never x0.
+    // Building the FULL (9+dimZ) joint covariance via one pseudo-inverse
+    // (cheap: dimFull <= ~90) and mapping with M_full=[J_h_tail, M_T]
+    // together is the correct joint-Gaussian marginalize-then-linearly-map
+    // operation for a variable (x0) that is fixed in the MEAN but not in
+    // the COVARIANCE -- see the user's explicit item 8 "final covariance
+    // equation" requirement.
+    const int dimFull = 9 + dimZ;
+    Eigen::MatrixXd Lambda_full_prior = Eigen::MatrixXd::Zero(dimFull, dimFull);
+    Lambda_full_prior.block(0, 0, 9, 9) = A_hh_prior;
+    Lambda_full_prior.block(0, 9, 9, dimZ) = A_hf_prior_z;
+    Lambda_full_prior.block(9, 0, dimZ, 9) = A_hf_prior_z.transpose();
+    Lambda_full_prior.block(9, 9, dimZ, dimZ) = A_ff_prior;
+    // A legitimate pinv use (item 3): "no prior/process information in a
+    // direction" genuinely means "infinite prior variance there" -- the
+    // textbook meaning of pinv on a pure information (no-measurement)
+    // system, not a measurement-information discard (that's what
+    // covarianceInformationUpdate's Woodbury form below is for instead).
+    const Eigen::MatrixXd Sigma_full_prior = generalPseudoInverse(Lambda_full_prior, 1e-9);
+    const bool schur_ok = Sigma_full_prior.allFinite();
+    if (copts_.psd_audit_en && schur_ok) {
+      logCovTraceStage(voxel_map_->frame_idx_, "Lambda_full_prior", Lambda_full_prior);
+      logCovTraceStage(voxel_map_->frame_idx_, "Sigma_full_prior", Sigma_full_prior);
+      logCovTraceStage(voxel_map_->frame_idx_, "P_x0_prior", Sigma_full_prior.topLeftCorner(9, 9));
+      logCovTraceStage(voxel_map_->frame_idx_, "P_z_prior", Sigma_full_prior.bottomRightCorner(dimZ, dimZ));
+      logCovTraceStage(voxel_map_->frame_idx_, "P_eta_prior", Sigma_full_prior.block(9, 9, dEta, dEta));
+      logCovTraceStage(voxel_map_->frame_idx_, "P_sT_prior", Sigma_full_prior.bottomRightCorner(dST, dST));
+    }
     if (schur_ok) {
-      Eigen::MatrixXd P_z_post;
+      Eigen::MatrixXd Lambda_meas_full = Eigen::MatrixXd::Zero(dimFull, dimFull);
+      Lambda_meas_full.block(9, 9, dimZ, dimZ) = Lambda_meas_z;   // LiDAR touches z only -- see head_block_process comment above
+      Eigen::MatrixXd Sigma_full_post;
       CovarianceUpdateDiagnostics cov_diag;
-      const bool update_ok = covarianceInformationUpdate(P_z_prior, Lambda_meas_z, P_z_post, cov_diag);
-      if (!update_ok) { P_z_post = P_z_prior; }
-      coupled_pose_control_P_z_post_ = P_z_post;
+      const bool update_ok = covarianceInformationUpdate(Sigma_full_prior, Lambda_meas_full, Sigma_full_post, cov_diag);
+      if (!update_ok) { Sigma_full_post = Sigma_full_prior; }
+      coupled_pose_control_P_z_post_ = Sigma_full_post.bottomRightCorner(dimZ, dimZ);
+      if (copts_.psd_audit_en) {
+        logCovTraceStage(voxel_map_->frame_idx_, "Sigma_full_post", Sigma_full_post);
+        logCovTraceStage(voxel_map_->frame_idx_, "P_z_post", coupled_pose_control_P_z_post_);
+        logCovTraceStage(voxel_map_->frame_idx_, "P_eta_post", Sigma_full_post.block(9, 9, dEta, dEta));
+        logCovTraceStage(voxel_map_->frame_idx_, "P_sT_post", Sigma_full_post.bottomRightCorner(dST, dST));
+      }
 
       // M_T: dimState() x dimZ, mapping z -> the FULL tail StateGroup
       // [theta,p,v,bg?,ba?,g?] in StateGroup's own index order. R/p/v
@@ -868,9 +992,20 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           dv_dc.block<3, 3>(0, colp) = PoseControlSpline::dVelDcp(jac1, k);
         }
       }
-      M_T.block(StateGroup::idxR(), 0, 3, dEta) = dR_dc * hns.Z;
-      M_T.block(StateGroup::idxP(), 0, 3, dEta) = dp_dc * hns.Z;
-      M_T.block(StateGroup::idxV(), 0, 3, dEta) = dv_dc * hns.Z;
+      const Eigen::MatrixXd J_R = dR_dc * hns.Z;
+      const Eigen::MatrixXd J_p = dp_dc * hns.Z;
+      const Eigen::MatrixXd J_v = dv_dc * hns.Z;
+      M_T.block(StateGroup::idxR(), 0, 3, dEta) = J_R;
+      M_T.block(StateGroup::idxP(), 0, 3, dEta) = J_p;
+      M_T.block(StateGroup::idxV(), 0, 3, dEta) = J_v;
+      if (copts_.psd_audit_en) {
+        logCovTraceStage(voxel_map_->frame_idx_, "dR_dc_raw", dR_dc);
+        logCovTraceStage(voxel_map_->frame_idx_, "dp_dc_raw", dp_dc);
+        logCovTraceStage(voxel_map_->frame_idx_, "dv_dc_raw", dv_dc);
+        logCovTraceStage(voxel_map_->frame_idx_, "J_R", J_R);
+        logCovTraceStage(voxel_map_->frame_idx_, "J_p", J_p);
+        logCovTraceStage(voxel_map_->frame_idx_, "J_v", J_v);
+      }
       if (layout.colBG() >= 0 && state_->idxBG() >= 0)
         M_T.block<3, 3>(state_->idxBG(), dEta + layout.colBG() - layout.dimCFree()) = M3D::Identity();
       if (layout.colBA() >= 0 && state_->idxBA() >= 0)
@@ -878,10 +1013,45 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       if (layout.colG() >= 0 && state_->idxG() >= 0)
         M_T.block<3, 3>(state_->idxG(), dEta + layout.colG() - layout.dimCFree()) = M3D::Identity();
 
-      const Eigen::MatrixXd P_tail_pred = 0.5 * (M_T * P_z_prior * M_T.transpose() +
-                                                  (M_T * P_z_prior * M_T.transpose()).transpose());
-      const Eigen::MatrixXd P_T = 0.5 * (M_T * P_z_post * M_T.transpose() +
-                                          (M_T * P_z_post * M_T.transpose()).transpose());
+      // J_h_tail: dimSt x 9, the DIRECT sensitivity of the tail state to
+      // x0=[dtheta0,dp0,dv0] (channel (b) in the comment above -- the SAME
+      // exact head-Jacobians poseControlHeadRotJacobian()/
+      // poseControlHeadPosJacobians() already used inside the process/LiDAR
+      // factors' own head_block bookkeeping, evaluated at t1 instead of at
+      // a factor's own segment endpoints). bg/ba/g rows are zero: those
+      // have no direct x0 dependency (their uncertainty reaches the tail
+      // entirely through delta_sT / Omega0's sT block, already handled).
+      Eigen::MatrixXd J_h_tail = Eigen::MatrixXd::Zero(dimSt, 9);
+      {
+        const M3D dR_dtheta0 = poseControlHeadRotJacobian(spline, t1);
+        const auto hs_head = poseControlHeadPosSensitivity(spline);
+        M3D dp_dp0, dp_dv0, dv_dp0, dv_dv0;
+        poseControlHeadPosJacobians(spline, hs_head, t1, dp_dp0, dp_dv0, dv_dp0, dv_dv0);
+        J_h_tail.block<3, 3>(StateGroup::idxR(), 0) = dR_dtheta0;
+        J_h_tail.block<3, 3>(StateGroup::idxP(), 3) = dp_dp0;
+        J_h_tail.block<3, 3>(StateGroup::idxP(), 6) = dp_dv0;
+        J_h_tail.block<3, 3>(StateGroup::idxV(), 3) = dv_dp0;
+        J_h_tail.block<3, 3>(StateGroup::idxV(), 6) = dv_dv0;
+      }
+      Eigen::MatrixXd M_full = Eigen::MatrixXd::Zero(dimSt, dimFull);
+      M_full.block(0, 0, dimSt, 9) = J_h_tail;
+      M_full.block(0, 9, dimSt, dimZ) = M_T;
+
+      const Eigen::MatrixXd Ppred_raw = M_full * Sigma_full_prior * M_full.transpose();
+      const Eigen::MatrixXd Ppost_raw = M_full * Sigma_full_post * M_full.transpose();
+      const Eigen::MatrixXd P_tail_pred = 0.5 * (Ppred_raw + Ppred_raw.transpose());
+      const Eigen::MatrixXd P_T = 0.5 * (Ppost_raw + Ppost_raw.transpose());
+      if (copts_.psd_audit_en) {
+        logCovTraceStage(voxel_map_->frame_idx_, "J_h_tail", J_h_tail);
+        logCovTraceStage(voxel_map_->frame_idx_, "M_full", M_full);
+        logCovTraceStage(voxel_map_->frame_idx_, "M_T", M_T);
+        logCovTraceStage(voxel_map_->frame_idx_, "P_R_pred", P_tail_pred.block<3, 3>(StateGroup::idxR(), StateGroup::idxR()));
+        logCovTraceStage(voxel_map_->frame_idx_, "P_p_pred", P_tail_pred.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()));
+        logCovTraceStage(voxel_map_->frame_idx_, "P_v_pred", P_tail_pred.block<3, 3>(StateGroup::idxV(), StateGroup::idxV()));
+        logCovTraceStage(voxel_map_->frame_idx_, "P_R_post", P_T.block<3, 3>(StateGroup::idxR(), StateGroup::idxR()));
+        logCovTraceStage(voxel_map_->frame_idx_, "P_p_post", P_T.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()));
+        logCovTraceStage(voxel_map_->frame_idx_, "P_v_post", P_T.block<3, 3>(StateGroup::idxV(), StateGroup::idxV()));
+      }
 
       // Item 6/7's SAME-TAIL information-gain diagnostic: compare
       // P_tail_pred (process/prior only, SAME tail state xT) against
