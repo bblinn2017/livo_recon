@@ -135,6 +135,7 @@ add_executable(livo_recon_node
   src/lio/coupled_estimator.cpp
   src/lio/pose_spline_system.cpp
   src/lio/pose_knot_spline.cpp
+  src/lio/pose_control_spline.cpp
   src/map/voxelmap.cpp
   src/map/akf_map.cpp
   src/map/map_backend_factory.cpp
