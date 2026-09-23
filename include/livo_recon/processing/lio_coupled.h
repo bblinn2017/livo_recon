@@ -112,15 +112,25 @@ struct LioProcCoupledOptions
   // that derivation). This mode stays useful as a "does relinearization
   // matter" ablation independent of that question.
   bool pose_control_frozen_process_hessian_prior = false;
-  // 2026-09-23 process-prior-equivalence phase, item 7: the TRUE marginalized
-  // Gaussian IMU/process prior over z=[eta;sT], properly accounting for the
-  // incoming StateGroup's uncertainty (P0) via the SAME joint [x0;z]
-  // marginalize-then-invert construction the covariance block already uses
-  // for P_z_prior -- just evaluated ONCE at scan-start (frozen for the GN
-  // loop) instead of post-convergence. Mutually exclusive with
-  // pose_control_frozen_process_hessian_prior -- refuses both at once (see
-  // config-registration site).
+  // 2026-09-23 process-prior-REFORMULATION phase: DEPRECATED, no-op. The
+  // joint IMU/bias Gaussian prior this flag used to opt INTO is now the
+  // unconditional PRODUCTION mechanism (see coupled_pose_control_sigma_
+  // full_prior_ / estimateCoupledPoseControlSpline()) -- there is no longer
+  // a way to turn it off except pose_control_legacy_process_factor (below),
+  // which reverts to the OLD per-iteration relinearizing process factor for
+  // A/B comparison, not to "no joint prior". Kept as a claimed (accepted,
+  // ignored) config key purely so an old config.yaml that still sets it
+  // doesn't trip the unclaimed-override abort.
   bool pose_control_true_imu_prior = false;
+  // 2026-09-23 process-prior-REFORMULATION phase, item 3/19: the ONLY
+  // opt-out from the production joint IMU/bias prior. When true, restores
+  // the pre-reformulation default: a per-iteration RELINEARIZING process
+  // factor scaled by pose_control_process_weight, with no fixed prior term
+  // at all. Exists solely for the comparison item 59 requires ("current
+  // process formulation" vs "fixed joint IMU Gaussian prior") -- NOT a
+  // production option; pose_control_process_weight has no role whatsoever
+  // when this is false (the default).
+  bool pose_control_legacy_process_factor = false;
 
   // CQ-82 Phase 2: pose-basis-only weights. Meaningless under raw_imu (the
   // refusal wiring never checks these -- they simply aren't read unless
@@ -944,13 +954,35 @@ private:
   // only, conditional on x0 exactly known -- see the option's header
   // comment for why this is NOT claimed equivalent to the true prior).
   Eigen::MatrixXd coupled_pose_control_lambda_frozen_hessian_eta_;
-  // true_imu_prior mode's own frozen information: the FULL z=[eta;sT]
-  // marginal (P_z_prior^-1, properly accounting for P0/x0 uncertainty via
-  // the joint [x0;z] marginalize-then-invert construction), and the
-  // z-space value ([eta_imu;0,0,0] -- sT's prior deviation is zero at scan
-  // start by construction) the GN loop's residual is measured against.
-  Eigen::MatrixXd coupled_pose_control_lambda_true_prior_z_;
+  // ==========================================================================
+  // PRODUCTION joint IMU/bias Gaussian prior (process-prior-REFORMULATION
+  // phase). Computed ONCE per scan, at scan-start, from the SAME joint
+  // [x0;z] marginalize-then-invert construction as before -- but now this
+  // is the estimator's ONE authoritative prior, shared verbatim between the
+  // mean solve (every GN iteration adds the SAME coupled_pose_control_
+  // lambda_prior_z_/z_imu_) and the post-loop covariance computation (which
+  // reuses coupled_pose_control_sigma_full_prior_ directly instead of
+  // re-deriving a fresh prior from the converged trial) -- this is what
+  // makes the "mean update information == covariance update information"
+  // invariant (item 29) hold BY CONSTRUCTION, not by convention.
+  // ==========================================================================
+  // The joint (9+dimZ) x (9+dimZ) covariance over [x0;eta;sT], BEFORE any
+  // LiDAR update -- needed (not just its z-marginal) for the covariance
+  // block's M_full=[J_h,M_T] tail/x1 mapping, which requires x0's DIRECT
+  // sensitivity path as well as its indirect (via z) one.
+  Eigen::MatrixXd coupled_pose_control_sigma_full_prior_;
+  // Lambda_prior_z = pinv(Sigma_full_prior_'s z=[eta;sT] marginal block) --
+  // the information the mean solve adds every iteration. z_imu_ is the
+  // z-space value ([eta_imu;0,0,0], sT's prior deviation is zero at scan
+  // start by construction) the residual is measured against.
+  Eigen::MatrixXd coupled_pose_control_lambda_prior_z_;
   Eigen::VectorXd coupled_pose_control_z_imu_;
+  // item 10/51's corrected EKF-reference test: the reference step computed
+  // mid-iteration (using THAT iteration's own LiDAR linearization + the
+  // fixed prior), held here until the actual delta_z for the SAME
+  // iteration is available a few lines later in the same function.
+  Eigen::VectorXd coupled_pose_control_ekf_ref_pending_;
+  bool coupled_pose_control_ekf_ref_pending_valid_ = false;
   // CQ-79: this scan's PREVIOUS iteration's own set of matched-plane
   // hashes, for carry_frac -- reset to empty at scan start (alongside
   // coupled_iters_'s own reset), updated after every iteration's own
