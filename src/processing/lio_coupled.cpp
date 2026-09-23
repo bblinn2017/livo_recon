@@ -820,6 +820,26 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       coupled_pose_control_prev_iter_cp_p_.clear();
       coupled_pose_control_prev_iter_cp_phi_.clear();
       coupled_pose_control_valid_ = true;
+      // 2026-09-23 stationary-campaign item 10: knot state IMMEDIATELY
+      // after initialization (the IMU-propagated seed, projected through
+      // the head nullspace), BEFORE the GN loop's first iteration runs at
+      // all -- distinct from pose_control_knot_state_per_iter.txt's
+      // iteration=0 row, which is logged AFTER that first GN update has
+      // already been applied.
+      if (copts_.psd_audit_en) {
+        static PersistentLogStream init_knot_log("pose_control_knot_state_at_init.txt");
+        bool ik_first;
+        std::ofstream& ikofs = init_knot_log.stream(&ik_first);
+        if (ik_first) ikofs << "scan_id,knot_index,knot_time,p_x,p_y,p_z,rlog_x,rlog_y,rlog_z\n";
+        for (int k = 0; k < N; ++k) {
+          const double tk = std::min(t1, t0 + k * spline.delta());
+          const V3D pk = spline.cp_p.col(k), rk = spline.cp_phi.col(k);
+          ikofs << voxel_map_->frame_idx_ << "," << k << "," << tk << ","
+                << pk.x() << "," << pk.y() << "," << pk.z() << ","
+                << rk.x() << "," << rk.y() << "," << rk.z() << "\n";
+        }
+        ikofs.flush();
+      }
       if (copts_.psd_audit_en) {
         const auto& hns = coupled_pose_control_hns_;
         const int dEta = hns.freeDim(), dST = coupled_pose_control_layout_.dimST();
