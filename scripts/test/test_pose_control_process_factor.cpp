@@ -156,6 +156,48 @@ int main() {
   check(max_abs < 1e-3, "max_abs_process_jacobian_error", max_abs);
   check(max_rel < 1e-2, "max_relative_process_jacobian_error", max_rel);
 
+  // ---- G9 bias/gravity Jacobian FD validation --------------------------
+  // The only channel by which measurement information can reach the free
+  // tail state sT=[bg,ba,g] in this architecture (the head correction is
+  // fixed at exactly zero, so decoupled LIO's usual pose-correction-via-
+  // prior-cross-covariance pathway to bg/ba/g does not apply here).
+  printf("\nG9 (bias/gravity process-factor Jacobian) FD validation\n");
+  {
+    Eigen::Matrix<double, 9, 9> F9b, Q9b, G9;
+    M3D rp; V3D pp, vp;
+    relinearizePoseControlSegmentWithBiasJac(samples, s.rotAt(tj), s.posAt(tj), s.velAt(tj),
+        bias_acc, bias_gyr, gravity, q_alpha_acc, q_alpha_gyr, var_acc, var_gyr, second_order,
+        F9b, Q9b, G9, rp, pp, vp);
+
+    double max_abs_g9 = 0.0, max_rel_g9 = 0.0;
+    const double hb = 1e-7;
+    for (int col = 0; col < 9; ++col) {
+      V3D e = V3D::Zero(); e(col % 3) = 1.0;
+      V3D bap = bias_acc, bam = bias_acc, bgp = bias_gyr, bgm = bias_gyr, gp = gravity, gm = gravity;
+      if (col < 3)      { bgp += hb * e; bgm -= hb * e; }
+      else if (col < 6) { bap += hb * e; bam -= hb * e; }
+      else              { gp  += hb * e; gm  -= hb * e; }
+
+      Eigen::Matrix<double, 9, 9> Fd, Qd; M3D rot_p, rot_m; V3D pos_p, pos_m, vel_p, vel_m;
+      relinearizePoseControlSegment(samples, s.rotAt(tj), s.posAt(tj), s.velAt(tj),
+          bap, bgp, gp, q_alpha_acc, q_alpha_gyr, var_acc, var_gyr, second_order, Fd, Qd, rot_p, pos_p, vel_p);
+      relinearizePoseControlSegment(samples, s.rotAt(tj), s.posAt(tj), s.velAt(tj),
+          bam, bgm, gm, q_alpha_acc, q_alpha_gyr, var_acc, var_gyr, second_order, Fd, Qd, rot_m, pos_m, vel_m);
+
+      Eigen::Matrix<double, 9, 1> fd_col;
+      fd_col.segment<3>(0) = Log(M3D(rot_m.transpose() * rot_p)) / (2 * hb);
+      fd_col.segment<3>(3) = (pos_p - pos_m) / (2 * hb);
+      fd_col.segment<3>(6) = (vel_p - vel_m) / (2 * hb);
+
+      Eigen::Matrix<double, 9, 1> an_col = G9.col(col);
+      double err = (an_col - fd_col).norm();
+      max_abs_g9 = std::max(max_abs_g9, err);
+      max_rel_g9 = std::max(max_rel_g9, err / std::max(1e-6, fd_col.norm()));
+    }
+    check(max_abs_g9 < 1e-4, "max_abs_G9_bias_jacobian_error", max_abs_g9);
+    check(max_rel_g9 < 1e-3, "max_relative_G9_bias_jacobian_error", max_rel_g9);
+  }
+
   printf("\n%s (%d failure%s)\n", g_fail == 0 ? "ALL PASS" : "SOME FAILED",
          g_fail, g_fail == 1 ? "" : "s");
   return g_fail == 0 ? 0 : 1;

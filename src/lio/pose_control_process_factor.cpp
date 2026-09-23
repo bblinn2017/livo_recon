@@ -96,6 +96,88 @@ void relinearizePoseControlSegment(
   rot_pred = rot_imu; pos_pred = pos_imu; vel_pred = vel_imu;
 }
 
+namespace
+{
+// One micro-step, EXACT duplicate of integrateAndAccumulateStep()'s own
+// arithmetic (pose_knot_spline.cpp) so F9/Q9/state-update stay identical --
+// but additionally returns the LOCAL bias/gravity partials needed to chain
+// G9 = F9_step*G9 + L_step. See this file's header comment for the
+// derivation; this function IS that derivation, one line per term.
+void imuStepWithBiasJac(
+    const ImuSample& head, const ImuSample& tail,
+    const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
+    const V3D& var_acc, const V3D& var_gyr,
+    double q_alpha_acc, double q_alpha_gyr, bool second_order,
+    M3D& rot_imu, V3D& pos_imu, V3D& vel_imu,
+    Eigen::Matrix<double, 9, 9>& F_seg, Eigen::Matrix<double, 9, 9>& Q_seg,
+    Eigen::Matrix<double, 9, 9>& G_seg)
+{
+  const double dt = tail.t - head.t;
+  if (!(dt > 0.0)) return;
+  const V3D acc_avr = 0.5 * (head.acc + tail.acc) - bias_acc;
+  const V3D angvel_avr = 0.5 * (head.gyro + tail.gyro) - bias_gyr;
+
+  Eigen::Matrix<double, 9, 9> F9, Q9;
+  buildImuStep9x9(rot_imu, acc_avr, angvel_avr, dt, var_acc, var_gyr,
+                  q_alpha_acc, q_alpha_gyr, second_order, F9, Q9);
+
+  const M3D rot_k = rot_imu;   // pre-step rotation, R_k
+  const V3D acc_world_head = rot_k * (head.acc - bias_acc) + gravity;
+  const M3D Exp_f = Exp(angvel_avr, dt);
+  const M3D rot_new = rot_k * Exp_f;
+  const V3D acc_world_tail = rot_new * (tail.acc - bias_acc) + gravity;
+  const V3D acc_avr_world = 0.5 * (acc_world_head + acc_world_tail);
+
+  // Local partials (entering state R_k/p_k/v_k held fixed).
+  const M3D dR_local = -dt * Jr(angvel_avr * dt);   // d(theta_new)/d(bg), local
+
+  Eigen::Matrix<double, 3, 9> dAccAvrWorld = Eigen::Matrix<double, 3, 9>::Zero();
+  // d/d(bg): only through rot_new's OWN local dependence on bg, via the
+  // tail term (head term uses R_k, no local bg dependence).
+  dAccAvrWorld.block<3, 3>(0, 0) =
+      -0.5 * rot_new * skew3v(tail.acc - bias_acc) * dR_local;
+  // d/d(ba): direct, both head (via R_k) and tail (via rot_new) terms.
+  dAccAvrWorld.block<3, 3>(0, 3) = -0.5 * (rot_k + rot_new);
+  // d/d(g): direct, both terms contribute I.
+  dAccAvrWorld.block<3, 3>(0, 6) = M3D::Identity();
+
+  Eigen::Matrix<double, 9, 9> L_step = Eigen::Matrix<double, 9, 9>::Zero();
+  L_step.block<3, 3>(0, 0) = dR_local;                       // theta row, bg col
+  L_step.block<3, 9>(3, 0) = 0.5 * dt * dt * dAccAvrWorld;   // pos row
+  L_step.block<3, 9>(6, 0) = dt * dAccAvrWorld;              // vel row
+
+  G_seg = F9 * G_seg + L_step;
+  F_seg = F9 * F_seg;
+  Q_seg = F9 * Q_seg * F9.transpose() + Q9;
+
+  rot_imu = rot_new;
+  pos_imu = pos_imu + vel_imu * dt + 0.5 * acc_avr_world * dt * dt;
+  vel_imu = vel_imu + acc_avr_world * dt;
+}
+}  // namespace
+
+void relinearizePoseControlSegmentWithBiasJac(
+    const std::vector<ImuSample>& samples,
+    const M3D& rot_j, const V3D& pos_j, const V3D& vel_j,
+    const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
+    double q_alpha_acc, double q_alpha_gyr,
+    const V3D& var_acc, const V3D& var_gyr, bool second_order,
+    Eigen::Matrix<double, 9, 9>& F9, Eigen::Matrix<double, 9, 9>& Q9,
+    Eigen::Matrix<double, 9, 9>& G9,
+    M3D& rot_pred, V3D& pos_pred, V3D& vel_pred)
+{
+  F9 = Eigen::Matrix<double, 9, 9>::Identity();
+  Q9 = Eigen::Matrix<double, 9, 9>::Zero();
+  G9 = Eigen::Matrix<double, 9, 9>::Zero();
+  M3D rot_imu = rot_j;
+  V3D pos_imu = pos_j, vel_imu = vel_j;
+  for (size_t k = 0; k + 1 < samples.size(); ++k)
+    imuStepWithBiasJac(samples[k], samples[k + 1], bias_acc, bias_gyr, gravity,
+                       var_acc, var_gyr, q_alpha_acc, q_alpha_gyr, second_order,
+                       rot_imu, pos_imu, vel_imu, F9, Q9, G9);
+  rot_pred = rot_imu; pos_pred = pos_imu; vel_pred = vel_imu;
+}
+
 Eigen::Matrix<double, 9, 9> poseControlPseudoInverse9(
     const Eigen::Matrix<double, 9, 9>& M, double rel_thresh)
 {

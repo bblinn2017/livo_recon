@@ -84,6 +84,33 @@ void relinearizePoseControlSegment(
     Eigen::Matrix<double, 9, 9>& F9, Eigen::Matrix<double, 9, 9>& Q9,
     M3D& rot_pred, V3D& pos_pred, V3D& vel_pred);
 
+// Re-integrates segment j's raw IMU samples from (rot_j,pos_j,vel_j) EXACTLY
+// like relinearizePoseControlSegment(), but ALSO accumulates the 9x9 bias/
+// gravity Jacobian G = d[theta,pos,vel](t_{j+1}) / d[bias_gyr,bias_acc,gravity]
+// -- the standard IMU-preintegration "bias-correction Jacobian" (Forster et
+// al.), needed because in THIS architecture the head correction is held at
+// EXACTLY zero (see solveHeadControlPoints()), so decoupled LIO's usual
+// pathway for measurement information reaching bg/ba/g (the pose-correction
+// coupling through the prior's cross-covariance) does not apply -- the
+// process factor's OWN dependence on bias/gravity is the only remaining
+// channel. Chained per micro-step via the same F9-recursion pattern
+// buildImuStep9x9/integrateAndAccumulateStep already use for F9/Q9:
+//     G_seg = F9_step * G_seg + L_step
+// where L_step is that step's own LOCAL partial derivative (holding the
+// entering state fixed) -- see pose_control_process_factor.cpp for the
+// full per-block derivation. FD-validated in
+// test_pose_control_process_factor.cpp (perturbing bias_acc/bias_gyr/
+// gravity directly and re-walking the SAME raw samples).
+void relinearizePoseControlSegmentWithBiasJac(
+    const std::vector<ImuSample>& samples,
+    const M3D& rot_j, const V3D& pos_j, const V3D& vel_j,
+    const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
+    double q_alpha_acc, double q_alpha_gyr,
+    const V3D& var_acc, const V3D& var_gyr, bool second_order,
+    Eigen::Matrix<double, 9, 9>& F9, Eigen::Matrix<double, 9, 9>& Q9,
+    Eigen::Matrix<double, 9, 9>& G9,
+    M3D& rot_pred, V3D& pos_pred, V3D& vel_pred);
+
 // SPD pseudo-inverse via eigendecomposition of the symmetrized matrix,
 // relative eigenvalue floor -- identical convention/algorithm to the
 // existing pose_knots arm's own pseudoInverse9 lambda (lio_coupled.cpp),
