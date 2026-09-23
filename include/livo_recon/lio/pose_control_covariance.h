@@ -49,4 +49,12 @@ bool schurComplementFreeCovariance(
     const Eigen::MatrixXd& A_hh, const Eigen::MatrixXd& A_hf,
     const Eigen::MatrixXd& A_ff, Eigen::MatrixXd& P_free);
 
+// Dynamic-size SPD pseudo-inverse via eigendecomposition of the
+// symmetrized matrix, relative eigenvalue floor -- the SAME algorithm/
+// convention as poseControlPseudoInverse9 (pose_control_process_factor.h)
+// and the pose_knots arm's own (unexported) pseudoInverse9 lambda, generalized
+// to arbitrary size (needed for state_->cov(), which is dimState()xdimState(),
+// 9..18, not fixed 9x9).
+Eigen::MatrixXd generalPseudoInverse(const Eigen::MatrixXd& M, double rel_thresh);
+
 }  // namespace livo_recon

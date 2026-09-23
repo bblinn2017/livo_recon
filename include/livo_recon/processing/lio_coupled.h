@@ -4,6 +4,10 @@
 #include "livo_recon/lio/coupled_estimator.h"
 #include "livo_recon/lio/pose_spline_system.h"
 #include "livo_recon/lio/pose_knot_spline.h"
+#include "livo_recon/lio/pose_control_spline.h"
+#include "livo_recon/lio/pose_control_process_factor.h"
+#include "livo_recon/lio/pose_control_lidar_factor.h"
+#include "livo_recon/lio/pose_control_covariance.h"
 #include "livo_recon/utils/eval/nees_logger.h"
 
 #include <limits>
@@ -45,9 +49,21 @@ struct LioProcCoupledOptions
   //     which stays exactly as shipped for comparison).
   // Config key: estimator/coupled/spline_mode.
   std::string spline_mode = "raw_imu";
-  static constexpr const char* SPLINE_MODES[] = { "raw_imu", "pose", "pose_knots" };
+  static constexpr const char* SPLINE_MODES[] = { "raw_imu", "pose", "pose_knots", "pose_control" };
   bool poseBasis() const { return spline_mode == "pose"; }
   bool poseKnotsBasis() const { return spline_mode == "pose_knots"; }
+  // 2026-09-22: the pose-CONTROL-POINT-only trajectory state -- z=[c_free;
+  // sT], no independent velocity/angular-velocity DOF, head mean fixed
+  // (not a GN variable), tail free (spline-derived R/p/v + free bg/ba/g).
+  // See pose_control_spline.h/pose_control_process_factor.h/
+  // pose_control_lidar_factor.h/pose_control_covariance.h and
+  // estimateCoupledPoseControlSpline()'s own doc comment for the mechanism.
+  bool poseControlSplineBasis() const { return spline_mode == "pose_control"; }
+  // Config key: estimator/coupled/pose_control/n_control_points.
+  int pose_control_n = 13;
+  // Config key: estimator/coupled/pose_control/q_pinv_rel_thresh -- same
+  // convention as pose_knots_q_pinv_rel_thresh below.
+  double pose_control_q_pinv_rel_thresh = 1e-6;
 
   // CQ-82 Phase 2: pose-basis-only weights. Meaningless under raw_imu (the
   // refusal wiring never checks these -- they simply aren't read unless
@@ -693,6 +709,18 @@ private:
   // own doc comment for why no basis-coefficient translation is needed
   // here, unlike coupled_pose_head_cov_ above).
   double estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out);
+  // 2026-09-22: one GN iteration of the pose-control-point-only estimator
+  // (spline_mode=pose_control). Rebuilds LiDAR + process-factor normal
+  // equations fresh each call against z=[c_free;sT] (coupled_pose_control_layout_),
+  // solves, applies the mean update in place to coupled_pose_control_spline_
+  // (free control points) and coupled_pose_control_sT_{bg,ba,g}_, reconciles
+  // the tail (R/p/v read directly off the optimized spline at t1, never an
+  // independent variable), and writes state_->setPropagatedState(...) every
+  // call -- exactly like estimateCoupledPoseKnotSpline()'s own pattern.
+  // Covariance is NOT written here (spec: mean every iteration, covariance
+  // once after convergence) -- see processLIO()'s own
+  // copts_.poseControlSplineBasis() early-return block for that.
+  double estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out);
   // CQ-82 Phase 1: everything buildImuCorrectionSystem() (and, in Phase 2,
   // its pose-basis sibling) hands back to the dispatcher besides A/b itself
   // -- every sum/accumulator the residual loop used to leave in a bare local
@@ -800,6 +828,38 @@ private:
   // above at scan start.
   std::vector<Eigen::Matrix<double, 9, 9>> pose_knots_frozen_F9_, pose_knots_frozen_Q9_;
   bool pose_knots_frozen_fq_valid_ = false;
+  // The pose-control-point analogue of coupled_pose_knots_ above -- only
+  // meaningful when copts_.poseControlSplineBasis(). The spline itself
+  // (cp_p/cp_phi) IS the accumulated state (mutated in place each GN
+  // iteration, unlike coupled_pose_knots_'s separate-delta-accumulator
+  // pattern -- simpler since there is no nullspace-elimination machinery
+  // to keep a clean nominal/delta split for here).
+  PoseControlSpline coupled_pose_control_spline_;
+  bool coupled_pose_control_valid_ = false;
+  PoseControlFreeLayout coupled_pose_control_layout_;
+  // sT = [bg,ba,g] -- the free non-trajectory tail state (see
+  // pose_control_layout.h). ABSOLUTE values (not corrections), mutated in
+  // place each GN iteration, seeded from state_->biasGyr()/biasAcc()/
+  // gravity() at scan start.
+  V3D coupled_pose_control_bg_ = V3D::Zero(), coupled_pose_control_ba_ = V3D::Zero(),
+      coupled_pose_control_g_ = V3D::Zero();
+  // Raw IMU samples bucketed onto the spline's own breakpoint grid ONCE at
+  // scan start (bucketing depends only on fixed breakpoint times, not on
+  // the moving trial trajectory) -- reused every GN iteration, mirroring
+  // coupled_pose_knots_'s own seg_samples_ caching.
+  std::vector<std::vector<ImuSample>> coupled_pose_control_seg_samples_;
+  // Continuity: the PREVIOUS scan's own optimized tail angular velocity,
+  // fed as this scan's omega0 head-boundary target (no StateGroup analog
+  // exists for this -- see estimateCoupledPoseControlSpline()'s own doc
+  // comment). Zero/invalid on the very first scan of a run.
+  V3D coupled_pose_control_tail_omega_ = V3D::Zero();
+  bool coupled_pose_control_tail_omega_valid_ = false;
+  // The reduced posterior z=[c_free;sT] covariance from the LAST
+  // (converged) GN iteration's own information matrix -- written once,
+  // post-loop, in processLIO()'s own poseControlSplineBasis() block (never
+  // inside the per-iteration solve -- spec: mean every iteration,
+  // covariance once after convergence).
+  Eigen::MatrixXd coupled_pose_control_P_z_post_;
   // CQ-79: this scan's PREVIOUS iteration's own set of matched-plane
   // hashes, for carry_frac -- reset to empty at scan start (alongside
   // coupled_iters_'s own reset), updated after every iteration's own

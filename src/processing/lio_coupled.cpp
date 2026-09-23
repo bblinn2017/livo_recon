@@ -92,7 +92,9 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
 
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/n_c", copts_.n_c, 4);
   cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/spline_mode",
-                 copts_.spline_mode, "raw_imu", {"raw_imu", "pose", "pose_knots"});
+                 copts_.spline_mode, "raw_imu", {"raw_imu", "pose", "pose_knots", "pose_control"});
+  cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/n_control_points", copts_.pose_control_n, 13);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/q_pinv_rel_thresh", copts_.pose_control_q_pinv_rel_thresh, 1e-6);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_acc", copts_.pose_imu_weight_acc, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_gyr", copts_.pose_imu_weight_gyr, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_curvature_weight_pos", copts_.pose_curvature_weight_pos, 0.0);
@@ -600,6 +602,67 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       }
     }
   }
+  // 2026-09-22: pose-control-point scan-start init -- mirrors the
+  // poseKnotsBasis() block above (P0 peek, mg.poses.front() as head data)
+  // but builds the HEAD via solveHeadControlPoints() (a solve-once, fixed
+  // quantity -- not a soft prior the GN loop can move) and seeds the FREE
+  // control points from the raw IMU-propagated mg.poses chain (a
+  // reasonable initial guess; the GN loop refines them against LiDAR+
+  // process-factor residuals every iteration).
+  if (copts_.poseControlSplineBasis()) {
+    coupled_pose_control_valid_ = false;
+    if (!mg.poses.empty() && mg.image.t > mg.poses.front().t) {
+      const double t0 = mg.poses.front().t;
+      const double t1 = mg.image.t;
+      const int N = std::max(6, copts_.pose_control_n);
+
+      Eigen::MatrixXd P_full = state_->cov();
+      if (copts_.prior_at_scan_start) {
+        Eigen::MatrixXd p_before_peek;
+        if (imuProcQhatPeekPBefore(p_before_peek) &&
+            p_before_peek.rows() == P_full.rows() && p_before_peek.cols() == P_full.cols()) {
+          P_full = p_before_peek;
+        }
+      }
+
+      auto& spline = coupled_pose_control_spline_;
+      spline.init(N, t0, t1);
+      spline.R_anchor = mg.poses.front().rot;
+
+      const V3D p0 = mg.poses.front().pos, v0 = mg.poses.front().vel;
+      const V3D omega0 = coupled_pose_control_tail_omega_valid_
+                              ? coupled_pose_control_tail_omega_ : V3D::Zero();
+      V3D cp_p_head[3], cp_phi_head[3];
+      solveHeadControlPoints(spline, p0, v0, V3D::Zero(), omega0, V3D::Zero(),
+                              cp_p_head, cp_phi_head);
+      for (int i = 0; i < 3; ++i) { spline.cp_p.col(i) = cp_p_head[i]; spline.cp_phi.col(i) = cp_phi_head[i]; }
+
+      // Free control points: nearest-time lookup into the IMU-propagated
+      // mg.poses chain -- an initial guess only, refined by the GN loop.
+      for (int k = 3; k < N; ++k) {
+        const double tk = std::min(t1, t0 + k * spline.delta());
+        size_t best = 0; double best_dt = std::numeric_limits<double>::max();
+        for (size_t i = 0; i < mg.poses.size(); ++i) {
+          const double dtp = std::abs(mg.poses[i].t - tk);
+          if (dtp < best_dt) { best_dt = dtp; best = i; }
+        }
+        spline.cp_p.col(k) = mg.poses[best].pos;
+        spline.cp_phi.col(k) = Log(M3D(spline.R_anchor.transpose() * mg.poses[best].rot));
+      }
+
+      coupled_pose_control_bg_ = state_->biasGyr();
+      coupled_pose_control_ba_ = state_->biasAcc();
+      coupled_pose_control_g_ = state_->gravity();
+      coupled_pose_control_layout_.N = N;
+      coupled_pose_control_layout_.has_bg = state_->estBG();
+      coupled_pose_control_layout_.has_ba = state_->estBA();
+      coupled_pose_control_layout_.has_g = state_->estGravity();
+      coupled_pose_control_seg_samples_ =
+          bucketPoseControlImuSamples(mg.imu_samples_raw, spline).seg_samples;
+      coupled_pose_control_P_z_post_.resize(0, 0);
+      coupled_pose_control_valid_ = true;
+    }
+  }
   // mg.poses.front().vel (NOT state_->vel()), for consistency with
   // rot0/pos0 in estimateCoupledCorrection() -- all three come from the
   // SAME raw-chain snapshot.
@@ -679,6 +742,114 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   // deskewed (by estimateCoupledCorrectionPoseBasis()'s own
   // deskewPointsSpline() call each iteration) -- the caller's own map
   // update (outside this function) is unaffected by skipping the rest.
+  // 2026-09-22: pose-control-point post-loop covariance + full-tail
+  // write-back. Mirrors poseBasis()'s own early-return pattern below --
+  // the GN loop itself already ran every iteration's mean update (LiDAR+
+  // process factor, state_->setPropagatedState() every call); this block
+  // does the ONE-TIME (not per-iteration, per spec item 5) covariance
+  // solve: relinearize the FULL system (LiDAR+process+sT-prior+head_block)
+  // at the converged trial, Schur-complement the head out, map the
+  // resulting z=[c_free;sT] posterior to the COMPLETE tail StateGroup via
+  // M_T, and write state_->covMut()/applyDelta() ONCE.
+  if (copts_.poseControlSplineBasis() && coupled_pose_control_valid_) {
+    auto& spline = coupled_pose_control_spline_;
+    const auto& layout = coupled_pose_control_layout_;
+    const double t1 = spline.t1();
+    const int dimZ = layout.dim();
+
+    Eigen::MatrixXd A_ff = Eigen::MatrixXd::Zero(dimZ, dimZ);
+    Eigen::VectorXd b_unused = Eigen::VectorXd::Zero(dimZ);
+    PoseControlProcessFactorHeadBlock head_block;
+    head_block.A_hf = Eigen::MatrixXd::Zero(9, dimZ);
+
+    // Rebuild LiDAR observations at the CONVERGED trial (mg.points/
+    // residuals_ already reflect the last GN iteration's own deskew).
+    std::vector<PoseControlLidarObs> lidar_obs;
+    lidar_obs.reserve(residuals_.size());
+    for (auto& res : residuals_) {
+      const double d = res.r - res.normal.dot(spline.rotAt(res.t) * res.raw_body_point + spline.posAt(res.t));
+      PoseControlLidarObs o;
+      o.t = res.t; o.q = res.raw_body_point; o.normal = res.normal; o.d = d; o.sigma2 = res.sigma_squared;
+      lidar_obs.push_back(o);
+    }
+    addPoseControlLidarFactor(spline, layout, lidar_obs, A_ff, b_unused, &head_block, nullptr);
+    for (int j = 0; j < spline.nSeg(); ++j)
+      addPoseControlProcessFactorReduced(spline, layout, j, coupled_pose_control_seg_samples_[j],
+          coupled_pose_control_ba_, coupled_pose_control_bg_, coupled_pose_control_g_,
+          copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, state_->varAcc(), state_->varGyr(),
+          copts_.repro_second_order, copts_.pose_control_q_pinv_rel_thresh, A_ff, b_unused, &head_block, nullptr);
+
+    Eigen::MatrixXd P0 = state_->cov();
+    if (copts_.prior_at_scan_start) {
+      Eigen::MatrixXd p_before_peek;
+      if (imuProcQhatPeekPBefore(p_before_peek) &&
+          p_before_peek.rows() == P0.rows() && p_before_peek.cols() == P0.cols())
+        P0 = p_before_peek;
+    }
+    const Eigen::MatrixXd Omega0 = generalPseudoInverse(P0, copts_.pose_control_q_pinv_rel_thresh);
+    const int dST = layout.dimST();
+    Eigen::MatrixXd A_hh = head_block.A_hh;
+    if (Omega0.rows() >= 9) A_hh += Omega0.block(0, 0, 9, 9);
+    if (dST > 0 && Omega0.rows() >= 9 + dST) {
+      A_ff.block(layout.dimCFree(), layout.dimCFree(), dST, dST) += Omega0.block(9, 9, dST, dST);
+      // Head-sT cross prior: Omega0.block(0,9,9,dST) -- part of the SAME
+      // joint head/free information the Schur complement below already
+      // marginalizes correctly (added to A_hf, not A_ff, since it couples
+      // the HEAD block, not a free-free term).
+      head_block.A_hf.block(0, layout.dimCFree(), 9, dST) += Omega0.block(0, 9, 9, dST);
+    }
+
+    Eigen::MatrixXd P_z_post;
+    const bool schur_ok = schurComplementFreeCovariance(A_hh, head_block.A_hf, A_ff, P_z_post);
+    if (schur_ok) {
+      coupled_pose_control_P_z_post_ = P_z_post;
+
+      // M_T: dimState() x dimZ, mapping z -> the FULL tail StateGroup
+      // [theta,p,v,bg?,ba?,g?] in StateGroup's own index order.
+      const int dimSt = state_->dimState();
+      Eigen::MatrixXd M_T = Eigen::MatrixXd::Zero(dimSt, dimZ);
+      const auto jac1 = spline.jacobianAt(t1);
+      for (int k = 0; k < 4; ++k) {
+        const int abs_k = jac1.s + k;
+        if (abs_k < 3) continue;   // fixed head control points contribute nothing to M_T (handled via A_hh/A_hf already, not via a tail Jacobian)
+        const int colp = layout.colPos(abs_k), colph = layout.colPhi(abs_k);
+        if (colph >= 0) M_T.block<3, 3>(StateGroup::idxR(), colph) = spline.dThetaDcphi(jac1, k, t1);
+        if (colp >= 0) {
+          M_T.block<3, 3>(StateGroup::idxP(), colp) = PoseControlSpline::dPosDcp(jac1, k);
+          M_T.block<3, 3>(StateGroup::idxV(), colp) = PoseControlSpline::dVelDcp(jac1, k);
+        }
+      }
+      if (layout.colBG() >= 0 && state_->idxBG() >= 0)
+        M_T.block<3, 3>(state_->idxBG(), layout.colBG()) = M3D::Identity();
+      if (layout.colBA() >= 0 && state_->idxBA() >= 0)
+        M_T.block<3, 3>(state_->idxBA(), layout.colBA()) = M3D::Identity();
+      if (layout.colG() >= 0 && state_->idxG() >= 0)
+        M_T.block<3, 3>(state_->idxG(), layout.colG()) = M3D::Identity();
+
+      const Eigen::MatrixXd P_T = M_T * P_z_post * M_T.transpose();
+      state_->covMut() = 0.5 * (P_T + P_T.transpose());
+
+      // sT mean write-back (R/p/v already written every GN iteration via
+      // setPropagatedState() -- only bg/ba/g need a final commit here).
+      Eigen::VectorXd dx = Eigen::VectorXd::Zero(dimSt);
+      if (state_->idxBG() >= 0) dx.segment<3>(state_->idxBG()) = coupled_pose_control_bg_ - state_->biasGyr();
+      if (state_->idxBA() >= 0) dx.segment<3>(state_->idxBA()) = coupled_pose_control_ba_ - state_->biasAcc();
+      if (state_->idxG()  >= 0) dx.segment<3>(state_->idxG())  = coupled_pose_control_g_  - state_->gravity();
+      state_->applyDelta(dx);
+    }
+
+    // Continuity for the NEXT scan's head omega0 target.
+    coupled_pose_control_tail_omega_ = spline.omegaBodyAt(t1);
+    coupled_pose_control_tail_omega_valid_ = true;
+
+    std::ostringstream oss;
+    oss << "[lio/ekf][pose-control] iters=" << iter << "  n_residuals=" << residuals_.size()
+        << "  schur_ok=" << (schur_ok ? 1 : 0)
+        << "  |dtheta|=" << total_dtheta.norm() * (180.0 / M_PI) << " deg"
+        << "  |dt|=" << total_dt.norm() * 1000.0 << " mm";
+    return oss.str();
+  }
+
   if (copts_.poseBasis()) {
     boundary_dpos_ = 0.0;
     boundary_drot_deg_ = 0.0;
@@ -2446,6 +2617,7 @@ double LioProcCoupled::estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_o
   // estimateCoupledCorrectionPoseBasis()'s own doc comment.
   if (copts_.poseBasis()) return estimateCoupledCorrectionPoseBasis(mg, dtheta_out, dt_out);
   if (copts_.poseKnotsBasis()) return estimateCoupledPoseKnotSpline(mg, dtheta_out, dt_out);
+  if (copts_.poseControlSplineBasis()) return estimateCoupledPoseControlSpline(mg, dtheta_out, dt_out);
 
   const auto t_start = std::chrono::steady_clock::now();
 
@@ -5801,6 +5973,131 @@ double LioProcCoupled::estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dthe
   double sum_abs_r = 0.0;
   for (const auto& res : residuals_) sum_abs_r += std::abs(res.r);
   return residuals_.empty() ? 0.0 : sum_abs_r / static_cast<double>(residuals_.size());
+}
+
+// 2026-09-22: ONE GN iteration of the pose-control-point-only estimator.
+// Called repeatedly from the SAME outer loop as estimateCoupledPoseKnotSpline()
+// (processLIO()'s `for (; iter < opts_.max_iterations; iter++)`), mirroring
+// its own deskew/associate/build/solve/write-back pattern exactly, but
+// building against z=[c_free;sT] (coupled_pose_control_layout_) instead of
+// the 9N physical-knot state -- see pose_control_spline.h/
+// pose_control_process_factor.h/pose_control_lidar_factor.h for the
+// validated math this function assembles.
+double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out)
+{
+  dtheta_out = V3D::Zero();
+  dt_out = V3D::Zero();
+  if (!coupled_pose_control_valid_) return 0.0;
+
+  auto& spline = coupled_pose_control_spline_;
+  const auto& layout = coupled_pose_control_layout_;
+  const double t1 = spline.t1();
+  const M3D prev_tail_R = spline.rotAt(t1);
+  const V3D prev_tail_p = spline.posAt(t1);
+
+  // ---- deskew + associate (EXACT mirror of estimateCoupledPoseKnotSpline()'s
+  // own item-8 block, re-derived here since PoseControlSpline is not the
+  // same type as PoseKnotSpline) ----------------------------------------
+  const M3D R_end_T = spline.rotAt(t1).transpose();
+  const V3D p_end = spline.posAt(t1);
+  std::vector<PointXYZCov> deskewed(mg.lidar_points.size());
+  for (size_t i = 0; i < mg.lidar_points.size(); ++i) {
+    const auto& pt = mg.lidar_points[i];
+    const M3D R_i = spline.rotAt(pt.t);
+    const V3D p_i = spline.posAt(pt.t);
+    const M3D R_rel = R_end_T * R_i;
+    const V3D t_rel = R_end_T * (p_i - p_end);
+    const V3D p_imu_i = state_->lidarToImu(pt.p);
+    const V3D p_imu_end = R_rel * p_imu_i + t_rel;
+    const M3D cov_lidar_i = getBodyCov(pt.p, opts_.deskew.sigma_r2, opts_.deskew.sigma_a2);
+    const M3D cov_imu_end = state_->lidarToImu(M3D(R_rel * cov_lidar_i * R_rel.transpose()));
+    deskewed[i] = PointXYZCov{p_imu_end, cov_imu_end};
+    deskewed[i].t = pt.t;
+    deskewed[i].raw_body_point = p_imu_i;
+  }
+  if (opts_.dsOn()) {
+    DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
+    voxelDownsample(deskewed, mg.points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
+  } else {
+    mg.points = deskewed;
+  }
+  buildResiduals(mg.points, residuals_, coupled_iters_ == 0);
+  std::vector<PoseControlLidarObs> lidar_obs;
+  lidar_obs.reserve(residuals_.size());
+  for (auto& res : residuals_) {
+    const double d = res.r - res.normal.dot(res.world_point);
+    const V3D q_world_trial = spline.rotAt(res.t) * res.raw_body_point + spline.posAt(res.t);
+    res.r = res.normal.dot(q_world_trial) + d;
+    PoseControlLidarObs o;
+    o.t = res.t; o.q = res.raw_body_point; o.normal = res.normal; o.d = d;
+    o.sigma2 = res.sigma_squared;
+    lidar_obs.push_back(o);
+  }
+
+  // ---- assemble the reduced [c_free;sT] normal equations ---------------
+  const int dimZ = layout.dim();
+  Eigen::MatrixXd A = Eigen::MatrixXd::Zero(dimZ, dimZ);
+  Eigen::VectorXd b = Eigen::VectorXd::Zero(dimZ);
+  double E_lidar = 0.0, E_process = 0.0;
+
+  addPoseControlLidarFactor(spline, layout, lidar_obs, A, b, nullptr, &E_lidar);
+  for (int j = 0; j < spline.nSeg(); ++j)
+    addPoseControlProcessFactorReduced(spline, layout, j, coupled_pose_control_seg_samples_[j],
+        coupled_pose_control_ba_, coupled_pose_control_bg_, coupled_pose_control_g_,
+        copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, state_->varAcc(), state_->varGyr(),
+        copts_.repro_second_order, copts_.pose_control_q_pinv_rel_thresh, A, b, nullptr, &E_process);
+
+  // sT prior: the sT-sT block of Omega0=pinv(P0), CONDITIONED on the head
+  // correction being identically zero (see pose_control_covariance.h's
+  // header comment -- for a jointly Gaussian [head;sT], conditioning on
+  // head=0 gives sT's conditional information EXACTLY equal to Omega0's
+  // own sT-sT diagonal block, no cross-term correction needed, since the
+  // cross term is multiplied by a head correction that is always zero).
+  {
+    Eigen::MatrixXd P0 = state_->cov();
+    if (copts_.prior_at_scan_start) {
+      Eigen::MatrixXd p_before_peek;
+      if (imuProcQhatPeekPBefore(p_before_peek) &&
+          p_before_peek.rows() == P0.rows() && p_before_peek.cols() == P0.cols())
+        P0 = p_before_peek;
+    }
+    const int dST = layout.dimST();
+    if (dST > 0 && P0.rows() >= 9 + dST) {
+      Eigen::MatrixXd Omega0_ss = generalPseudoInverse(P0, copts_.pose_control_q_pinv_rel_thresh)
+                                       .block(9, 9, dST, dST);
+      A.block(layout.dimCFree(), layout.dimCFree(), dST, dST) += Omega0_ss;
+      // target is 0 (sT's correction relative to bg0/ba0/g0), so no `b`
+      // contribution at c=0 -- see header comment.
+    }
+  }
+
+  Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
+  if (ldlt.info() != Eigen::Success) return 0.0;
+  const Eigen::VectorXd delta = ldlt.solve(b);
+  if (!delta.allFinite()) return 0.0;
+
+  // ---- apply the mean update in place -----------------------------------
+  for (int k = 3; k < layout.N; ++k) {
+    const int cp = layout.colPos(k), cph = layout.colPhi(k);
+    if (cp >= 0) spline.cp_p.col(k) += delta.segment<3>(cp);
+    if (cph >= 0) spline.cp_phi.col(k) += delta.segment<3>(cph);
+  }
+  if (layout.colBG() >= 0) coupled_pose_control_bg_ += delta.segment<3>(layout.colBG());
+  if (layout.colBA() >= 0) coupled_pose_control_ba_ += delta.segment<3>(layout.colBA());
+  if (layout.colG()  >= 0) coupled_pose_control_g_  += delta.segment<3>(layout.colG());
+
+  const M3D new_tail_R = spline.rotAt(t1);
+  const V3D new_tail_p = spline.posAt(t1);
+  const V3D new_tail_v = spline.velAt(t1);
+  dtheta_out = Log(M3D(prev_tail_R.transpose() * new_tail_R));
+  dt_out = new_tail_p - prev_tail_p;
+  state_->setPropagatedState(new_tail_R, new_tail_p, new_tail_v);
+  // Bias/gravity mean is NOT written to state_ every iteration (matches
+  // decoupled LIO's own "mean every iteration, only rot/pos/vel" pattern
+  // for THIS arm -- covariance-carrying full write-back happens once,
+  // post-loop, in processLIO()'s poseControlSplineBasis() block).
+
+  return residuals_.empty() ? 0.0 : E_lidar / static_cast<double>(residuals_.size());
 }
 
 }  // namespace livo_recon

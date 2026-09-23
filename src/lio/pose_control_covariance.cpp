@@ -20,4 +20,18 @@ bool schurComplementFreeCovariance(
   return P_free.allFinite();
 }
 
+Eigen::MatrixXd generalPseudoInverse(const Eigen::MatrixXd& M, double rel_thresh)
+{
+  const int n = static_cast<int>(M.rows());
+  const Eigen::MatrixXd Ms = 0.5 * (M + M.transpose());
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(Ms);
+  const auto& evals = es.eigenvalues();
+  const auto& evecs = es.eigenvectors();
+  const double thresh = rel_thresh * std::max(evals.maxCoeff(), 0.0);
+  Eigen::MatrixXd out = Eigen::MatrixXd::Zero(n, n);
+  for (int k = 0; k < n; ++k)
+    if (evals(k) > thresh) out += (1.0 / evals(k)) * (evecs.col(k) * evecs.col(k).transpose());
+  return out;
+}
+
 }  // namespace livo_recon
