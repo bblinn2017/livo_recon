@@ -341,6 +341,46 @@ static void testE() {
   check(dp0 < 1e-7, "p(t0)_still_unaffected_by_tail_pull", dp0);
 }
 
+// ---- Test F: head ELIMINATION (2026-09-22 follow-up supersedes the KKT
+// head treatment for the live estimator) -- cp[0..2]/cp_phi[0..2] solved
+// once from fixed head data, held constant, and never appear as GN
+// variables at all (validated here as a pure algebraic property: solving
+// once reproduces p(t0)/v(t0)/a(t0)/phi(t0)/phidot(t0) to machine
+// precision, with NO subsequent solve/iteration involved).
+static void testF() {
+  printf("Test F: head elimination (solve-once, no GN variable)\n");
+  PoseControlSpline s; s.init(13, 0.0, 0.1);
+  const V3D p0(1.2, -0.4, 0.7), v0(0.3, 0.1, -0.2), a0(0.0, 0.0, 0.0);
+  const V3D omega0(0.05, -0.03, 0.02), alpha0(0.0, 0.0, 0.0);
+  s.R_anchor = M3D::Identity();
+
+  V3D cp_p_head[3], cp_phi_head[3];
+  solveHeadControlPoints(s, p0, v0, a0, omega0, alpha0, cp_p_head, cp_phi_head);
+  for (int i = 0; i < 3; ++i) { s.cp_p.col(i) = cp_p_head[i]; s.cp_phi.col(i) = cp_phi_head[i]; }
+  // Fill the rest arbitrarily -- head values must not depend on them.
+  std::mt19937 rng(7777);
+  std::uniform_real_distribution<double> up(-1, 1), uphi(-0.1, 0.1);
+  for (int i = 3; i < 13; ++i) { s.cp_p.col(i) = V3D(up(rng), up(rng), up(rng)); s.cp_phi.col(i) = V3D(uphi(rng), uphi(rng), uphi(rng)); }
+
+  double ep = (s.posAt(s.t0()) - p0).norm();
+  double ev = (s.velAt(s.t0()) - v0).norm();
+  double ea = (s.accAt(s.t0()) - a0).norm();
+  double ephi = s.phiAt(s.t0()).norm();
+  double eomega = (s.omegaBodyAt(s.t0()) - omega0).norm();
+  check(ep < 1e-12, "p(t0) exact from solve-once", ep);
+  check(ev < 1e-12, "v(t0) exact from solve-once", ev);
+  check(ea < 1e-10, "a(t0) exact from solve-once", ea);
+  check(ephi < 1e-12, "phi(t0)=0 exact (R_anchor=R0)", ephi);
+  check(eomega < 1e-12, "omega(t0) exact from solve-once", eomega);
+
+  // Changing the FREE (non-head) control points must not move the head at
+  // all -- re-derive with a DIFFERENT random tail, head values unchanged.
+  auto s2 = s;
+  for (int i = 3; i < 13; ++i) { s2.cp_p.col(i) = V3D(up(rng), up(rng), up(rng)); s2.cp_phi.col(i) = V3D(uphi(rng), uphi(rng), uphi(rng)); }
+  double dp = (s2.posAt(s.t0()) - p0).norm();
+  check(dp < 1e-12, "head_still_exact_after_changing_free_control_points", dp);
+}
+
 int main() {
   testA();
   testB();
@@ -348,6 +388,7 @@ int main() {
   testC2();
   testD();
   testE();
+  testF();
   printf("\n%s (%d failure%s)\n", g_fail == 0 ? "ALL PASS" : "SOME FAILED",
          g_fail, g_fail == 1 ? "" : "s");
   return g_fail == 0 ? 0 : 1;

@@ -196,4 +196,31 @@ bool solvePoseControlKkt(const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
                           const Eigen::MatrixXd& C, const Eigen::VectorXd& d,
                           Eigen::VectorXd& delta_c);
 
+// ============================================================================
+// HEAD ELIMINATION -- 2026-09-22 follow-up ("The head is NOT an optimization
+// variable... Do NOT add a soft prior and then allow the optimizer to
+// change the head... delta_x0 = 0 BY CONSTRUCTION"). This SUPERSEDES the
+// KKT-augmented head treatment above for the live estimator: cp[0..2] and
+// cp_phi[0..2] (the only 3 control points p(t0)/v(t0)/R(t0) depend on --
+// basis weight at u=0 is [1/6,4/6,1/6,0], so cp[3.] never touches t0) are
+// SOLVED ONCE from the incoming fixed head data and then HELD CONSTANT for
+// the entire GN loop -- they are simply not columns in the optimization
+// state at all, not "free but constrained via equality rows".
+//
+// Head data is [p0,v0,a0] / [phi0=0,omega0,alpha0] -- 3 equations per axis
+// (value/rate/2nd-derivative at u=0) for the 3 unknowns cp[0],cp[1],cp[2]
+// (resp. cp_phi[0..2]), uniquely solvable (a full-rank 3x3 system, the
+// clamped-cubic-B-spline boundary identity). a0/alpha0 (acceleration/
+// angular-acceleration) are NOT part of StateGroup -- default to ZERO
+// (the standard "no better information" boundary assumption) unless the
+// caller has a genuine estimate.
+void solveHeadControlPoints(const PoseControlSpline& spline,
+                             const V3D& p0, const V3D& v0, const V3D& a0,
+                             const V3D& omega0, const V3D& alpha0,
+                             V3D cp_p_head[3], V3D cp_phi_head[3]);
+
+// Number of control points ELIMINATED at the head (fixed, not GN
+// variables) -- always 3, named for readability at call sites.
+inline constexpr int POSE_CONTROL_HEAD_FIXED_CP = 3;
+
 }  // namespace livo_recon

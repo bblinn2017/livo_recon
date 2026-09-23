@@ -182,6 +182,33 @@ bool solvePoseControlKkt(const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
   return true;
 }
 
+void solveHeadControlPoints(const PoseControlSpline& spline,
+                             const V3D& p0, const V3D& v0, const V3D& a0,
+                             const V3D& omega0, const V3D& alpha0,
+                             V3D cp_p_head[3], V3D cp_phi_head[3])
+{
+  // Basis (b,db,ddb) at u=0, du/dt->inv_delta scaling already applied.
+  const double invd = 1.0 / spline.delta();
+  const double invd2 = invd * invd;
+  Eigen::Matrix3d M;
+  M << 1.0 / 6.0, 4.0 / 6.0, 1.0 / 6.0,      // value row
+      -0.5 * invd, 0.0, 0.5 * invd,          // rate row
+      invd2, -2.0 * invd2, invd2;            // 2nd-derivative row
+  const Eigen::Matrix3d Minv = M.inverse();
+
+  for (int a = 0; a < 3; ++a)
+  {
+    Eigen::Vector3d rhs_p(p0(a), v0(a), a0(a));
+    Eigen::Vector3d sol_p = Minv * rhs_p;
+    cp_p_head[0](a) = sol_p(0); cp_p_head[1](a) = sol_p(1); cp_p_head[2](a) = sol_p(2);
+
+    // phi0 target is 0 -- caller sets spline.R_anchor = R0 so this is exact.
+    Eigen::Vector3d rhs_phi(0.0, omega0(a), alpha0(a));
+    Eigen::Vector3d sol_phi = Minv * rhs_phi;
+    cp_phi_head[0](a) = sol_phi(0); cp_phi_head[1](a) = sol_phi(1); cp_phi_head[2](a) = sol_phi(2);
+  }
+}
+
 M3D PoseControlSpline::dOmegaDcphi(const PoseControlJac& j, int k, double t) const
 {
   // omega(t) = Jr(phi(t)) * phidot(t). Leading-order (exact at phi=0,
