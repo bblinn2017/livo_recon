@@ -223,4 +223,46 @@ void solveHeadControlPoints(const PoseControlSpline& spline,
 // variables) -- always 3, named for readability at call sites.
 inline constexpr int POSE_CONTROL_HEAD_FIXED_CP = 3;
 
+// ============================================================================
+// HEAD-COVARIANCE SENSITIVITY -- how p(t)/v(t)/R(t) respond to a
+// perturbation of the FIXED incoming head x0=[theta0,p0,v0] itself (as
+// opposed to a perturbation of any GN variable). Needed for the
+// Schur-complement covariance step (pose_control_covariance.h) to build
+// the head/free cross-block -- NOT part of the GN mean solve (the head
+// never moves there), only the COVARIANCE propagation.
+//
+// POSITION is a LOCAL effect, mediated entirely through cp_p[0..2]
+// (solveHeadControlPoints()'s own 3x3 M matrix): d(cp_p[k])/d(p0) =
+// Minv(k,0)*I, d(cp_p[k])/d(v0) = Minv(k,1)*I (a0 is FIXED at 0, not a
+// variable, so its Minv column is irrelevant here) -- chained through the
+// ordinary basis weights, so dp(t)/d(p0)=dp(t)/d(v0)=0 EXACTLY for t
+// beyond cp[2]'s support (segment 3 onward), a genuine locality property,
+// not an approximation.
+//
+// ROTATION is a GLOBAL effect and has NO control-point-mediated
+// component at all: cp_phi[0..2] are solved from [phi0=0 (fixed BY
+// DEFINITION, since R_anchor:=R0 always), omega0, alpha0=0] -- phi0's
+// target is 0 regardless of what R0 numerically is, so cp_phi[0..2]
+// themselves do not depend on theta0. Instead, perturbing R0 rigidly
+// perturbs R_anchor itself, which shifts R(t)=R_anchor*Exp(phi(t)) for
+// EVERY t in the scan (not just near the head) via the EXACT (not
+// leading-order) conjugation identity R*Exp(v)*R^T=Exp(R*v):
+//     R(t;theta0+eps) = R(t;theta0) * Exp( R(t)^T R_anchor * eps )
+//     => d(theta_pert(t))/d(theta0) = R(t)^T * R_anchor      (exact)
+// which is nonzero for every t across the whole scan, including the tail.
+struct PoseControlHeadPosSensitivity
+{
+  Eigen::Matrix3d Minv;   // solveHeadControlPoints()'s own per-axis 3x3 map
+};
+PoseControlHeadPosSensitivity poseControlHeadPosSensitivity(const PoseControlSpline& spline);
+// dp(t)/d(p0) and dp(t)/d(v0), dv(t)/d(p0), dv(t)/d(v0) -- each 3x3
+// (scalar-times-identity, since Minv acts identically per axis), zero for
+// t beyond cp[2]'s support.
+void poseControlHeadPosJacobians(const PoseControlSpline& spline,
+                                  const PoseControlHeadPosSensitivity& hs, double t,
+                                  M3D& dp_dp0, M3D& dp_dv0, M3D& dv_dp0, M3D& dv_dv0);
+
+// d(theta_pert(t))/d(theta0), exact, for any t (see header comment above).
+M3D poseControlHeadRotJacobian(const PoseControlSpline& spline, double t);
+
 }  // namespace livo_recon

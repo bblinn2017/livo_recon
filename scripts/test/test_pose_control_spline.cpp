@@ -381,6 +381,86 @@ static void testF() {
   check(dp < 1e-12, "head_still_exact_after_changing_free_control_points", dp);
 }
 
+// ---- Test G: head-covariance sensitivity Jacobians (rotation is a GLOBAL
+// exact effect via R_anchor; position is LOCAL, mediated by cp[0..2]) --
+// FD-validated by literally perturbing x0=[p0,v0,theta0] and re-running
+// solveHeadControlPoints()/rebuilding R_anchor from scratch, i.e. an
+// end-to-end check of the whole head-elimination + sensitivity pipeline
+// together, not just the isolated formula.
+static void testG() {
+  printf("Test G: head-covariance sensitivity Jacobians (position local, rotation global)\n");
+  PoseControlSpline s; s.init(13, 0.0, 0.1);
+  const V3D p0(1.2, -0.4, 0.7), v0(0.3, 0.1, -0.2), a0(0, 0, 0);
+  const V3D omega0(0.05, -0.03, 0.02), alpha0(0, 0, 0);
+  const M3D R0 = Exp(V3D(0.2, -0.1, 0.05));
+  s.R_anchor = R0;
+  V3D cp_p_head[3], cp_phi_head[3];
+  solveHeadControlPoints(s, p0, v0, a0, omega0, alpha0, cp_p_head, cp_phi_head);
+  for (int i = 0; i < 3; ++i) { s.cp_p.col(i) = cp_p_head[i]; s.cp_phi.col(i) = cp_phi_head[i]; }
+  std::mt19937 rng(505);
+  std::uniform_real_distribution<double> up(-1, 1), uphi(-0.1, 0.1);
+  for (int i = 3; i < 13; ++i) { s.cp_p.col(i) = V3D(up(rng), up(rng), up(rng)); s.cp_phi.col(i) = V3D(uphi(rng), uphi(rng), uphi(rng)); }
+
+  auto hs = poseControlHeadPosSensitivity(s);
+  const double h = 1e-6;
+  double max_dp_dp0 = 0, max_dp_dv0 = 0, max_dv_dp0 = 0, max_dv_dv0 = 0, max_dtheta_dtheta0 = 0;
+
+  std::vector<double> test_times = {0.0, 0.005, 0.011, 0.02, 0.029, 0.031, 0.05, 0.08, 0.1};
+  for (double t : test_times) {
+    M3D dp_dp0, dp_dv0, dv_dp0, dv_dv0;
+    poseControlHeadPosJacobians(s, hs, t, dp_dp0, dp_dv0, dv_dp0, dv_dv0);
+    for (int axis = 0; axis < 3; ++axis) {
+      V3D e = V3D::Zero(); e(axis) = 1.0;
+      auto rebuild = [&](const V3D& dp0, const V3D& dv0) {
+        PoseControlSpline sp = s;
+        V3D cpp[3], cph[3];
+        solveHeadControlPoints(sp, p0 + dp0, v0 + dv0, a0, omega0, alpha0, cpp, cph);
+        for (int i = 0; i < 3; ++i) { sp.cp_p.col(i) = cpp[i]; sp.cp_phi.col(i) = cph[i]; }
+        return sp;
+      };
+      auto sp_p = rebuild(h * e, V3D::Zero()), sm_p = rebuild(-h * e, V3D::Zero());
+      auto sp_v = rebuild(V3D::Zero(), h * e), sm_v = rebuild(V3D::Zero(), -h * e);
+      V3D fd_dp_dp0 = (sp_p.posAt(t) - sm_p.posAt(t)) / (2 * h);
+      V3D fd_dv_dp0 = (sp_p.velAt(t) - sm_p.velAt(t)) / (2 * h);
+      V3D fd_dp_dv0 = (sp_v.posAt(t) - sm_v.posAt(t)) / (2 * h);
+      V3D fd_dv_dv0 = (sp_v.velAt(t) - sm_v.velAt(t)) / (2 * h);
+      max_dp_dp0 = std::max(max_dp_dp0, (dp_dp0 * e - fd_dp_dp0).norm());
+      max_dv_dp0 = std::max(max_dv_dp0, (dv_dp0 * e - fd_dv_dp0).norm());
+      max_dp_dv0 = std::max(max_dp_dv0, (dp_dv0 * e - fd_dp_dv0).norm());
+      max_dv_dv0 = std::max(max_dv_dv0, (dv_dv0 * e - fd_dv_dv0).norm());
+    }
+
+    // Rotation: perturb theta0 (right-perturbation of R0), rebuild R_anchor
+    // AND re-solve cp_phi[0..2] (target phi0 stays 0 by construction, so
+    // cp_phi head values are literally unchanged -- only R_anchor moves).
+    M3D dtheta_dtheta0 = poseControlHeadRotJacobian(s, t);
+    for (int axis = 0; axis < 3; ++axis) {
+      V3D e = V3D::Zero(); e(axis) = 1.0;
+      M3D R0p = R0 * Exp(h * e), R0m = R0 * Exp(-h * e);
+      PoseControlSpline sp = s, sm = s;
+      sp.R_anchor = R0p; sm.R_anchor = R0m;   // cp_phi[0..2]/cp_p unchanged (phi0 target still 0)
+      V3D theta_p = Log(M3D(s.rotAt(t).transpose() * sp.rotAt(t)));
+      V3D theta_m = Log(M3D(s.rotAt(t).transpose() * sm.rotAt(t)));
+      V3D fd = (theta_p - theta_m) / (2 * h);
+      max_dtheta_dtheta0 = std::max(max_dtheta_dtheta0, (dtheta_dtheta0 * e - fd).norm());
+    }
+  }
+  check(max_dp_dp0 < 1e-6, "max_abs_dp_dp0_error", max_dp_dp0);
+  check(max_dv_dp0 < 1e-4, "max_abs_dv_dp0_error", max_dv_dp0);
+  check(max_dp_dv0 < 1e-6, "max_abs_dp_dv0_error", max_dp_dv0);
+  check(max_dv_dv0 < 1e-4, "max_abs_dv_dv0_error", max_dv_dv0);
+  check(max_dtheta_dtheta0 < 1e-6, "max_abs_dtheta_dtheta0_error(global,exact)", max_dtheta_dtheta0);
+
+  // Locality: at t=t1 (=0.1, far beyond cp[2]'s support), position
+  // sensitivity must be EXACTLY zero; rotation sensitivity must be
+  // nonzero (global effect reaches the tail).
+  M3D dp_dp0_tail, dp_dv0_tail, dv_dp0_tail, dv_dv0_tail;
+  poseControlHeadPosJacobians(s, hs, s.t1(), dp_dp0_tail, dp_dv0_tail, dv_dp0_tail, dv_dv0_tail);
+  check(dp_dp0_tail.norm() < 1e-12, "position_sensitivity_exactly_zero_at_tail(locality)", dp_dp0_tail.norm());
+  M3D dtheta_dtheta0_tail = poseControlHeadRotJacobian(s, s.t1());
+  check(dtheta_dtheta0_tail.norm() > 0.1, "rotation_sensitivity_nonzero_at_tail(global effect)", dtheta_dtheta0_tail.norm());
+}
+
 int main() {
   testA();
   testB();
@@ -389,6 +469,7 @@ int main() {
   testD();
   testE();
   testF();
+  testG();
   printf("\n%s (%d failure%s)\n", g_fail == 0 ? "ALL PASS" : "SOME FAILED",
          g_fail, g_fail == 1 ? "" : "s");
   return g_fail == 0 ? 0 : 1;

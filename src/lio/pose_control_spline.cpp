@@ -13,6 +13,18 @@ inline M3D skew3(const V3D& v)
        -v.y(),  v.x(),      0;
   return S;
 }
+
+Eigen::Matrix3d headBoundaryM(const PoseControlSpline& spline)
+{
+  // Basis (b,db,ddb) at u=0, du/dt->inv_delta scaling already applied.
+  const double invd = 1.0 / spline.delta();
+  const double invd2 = invd * invd;
+  Eigen::Matrix3d M;
+  M << 1.0 / 6.0, 4.0 / 6.0, 1.0 / 6.0,      // value row
+      -0.5 * invd, 0.0, 0.5 * invd,          // rate row
+      invd2, -2.0 * invd2, invd2;            // 2nd-derivative row
+  return M;
+}
 }  // namespace
 
 void PoseControlSpline::init(int N, double t0, double t1)
@@ -159,6 +171,38 @@ void buildHeadConstraintRows(const PoseControlSpline& spline,
   }
 }
 
+PoseControlHeadPosSensitivity poseControlHeadPosSensitivity(const PoseControlSpline& spline)
+{
+  PoseControlHeadPosSensitivity hs;
+  hs.Minv = headBoundaryM(spline).inverse();
+  return hs;
+}
+
+void poseControlHeadPosJacobians(const PoseControlSpline& spline,
+                                  const PoseControlHeadPosSensitivity& hs, double t,
+                                  M3D& dp_dp0, M3D& dp_dv0, M3D& dv_dp0, M3D& dv_dv0)
+{
+  dp_dp0 = M3D::Zero(); dp_dv0 = M3D::Zero(); dv_dp0 = M3D::Zero(); dv_dv0 = M3D::Zero();
+  int s; double u; spline.locate(t, s, u);
+  Eigen::Vector4d b, db, ddb; poseControlBasisU(u, b, db, ddb);
+  const double inv_delta = 1.0 / spline.delta();
+  for (int k = 0; k < 4; ++k)
+  {
+    const int abs_k = s + k;
+    if (abs_k >= 3) continue;   // only cp[0..2] depend on p0/v0 at all
+    dp_dp0 += (b[k] * hs.Minv(abs_k, 0)) * M3D::Identity();
+    dp_dv0 += (b[k] * hs.Minv(abs_k, 1)) * M3D::Identity();
+    dv_dp0 += (db[k] * inv_delta * hs.Minv(abs_k, 0)) * M3D::Identity();
+    dv_dv0 += (db[k] * inv_delta * hs.Minv(abs_k, 1)) * M3D::Identity();
+  }
+}
+
+M3D poseControlHeadRotJacobian(const PoseControlSpline& spline, double t)
+{
+  // Exact (not leading-order): R(t)^T * R_anchor -- see header comment.
+  return spline.rotAt(t).transpose() * spline.R_anchor;
+}
+
 bool solvePoseControlKkt(const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
                           const Eigen::MatrixXd& C, const Eigen::VectorXd& d,
                           Eigen::VectorXd& delta_c)
@@ -187,14 +231,7 @@ void solveHeadControlPoints(const PoseControlSpline& spline,
                              const V3D& omega0, const V3D& alpha0,
                              V3D cp_p_head[3], V3D cp_phi_head[3])
 {
-  // Basis (b,db,ddb) at u=0, du/dt->inv_delta scaling already applied.
-  const double invd = 1.0 / spline.delta();
-  const double invd2 = invd * invd;
-  Eigen::Matrix3d M;
-  M << 1.0 / 6.0, 4.0 / 6.0, 1.0 / 6.0,      // value row
-      -0.5 * invd, 0.0, 0.5 * invd,          // rate row
-      invd2, -2.0 * invd2, invd2;            // 2nd-derivative row
-  const Eigen::Matrix3d Minv = M.inverse();
+  const Eigen::Matrix3d Minv = headBoundaryM(spline).inverse();
 
   for (int a = 0; a < 3; ++a)
   {
