@@ -266,7 +266,10 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/curvature_weight_pos", copts_.pose_control_curvature_weight_pos, 0.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/curvature_weight_rot", copts_.pose_control_curvature_weight_rot, 0.0);
   cfg.nested<std::string>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/test_id", copts_.pose_control_test_id, std::string("unlabeled"));
-  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/explicit_imu_prior", copts_.pose_control_explicit_imu_prior, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/frozen_process_hessian_prior", copts_.pose_control_frozen_process_hessian_prior, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/true_imu_prior", copts_.pose_control_true_imu_prior, false);
+  if (copts_.pose_control_frozen_process_hessian_prior && copts_.pose_control_true_imu_prior)
+    throw std::runtime_error("pose_control/frozen_process_hessian_prior and pose_control/true_imu_prior are mutually exclusive diagnostic modes -- enable only one at a time.");
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_acc", copts_.pose_imu_weight_acc, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_gyr", copts_.pose_imu_weight_gyr, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_curvature_weight_pos", copts_.pose_curvature_weight_pos, 0.0);
@@ -888,26 +891,112 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       coupled_pose_control_P_z_post_.resize(0, 0);
       coupled_pose_control_prev_iter_cp_p_.clear();
       coupled_pose_control_prev_iter_cp_phi_.clear();
-      // item 16: explicit-IMU-prior diagnostic mode -- Lambda_prior_eta is
+      // item 16 (RENAMED, process-prior-equivalence phase item 2):
+      // frozen_process_hessian_prior mode -- Lambda_frozen_hessian_eta is
       // computed ONCE here, at the initial (projected) trial, from the SAME
       // process-factor machinery the default per-iteration path uses (never
       // an arbitrary diagonal). A Gaussian factor's own GN Hessian IS its
       // information contribution, so no extra inversion is needed here --
-      // A_ff_eta_scanstart directly IS Lambda_prior_eta.
-      coupled_pose_control_lambda_prior_eta_.resize(0, 0);
-      if (copts_.pose_control_explicit_imu_prior) {
+      // A_ff_eta_scanstart directly IS Lambda_frozen_hessian_eta. NOTE (see
+      // the option's header comment): this is eta-space only, CONDITIONAL on
+      // x0 exactly known -- deliberately NOT claimed to be the true
+      // marginalized prior (pose_control_true_imu_prior, below, is).
+      coupled_pose_control_lambda_frozen_hessian_eta_.resize(0, 0);
+      Eigen::MatrixXd A_process_scanstart_shared;  // reused below by true_imu_prior if both need it
+      // process-prior-equivalence phase item 5/6: BOTH Lambda_frozen_hessian_eta
+      // and Lambda_true_prior_z are now computed and LOGGED whenever
+      // psd_audit_en is on, regardless of which mode (if any) is actually
+      // active this scan -- since this is evaluated BEFORE any GN step, the
+      // linearization point is IDENTICAL across every mode for the same
+      // scan/config, so any OTHER job's own A_process_red (from its own
+      // weak-mode export at iter=0) can be validly compared against these
+      // matrices from a frozen/true-prior job at the SAME scan index. Actual
+      // USE of either quantity in the mean solve remains separately gated on
+      // its own mode flag (below, in estimateCoupledPoseControlSpline) --
+      // logging them here never changes estimator behavior.
+      if (copts_.psd_audit_en || copts_.pose_control_frozen_process_hessian_prior || copts_.pose_control_true_imu_prior) {
         const int dimRawScanstart = coupled_pose_control_layout_.dim();
-        Eigen::MatrixXd A_process_scanstart = Eigen::MatrixXd::Zero(dimRawScanstart, dimRawScanstart);
+        A_process_scanstart_shared = Eigen::MatrixXd::Zero(dimRawScanstart, dimRawScanstart);
         Eigen::VectorXd b_unused_scanstart = Eigen::VectorXd::Zero(dimRawScanstart);
+        PoseControlProcessFactorHeadBlock head_block_scanstart;
         for (int j = 0; j < spline.nSeg(); ++j)
           addPoseControlProcessFactorReduced(spline, coupled_pose_control_layout_, j, coupled_pose_control_seg_samples_[j],
               coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
               copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, state_->varAcc(), state_->varGyr(),
               copts_.repro_second_order, copts_.pose_control_q_pinv_rel_thresh,
-              A_process_scanstart, b_unused_scanstart, nullptr, nullptr);
+              A_process_scanstart_shared, b_unused_scanstart, &head_block_scanstart, nullptr);
         const auto& hns2 = coupled_pose_control_hns_;
-        coupled_pose_control_lambda_prior_eta_ =
-            hns2.Z.transpose() * A_process_scanstart.topLeftCorner(hns2.rawDim(), hns2.rawDim()) * hns2.Z;
+        {
+          coupled_pose_control_lambda_frozen_hessian_eta_ =
+              hns2.Z.transpose() * A_process_scanstart_shared.topLeftCorner(hns2.rawDim(), hns2.rawDim()) * hns2.Z;
+        }
+        // process-prior-equivalence phase, items 3/4/7: the TRUE marginalized
+        // prior over z=[eta;sT] at scan start. Mirrors EXACTLY the post-loop
+        // covariance block's Lambda_full_prior/Sigma_full_prior construction
+        // (joint [x0;z], head_block_process cross-coupling, P0's own
+        // information via generalPseudoInverse) -- just evaluated at the
+        // INITIAL trial instead of the converged one, and frozen from here on.
+        {
+          const auto& layoutS = coupled_pose_control_layout_;
+          const int dEtaS = hns2.freeDim(), dSTS = layoutS.dimST(), dimZS = dEtaS + dSTS;
+          Eigen::MatrixXd P0s = state_->cov();
+          if (copts_.prior_at_scan_start) {
+            Eigen::MatrixXd p_before_peek;
+            if (imuProcQhatPeekPBefore(p_before_peek) &&
+                p_before_peek.rows() == P0s.rows() && p_before_peek.cols() == P0s.cols())
+              P0s = p_before_peek;
+          }
+          P0s *= copts_.pose_control_p0_scale;
+          const Eigen::MatrixXd Omega0s = generalPseudoInverse(P0s, copts_.pose_control_q_pinv_rel_thresh);
+          Eigen::MatrixXd A_hh_priorS = head_block_scanstart.A_hh;
+          Eigen::MatrixXd A_hf_priorS = (head_block_scanstart.A_hf.size() > 0)
+              ? head_block_scanstart.A_hf : Eigen::MatrixXd::Zero(9, dimRawScanstart);
+          if (Omega0s.rows() >= 9) A_hh_priorS += Omega0s.block(0, 0, 9, 9);
+          if (dSTS > 0 && Omega0s.rows() >= 9 + dSTS) {
+            A_process_scanstart_shared.block(layoutS.dimCFree(), layoutS.dimCFree(), dSTS, dSTS) += Omega0s.block(9, 9, dSTS, dSTS);
+            A_hf_priorS.block(0, layoutS.dimCFree(), 9, dSTS) += Omega0s.block(0, 9, 9, dSTS);
+          }
+          Eigen::MatrixXd Ps = Eigen::MatrixXd::Zero(dimRawScanstart, dimZS);
+          Ps.block(0, 0, hns2.rawDim(), dEtaS) = hns2.Z;
+          if (dSTS > 0) Ps.block(hns2.rawDim(), dEtaS, dSTS, dSTS) = Eigen::MatrixXd::Identity(dSTS, dSTS);
+          const Eigen::MatrixXd A_ff_priorS = Ps.transpose() * A_process_scanstart_shared * Ps;
+          const Eigen::MatrixXd A_hf_prior_zS = A_hf_priorS * Ps;
+          const int dimFullS = 9 + dimZS;
+          Eigen::MatrixXd Lambda_full_priorS = Eigen::MatrixXd::Zero(dimFullS, dimFullS);
+          Lambda_full_priorS.block(0, 0, 9, 9) = A_hh_priorS;
+          Lambda_full_priorS.block(0, 9, 9, dimZS) = A_hf_prior_zS;
+          Lambda_full_priorS.block(9, 0, dimZS, 9) = A_hf_prior_zS.transpose();
+          Lambda_full_priorS.block(9, 9, dimZS, dimZS) = A_ff_priorS;
+          const Eigen::MatrixXd Sigma_full_priorS = generalPseudoInverse(Lambda_full_priorS, 1e-9);
+          const Eigen::MatrixXd P_z_priorS = Sigma_full_priorS.bottomRightCorner(dimZS, dimZS);
+          coupled_pose_control_lambda_true_prior_z_ =
+              generalPseudoInverse(P_z_priorS, copts_.pose_control_q_pinv_rel_thresh);
+          coupled_pose_control_z_imu_ = Eigen::VectorXd::Zero(dimZS);
+          coupled_pose_control_z_imu_.head(dEtaS) = coupled_pose_control_eta_;  // == eta_imu at this point (pre-GN)
+
+          // item 5/6: export BOTH matrices at scan-start (iter=0's own
+          // linearization point) so a Python post-process can directly
+          // compare against ANY job's A_process_red (from
+          // pose_control_weak_mode_matrices.txt, also dumped at iter=0) for
+          // the SAME scan index -- see the comment above this whole block
+          // for why that cross-job comparison is valid.
+          if (copts_.psd_audit_en) {
+            static PersistentLogStream ppm_log("pose_control_process_prior_matrices.txt");
+            bool ppm_first;
+            std::ofstream& ppmofs = ppm_log.stream(&ppm_first);
+            if (ppm_first) ppmofs << "scan_id,dim,which,matrix_row_major_csv\n";
+            auto dumpPPM = [&](const char* which, const Eigen::MatrixXd& M) {
+              ppmofs << voxel_map_->frame_idx_ << "," << M.rows() << "," << which << ",";
+              for (int i = 0; i < M.rows(); ++i)
+                for (int j = 0; j < M.cols(); ++j)
+                  ppmofs << std::setprecision(9) << M(i, j) << (i == M.rows()-1 && j == M.cols()-1 ? "" : ";");
+              ppmofs << "\n";
+            };
+            dumpPPM("Lambda_frozen_hessian_eta", coupled_pose_control_lambda_frozen_hessian_eta_);
+            dumpPPM("Lambda_true_prior_z", coupled_pose_control_lambda_true_prior_z_);
+            ppmofs.flush();
+          }
+        }
       }
       coupled_pose_control_valid_ = true;
       // 2026-09-23 stationary-campaign item 10: knot state IMMEDIATELY
@@ -6986,12 +7075,12 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   // determine the tail, for comparison against the propagated prior.
   if (copts_.pose_control_lidar_enable)
     addPoseControlLidarFactor(spline, layout, lidar_obs, A_lidar_raw_mean, b_lidar_raw_mean, nullptr, &E_lidar);
-  // item 16: the explicit-IMU-prior diagnostic mode REPLACES this
-  // per-iteration relinearizing process factor with a single frozen prior
-  // (added post-projection, in eta-space, below) -- skip it here so the two
-  // information sources are never both active at once (item 17's
+  // item 16: BOTH frozen-prior diagnostic modes (frozen_process_hessian_prior,
+  // true_imu_prior) REPLACE this per-iteration relinearizing process factor
+  // with a single frozen prior (added post-projection below) -- skip it here
+  // so the two information sources are never both active at once (item 17/19's
   // double-counting concern).
-  if (!copts_.pose_control_explicit_imu_prior)
+  if (!copts_.pose_control_frozen_process_hessian_prior && !copts_.pose_control_true_imu_prior)
     for (int j = 0; j < spline.nSeg(); ++j)
       addPoseControlProcessFactorReduced(spline, layout, j, coupled_pose_control_seg_samples_[j],
           coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
@@ -7044,7 +7133,11 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   // 6's own correction: "if the current tail bias has moved away from its
   // scan-entry value, the next GN iteration must contain the corresponding
   // prior residual", not an assumed-zero b contribution.
-  {
+  // SKIPPED under true_imu_prior (item 19 double-counting audit): that
+  // mode's Lambda_true_prior_z already carries a jointly-derived sT block
+  // (from the SAME P0/Omega0 this block would otherwise use) -- adding this
+  // separate Omega_ss term on top would double-count P0's sT information.
+  if (!copts_.pose_control_true_imu_prior) {
     Eigen::MatrixXd P0 = state_->cov();
     if (copts_.prior_at_scan_start) {
       Eigen::MatrixXd p_before_peek;
@@ -7083,17 +7176,36 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
 
   // item 16: add the frozen scan-start prior (see the comment above the
   // skipped per-iteration process-factor call) directly in eta-space --
-  // r_prior = eta_current - eta_imu, Lambda_prior = coupled_pose_control_
-  // lambda_prior_eta_ (the process factor's own GN Hessian, computed once,
-  // NOT re-linearized as eta moves across iterations, unlike the default
-  // mode). sT is untouched here -- it already gets its own prior via the
-  // Omega_ss block above, applies identically in both modes.
-  if (copts_.pose_control_explicit_imu_prior &&
-      coupled_pose_control_lambda_prior_eta_.rows() == dEta &&
+  // r_prior = eta_current - eta_imu, Lambda = coupled_pose_control_
+  // lambda_frozen_hessian_eta_ (the process factor's own GN Hessian,
+  // computed once, NOT re-linearized as eta moves across iterations,
+  // unlike the default mode). sT is untouched here -- it gets its own
+  // prior via the Omega_ss block above (same as the default mode).
+  if (copts_.pose_control_frozen_process_hessian_prior &&
+      coupled_pose_control_lambda_frozen_hessian_eta_.rows() == dEta &&
       coupled_pose_control_eta_imu_.size() == dEta) {
     const Eigen::VectorXd r_prior_eta = coupled_pose_control_eta_ - coupled_pose_control_eta_imu_;
-    A.topLeftCorner(dEta, dEta) += coupled_pose_control_lambda_prior_eta_;
-    b.head(dEta) += -coupled_pose_control_lambda_prior_eta_ * r_prior_eta;
+    A.topLeftCorner(dEta, dEta) += coupled_pose_control_lambda_frozen_hessian_eta_;
+    b.head(dEta) += -coupled_pose_control_lambda_frozen_hessian_eta_ * r_prior_eta;
+  }
+
+  // process-prior-equivalence phase item 7: the TRUE marginalized prior,
+  // over the FULL z=[eta;sT] jointly (Lambda_true_prior_z was derived at
+  // scan-start covering both blocks -- see the init-block comment) --
+  // r_prior_z = z_current - z_imu, where z_current's sT part is read
+  // directly off the trial (bg_trial_-bg_prior_ etc, mirroring the Omega_ss
+  // block's own residual convention) since sT is not part of the eta vector.
+  if (copts_.pose_control_true_imu_prior &&
+      coupled_pose_control_lambda_true_prior_z_.rows() == dimZ &&
+      coupled_pose_control_z_imu_.size() == dimZ) {
+    Eigen::VectorXd z_current = Eigen::VectorXd::Zero(dimZ);
+    z_current.head(dEta) = coupled_pose_control_eta_;
+    if (layout.colBG() >= 0) z_current.segment<3>(dEta + layout.colBG() - layout.dimCFree()) = coupled_pose_control_bg_trial_ - coupled_pose_control_bg_prior_;
+    if (layout.colBA() >= 0) z_current.segment<3>(dEta + layout.colBA() - layout.dimCFree()) = coupled_pose_control_ba_trial_ - coupled_pose_control_ba_prior_;
+    if (layout.colG()  >= 0) z_current.segment<3>(dEta + layout.colG()  - layout.dimCFree()) = coupled_pose_control_g_trial_  - coupled_pose_control_g_prior_;
+    const Eigen::VectorXd r_prior_z = z_current - coupled_pose_control_z_imu_;
+    A += coupled_pose_control_lambda_true_prior_z_;
+    b += -coupled_pose_control_lambda_true_prior_z_ * r_prior_z;
   }
 
   // 2026-09-23 items 1/2/3/4/10/13/14: iter-0-only information-scale/

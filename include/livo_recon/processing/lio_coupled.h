@@ -95,19 +95,32 @@ struct LioProcCoupledOptions
   // A/B/C, weight sweep, P0-scale sweep) can be told apart in the one
   // shared CSV. Purely a label, no effect on estimator behavior.
   std::string pose_control_test_id = "unlabeled";
-  // 2026-09-23 x1/head-propagation campaign, item 16: OFF-by-default
-  // diagnostic mode. When true, the per-iteration relinearizing process
-  // factor (addPoseControlProcessFactorReduced, called fresh every GN
-  // iteration in estimateCoupledPoseControlSpline) is REPLACED by a single
-  // FROZEN Gaussian prior on eta, r_prior = eta - eta_imu, Lambda_prior =
-  // pinv(A_ff_prior_scanstart) -- both computed ONCE at scan-start from the
-  // real process/head-coupling machinery (never an arbitrary diagonal) --
-  // added into every GN iteration's A_raw/b_raw instead of the per-iteration
-  // process factor. Comparing this mode's mean update against the default
-  // answers item 16/17's question: is the per-iteration relinearizing
-  // process factor mathematically equivalent to a static uncertainty-
-  // weighted trajectory prior, or does relinearization matter?
-  bool pose_control_explicit_imu_prior = false;
+  // 2026-09-23 x1/head-propagation campaign, item 16 (RENAMED 2026-09-23
+  // process-prior-equivalence phase, item 2 -- was pose_control_
+  // explicit_imu_prior). OFF-by-default diagnostic mode. When true, the
+  // per-iteration relinearizing process factor (addPoseControlProcessFactorReduced,
+  // called fresh every GN iteration in estimateCoupledPoseControlSpline) is
+  // REPLACED by a single FROZEN quadratic penalty on eta, r = eta - eta_imu,
+  // Lambda = Z^T A_process_at_scanstart Z -- both computed ONCE at scan-start.
+  // NAMING NOTE (why this is "frozen_process_hessian_prior", not "true_imu_
+  // prior"): Lambda here is the process factor's own conditional GN Hessian
+  // at scan-start (eta-space only, ignoring x0's uncertainty and the sT
+  // block entirely) -- it is NOT proven equivalent to the correctly
+  // marginalized Gaussian prior a full IMU/process propagation would give
+  // (that requires accounting for P0's propagated uncertainty and the joint
+  // eta/sT structure -- see pose_control_true_imu_prior below, which does
+  // that derivation). This mode stays useful as a "does relinearization
+  // matter" ablation independent of that question.
+  bool pose_control_frozen_process_hessian_prior = false;
+  // 2026-09-23 process-prior-equivalence phase, item 7: the TRUE marginalized
+  // Gaussian IMU/process prior over z=[eta;sT], properly accounting for the
+  // incoming StateGroup's uncertainty (P0) via the SAME joint [x0;z]
+  // marginalize-then-invert construction the covariance block already uses
+  // for P_z_prior -- just evaluated ONCE at scan-start (frozen for the GN
+  // loop) instead of post-convergence. Mutually exclusive with
+  // pose_control_frozen_process_hessian_prior -- refuses both at once (see
+  // config-registration site).
+  bool pose_control_true_imu_prior = false;
 
   // CQ-82 Phase 2: pose-basis-only weights. Meaningless under raw_imu (the
   // refusal wiring never checks these -- they simply aren't read unless
@@ -923,12 +936,21 @@ private:
   // it against an independently-constructed information-form reference
   // update AT THE SAME (converged) linearization point.
   Eigen::VectorXd coupled_pose_control_last_delta_z_;
-  // Item 16's explicit-IMU-prior diagnostic mode: eta_imu/Lambda_prior_eta
-  // are computed ONCE at scan-start (frozen for the whole GN loop, unlike
-  // the default per-iteration relinearizing process factor) when
-  // pose_control_explicit_imu_prior is true. Unused/empty otherwise.
+  // eta_imu: the scan-start (post-head-projection, pre-GN) eta value --
+  // shared by both frozen_process_hessian_prior and true_imu_prior modes
+  // (and by the always-on x1/knot init-state diagnostics).
   Eigen::VectorXd coupled_pose_control_eta_imu_;
-  Eigen::MatrixXd coupled_pose_control_lambda_prior_eta_;
+  // frozen_process_hessian_prior mode's own frozen information (eta-space
+  // only, conditional on x0 exactly known -- see the option's header
+  // comment for why this is NOT claimed equivalent to the true prior).
+  Eigen::MatrixXd coupled_pose_control_lambda_frozen_hessian_eta_;
+  // true_imu_prior mode's own frozen information: the FULL z=[eta;sT]
+  // marginal (P_z_prior^-1, properly accounting for P0/x0 uncertainty via
+  // the joint [x0;z] marginalize-then-invert construction), and the
+  // z-space value ([eta_imu;0,0,0] -- sT's prior deviation is zero at scan
+  // start by construction) the GN loop's residual is measured against.
+  Eigen::MatrixXd coupled_pose_control_lambda_true_prior_z_;
+  Eigen::VectorXd coupled_pose_control_z_imu_;
   // CQ-79: this scan's PREVIOUS iteration's own set of matched-plane
   // hashes, for carry_frac -- reset to empty at scan start (alongside
   // coupled_iters_'s own reset), updated after every iteration's own
