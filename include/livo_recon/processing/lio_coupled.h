@@ -80,6 +80,16 @@ struct LioProcCoupledOptions
   // mg.imu_samples_raw was fixed to be non-empty is an information-SCALE
   // mismatch between the process factor and LiDAR.
   double pose_control_process_weight = 1.0;
+  // 2026-09-23 stationary-campaign item 22: curvature regularization FOR
+  // pose_control specifically -- pose_curvature_weight_pos/rot (above) is
+  // confirmed NOT wired into pose_control at all (only the old "pose"
+  // basis arm reads it). These are new, pose_control-specific knobs rather
+  // than misusing the unwired ones. Penalizes the second difference
+  // cp[k+1]-2*cp[k]+cp[k-1] (position) / cp_phi likewise (rotation) for
+  // every interior free control point, added directly into the raw normal
+  // equations alongside the process factor.
+  double pose_control_curvature_weight_pos = 0.0;
+  double pose_control_curvature_weight_rot = 0.0;
   // 2026-09-23: free-text test label, written into pose_control_full_
   // diagnostics.csv's test_id column so multiple diagnostic runs (ablation
   // A/B/C, weight sweep, P0-scale sweep) can be told apart in the one
@@ -881,6 +891,13 @@ private:
   // the moving trial trajectory) -- reused every GN iteration, mirroring
   // coupled_pose_knots_'s own seg_samples_ caching.
   std::vector<std::vector<ImuSample>> coupled_pose_control_seg_samples_;
+  // 2026-09-23 stationary-campaign instrumentation: previous GN iteration's
+  // control points, for the per-iteration delta_pos_norm/delta_rot_norm
+  // columns in pose_control_knot_state_per_iter.txt. Cleared at scan-start
+  // init (coupled_iters_==0 there) so scan boundaries never leak into an
+  // iter-0 delta.
+  std::vector<V3D> coupled_pose_control_prev_iter_cp_p_;
+  std::vector<V3D> coupled_pose_control_prev_iter_cp_phi_;
   // The reduced posterior z=[eta;delta_sT] covariance from the LAST
   // (converged) GN iteration's own information matrix -- written once,
   // post-loop, in processLIO()'s own poseControlSplineBasis() block (never

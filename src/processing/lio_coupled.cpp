@@ -236,6 +236,8 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/lidar_enable", copts_.pose_control_lidar_enable, true);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/p0_scale", copts_.pose_control_p0_scale, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/process_weight", copts_.pose_control_process_weight, 1.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/curvature_weight_pos", copts_.pose_control_curvature_weight_pos, 0.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/curvature_weight_rot", copts_.pose_control_curvature_weight_rot, 0.0);
   cfg.nested<std::string>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/test_id", copts_.pose_control_test_id, std::string("unlabeled"));
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_acc", copts_.pose_imu_weight_acc, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_gyr", copts_.pose_imu_weight_gyr, 1.0);
@@ -815,6 +817,8 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         ofs.flush();
       }
       coupled_pose_control_P_z_post_.resize(0, 0);
+      coupled_pose_control_prev_iter_cp_p_.clear();
+      coupled_pose_control_prev_iter_cp_phi_.clear();
       coupled_pose_control_valid_ = true;
       if (copts_.psd_audit_en) {
         const auto& hns = coupled_pose_control_hns_;
@@ -1188,6 +1192,22 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         logCovTraceStage(voxel_map_->frame_idx_, "J_h_tail", J_h_tail);
         logCovTraceStage(voxel_map_->frame_idx_, "M_full", M_full);
         logCovTraceStage(voxel_map_->frame_idx_, "M_T", M_T);
+        // 2026-09-23 item 18: full M_T export (dimSt x dimZ) -- lets
+        // post-processing map A_lidar_red/A_process_red's own eigenvectors
+        // (logged above, in z-space) into physical tail R/p/v/bg/ba/g
+        // effect via ||J_tail * eigenvector||, split by state block.
+        {
+          static PersistentLogStream mt_log("pose_control_M_T_matrices.txt");
+          bool mt_first;
+          std::ofstream& mtofs = mt_log.stream(&mt_first);
+          if (mt_first) mtofs << "scan_id,rows,cols,matrix_row_major_csv\n";
+          mtofs << voxel_map_->frame_idx_ << "," << M_T.rows() << "," << M_T.cols() << ",";
+          for (int i = 0; i < M_T.rows(); ++i)
+            for (int j = 0; j < M_T.cols(); ++j)
+              mtofs << std::setprecision(9) << M_T(i, j) << (i == M_T.rows()-1 && j == M_T.cols()-1 ? "" : ";");
+          mtofs << "\n";
+          mtofs.flush();
+        }
         logCovTraceStage(voxel_map_->frame_idx_, "P_R_pred", P_tail_pred.block<3, 3>(StateGroup::idxR(), StateGroup::idxR()));
         logCovTraceStage(voxel_map_->frame_idx_, "P_p_pred", P_tail_pred.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()));
         logCovTraceStage(voxel_map_->frame_idx_, "P_v_pred", P_tail_pred.block<3, 3>(StateGroup::idxV(), StateGroup::idxV()));
@@ -1261,6 +1281,63 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           };
           emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "covariance_block", voxel_map_->frame_idx_, -1, bkv);
         }
+      }
+
+      // 2026-09-23 stationary-campaign instrumentation: full P_tail_pred/
+      // P_tail_post matrices (not just scalar traces) -- needed for real
+      // NEES computation in post-processing (e^T P^-1 e), which cannot be
+      // recovered from trace/min-eig/max-eig alone. One row per scan,
+      // flattened row-major, gated behind psd_audit_en like everything else
+      // in this block.
+      if (copts_.psd_audit_en) {
+        static PersistentLogStream fullcov_log("pose_control_full_cov_matrices.txt");
+        bool fc_first;
+        std::ofstream& fofs = fullcov_log.stream(&fc_first);
+        if (fc_first) fofs << "scan_id,dim,which,matrix_row_major_csv\n";
+        auto dumpMat = [&](const char* which, const Eigen::MatrixXd& M) {
+          fofs << voxel_map_->frame_idx_ << "," << M.rows() << "," << which << ",";
+          for (int i = 0; i < M.rows(); ++i)
+            for (int j = 0; j < M.cols(); ++j)
+              fofs << std::setprecision(9) << M(i, j) << (i == M.rows()-1 && j == M.cols()-1 ? "" : ";");
+          fofs << "\n";
+        };
+        dumpMat("P_tail_pred", P_tail_pred);
+        dumpMat("P_tail_post", P_T);
+        fofs.flush();
+      }
+
+      // 2026-09-23 stationary-campaign instrumentation: per-knot state
+      // (position/rotation-log/derived velocity/acceleration/angular
+      // velocity) and control-point second-difference (oscillation) at the
+      // CONVERGED spline, once per scan. Cheap -- pure spline evaluation,
+      // no new solves.
+      if (copts_.psd_audit_en) {
+        static PersistentLogStream knot_log("pose_control_knot_state.txt");
+        bool kn_first;
+        std::ofstream& kofs = knot_log.stream(&kn_first);
+        if (kn_first)
+          kofs << "scan_id,knot_index,knot_time,p_x,p_y,p_z,rlog_x,rlog_y,rlog_z,"
+                  "v_x,v_y,v_z,a_x,a_y,a_z,omega_x,omega_y,omega_z,"
+                  "d1_pos_norm,d2_pos_norm,d1_rot_norm,d2_rot_norm\n";
+        const int N = layout.N;
+        for (int k = 0; k < N; ++k) {
+          const double tk = spline.t0() + std::min<double>(k, spline.nSeg()) * spline.delta();
+          const V3D p = spline.cp_p.col(k), r = spline.cp_phi.col(k);
+          const V3D vel = spline.velAt(tk), acc = spline.accAt(tk), om = spline.omegaBodyAt(tk);
+          double d1p = 0, d2p = 0, d1r = 0, d2r = 0;
+          if (k >= 1) d1p = (spline.cp_p.col(k) - spline.cp_p.col(k-1)).norm();
+          if (k >= 1) d1r = (spline.cp_phi.col(k) - spline.cp_phi.col(k-1)).norm();
+          if (k >= 2) d2p = (spline.cp_p.col(k) - 2*spline.cp_p.col(k-1) + spline.cp_p.col(k-2)).norm();
+          if (k >= 2) d2r = (spline.cp_phi.col(k) - 2*spline.cp_phi.col(k-1) + spline.cp_phi.col(k-2)).norm();
+          kofs << voxel_map_->frame_idx_ << "," << k << "," << tk << ","
+               << p.x() << "," << p.y() << "," << p.z() << ","
+               << r.x() << "," << r.y() << "," << r.z() << ","
+               << vel.x() << "," << vel.y() << "," << vel.z() << ","
+               << acc.x() << "," << acc.y() << "," << acc.z() << ","
+               << om.x() << "," << om.y() << "," << om.z() << ","
+               << d1p << "," << d2p << "," << d1r << "," << d2r << "\n";
+        }
+        kofs.flush();
       }
 
       // ---- full tail writeback (item 12): ONE complete posterior tail
@@ -6513,6 +6590,40 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   A_raw = A_lidar_raw_mean + copts_.pose_control_process_weight * A_process_raw_mean;
   b_raw = b_lidar_raw_mean + copts_.pose_control_process_weight * b_process_raw_mean;
 
+  // 2026-09-23 stationary-campaign item 22: curvature (Tikhonov, second-
+  // difference) regularization for pose_control specifically -- default
+  // 0.0 (no-op). Penalizes cp[k+1]-2*cp[k]+cp[k-1] for position/rotation
+  // control points, over EVERY interior control point (k=1..N-2) including
+  // the head ones (their contribution to eta is via the SAME Z-projection
+  // as any other factor -- no special-casing needed, matching how LiDAR/
+  // process factors already touch cp[0..2] uniformly under fix_head=false).
+  if (copts_.pose_control_curvature_weight_pos > 0.0 || copts_.pose_control_curvature_weight_rot > 0.0) {
+    const int N = layout.N;
+    for (int k = 1; k < N - 1; ++k) {
+      const int cm1p = layout.colPos(k - 1), c0p = layout.colPos(k), cp1p = layout.colPos(k + 1);
+      const int cm1r = layout.colPhi(k - 1), c0r = layout.colPhi(k), cp1r = layout.colPhi(k + 1);
+      if (copts_.pose_control_curvature_weight_pos > 0.0 && cm1p >= 0 && c0p >= 0 && cp1p >= 0) {
+        const double w = copts_.pose_control_curvature_weight_pos;
+        const V3D r = spline.cp_p.col(k + 1) - 2.0 * spline.cp_p.col(k) + spline.cp_p.col(k - 1);
+        // J = [I, -2I, I] at columns [cp1p, c0p, cm1p]; A += w*J^T J, b += -w*J^T r
+        A_raw.block<3,3>(cp1p,cp1p) += w*M3D::Identity(); A_raw.block<3,3>(c0p,c0p) += 4*w*M3D::Identity(); A_raw.block<3,3>(cm1p,cm1p) += w*M3D::Identity();
+        A_raw.block<3,3>(cp1p,c0p) += -2*w*M3D::Identity(); A_raw.block<3,3>(c0p,cp1p) += -2*w*M3D::Identity();
+        A_raw.block<3,3>(cp1p,cm1p) += w*M3D::Identity(); A_raw.block<3,3>(cm1p,cp1p) += w*M3D::Identity();
+        A_raw.block<3,3>(c0p,cm1p) += -2*w*M3D::Identity(); A_raw.block<3,3>(cm1p,c0p) += -2*w*M3D::Identity();
+        b_raw.segment<3>(cp1p) += -w*r; b_raw.segment<3>(c0p) += 2*w*r; b_raw.segment<3>(cm1p) += -w*r;
+      }
+      if (copts_.pose_control_curvature_weight_rot > 0.0 && cm1r >= 0 && c0r >= 0 && cp1r >= 0) {
+        const double w = copts_.pose_control_curvature_weight_rot;
+        const V3D r = spline.cp_phi.col(k + 1) - 2.0 * spline.cp_phi.col(k) + spline.cp_phi.col(k - 1);
+        A_raw.block<3,3>(cp1r,cp1r) += w*M3D::Identity(); A_raw.block<3,3>(c0r,c0r) += 4*w*M3D::Identity(); A_raw.block<3,3>(cm1r,cm1r) += w*M3D::Identity();
+        A_raw.block<3,3>(cp1r,c0r) += -2*w*M3D::Identity(); A_raw.block<3,3>(c0r,cp1r) += -2*w*M3D::Identity();
+        A_raw.block<3,3>(cp1r,cm1r) += w*M3D::Identity(); A_raw.block<3,3>(cm1r,cp1r) += w*M3D::Identity();
+        A_raw.block<3,3>(c0r,cm1r) += -2*w*M3D::Identity(); A_raw.block<3,3>(cm1r,c0r) += -2*w*M3D::Identity();
+        b_raw.segment<3>(cp1r) += -w*r; b_raw.segment<3>(c0r) += 2*w*r; b_raw.segment<3>(cm1r) += -w*r;
+      }
+    }
+  }
+
   // sT prior (item 6/10): Omega_ss = the sT-sT block of pinv(P0),
   // CONDITIONED on the head correction being identically zero (for a
   // jointly Gaussian [head;sT], conditioning on head=0 gives sT's
@@ -6571,6 +6682,28 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
     const Eigen::MatrixXd A_process_red = P.transpose() * A_process_raw_mean * P;
     const Eigen::VectorXd b_lidar_red = P.transpose() * b_lidar_raw_mean;
     const Eigen::VectorXd b_process_red = P.transpose() * b_process_raw_mean;
+
+    // 2026-09-23 stationary-campaign item 18: full A_lidar_red/A_process_red
+    // export (dimZ x dimZ, flattened) so weak-mode eigendecomposition
+    // (eigenvalue + J_tail-mapped tail effect) can be computed in
+    // post-processing -- these are already fully formed in memory here,
+    // only trace/eigenvalue-RANGE scalars were exported before.
+    {
+      static PersistentLogStream weak_mode_log("pose_control_weak_mode_matrices.txt");
+      bool wm_first;
+      std::ofstream& wmofs = weak_mode_log.stream(&wm_first);
+      if (wm_first) wmofs << "scan_id,dim,which,matrix_row_major_csv\n";
+      auto dumpZ = [&](const char* which, const Eigen::MatrixXd& M) {
+        wmofs << voxel_map_->frame_idx_ << "," << M.rows() << "," << which << ",";
+        for (int i = 0; i < M.rows(); ++i)
+          for (int j = 0; j < M.cols(); ++j)
+            wmofs << std::setprecision(9) << M(i, j) << (i == M.rows()-1 && j == M.cols()-1 ? "" : ";");
+        wmofs << "\n";
+      };
+      dumpZ("A_lidar_red", A_lidar_red);
+      dumpZ("A_process_red", A_process_red);
+      wmofs.flush();
+    }
     // eta layout: [posHead(3), posFree(3*(N-3)), rotHead(6), rotFree(3*(N-3))]
     const int N = layout.N;
     const int posDim = 3 * (N - 2), rotDim = 3 * N - 3;
@@ -6744,6 +6877,38 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   if (layout.colG()  >= 0) coupled_pose_control_g_trial_  += delta_z.segment<3>(dEta + layout.colG()  - layout.dimCFree());
 
   poseControlUnflatten(hns.c_particular + hns.Z * coupled_pose_control_eta_, spline);
+
+  // 2026-09-23 stationary-campaign instrumentation (items 11/17): per-knot
+  // position/rotation-log at EVERY GN iteration (not just once per scan,
+  // unlike pose_control_knot_state.txt above) -- tells us whether the
+  // optimizer converges the whole trajectory toward a target or moves
+  // control points in compensating ways iteration-to-iteration.
+  if (copts_.psd_audit_en) {
+    static PersistentLogStream iterknot_log("pose_control_knot_state_per_iter.txt");
+    bool ik_first;
+    std::ofstream& ikofs = iterknot_log.stream(&ik_first);
+    if (ik_first) ikofs << "scan_id,iteration,knot_index,p_x,p_y,p_z,rlog_x,rlog_y,rlog_z,delta_pos_norm,delta_rot_norm\n";
+    const int N = layout.N;
+    for (int k = 0; k < N; ++k) {
+      const V3D p = spline.cp_p.col(k), r = spline.cp_phi.col(k);
+      double dpos = 0, drot = 0;
+      if (coupled_iters_ > 0 && k < static_cast<int>(coupled_pose_control_prev_iter_cp_p_.size())) {
+        dpos = (p - coupled_pose_control_prev_iter_cp_p_[k]).norm();
+        drot = (r - coupled_pose_control_prev_iter_cp_phi_[k]).norm();
+      }
+      ikofs << voxel_map_->frame_idx_ << "," << coupled_iters_ << "," << k << ","
+            << p.x() << "," << p.y() << "," << p.z() << ","
+            << r.x() << "," << r.y() << "," << r.z() << ","
+            << dpos << "," << drot << "\n";
+    }
+    ikofs.flush();
+    coupled_pose_control_prev_iter_cp_p_.resize(N);
+    coupled_pose_control_prev_iter_cp_phi_.resize(N);
+    for (int k = 0; k < N; ++k) {
+      coupled_pose_control_prev_iter_cp_p_[k] = spline.cp_p.col(k);
+      coupled_pose_control_prev_iter_cp_phi_[k] = spline.cp_phi.col(k);
+    }
+  }
 
   // ---- reconcile the tail (item 5: R/p/v are NEVER independent -- always
   // read directly off the just-updated spline) -----------------------------
