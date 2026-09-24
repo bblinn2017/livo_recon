@@ -48,6 +48,7 @@ struct PoseControlLidarRecord
 {
   Eigen::VectorXd Jrow_z;
   double w = 0.0;            // 1/sigma2
+  double r = 0.0;            // raw (unweighted) point-to-plane residual
   double sigma2 = 1.0;
   double plane_var_term = 0.0;
   const void* plane_id = nullptr;

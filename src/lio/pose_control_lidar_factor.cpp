@@ -80,6 +80,7 @@ void addPoseControlLidarFactor(
       PoseControlLidarRecord rec;
       rec.Jrow_z = Jrow_z;
       rec.w = w;
+      rec.r = r;
       rec.sigma2 = o.sigma2;
       rec.plane_var_term = o.plane_var_term;
       rec.plane_id = o.plane_id;

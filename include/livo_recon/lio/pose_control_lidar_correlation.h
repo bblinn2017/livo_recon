@@ -27,12 +27,12 @@ namespace livo_recon
 {
 
 // Groups `records` by plane_id; for every group with >= 2 members, computes
-// and SUBTRACTS the Woodbury downdate from A/b (which must already contain
-// the naive per-point sum these records came from -- call this AFTER
-// addPoseControlLidarFactor(..., &records)). Returns the same kind of
-// engagement stats residual_redundancy.h's own function does. mode=="off"
-// computes stats but does not mutate A/b (matches residual_redundancy.h's
-// own "log beside, do not drive" convention).
+// and SUBTRACTS the Woodbury downdate from BOTH A and b consistently (which
+// must already contain the naive per-point sum these records came from --
+// call this AFTER addPoseControlLidarFactor(..., &records)). Returns the
+// same kind of engagement stats residual_redundancy.h's own function does.
+// mode=="off" computes stats but does not mutate A/b (matches
+// residual_redundancy.h's own "log beside, do not drive" convention).
 ResidualRedundancyStats applyPoseControlLidarCorrelationCorrection(
     const std::vector<PoseControlLidarRecord>& records,
     const ResidualRedundancyOptions& opts,

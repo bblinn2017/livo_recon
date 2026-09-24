@@ -74,16 +74,17 @@ struct LioProcCoupledOptions
   // estimator/coupled/pose_control/{lidar_enable,p0_scale}.
   bool pose_control_lidar_enable = true;
   double pose_control_p0_scale = 1.0;
-  // 2026-09-23 DIAGNOSTIC ONLY (item 6 of the process/LiDAR information-scale
-  // investigation) -- scales A_process/b_process (equivalently Lambda_process)
-  // in the MEAN solve by this scalar before combining with A_lidar/b_lidar.
-  // Default 1.0 is a no-op. This does NOT reuse pose_imu_weight_acc/gyr (those
-  // knobs are NOT wired into the pose_control process factor at all -- do not
-  // assume they have any effect here). Not yet a production weighting
-  // mechanism -- purely for isolating whether the divergence seen once
-  // mg.imu_samples_raw was fixed to be non-empty is an information-SCALE
-  // mismatch between the process factor and LiDAR.
-  double pose_control_process_weight = 1.0;
+  // 2026-09-24 pose-control-implementation-cleanup phase, item 9: REMOVED.
+  // pose_control_process_weight was an arbitrary empirical scalar the
+  // pre-reformulation architecture used to weight the process factor
+  // against LiDAR; the production formulation gets its process/prior
+  // influence entirely from Q -> P_prior -> P_prior^-1 (see
+  // coupled_pose_control_lambda_prior_z_), with no scalar multiplier
+  // anywhere in the production path. Removed rather than deprecated-and-
+  // ignored (per this phase's explicit "do not leave obsolete config keys
+  // exposed" instruction) -- an old config.yaml setting this key will now
+  // correctly trip the unclaimed-override abort, surfacing the stale
+  // config rather than silently no-op'ing.
   // 2026-09-23 stationary-campaign item 22: curvature regularization FOR
   // pose_control specifically -- pose_curvature_weight_pos/rot (above) is
   // confirmed NOT wired into pose_control at all (only the old "pose"
@@ -99,42 +100,21 @@ struct LioProcCoupledOptions
   // A/B/C, weight sweep, P0-scale sweep) can be told apart in the one
   // shared CSV. Purely a label, no effect on estimator behavior.
   std::string pose_control_test_id = "unlabeled";
-  // 2026-09-23 x1/head-propagation campaign, item 16 (RENAMED 2026-09-23
-  // process-prior-equivalence phase, item 2 -- was pose_control_
-  // explicit_imu_prior). OFF-by-default diagnostic mode. When true, the
-  // per-iteration relinearizing process factor (addPoseControlProcessFactorReduced,
-  // called fresh every GN iteration in estimateCoupledPoseControlSpline) is
-  // REPLACED by a single FROZEN quadratic penalty on eta, r = eta - eta_imu,
-  // Lambda = Z^T A_process_at_scanstart Z -- both computed ONCE at scan-start.
-  // NAMING NOTE (why this is "frozen_process_hessian_prior", not "true_imu_
-  // prior"): Lambda here is the process factor's own conditional GN Hessian
-  // at scan-start (eta-space only, ignoring x0's uncertainty and the sT
-  // block entirely) -- it is NOT proven equivalent to the correctly
-  // marginalized Gaussian prior a full IMU/process propagation would give
-  // (that requires accounting for P0's propagated uncertainty and the joint
-  // eta/sT structure -- see pose_control_true_imu_prior below, which does
-  // that derivation). This mode stays useful as a "does relinearization
-  // matter" ablation independent of that question.
-  bool pose_control_frozen_process_hessian_prior = false;
-  // 2026-09-23 process-prior-REFORMULATION phase: DEPRECATED, no-op. The
-  // joint IMU/bias Gaussian prior this flag used to opt INTO is now the
-  // unconditional PRODUCTION mechanism (see coupled_pose_control_sigma_
-  // full_prior_ / estimateCoupledPoseControlSpline()) -- there is no longer
-  // a way to turn it off except pose_control_legacy_process_factor (below),
-  // which reverts to the OLD per-iteration relinearizing process factor for
-  // A/B comparison, not to "no joint prior". Kept as a claimed (accepted,
-  // ignored) config key purely so an old config.yaml that still sets it
-  // doesn't trip the unclaimed-override abort.
-  bool pose_control_true_imu_prior = false;
-  // 2026-09-23 process-prior-REFORMULATION phase, item 3/19: the ONLY
-  // opt-out from the production joint IMU/bias prior. When true, restores
-  // the pre-reformulation default: a per-iteration RELINEARIZING process
-  // factor scaled by pose_control_process_weight, with no fixed prior term
-  // at all. Exists solely for the comparison item 59 requires ("current
-  // process formulation" vs "fixed joint IMU Gaussian prior") -- NOT a
-  // production option; pose_control_process_weight has no role whatsoever
-  // when this is false (the default).
-  bool pose_control_legacy_process_factor = false;
+  // 2026-09-24 pose-control-implementation-cleanup phase, items 9/10 and
+  // legacy-removal items 1/3/7: REMOVED from production entirely.
+  // frozen_process_hessian_prior, true_imu_prior (already a deprecated
+  // no-op), and legacy_process_factor were all comparison-only ablations
+  // from the process-prior-equivalence/REFORMULATION phases, superseded
+  // once the joint IMU/bias Gaussian prior became the estimator's ONE
+  // authoritative production mechanism. There is now exactly one
+  // production pose-control prior representation (coupled_pose_control_
+  // sigma_full_prior_/lambda_prior_z_/z_imu_, built once at scan-start,
+  // shared verbatim by the mean solve and the covariance computation) and
+  // no runtime switch back to any of the retired formulations. Their
+  // algebra remains recoverable from git history (see the
+  // process-prior-equivalence/REFORMULATION phase commits) if a future
+  // regression test needs it as an independent reference -- it does not
+  // need to stay compiled into the live estimator to serve that purpose.
   // process-prior-REFORMULATION phase, items 13-19/39-40: pose_control's
   // OWN adaptive process-noise estimator (a SEPARATE AdaptiveQ instance from
   // the decoupled arm's, since pose_control has no ScanSpline and its own
@@ -945,13 +925,6 @@ private:
   // the moving trial trajectory) -- reused every GN iteration, mirroring
   // coupled_pose_knots_'s own seg_samples_ caching.
   std::vector<std::vector<ImuSample>> coupled_pose_control_seg_samples_;
-  // 2026-09-23 stationary-campaign instrumentation: previous GN iteration's
-  // control points, for the per-iteration delta_pos_norm/delta_rot_norm
-  // columns in pose_control_knot_state_per_iter.txt. Cleared at scan-start
-  // init (coupled_iters_==0 there) so scan boundaries never leak into an
-  // iter-0 delta.
-  std::vector<V3D> coupled_pose_control_prev_iter_cp_p_;
-  std::vector<V3D> coupled_pose_control_prev_iter_cp_phi_;
   // The reduced posterior z=[eta;delta_sT] covariance from the LAST
   // (converged) GN iteration's own information matrix -- written once,
   // post-loop, in processLIO()'s own poseControlSplineBasis() block (never
@@ -963,15 +936,10 @@ private:
   // post-loop covariance block (item 7's EKF-reference check) can compare
   // it against an independently-constructed information-form reference
   // update AT THE SAME (converged) linearization point.
-  Eigen::VectorXd coupled_pose_control_last_delta_z_;
-  // eta_imu: the scan-start (post-head-projection, pre-GN) eta value --
-  // shared by both frozen_process_hessian_prior and true_imu_prior modes
-  // (and by the always-on x1/knot init-state diagnostics).
+  // eta_imu: the scan-start (post-head-projection, pre-GN) eta value the
+  // production prior's residual is measured against, and the always-on
+  // x1/knot init-state diagnostics reference.
   Eigen::VectorXd coupled_pose_control_eta_imu_;
-  // frozen_process_hessian_prior mode's own frozen information (eta-space
-  // only, conditional on x0 exactly known -- see the option's header
-  // comment for why this is NOT claimed equivalent to the true prior).
-  Eigen::MatrixXd coupled_pose_control_lambda_frozen_hessian_eta_;
   // ==========================================================================
   // PRODUCTION joint IMU/bias Gaussian prior (process-prior-REFORMULATION
   // phase). Computed ONCE per scan, at scan-start, from the SAME joint
