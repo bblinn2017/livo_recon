@@ -8,10 +8,12 @@
 #include "livo_recon/lio/pose_control_process_factor.h"
 #include "livo_recon/lio/pose_control_lidar_factor.h"
 #include "livo_recon/lio/pose_control_covariance.h"
+#include "livo_recon/lio/adaptive_q.h"
 #include "livo_recon/utils/eval/nees_logger.h"
 
 #include <limits>
 #include <unordered_set>
+#include <deque>
 
 namespace livo_recon
 {
@@ -131,6 +133,16 @@ struct LioProcCoupledOptions
   // production option; pose_control_process_weight has no role whatsoever
   // when this is false (the default).
   bool pose_control_legacy_process_factor = false;
+  // process-prior-REFORMULATION phase, items 13-19/39-40: pose_control's
+  // OWN adaptive process-noise estimator (a SEPARATE AdaptiveQ instance from
+  // the decoupled arm's, since pose_control has no ScanSpline and its own
+  // residual source is the process-segment residual, not
+  // computeSplineImuResidual()). Off by default -- pose_control's varAcc/
+  // varGyr stay exactly state_->varAcc()/varGyr() (today's behavior)
+  // unless enabled. When enabled, applied CAUSALLY: this scan's prior uses
+  // the value estimated from the PREVIOUS scan's converged residual, never
+  // this scan's own (item 40, no same-frame feedback).
+  AdaptiveQOptions pose_control_adaptive_q;
 
   // CQ-82 Phase 2: pose-basis-only weights. Meaningless under raw_imu (the
   // refusal wiring never checks these -- they simply aren't read unless
@@ -983,6 +995,25 @@ private:
   // iteration is available a few lines later in the same function.
   Eigen::VectorXd coupled_pose_control_ekf_ref_pending_;
   bool coupled_pose_control_ekf_ref_pending_valid_ = false;
+  // items 13-19/39-40: pose_control's own causal adaptive-Q estimator
+  // (reuses the existing AdaptiveQ class -- its math is fully generic
+  // despite SplineImuResidualStats' name; populated here from process-
+  // segment residuals, not a ScanSpline). primed_ tracks whether
+  // setNominal/setFloor has run yet (once, first valid scan).
+  AdaptiveQ coupled_pose_control_adaptive_q_;
+  bool coupled_pose_control_adaptive_q_primed_ = false;
+  // item 18: the ONE authoritative Q read site pose_control's own factor
+  // construction/diagnostics go through -- returns the adaptive value
+  // (already one-scan-causal by construction) when enabled and primed,
+  // else state_->varAcc()/varGyr() exactly as before (identity when off).
+  V3D poseControlEffectiveVarAcc() const;
+  V3D poseControlEffectiveVarGyr() const;
+  // Rolling cross-scan history of the (bias-corrected) segment residual
+  // mean, used ONLY to compute a genuine multi-scan lag-1 autocorrelation
+  // (item 17) -- a single scan's handful of segments is too few samples on
+  // its own. Bounded ring buffer (see .cpp for the cap).
+  std::deque<V3D> coupled_pose_control_acc_resid_hist_;
+  std::deque<V3D> coupled_pose_control_gyr_resid_hist_;
   // CQ-79: this scan's PREVIOUS iteration's own set of matched-plane
   // hashes, for carry_frac -- reset to empty at scan start (alongside
   // coupled_iters_'s own reset), updated after every iteration's own

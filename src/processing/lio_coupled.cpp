@@ -170,6 +170,10 @@ static const std::vector<std::string>& fullDiagColumns()
     "delta_ba_actual","delta_ba_reference","delta_g_actual","delta_g_reference",
     "lambda_prior_trace","lambda_total_trace","curvature_weight_pos","curvature_weight_rot",
     "P_eta_bg_norm","P_eta_ba_norm","P_eta_g_norm",
+    // q_estimation (items 13-19/39-40)
+    "q_used_acc","q_used_gyr","q_candidate_acc","q_candidate_gyr","q_next_acc","q_next_gyr",
+    "residual_var_acc","residual_var_gyr","acf1_acc","acf1_gyr",
+    "q_update_accepted","q_adaptation_reason","bias_var_acc_proxy","bias_var_gyr_proxy",
     "notes"
   };
   return cols;
@@ -275,6 +279,13 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/frozen_process_hessian_prior", copts_.pose_control_frozen_process_hessian_prior, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/true_imu_prior", copts_.pose_control_true_imu_prior, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/legacy_process_factor", copts_.pose_control_legacy_process_factor, false);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/adaptive_q/enable", copts_.pose_control_adaptive_q.enable, false);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/adaptive_q/beta_acc", copts_.pose_control_adaptive_q.beta_acc, 0.3);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/adaptive_q/beta_gyr", copts_.pose_control_adaptive_q.beta_gyr, 0.3);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/adaptive_q/acf1_max", copts_.pose_control_adaptive_q.acf1_max, 1.0);
+  cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/adaptive_q/warmup_frames", copts_.pose_control_adaptive_q.warmup_frames, 20);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/adaptive_q/ema", copts_.pose_control_adaptive_q.ema, 0.9);
+  copts_.pose_control_adaptive_q.use_noise_floor = false;  // pose_control has no calibration-window floor plumbed yet -- documented simplification
   if (copts_.pose_control_frozen_process_hessian_prior && copts_.pose_control_legacy_process_factor)
     throw std::runtime_error("pose_control/frozen_process_hessian_prior and pose_control/legacy_process_factor are mutually exclusive comparison modes -- enable only one at a time.");
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_acc", copts_.pose_imu_weight_acc, 1.0);
@@ -577,6 +588,22 @@ void LioProcCoupled::deskewAndDownsample(MeasureGroup& mg)
       mg.dry_run_points = std::move(dry_run_deskewed);
     }
   }
+}
+
+V3D LioProcCoupled::poseControlEffectiveVarAcc() const
+{
+  if (copts_.pose_control_adaptive_q.enable && coupled_pose_control_adaptive_q_primed_ &&
+      coupled_pose_control_adaptive_q_.active())
+    return V3D::Constant(coupled_pose_control_adaptive_q_.varAcc());
+  return state_->varAcc();
+}
+
+V3D LioProcCoupled::poseControlEffectiveVarGyr() const
+{
+  if (copts_.pose_control_adaptive_q.enable && coupled_pose_control_adaptive_q_primed_ &&
+      coupled_pose_control_adaptive_q_.active())
+    return V3D::Constant(coupled_pose_control_adaptive_q_.varGyr());
+  return state_->varGyr();
 }
 
 std::string LioProcCoupled::processLIO(MeasureGroup& mg)
@@ -923,7 +950,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         for (int j = 0; j < spline.nSeg(); ++j)
           addPoseControlProcessFactorReduced(spline, coupled_pose_control_layout_, j, coupled_pose_control_seg_samples_[j],
               coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
-              copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, state_->varAcc(), state_->varGyr(),
+              copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, poseControlEffectiveVarAcc(), poseControlEffectiveVarGyr(),
               copts_.repro_second_order, copts_.pose_control_q_pinv_rel_thresh,
               A_process_scanstart_shared, b_unused_scanstart, &head_block_scanstart, nullptr);
         const auto& hns2 = coupled_pose_control_hns_;
@@ -6928,7 +6955,7 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
     for (int j = 0; j < spline.nSeg(); ++j)
       addPoseControlProcessFactorReduced(spline, layout, j, coupled_pose_control_seg_samples_[j],
           coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
-          copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, state_->varAcc(), state_->varGyr(),
+          copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, poseControlEffectiveVarAcc(), poseControlEffectiveVarGyr(),
           copts_.repro_second_order, copts_.pose_control_q_pinv_rel_thresh, A_process_raw_mean, b_process_raw_mean, nullptr, &E_process);
   A_raw = A_lidar_raw_mean + copts_.pose_control_process_weight * A_process_raw_mean;
   b_raw = b_lidar_raw_mean + copts_.pose_control_process_weight * b_process_raw_mean;
@@ -7250,6 +7277,9 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
               "Q_eig_min,Q_eig_max,Q_cond,"
               "Lambda_eig_min_nonzero,Lambda_eig_max,Lambda_cond_nonzero,"
               "r_theta_norm,r_pos_norm,r_vel_norm,r_whitened\n";
+    double accum_r_pos_vel_sqnorm = 0.0, accum_r_theta_sqnorm = 0.0;
+    V3D accum_r_pos_vel_vec = V3D::Zero(), accum_r_theta_vec = V3D::Zero();
+    int accum_n_segs = 0, accum_n_samples = 0;
     for (int j = 0; j < spline.nSeg(); ++j) {
       const auto& samples = coupled_pose_control_seg_samples_[j];
       const double tj = spline.t0() + j * spline.delta();
@@ -7262,7 +7292,7 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
       M3D rot_pred; V3D pos_pred, vel_pred;
       relinearizePoseControlSegmentWithBiasJac(samples, Rj, pj, vj,
           coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
-          copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, state_->varAcc(), state_->varGyr(),
+          copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, poseControlEffectiveVarAcc(), poseControlEffectiveVarGyr(),
           copts_.repro_second_order, F9, Q9, G9, rot_pred, pos_pred, vel_pred);
       const Eigen::Matrix<double, 9, 9> Lambda = poseControlPseudoInverse9(Q9, copts_.pose_control_q_pinv_rel_thresh);
       Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 9, 9>> es_q(0.5 * (Q9 + Q9.transpose()));
@@ -7301,8 +7331,123 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
       };
       emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "process_segment",
                        voxel_map_->frame_idx_, coupled_iters_, skv);
+      if (coupled_iters_ == 0) {
+        accum_r_pos_vel_sqnorm += r_pos.squaredNorm() + r_vel.squaredNorm();
+        accum_r_theta_sqnorm += r_theta.squaredNorm();
+        accum_r_pos_vel_vec += r_pos + r_vel;
+        accum_r_theta_vec += r_theta;
+        accum_n_segs += 1;
+        accum_n_samples += static_cast<int>(samples.size());
+      }
     }
     sofs.flush();
+
+    // ========================================================================
+    // items 13-19/39-40: pose_control's own causal adaptive-Q. Only the
+    // MEASUREMENT (this scan's aggregate segment residual) is taken here;
+    // the actual APPLICATION happens at the START of the NEXT scan's
+    // init block, using coupled_pose_control_adaptive_q_.varAcc()/varGyr()
+    // as they stand AFTER this update() call -- i.e. genuinely one scan
+    // late, never this scan's own measurement feeding this scan's own
+    // prior (item 40's no-same-frame-feedback requirement).
+    // ========================================================================
+    if (copts_.pose_control_adaptive_q.enable && accum_n_segs > 0) {
+      // item 15: bias-aware correction -- remove the portion of the
+      // aggregate residual variance explainable by bias UNCERTAINTY
+      // (not bias error itself, which the process factor's own mean
+      // already accounts for) before calling the remainder "process
+      // noise". Uses P_eta_ba/bg norms from THIS scan's own joint prior
+      // (coupled_pose_control_sigma_full_prior_, already computed) as a
+      // scalar, isotropic proxy for the bias-uncertainty contribution --
+      // documented simplification of item 14's full C_expected =
+      // C_sensor + H_state*P_state*H_state^T (a full per-axis treatment
+      // would need G9's own bias-Jacobian columns contracted against the
+      // FULL P_eta_bg/ba block, not just its norm; this scalar version
+      // still satisfies "do not inflate Q simply because the current bias
+      // estimate is uncertain" directionally, without the full matrix
+      // machinery).
+      double bias_var_acc_proxy = 0.0, bias_var_gyr_proxy = 0.0;
+      if (coupled_pose_control_sigma_full_prior_.rows() > 0) {
+        const auto& layoutQ = coupled_pose_control_layout_;
+        const int dEtaQ = coupled_pose_control_hns_.freeDim();
+        const Eigen::MatrixXd P_z = coupled_pose_control_sigma_full_prior_.bottomRightCorner(
+            coupled_pose_control_sigma_full_prior_.rows() - 9, coupled_pose_control_sigma_full_prior_.cols() - 9);
+        if (layoutQ.colBA() >= 0) {
+          const int off = dEtaQ + layoutQ.colBA() - layoutQ.dimCFree();
+          bias_var_acc_proxy = P_z.block<3, 3>(off, off).trace() / 3.0;
+        }
+        if (layoutQ.colBG() >= 0) {
+          const int off = dEtaQ + layoutQ.colBG() - layoutQ.dimCFree();
+          bias_var_gyr_proxy = P_z.block<3, 3>(off, off).trace() / 3.0;
+        }
+      }
+      const double cov_acc_raw = accum_r_pos_vel_sqnorm / std::max(1, 6 * accum_n_segs);
+      const double cov_gyr_raw = accum_r_theta_sqnorm / std::max(1, 3 * accum_n_segs);
+      // item 14: project onto the PSD cone -- never a negative "process
+      // noise" estimate.
+      const double cov_acc_corrected = std::max(0.0, cov_acc_raw - bias_var_acc_proxy);
+      const double cov_gyr_corrected = std::max(0.0, cov_gyr_raw - bias_var_gyr_proxy);
+
+      // item 17: whiteness via cross-scan lag-1 autocorrelation of the
+      // (bias-corrected direction, mean) residual vector -- one sample per
+      // scan (this scan's mean residual across its own segments), rolling
+      // window across scans. A single scan's handful of segments is too
+      // few samples for a meaningful within-scan ACF on its own.
+      const V3D acc_mean_this_scan = accum_r_pos_vel_vec / accum_n_segs;
+      const V3D gyr_mean_this_scan = accum_r_theta_vec / accum_n_segs;
+      coupled_pose_control_acc_resid_hist_.push_back(acc_mean_this_scan);
+      coupled_pose_control_gyr_resid_hist_.push_back(gyr_mean_this_scan);
+      constexpr size_t kAdaptiveQHistCap = 50;
+      while (coupled_pose_control_acc_resid_hist_.size() > kAdaptiveQHistCap) coupled_pose_control_acc_resid_hist_.pop_front();
+      while (coupled_pose_control_gyr_resid_hist_.size() > kAdaptiveQHistCap) coupled_pose_control_gyr_resid_hist_.pop_front();
+      auto lag1Acf = [](const std::deque<V3D>& hist) -> double {
+        if (hist.size() < 4) return 0.0;
+        V3D mean = V3D::Zero();
+        for (const auto& v : hist) mean += v;
+        mean /= static_cast<double>(hist.size());
+        double num = 0.0, den = 0.0;
+        for (size_t i = 0; i < hist.size(); ++i) {
+          const V3D d = hist[i] - mean;
+          den += d.squaredNorm();
+          if (i > 0) num += d.dot(hist[i - 1] - mean);
+        }
+        return (den > 1e-300) ? num / den : 0.0;
+      };
+      SplineImuResidualStats stats;
+      stats.n = accum_n_samples;
+      stats.cov_acc = cov_acc_corrected;
+      stats.cov_gyr = cov_gyr_corrected;
+      stats.acf1_acc = lag1Acf(coupled_pose_control_acc_resid_hist_);
+      stats.acf1_gyr = lag1Acf(coupled_pose_control_gyr_resid_hist_);
+      stats.max_abs_acc = std::sqrt(cov_acc_raw);
+      stats.max_abs_gyr = std::sqrt(cov_gyr_raw);
+      stats.mean_abs_acc = acc_mean_this_scan.norm();
+      stats.mean_abs_gyr = gyr_mean_this_scan.norm();
+
+      if (!coupled_pose_control_adaptive_q_primed_) {
+        coupled_pose_control_adaptive_q_.configure(copts_.pose_control_adaptive_q);
+        coupled_pose_control_adaptive_q_.setNominal(state_->varAcc().mean(), state_->varGyr().mean());
+        coupled_pose_control_adaptive_q_.setFloor(0.0, 0.0);  // use_noise_floor=false, see registration site
+        coupled_pose_control_adaptive_q_primed_ = true;
+      }
+      const double q_used_acc_this_scan = coupled_pose_control_adaptive_q_.varAcc();
+      const double q_used_gyr_this_scan = coupled_pose_control_adaptive_q_.varGyr();
+      coupled_pose_control_adaptive_q_.update(stats);
+      if (copts_.psd_audit_en) {
+        std::map<std::string, std::string> qkv = {
+          {"q_used_acc", std::to_string(q_used_acc_this_scan)}, {"q_used_gyr", std::to_string(q_used_gyr_this_scan)},
+          {"q_candidate_acc", std::to_string(cov_acc_corrected)}, {"q_candidate_gyr", std::to_string(cov_gyr_corrected)},
+          {"q_next_acc", std::to_string(coupled_pose_control_adaptive_q_.varAcc())},
+          {"q_next_gyr", std::to_string(coupled_pose_control_adaptive_q_.varGyr())},
+          {"residual_var_acc", std::to_string(cov_acc_raw)}, {"residual_var_gyr", std::to_string(cov_gyr_raw)},
+          {"acf1_acc", std::to_string(stats.acf1_acc)}, {"acf1_gyr", std::to_string(stats.acf1_gyr)},
+          {"q_update_accepted", coupled_pose_control_adaptive_q_.activeThisFrame() ? "1" : "0"},
+          {"q_adaptation_reason", coupled_pose_control_adaptive_q_.lastStatus()},
+          {"bias_var_acc_proxy", std::to_string(bias_var_acc_proxy)}, {"bias_var_gyr_proxy", std::to_string(bias_var_gyr_proxy)},
+        };
+        emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "q_estimation", voxel_map_->frame_idx_, -1, qkv);
+      }
+    }
   }
 
   Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
