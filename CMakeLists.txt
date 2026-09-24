@@ -139,6 +139,7 @@ add_executable(livo_recon_node
   src/lio/pose_control_process_factor.cpp
   src/lio/pose_control_covariance.cpp
   src/lio/pose_control_lidar_factor.cpp
+  src/lio/pose_control_lidar_correlation.cpp
   src/map/voxelmap.cpp
   src/map/akf_map.cpp
   src/map/map_backend_factory.cpp

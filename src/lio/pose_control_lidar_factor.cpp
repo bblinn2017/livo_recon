@@ -8,8 +8,10 @@ void addPoseControlLidarFactor(
     const std::vector<PoseControlLidarObs>& obs,
     Eigen::MatrixXd& A, Eigen::VectorXd& b,
     PoseControlProcessFactorHeadBlock* head_block,
-    double* out_E_lidar)
+    double* out_E_lidar,
+    std::vector<PoseControlLidarRecord>* out_records)
 {
+  if (out_records) out_records->reserve(out_records->size() + obs.size());
   const int dimZ = layout.dim();
   Eigen::VectorXd Jrow_z(dimZ);
   Eigen::Vector3d Jrow_head_theta, Jrow_head_p;   // 1x3 rows, transposed to 3x1 for storage
@@ -74,6 +76,15 @@ void addPoseControlLidarFactor(
     A += w * (Jrow_z * Jrow_z.transpose());
     b += -w * r * Jrow_z;
     if (out_E_lidar) *out_E_lidar += 0.5 * w * r * r;
+    if (out_records) {
+      PoseControlLidarRecord rec;
+      rec.Jrow_z = Jrow_z;
+      rec.w = w;
+      rec.sigma2 = o.sigma2;
+      rec.plane_var_term = o.plane_var_term;
+      rec.plane_id = o.plane_id;
+      out_records->push_back(std::move(rec));
+    }
   }
 }
 

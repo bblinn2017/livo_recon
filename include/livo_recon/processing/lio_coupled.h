@@ -9,6 +9,8 @@
 #include "livo_recon/lio/pose_control_lidar_factor.h"
 #include "livo_recon/lio/pose_control_covariance.h"
 #include "livo_recon/lio/adaptive_q.h"
+#include "livo_recon/lio/residual_redundancy.h"
+#include "livo_recon/lio/pose_control_lidar_correlation.h"
 #include "livo_recon/utils/eval/nees_logger.h"
 
 #include <limits>
@@ -143,6 +145,10 @@ struct LioProcCoupledOptions
   // the value estimated from the PREVIOUS scan's converged residual, never
   // this scan's own (item 40, no same-frame feedback).
   AdaptiveQOptions pose_control_adaptive_q;
+  // items 24/25: correlated-noise (Woodbury) correction for pose_control's
+  // LiDAR information -- reuses ResidualRedundancyOptions (generic struct,
+  // not decoupled-specific). Off by default (mode=="off").
+  ResidualRedundancyOptions pose_control_lidar_correlation;
 
   // CQ-82 Phase 2: pose-basis-only weights. Meaningless under raw_imu (the
   // refusal wiring never checks these -- they simply aren't read unless

@@ -174,6 +174,9 @@ static const std::vector<std::string>& fullDiagColumns()
     "q_used_acc","q_used_gyr","q_candidate_acc","q_candidate_gyr","q_next_acc","q_next_gyr",
     "residual_var_acc","residual_var_gyr","acf1_acc","acf1_gyr",
     "q_update_accepted","q_adaptation_reason","bias_var_acc_proxy","bias_var_gyr_proxy",
+    // lidar_correlation (items 24/25)
+    "num_raw_residuals","redund_groups","redund_n_raw","raw_information_trace",
+    "correlation_corrected_information","correlation_information_reduction","lidar_correlation_mode",
     "notes"
   };
   return cols;
@@ -286,6 +289,10 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/adaptive_q/warmup_frames", copts_.pose_control_adaptive_q.warmup_frames, 20);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/adaptive_q/ema", copts_.pose_control_adaptive_q.ema, 0.9);
   copts_.pose_control_adaptive_q.use_noise_floor = false;  // pose_control has no calibration-window floor plumbed yet -- documented simplification
+  cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/pose_control/lidar_correlation_mode",
+                 copts_.pose_control_lidar_correlation.mode, "off", {"off", "woodbury"});
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/lidar_correlation_rho", copts_.pose_control_lidar_correlation.rho, 1.0);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/lidar_correlation_max_discount", copts_.pose_control_lidar_correlation.max_discount, 0.9);
   if (copts_.pose_control_frozen_process_hessian_prior && copts_.pose_control_legacy_process_factor)
     throw std::runtime_error("pose_control/frozen_process_hessian_prior and pose_control/legacy_process_factor are mutually exclusive comparison modes -- enable only one at a time.");
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_imu_weight_acc", copts_.pose_imu_weight_acc, 1.0);
@@ -1280,11 +1287,31 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     for (auto& res : residuals_) {
       const double d = res.r - res.normal.dot(spline.rotAt(res.t) * res.raw_body_point + spline.posAt(res.t));
       PoseControlLidarObs o;
-      o.t = res.t; o.q = res.raw_body_point; o.normal = res.normal; o.d = d; o.sigma2 = res.sigma_squared;
+      o.t = res.t; o.q = res.raw_body_point; o.normal = res.normal; o.d = d; o.sigma2 = res.sigma_squared; o.plane_id = res.plane_id; o.plane_var_term = res.plane_var_term;
       lidar_obs.push_back(o);
     }
-    if (copts_.pose_control_lidar_enable)
-      addPoseControlLidarFactor(spline, layout, lidar_obs, A_lidar_raw, b_lidar_raw, nullptr, nullptr);
+    ResidualRedundancyStats pose_control_lidar_corr_stats;
+    if (copts_.pose_control_lidar_enable) {
+      std::vector<PoseControlLidarRecord> lidar_records;
+      const bool want_records = copts_.pose_control_lidar_correlation.mode != "off";
+      addPoseControlLidarFactor(spline, layout, lidar_obs, A_lidar_raw, b_lidar_raw, nullptr, nullptr,
+                                 want_records ? &lidar_records : nullptr);
+      if (want_records)
+        pose_control_lidar_corr_stats = applyPoseControlLidarCorrelationCorrection(
+            lidar_records, copts_.pose_control_lidar_correlation, A_lidar_raw, b_lidar_raw);
+      if (copts_.psd_audit_en && want_records) {
+        std::map<std::string, std::string> lkv = {
+          {"num_raw_residuals", std::to_string(lidar_records.size())},
+          {"redund_groups", std::to_string(pose_control_lidar_corr_stats.redund_groups)},
+          {"redund_n_raw", std::to_string(pose_control_lidar_corr_stats.redund_n_raw)},
+          {"raw_information_trace", std::to_string(pose_control_lidar_corr_stats.naive_info_gain)},
+          {"correlation_corrected_information", std::to_string(pose_control_lidar_corr_stats.woodbury_info_gain)},
+          {"correlation_information_reduction", std::to_string(1.0 - pose_control_lidar_corr_stats.redund_info_ratio)},
+          {"lidar_correlation_mode", copts_.pose_control_lidar_correlation.mode},
+        };
+        emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "lidar_correlation", voxel_map_->frame_idx_, -1, lkv);
+      }
+    }
 
     // ---- project onto z=[eta;delta_sT] (SAME P as the mean solve) --------
     Eigen::MatrixXd P = Eigen::MatrixXd::Zero(dimRaw, dimZ);
@@ -6914,6 +6941,7 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
     PoseControlLidarObs o;
     o.t = res.t; o.q = res.raw_body_point; o.normal = res.normal; o.d = d;
     o.sigma2 = res.sigma_squared;
+    o.plane_id = res.plane_id; o.plane_var_term = res.plane_var_term;
     lidar_obs.push_back(o);
   }
 

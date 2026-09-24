@@ -33,6 +33,24 @@ struct PoseControlLidarObs
   V3D    normal = V3D::Zero();
   double d = 0.0;                // plane offset
   double sigma2 = 1.0;
+  // process-prior-REFORMULATION phase, items 24/25: shared-uncertainty
+  // correlation source, copied straight from Residual::plane_id/
+  // plane_var_term -- see pose_control_lidar_correlation.h.
+  const void* plane_id = nullptr;
+  double plane_var_term = 0.0;
+};
+
+// process-prior-REFORMULATION phase, item 21: one point's reduced Jacobian
+// row (already projected into z-space), retained ONLY when
+// addPoseControlLidarFactor's out_records is non-null (default nullptr ->
+// zero extra cost, current behavior byte-for-byte unchanged).
+struct PoseControlLidarRecord
+{
+  Eigen::VectorXd Jrow_z;
+  double w = 0.0;            // 1/sigma2
+  double sigma2 = 1.0;
+  double plane_var_term = 0.0;
+  const void* plane_id = nullptr;
 };
 
 // Adds every observation's contribution to A/b (layout.dim() square/long).
@@ -42,6 +60,7 @@ void addPoseControlLidarFactor(
     const std::vector<PoseControlLidarObs>& obs,
     Eigen::MatrixXd& A, Eigen::VectorXd& b,
     PoseControlProcessFactorHeadBlock* head_block,
-    double* out_E_lidar = nullptr);
+    double* out_E_lidar = nullptr,
+    std::vector<PoseControlLidarRecord>* out_records = nullptr);
 
 }  // namespace livo_recon
