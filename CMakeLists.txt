@@ -203,3 +203,45 @@ target_link_libraries(cache_tracker_output_livo_recon
   OpenMP::OpenMP_CXX
   tbb
 )
+
+# Registered numerical validation test for the pose-control production
+# prior/covariance/LiDAR-correlation mathematics (2026-09-24 implementation
+# + code-validation phase, item 39: "durable registered tests", not a
+# one-off shell script). Standalone from livo_recon_node -- run directly
+# after build: devel/lib/livo_recon/test_pose_control_prior_math
+# (exit code 0 = all checks passed). See scripts/test/test_pose_control_
+# prior_math.cpp's own header comment for exactly what it validates and its
+# honest scope limits.
+add_executable(test_pose_control_prior_math
+  src/utils/state/state.cpp
+  src/lio/pose_control_covariance.cpp
+  src/lio/pose_control_lidar_correlation.cpp
+  scripts/test/test_pose_control_prior_math.cpp
+)
+target_link_libraries(test_pose_control_prior_math
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+)
+
+# Item 38 of the 2026-09-24 implementation + code-validation phase: "the
+# earlier implementation had a real Eigen dimension mismatch hidden by
+# NDEBUG... create/run at least one test build where Eigen assertions are
+# enabled... this is mandatory." Same sources as test_pose_control_prior_math
+# above, built with -UNDEBUG -O0 so eigen_assert()'s (compiled out by
+# -DNDEBUG in the CMAKE_BUILD_TYPE=Release flags every other target uses)
+# actually fire.
+add_executable(test_pose_control_prior_math_debugeigen
+  src/utils/state/state.cpp
+  src/lio/pose_control_covariance.cpp
+  src/lio/pose_control_lidar_correlation.cpp
+  scripts/test/test_pose_control_prior_math.cpp
+)
+target_compile_options(test_pose_control_prior_math_debugeigen PRIVATE
+  $<$<COMPILE_LANGUAGE:CXX>:-UNDEBUG;-O0;-g>
+)
+target_link_libraries(test_pose_control_prior_math_debugeigen
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+)

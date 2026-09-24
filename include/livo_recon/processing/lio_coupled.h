@@ -74,17 +74,11 @@ struct LioProcCoupledOptions
   // estimator/coupled/pose_control/{lidar_enable,p0_scale}.
   bool pose_control_lidar_enable = true;
   double pose_control_p0_scale = 1.0;
-  // 2026-09-24 pose-control-implementation-cleanup phase, item 9: REMOVED.
-  // pose_control_process_weight was an arbitrary empirical scalar the
-  // pre-reformulation architecture used to weight the process factor
-  // against LiDAR; the production formulation gets its process/prior
-  // influence entirely from Q -> P_prior -> P_prior^-1 (see
-  // coupled_pose_control_lambda_prior_z_), with no scalar multiplier
-  // anywhere in the production path. Removed rather than deprecated-and-
-  // ignored (per this phase's explicit "do not leave obsolete config keys
-  // exposed" instruction) -- an old config.yaml setting this key will now
-  // correctly trip the unclaimed-override abort, surfacing the stale
-  // config rather than silently no-op'ing.
+  // pose_control_process_weight (an arbitrary empirical LiDAR-vs-process
+  // weighting scalar) was removed; production's process/prior influence
+  // comes entirely from Q -> P_prior -> P_prior^-1 with no scalar
+  // multiplier. An old config.yaml setting this key now correctly trips
+  // the unclaimed-override abort. See git history for the prior mechanism.
   // 2026-09-23 stationary-campaign item 22: curvature regularization FOR
   // pose_control specifically -- pose_curvature_weight_pos/rot (above) is
   // confirmed NOT wired into pose_control at all (only the old "pose"
@@ -100,21 +94,13 @@ struct LioProcCoupledOptions
   // A/B/C, weight sweep, P0-scale sweep) can be told apart in the one
   // shared CSV. Purely a label, no effect on estimator behavior.
   std::string pose_control_test_id = "unlabeled";
-  // 2026-09-24 pose-control-implementation-cleanup phase, items 9/10 and
-  // legacy-removal items 1/3/7: REMOVED from production entirely.
-  // frozen_process_hessian_prior, true_imu_prior (already a deprecated
-  // no-op), and legacy_process_factor were all comparison-only ablations
-  // from the process-prior-equivalence/REFORMULATION phases, superseded
-  // once the joint IMU/bias Gaussian prior became the estimator's ONE
-  // authoritative production mechanism. There is now exactly one
+  // frozen_process_hessian_prior, true_imu_prior, and legacy_process_factor
+  // (comparison-only ablation modes) were removed. There is exactly one
   // production pose-control prior representation (coupled_pose_control_
   // sigma_full_prior_/lambda_prior_z_/z_imu_, built once at scan-start,
   // shared verbatim by the mean solve and the covariance computation) and
-  // no runtime switch back to any of the retired formulations. Their
-  // algebra remains recoverable from git history (see the
-  // process-prior-equivalence/REFORMULATION phase commits) if a future
-  // regression test needs it as an independent reference -- it does not
-  // need to stay compiled into the live estimator to serve that purpose.
+  // no runtime switch to any retired formulation. See git history for
+  // their algebra if ever needed as an independent test reference.
   // process-prior-REFORMULATION phase, items 13-19/39-40: pose_control's
   // OWN adaptive process-noise estimator (a SEPARATE AdaptiveQ instance from
   // the decoupled arm's, since pose_control has no ScanSpline and its own

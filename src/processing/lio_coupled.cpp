@@ -50,12 +50,25 @@ static void logPsdStage(int scan_id, int iter, const char* stage, const Eigen::M
   ofs.flush();
 }
 
-// 2026-09-22 item 1 instrumentation: trace(P_R)=trace(P_p)=0 root-cause
-// hunt. Reports shape/trace/Frobenius/min-max eig/rank estimate/exact-zero
-// row-or-column count for an arbitrary matrix at a named pipeline stage --
-// gated behind psd_audit_en, written to its own file so it never mixes with
-// psd_stage_audit.txt's narrower (min/max eig only) columns.
-static void logCovTraceStage(int scan_id, const char* stage, const Eigen::MatrixXd& X)
+// Forward declaration: logCovTraceStage (below) routes through the unified
+// diagnostics CSV (emitFullDiagRow/fullDiagRunId, defined further down this
+// file) rather than its own dedicated file writer -- see the "legacy code
+// removal" note at that definition for why pose_control_cov_trace.txt was
+// retired.
+static const std::string& fullDiagRunId();
+static void emitFullDiagRow(const std::string& run_id, const std::string& test_id,
+                             const std::string& row_type, int scan_id, int iteration,
+                             const std::map<std::string, std::string>& kv);
+
+// Reports shape/trace/Frobenius/min-max eig/rank estimate/exact-zero
+// row-or-column count for an arbitrary matrix at a named pipeline stage of
+// the pose_control prior/covariance construction -- gated behind
+// psd_audit_en. Previously wrote its own pose_control_cov_trace.txt; now
+// folded into pose_control_full_diagnostics.csv's "covariance_trace_stage"
+// row type (2026-09-24 legacy-diagnostic-writer cleanup, item 3/33) so this
+// remains the ONE unified validation instrumentation path rather than a
+// second, dedicated raw file.
+static void logCovTraceStage(int scan_id, const std::string& test_id, const char* stage, const Eigen::MatrixXd& X)
 {
   const int rows = static_cast<int>(X.rows()), cols = static_cast<int>(X.cols());
   const Eigen::MatrixXd Xsym = (rows == cols) ? Eigen::MatrixXd(0.5 * (X + X.transpose())) : X;
@@ -76,15 +89,14 @@ static void logCovTraceStage(int scan_id, const char* stage, const Eigen::Matrix
   for (int i = 0; i < rows; ++i) if (X.row(i).cwiseAbs().maxCoeff() < 1e-300) ++zero_rows;
   for (int j = 0; j < cols; ++j) if (X.col(j).cwiseAbs().maxCoeff() < 1e-300) ++zero_cols;
 
-  static PersistentLogStream log("pose_control_cov_trace.txt");
-  bool first;
-  std::ofstream& ofs = log.stream(&first);
-  if (first)
-    ofs << "scan_id,stage,rows,cols,trace,frobenius,min_eig,max_eig,rank_est,zero_rows,zero_cols\n";
-  ofs << scan_id << "," << stage << "," << rows << "," << cols << ","
-      << std::setprecision(9) << trace << "," << fro << "," << min_eig << "," << max_eig << ","
-      << rank_est << "," << zero_rows << "," << zero_cols << "\n";
-  ofs.flush();
+  std::map<std::string, std::string> kv = {
+    {"cov_trace_stage", stage}, {"cov_trace_rows", std::to_string(rows)}, {"cov_trace_cols", std::to_string(cols)},
+    {"cov_trace_trace", std::to_string(trace)}, {"cov_trace_frobenius", std::to_string(fro)},
+    {"cov_trace_min_eig", std::to_string(min_eig)}, {"cov_trace_max_eig", std::to_string(max_eig)},
+    {"cov_trace_rank_est", std::to_string(rank_est)},
+    {"cov_trace_zero_rows", std::to_string(zero_rows)}, {"cov_trace_zero_cols", std::to_string(zero_cols)},
+  };
+  emitFullDiagRow(fullDiagRunId(), test_id, "covariance_trace_stage", scan_id, -1, kv);
 }
 
 // 2026-09-23 x1/head-propagation campaign, item 2: linear interpolation of
@@ -167,6 +179,26 @@ static const std::vector<std::string>& fullDiagColumns()
     // lidar_correlation (items 24/25)
     "num_raw_residuals","redund_groups","redund_n_raw","raw_information_trace",
     "correlation_corrected_information","correlation_information_reduction","lidar_correlation_mode",
+    // covariance_trace_stage (folded from the old pose_control_cov_trace.txt)
+    "cov_trace_stage","cov_trace_rows","cov_trace_cols","cov_trace_trace","cov_trace_frobenius",
+    "cov_trace_min_eig","cov_trace_max_eig","cov_trace_rank_est","cov_trace_zero_rows","cov_trace_zero_cols",
+    // x1_init_state (folded from the old pose_control_x1_init_state.txt)
+    "x1_knot_index","x1_time","p_imu_x","p_imu_y","p_imu_z","v_imu_x","v_imu_y","v_imu_z",
+    "p_pre_x","p_pre_y","p_pre_z","v_pre_x","v_pre_y","v_pre_z",
+    "p_post_x","p_post_y","p_post_z","v_post_x","v_post_y","v_post_z",
+    "delta_p_pre_norm","delta_v_pre_norm","delta_R_pre_norm",
+    "delta_p_post_norm","delta_v_post_norm","delta_R_post_norm",
+    // x1_covariance (folded from the old pose_control_x1_diagnostics.txt)
+    "p_final_x","p_final_y","p_final_z","v_final_x","v_final_y","v_final_z",
+    "delta_p_norm","delta_v_norm","delta_R_norm",
+    "trace_P_p_x1","trace_P_v_x1","trace_P_R_x1","trace_P_x1_prior","trace_P_x1_post",
+    "min_eig_P_x1_prior","max_eig_P_x1_prior","cond_P_x1_prior","rank_P_x1_prior",
+    "sigma_distance_p","sigma_distance_R","sigma_distance_v",
+    "abs_err_head_propagation_check","rel_err_head_propagation_check",
+    // knot_state (folded from the old pose_control_knot_state.txt)
+    "knot_index","knot_time","p_x","p_y","p_z","rlog_x","rlog_y","rlog_z",
+    "v_x","v_y","v_z","a_x","a_y","a_z","omega_x","omega_y","omega_z",
+    "d1_pos_norm","d2_pos_norm","d1_rot_norm","d2_rot_norm",
     "notes"
   };
   return cols;
@@ -920,7 +952,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         Eigen::VectorXd b_unused_scanstart = Eigen::VectorXd::Zero(dimRawScanstart);
         PoseControlProcessFactorHeadBlock head_block_scanstart;
         for (int j = 0; j < spline.nSeg(); ++j)
-          addPoseControlProcessFactorReduced(spline, coupled_pose_control_layout_, j, coupled_pose_control_seg_samples_[j],
+          buildPoseControlImuPriorContribution(spline, coupled_pose_control_layout_, j, coupled_pose_control_seg_samples_[j],
               coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
               copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, poseControlEffectiveVarAcc(), poseControlEffectiveVarGyr(),
               copts_.repro_second_order, copts_.pose_control_q_pinv_rel_thresh,
@@ -972,6 +1004,28 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           // BOTH the mean solve's information (via its z-block inverse
           // below) and the covariance block (directly) -- one prior, one
           // representation, item 29's invariant by construction.
+          // Item 10 (prior factorization): this pinv runs EXACTLY ONCE per
+          // scan (here, at scan-start init) -- never again during the GN
+          // loop, which only ever reads the resulting coupled_pose_control_
+          // lambda_prior_z_/z_imu_ objects directly (A += Lambda_prior_z).
+          // A pinv (rather than LDLT/LLT of a full-rank matrix) is used
+          // because Lambda_full_priorS has GENUINE structural rank
+          // deficiency by construction: every IMU-process-only direction
+          // the raw 6N/dimST space contains that neither the head
+          // constraints nor any process/prior term touches (e.g. any
+          // spline column entirely outside the process factor's segment
+          // window for a large N) is an EXACT zero row/column of
+          // A_process_scanstart_shared, not a numerically-weak one --
+          // expected structural nullity is layoutS.dim() minus the number
+          // of columns the process-factor segments + head constraints
+          // actually touch (bounded above by dimFullS - dEtaS - dSTS - 9
+          // for a fully-constrained scan). The retained eigenvalue range
+          // after pinv is [rel_thresh * lambda_max, lambda_max] by
+          // generalPseudoInverse's own construction (pose_control_
+          // covariance.h) -- see test_pose_control_prior_math.cpp's
+          // testStructuralVsNumericalNullspace() for the general version of
+          // this exact structural-vs-numerical distinction, validated on a
+          // synthetic analogue of this same pinv call.
           coupled_pose_control_sigma_full_prior_ = generalPseudoInverse(Lambda_full_priorS, 1e-9);
           const Eigen::MatrixXd P_z_priorS = coupled_pose_control_sigma_full_prior_.bottomRightCorner(dimZS, dimZS);
           coupled_pose_control_lambda_prior_z_ =
@@ -1016,34 +1070,21 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         const double dp_post = (p_x1_spline_init_post - p_x1_imu_prior).norm();
         const double dv_post = (v_x1_spline_init_post - v_x1_imu_prior).norm();
         const double dR_post = Log(M3D(R_x1_imu_prior.transpose() * R_x1_spline_init_post)).norm();
-        static PersistentLogStream x1log("pose_control_x1_init_state.txt");
-        bool x1_first;
-        std::ofstream& x1ofs = x1log.stream(&x1_first);
-        if (x1_first)
-          x1ofs << "scan_id,x1_knot_index,x1_time,"
-                   "p_imu_x,p_imu_y,p_imu_z,v_imu_x,v_imu_y,v_imu_z,"
-                   "p_pre_x,p_pre_y,p_pre_z,v_pre_x,v_pre_y,v_pre_z,"
-                   "p_post_x,p_post_y,p_post_z,v_post_x,v_post_y,v_post_z,"
-                   "delta_p_pre_norm,delta_v_pre_norm,delta_R_pre_norm,"
-                   "delta_p_post_norm,delta_v_post_norm,delta_R_post_norm\n";
-        x1ofs << std::setprecision(9)
-              << voxel_map_->frame_idx_ << "," << kPoseControlX1Knot << "," << t_x1 << ","
-              << p_x1_imu_prior.x() << "," << p_x1_imu_prior.y() << "," << p_x1_imu_prior.z() << ","
-              << v_x1_imu_prior.x() << "," << v_x1_imu_prior.y() << "," << v_x1_imu_prior.z() << ","
-              << p_x1_spline_init_pre.x() << "," << p_x1_spline_init_pre.y() << "," << p_x1_spline_init_pre.z() << ","
-              << v_x1_spline_init_pre.x() << "," << v_x1_spline_init_pre.y() << "," << v_x1_spline_init_pre.z() << ","
-              << p_x1_spline_init_post.x() << "," << p_x1_spline_init_post.y() << "," << p_x1_spline_init_post.z() << ","
-              << v_x1_spline_init_post.x() << "," << v_x1_spline_init_post.y() << "," << v_x1_spline_init_post.z() << ","
-              << dp_pre << "," << dv_pre << "," << dR_pre << ","
-              << dp_post << "," << dv_post << "," << dR_post << "\n";
-        x1ofs.flush();
-        // Note: NOT routed through emitFullDiagRow -- that CSV's column set
-        // (fullDiagColumns()) predates this x1 instrumentation and doesn't
-        // carry these fields; extending its 30-ish already-fixed columns for
-        // every new diagnostic would bloat it indefinitely. This dedicated
-        // file plus pose_control_x1_diagnostics.txt (covariance block,
-        // below) are the raw sources the Python campaign-CSV builder reads,
-        // same pattern as every other raw diagnostic file this session.
+        // 2026-09-24 legacy-diagnostic-writer cleanup (item 3/33): folded
+        // into pose_control_full_diagnostics.csv's "x1_init_state" row
+        // (previously a dedicated pose_control_x1_init_state.txt file).
+        std::map<std::string, std::string> x1kv = {
+          {"x1_knot_index", std::to_string(kPoseControlX1Knot)}, {"x1_time", std::to_string(t_x1)},
+          {"p_imu_x", std::to_string(p_x1_imu_prior.x())}, {"p_imu_y", std::to_string(p_x1_imu_prior.y())}, {"p_imu_z", std::to_string(p_x1_imu_prior.z())},
+          {"v_imu_x", std::to_string(v_x1_imu_prior.x())}, {"v_imu_y", std::to_string(v_x1_imu_prior.y())}, {"v_imu_z", std::to_string(v_x1_imu_prior.z())},
+          {"p_pre_x", std::to_string(p_x1_spline_init_pre.x())}, {"p_pre_y", std::to_string(p_x1_spline_init_pre.y())}, {"p_pre_z", std::to_string(p_x1_spline_init_pre.z())},
+          {"v_pre_x", std::to_string(v_x1_spline_init_pre.x())}, {"v_pre_y", std::to_string(v_x1_spline_init_pre.y())}, {"v_pre_z", std::to_string(v_x1_spline_init_pre.z())},
+          {"p_post_x", std::to_string(p_x1_spline_init_post.x())}, {"p_post_y", std::to_string(p_x1_spline_init_post.y())}, {"p_post_z", std::to_string(p_x1_spline_init_post.z())},
+          {"v_post_x", std::to_string(v_x1_spline_init_post.x())}, {"v_post_y", std::to_string(v_x1_spline_init_post.y())}, {"v_post_z", std::to_string(v_x1_spline_init_post.z())},
+          {"delta_p_pre_norm", std::to_string(dp_pre)}, {"delta_v_pre_norm", std::to_string(dv_pre)}, {"delta_R_pre_norm", std::to_string(dR_pre)},
+          {"delta_p_post_norm", std::to_string(dp_post)}, {"delta_v_post_norm", std::to_string(dv_post)}, {"delta_R_post_norm", std::to_string(dR_post)},
+        };
+        emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "x1_init_state", voxel_map_->frame_idx_, -1, x1kv);
       }
       if (copts_.psd_audit_en) {
         const auto& hns = coupled_pose_control_hns_;
@@ -1237,21 +1278,34 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     Eigen::MatrixXd P = Eigen::MatrixXd::Zero(dimRaw, dimZ);
     P.block(0, 0, hns.rawDim(), dEta) = hns.Z;
     if (dST > 0) P.block(hns.rawDim(), dEta, dST, dST) = Eigen::MatrixXd::Identity(dST, dST);
+    // Item 18 (curvature semantics), DECIDED: curvature is interpretation B
+    // -- DETERMINISTIC NUMERICAL REGULARIZATION on the trajectory, not a
+    // Gaussian smoothness prior. It therefore appears in the MEAN solve's
+    // A/b (estimateCoupledPoseControlSpline's curvature block, added
+    // directly to A_raw/b_raw before projection) but is DELIBERATELY
+    // EXCLUDED from Lambda_meas_z below and from the joint prior -- the
+    // covariance this estimator reports is the covariance of the
+    // MAP/regularized-trajectory-conditional posterior (LiDAR + IMU/bias
+    // prior information only), not "as if curvature were itself measurement
+    // information". If curvature is ever reinterpreted as interpretation A
+    // (a genuine Gaussian smoothness prior), it must be added HERE too, to
+    // both this covariance path and the mean solve's A/b, from the SAME
+    // Lambda_curvature object -- not independently in only one place.
     const Eigen::MatrixXd Lambda_meas_z = P.transpose() * A_lidar_raw * P;  // LiDAR ONLY, in z-space
     if (copts_.psd_audit_en) {
-      logCovTraceStage(voxel_map_->frame_idx_, "Lambda_meas_z", Lambda_meas_z);
-      logCovTraceStage(voxel_map_->frame_idx_, "Lambda_meas_z_eta_block", Lambda_meas_z.topLeftCorner(dEta, dEta));
+      logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "Lambda_meas_z", Lambda_meas_z);
+      logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "Lambda_meas_z_eta_block", Lambda_meas_z.topLeftCorner(dEta, dEta));
     }
 
     const int dimFull = 9 + dimZ;
     const Eigen::MatrixXd& Sigma_full_prior = coupled_pose_control_sigma_full_prior_;
     const bool schur_ok = Sigma_full_prior.rows() == dimFull && Sigma_full_prior.allFinite();
     if (copts_.psd_audit_en && schur_ok) {
-      logCovTraceStage(voxel_map_->frame_idx_, "Sigma_full_prior", Sigma_full_prior);
-      logCovTraceStage(voxel_map_->frame_idx_, "P_x0_prior", Sigma_full_prior.topLeftCorner(9, 9));
-      logCovTraceStage(voxel_map_->frame_idx_, "P_z_prior", Sigma_full_prior.bottomRightCorner(dimZ, dimZ));
-      logCovTraceStage(voxel_map_->frame_idx_, "P_eta_prior", Sigma_full_prior.block(9, 9, dEta, dEta));
-      logCovTraceStage(voxel_map_->frame_idx_, "P_sT_prior", Sigma_full_prior.bottomRightCorner(dST, dST));
+      logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "Sigma_full_prior", Sigma_full_prior);
+      logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_x0_prior", Sigma_full_prior.topLeftCorner(9, 9));
+      logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_z_prior", Sigma_full_prior.bottomRightCorner(dimZ, dimZ));
+      logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_eta_prior", Sigma_full_prior.block(9, 9, dEta, dEta));
+      logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_sT_prior", Sigma_full_prior.bottomRightCorner(dST, dST));
     }
     if (schur_ok) {
       Eigen::MatrixXd Lambda_meas_full = Eigen::MatrixXd::Zero(dimFull, dimFull);
@@ -1262,10 +1316,10 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       if (!update_ok) { Sigma_full_post = Sigma_full_prior; }
       coupled_pose_control_P_z_post_ = Sigma_full_post.bottomRightCorner(dimZ, dimZ);
       if (copts_.psd_audit_en) {
-        logCovTraceStage(voxel_map_->frame_idx_, "Sigma_full_post", Sigma_full_post);
-        logCovTraceStage(voxel_map_->frame_idx_, "P_z_post", coupled_pose_control_P_z_post_);
-        logCovTraceStage(voxel_map_->frame_idx_, "P_eta_post", Sigma_full_post.block(9, 9, dEta, dEta));
-        logCovTraceStage(voxel_map_->frame_idx_, "P_sT_post", Sigma_full_post.bottomRightCorner(dST, dST));
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "Sigma_full_post", Sigma_full_post);
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_z_post", coupled_pose_control_P_z_post_);
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_eta_post", Sigma_full_post.block(9, 9, dEta, dEta));
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_sT_post", Sigma_full_post.bottomRightCorner(dST, dST));
       }
 
       // M_T: dimState() x dimZ, mapping z -> the FULL tail StateGroup
@@ -1311,12 +1365,12 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       M_T.block(StateGroup::idxP(), 0, 3, dEta) = J_p;
       M_T.block(StateGroup::idxV(), 0, 3, dEta) = J_v;
       if (copts_.psd_audit_en) {
-        logCovTraceStage(voxel_map_->frame_idx_, "dR_dc_raw", dR_dc);
-        logCovTraceStage(voxel_map_->frame_idx_, "dp_dc_raw", dp_dc);
-        logCovTraceStage(voxel_map_->frame_idx_, "dv_dc_raw", dv_dc);
-        logCovTraceStage(voxel_map_->frame_idx_, "J_R", J_R);
-        logCovTraceStage(voxel_map_->frame_idx_, "J_p", J_p);
-        logCovTraceStage(voxel_map_->frame_idx_, "J_v", J_v);
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "dR_dc_raw", dR_dc);
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "dp_dc_raw", dp_dc);
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "dv_dc_raw", dv_dc);
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "J_R", J_R);
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "J_p", J_p);
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "J_v", J_v);
       }
       if (layout.colBG() >= 0 && state_->idxBG() >= 0)
         M_T.block<3, 3>(state_->idxBG(), dEta + layout.colBG() - layout.dimCFree()) = M3D::Identity();
@@ -1354,15 +1408,15 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       const Eigen::MatrixXd P_tail_pred = 0.5 * (Ppred_raw + Ppred_raw.transpose());
       const Eigen::MatrixXd P_T = 0.5 * (Ppost_raw + Ppost_raw.transpose());
       if (copts_.psd_audit_en) {
-        logCovTraceStage(voxel_map_->frame_idx_, "J_h_tail", J_h_tail);
-        logCovTraceStage(voxel_map_->frame_idx_, "M_full", M_full);
-        logCovTraceStage(voxel_map_->frame_idx_, "M_T", M_T);
-        logCovTraceStage(voxel_map_->frame_idx_, "P_R_pred", P_tail_pred.block<3, 3>(StateGroup::idxR(), StateGroup::idxR()));
-        logCovTraceStage(voxel_map_->frame_idx_, "P_p_pred", P_tail_pred.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()));
-        logCovTraceStage(voxel_map_->frame_idx_, "P_v_pred", P_tail_pred.block<3, 3>(StateGroup::idxV(), StateGroup::idxV()));
-        logCovTraceStage(voxel_map_->frame_idx_, "P_R_post", P_T.block<3, 3>(StateGroup::idxR(), StateGroup::idxR()));
-        logCovTraceStage(voxel_map_->frame_idx_, "P_p_post", P_T.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()));
-        logCovTraceStage(voxel_map_->frame_idx_, "P_v_post", P_T.block<3, 3>(StateGroup::idxV(), StateGroup::idxV()));
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "J_h_tail", J_h_tail);
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "M_full", M_full);
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "M_T", M_T);
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_R_pred", P_tail_pred.block<3, 3>(StateGroup::idxR(), StateGroup::idxR()));
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_p_pred", P_tail_pred.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()));
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_v_pred", P_tail_pred.block<3, 3>(StateGroup::idxV(), StateGroup::idxV()));
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_R_post", P_T.block<3, 3>(StateGroup::idxR(), StateGroup::idxR()));
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_p_post", P_T.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()));
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_v_post", P_T.block<3, 3>(StateGroup::idxV(), StateGroup::idxV()));
       }
 
       // ====================================================================
@@ -1460,38 +1514,30 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           const double x1_cond = (std::abs(es_x1.eigenvalues().minCoeff()) > 1e-300)
               ? es_x1.eigenvalues().maxCoeff() / es_x1.eigenvalues().minCoeff() : 0.0;
 
-          static PersistentLogStream x1cov_log("pose_control_x1_diagnostics.txt");
-          bool x1cov_first;
-          std::ofstream& x1cov_ofs = x1cov_log.stream(&x1cov_first);
-          if (x1cov_first)
-            x1cov_ofs << "scan_id,x1_knot_index,x1_time,"
-                          "p_final_x,p_final_y,p_final_z,v_final_x,v_final_y,v_final_z,"
-                          "p_imu_x,p_imu_y,p_imu_z,v_imu_x,v_imu_y,v_imu_z,"
-                          "delta_p_norm,delta_v_norm,delta_R_norm,"
-                          "trace_P_p_x1,trace_P_v_x1,trace_P_R_x1,"
-                          "trace_P_x1_prior,trace_P_x1_post,"
-                          "min_eig_P_x1_prior,max_eig_P_x1_prior,cond_P_x1_prior,rank_P_x1_prior,"
-                          "sigma_distance_p,sigma_distance_R,sigma_distance_v,"
-                          "abs_err_head_propagation_check,rel_err_head_propagation_check\n";
+          // 2026-09-24 legacy-diagnostic-writer cleanup (item 3/33): folded
+          // into pose_control_full_diagnostics.csv's "x1_covariance" row
+          // (previously a dedicated pose_control_x1_diagnostics.txt file).
           int rank_x1 = 0;
           const double thresh_x1 = 1e-9 * std::max(std::abs(es_x1.eigenvalues().maxCoeff()), 1.0);
           for (int i = 0; i < es_x1.eigenvalues().size(); ++i) if (std::abs(es_x1.eigenvalues()(i)) > thresh_x1) ++rank_x1;
-          x1cov_ofs << std::setprecision(9)
-              << voxel_map_->frame_idx_ << "," << kPoseControlX1Knot << "," << t_x1 << ","
-              << p_x1_final.x() << "," << p_x1_final.y() << "," << p_x1_final.z() << ","
-              << v_x1_final.x() << "," << v_x1_final.y() << "," << v_x1_final.z() << ","
-              << p_x1_imu_prior.x() << "," << p_x1_imu_prior.y() << "," << p_x1_imu_prior.z() << ","
-              << v_x1_imu_prior.x() << "," << v_x1_imu_prior.y() << "," << v_x1_imu_prior.z() << ","
-              << e_p.norm() << "," << e_v.norm() << "," << e_R.norm() << ","
-              << P_p_x1.trace() << "," << P_v_x1.trace() << "," << P_R_x1.trace() << ","
-              << P_x1_prior.trace() << "," << P_x1_post.trace() << ","
-              << es_x1.eigenvalues().minCoeff() << "," << es_x1.eigenvalues().maxCoeff() << "," << x1_cond << "," << rank_x1 << ","
-              << sigma_dist_p << "," << sigma_dist_R << "," << sigma_dist_v << ","
-              << abs_err_x1_check << "," << rel_err_x1_check << "\n";
-          x1cov_ofs.flush();
+          std::map<std::string, std::string> x1covkv = {
+            {"x1_knot_index", std::to_string(kPoseControlX1Knot)}, {"x1_time", std::to_string(t_x1)},
+            {"p_final_x", std::to_string(p_x1_final.x())}, {"p_final_y", std::to_string(p_x1_final.y())}, {"p_final_z", std::to_string(p_x1_final.z())},
+            {"v_final_x", std::to_string(v_x1_final.x())}, {"v_final_y", std::to_string(v_x1_final.y())}, {"v_final_z", std::to_string(v_x1_final.z())},
+            {"p_imu_x", std::to_string(p_x1_imu_prior.x())}, {"p_imu_y", std::to_string(p_x1_imu_prior.y())}, {"p_imu_z", std::to_string(p_x1_imu_prior.z())},
+            {"v_imu_x", std::to_string(v_x1_imu_prior.x())}, {"v_imu_y", std::to_string(v_x1_imu_prior.y())}, {"v_imu_z", std::to_string(v_x1_imu_prior.z())},
+            {"delta_p_norm", std::to_string(e_p.norm())}, {"delta_v_norm", std::to_string(e_v.norm())}, {"delta_R_norm", std::to_string(e_R.norm())},
+            {"trace_P_p_x1", std::to_string(P_p_x1.trace())}, {"trace_P_v_x1", std::to_string(P_v_x1.trace())}, {"trace_P_R_x1", std::to_string(P_R_x1.trace())},
+            {"trace_P_x1_prior", std::to_string(P_x1_prior.trace())}, {"trace_P_x1_post", std::to_string(P_x1_post.trace())},
+            {"min_eig_P_x1_prior", std::to_string(es_x1.eigenvalues().minCoeff())}, {"max_eig_P_x1_prior", std::to_string(es_x1.eigenvalues().maxCoeff())},
+            {"cond_P_x1_prior", std::to_string(x1_cond)}, {"rank_P_x1_prior", std::to_string(rank_x1)},
+            {"sigma_distance_p", std::to_string(sigma_dist_p)}, {"sigma_distance_R", std::to_string(sigma_dist_R)}, {"sigma_distance_v", std::to_string(sigma_dist_v)},
+            {"abs_err_head_propagation_check", std::to_string(abs_err_x1_check)}, {"rel_err_head_propagation_check", std::to_string(rel_err_x1_check)},
+          };
+          emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "x1_covariance", voxel_map_->frame_idx_, -1, x1covkv);
 
-          logCovTraceStage(voxel_map_->frame_idx_, "P_x1_prior", P_x1_prior);
-          logCovTraceStage(voxel_map_->frame_idx_, "P_x1_post", P_x1_post);
+          logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_x1_prior", P_x1_prior);
+          logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_x1_post", P_x1_post);
         }
       }
 
@@ -1548,42 +1594,26 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         }
       }
 
-      // 2026-09-23 stationary-campaign instrumentation: full P_tail_pred/
-      // P_tail_post matrices (not just scalar traces) -- needed for real
-      // NEES computation in post-processing (e^T P^-1 e), which cannot be
-      // recovered from trace/min-eig/max-eig alone. One row per scan,
-      // flattened row-major, gated behind psd_audit_en like everything else
-      // in this block.
-      if (copts_.psd_audit_en) {
-        static PersistentLogStream fullcov_log("pose_control_full_cov_matrices.txt");
-        bool fc_first;
-        std::ofstream& fofs = fullcov_log.stream(&fc_first);
-        if (fc_first) fofs << "scan_id,dim,which,matrix_row_major_csv\n";
-        auto dumpMat = [&](const char* which, const Eigen::MatrixXd& M) {
-          fofs << voxel_map_->frame_idx_ << "," << M.rows() << "," << which << ",";
-          for (int i = 0; i < M.rows(); ++i)
-            for (int j = 0; j < M.cols(); ++j)
-              fofs << std::setprecision(9) << M(i, j) << (i == M.rows()-1 && j == M.cols()-1 ? "" : ";");
-          fofs << "\n";
-        };
-        dumpMat("P_tail_pred", P_tail_pred);
-        dumpMat("P_tail_post", P_T);
-        fofs.flush();
-      }
+      // 2026-09-24 legacy-diagnostic-writer cleanup (item 3/33): the old
+      // pose_control_full_cov_matrices.txt (full P_tail_pred/P_tail_post
+      // NxN dumps, for an offline NEES computation) is REMOVED rather than
+      // folded into the unified CSV -- a full matrix dump doesn't fit that
+      // schema's fixed scalar/vector-column convention (same reasoning
+      // applied when pose_control_weak_mode_matrices.txt was removed the
+      // previous phase), and NEES-from-raw-matrix is not part of this
+      // phase's required validation output (items 44-49). trace/min-eig/
+      // max-eig of these same matrices remain available via the
+      // covariance_summary/covariance_block rows above.
 
       // 2026-09-23 stationary-campaign instrumentation: per-knot state
       // (position/rotation-log/derived velocity/acceleration/angular
       // velocity) and control-point second-difference (oscillation) at the
       // CONVERGED spline, once per scan. Cheap -- pure spline evaluation,
       // no new solves.
+      // 2026-09-24 legacy-diagnostic-writer cleanup (item 3/33): folded
+      // into pose_control_full_diagnostics.csv's "knot_state" row
+      // (previously a dedicated pose_control_knot_state.txt file).
       if (copts_.psd_audit_en) {
-        static PersistentLogStream knot_log("pose_control_knot_state.txt");
-        bool kn_first;
-        std::ofstream& kofs = knot_log.stream(&kn_first);
-        if (kn_first)
-          kofs << "scan_id,knot_index,knot_time,p_x,p_y,p_z,rlog_x,rlog_y,rlog_z,"
-                  "v_x,v_y,v_z,a_x,a_y,a_z,omega_x,omega_y,omega_z,"
-                  "d1_pos_norm,d2_pos_norm,d1_rot_norm,d2_rot_norm\n";
         const int N = layout.N;
         for (int k = 0; k < N; ++k) {
           const double tk = spline.t0() + std::min<double>(k, spline.nSeg()) * spline.delta();
@@ -1594,15 +1624,18 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           if (k >= 1) d1r = (spline.cp_phi.col(k) - spline.cp_phi.col(k-1)).norm();
           if (k >= 2) d2p = (spline.cp_p.col(k) - 2*spline.cp_p.col(k-1) + spline.cp_p.col(k-2)).norm();
           if (k >= 2) d2r = (spline.cp_phi.col(k) - 2*spline.cp_phi.col(k-1) + spline.cp_phi.col(k-2)).norm();
-          kofs << voxel_map_->frame_idx_ << "," << k << "," << tk << ","
-               << p.x() << "," << p.y() << "," << p.z() << ","
-               << r.x() << "," << r.y() << "," << r.z() << ","
-               << vel.x() << "," << vel.y() << "," << vel.z() << ","
-               << acc.x() << "," << acc.y() << "," << acc.z() << ","
-               << om.x() << "," << om.y() << "," << om.z() << ","
-               << d1p << "," << d2p << "," << d1r << "," << d2r << "\n";
+          std::map<std::string, std::string> knkv = {
+            {"knot_index", std::to_string(k)}, {"knot_time", std::to_string(tk)},
+            {"p_x", std::to_string(p.x())}, {"p_y", std::to_string(p.y())}, {"p_z", std::to_string(p.z())},
+            {"rlog_x", std::to_string(r.x())}, {"rlog_y", std::to_string(r.y())}, {"rlog_z", std::to_string(r.z())},
+            {"v_x", std::to_string(vel.x())}, {"v_y", std::to_string(vel.y())}, {"v_z", std::to_string(vel.z())},
+            {"a_x", std::to_string(acc.x())}, {"a_y", std::to_string(acc.y())}, {"a_z", std::to_string(acc.z())},
+            {"omega_x", std::to_string(om.x())}, {"omega_y", std::to_string(om.y())}, {"omega_z", std::to_string(om.z())},
+            {"d1_pos_norm", std::to_string(d1p)}, {"d2_pos_norm", std::to_string(d2p)},
+            {"d1_rot_norm", std::to_string(d1r)}, {"d2_rot_norm", std::to_string(d2r)},
+          };
+          emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "knot_state", voxel_map_->frame_idx_, -1, knkv);
         }
-        kofs.flush();
       }
 
       // ---- full tail writeback (item 12): ONE complete posterior tail
