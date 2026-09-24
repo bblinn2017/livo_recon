@@ -2,7 +2,7 @@
 
 #include "livo_recon/lio/pose_control_spline.h"
 #include "livo_recon/lio/pose_control_layout.h"
-#include "livo_recon/lio/pose_knot_spline.h"   // buildImuStep9x9/integrateAndAccumulateStep
+#include "livo_recon/lio/imu_process_step9.h"   // buildImuStep9x9/integrateAndAccumulateStep
 
 // ============================================================================
 // 2026-09-24 PRODUCTION ROLE CLARIFICATION (item 5 of the implementation +

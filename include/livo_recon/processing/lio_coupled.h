@@ -3,7 +3,6 @@
 #include "livo_recon/processing/lio_base.h"
 #include "livo_recon/lio/coupled_estimator.h"
 #include "livo_recon/lio/pose_spline_system.h"
-#include "livo_recon/lio/pose_knot_spline.h"
 #include "livo_recon/lio/pose_control_spline.h"
 #include "livo_recon/lio/pose_control_process_factor.h"
 #include "livo_recon/lio/pose_control_lidar_factor.h"
@@ -40,22 +39,24 @@ struct LioProcCoupledOptions
   //     in c_p directly (no chain through the IMU state), and the IMU
   //     enters as a measurement FACTOR (spline-implied accel/omega vs raw
   //     IMU), not a prior. See buildPoseSplineSystem().
-  //   "pose_knots" (user instruction 2026-09-21, 32-item redesign):
-  //     control points are ACTUAL PHYSICAL TRAJECTORY KNOTS (p_j,R_j,v_j at
-  //     known times t_j -- PoseKnotSpline, pose_knot_spline.h) rather than
-  //     B-spline basis coefficients (cp_j != p(tj) under "pose" -- this
-  //     mode's whole point is closing that gap so a covariance genuinely
-  //     attached to knot j means Cov[p(tj),theta(tj)], not
-  //     Cov[coefficient j]). Kept as a THIRD, separate mode alongside
-  //     "pose" (item 23: "I would not replace ScanSpline globally... this
-  //     protects the existing decoupled estimator" -- and by the same
-  //     logic, protects the existing coefficient-basis "pose" mode too,
-  //     which stays exactly as shipped for comparison).
+  //   "pose_control": the pose-control-point-only trajectory state (see
+  //     below) -- the current, supported joint-prior formulation.
+  //
+  // 2026-09-23: the "pose_knots" physical-knot B-spline estimator (a fourth
+  // mode that existed here, PoseKnotSpline/pose_knot_spline.h) has been
+  // retired -- see pose_control_implementation_report_v3.md's estimator-
+  // retirement section. It was never selected by any shipped config
+  // (default spline_mode is "raw_imu"); its two genuinely shared IMU-
+  // propagation functions (buildImuStep9x9/integrateAndAccumulateStep) were
+  // extracted into imu_process_step9.h before deletion, since
+  // pose_control_process_factor.cpp depends on them for the scan-start
+  // joint IMU prior. "pose_knots" is no longer a valid spline_mode value --
+  // configuring it now trips the unclaimed-mode-value abort in
+  // cfg.nestedMode(), same as any other unrecognized string.
   // Config key: estimator/coupled/spline_mode.
   std::string spline_mode = "raw_imu";
-  static constexpr const char* SPLINE_MODES[] = { "raw_imu", "pose", "pose_knots", "pose_control" };
+  static constexpr const char* SPLINE_MODES[] = { "raw_imu", "pose", "pose_control" };
   bool poseBasis() const { return spline_mode == "pose"; }
-  bool poseKnotsBasis() const { return spline_mode == "pose_knots"; }
   // 2026-09-22: the pose-CONTROL-POINT-only trajectory state -- z=[c_free;
   // sT], no independent velocity/angular-velocity DOF, head mean fixed
   // (not a GN variable), tail free (spline-derived R/p/v + free bg/ba/g).
@@ -65,8 +66,7 @@ struct LioProcCoupledOptions
   bool poseControlSplineBasis() const { return spline_mode == "pose_control"; }
   // Config key: estimator/coupled/pose_control/n_control_points.
   int pose_control_n = 13;
-  // Config key: estimator/coupled/pose_control/q_pinv_rel_thresh -- same
-  // convention as pose_knots_q_pinv_rel_thresh below.
+  // Config key: estimator/coupled/pose_control/q_pinv_rel_thresh.
   double pose_control_q_pinv_rel_thresh = 1e-6;
   // Diagnostic-only knobs for the 2026-09-22 correction's required
   // scan-1 test suite (items 16/18) -- both default to shipping behavior
@@ -201,133 +201,6 @@ struct LioProcCoupledOptions
   // choice -- report the actual number this produces before trusting it.
   double pose_gn_max_step_pos_m = 0.5;
   double pose_gn_max_step_rot_rad = 0.2;
-
-  // ==========================================================================
-  // User instruction 2026-09-21 ("do all of them", the 32-item physical-
-  // knot redesign) -- estimator/coupled/pose_knots/*, meaningful only under
-  // spline_mode=pose_knots (poseKnotsBasis()). See pose_knot_spline.h and
-  // estimateCoupledPoseKnotSpline() for the actual mechanism; these are
-  // just its tunables. Item 31's own "first experiment" config: n_knots=13
-  // (matching this project's usual n_c range), smoothness OFF, IMU factors
-  // ON, point_time by default (this arm reuses the SAME
-  // estimator/coupled/jacobian_time_mode key the other two arms read --
-  // item 9's own "keep point_time/end_time as an orthogonal experiment").
-  // ==========================================================================
-  int pose_knots_n = 13;
-  // Item 20's own "simpler first implementation" fallback: a first-
-  // difference penalty between ADJACENT knots' position/rotation
-  // corrections (||delta_p_{j+1}-delta_p_j||^2 etc.), NOT the physically-
-  // motivated integral jerk/angular-acceleration form item 20 states as
-  // the ideal -- that would need a higher-order interpolation than the
-  // cubic Hermite this first implementation uses. 0.0 = off (item 31: "First
-  // prove physical knot representation + IMU factors + LiDAR works. Then
-  // add smoothness" -- this class of prior is deliberately NOT what
-  // enforces trajectory sanity in v1; the IMU process factor is).
-  double pose_knots_smoothness_pos = 0.0;
-  double pose_knots_smoothness_rot = 0.0;
-  // Ablation knob (item 31's own YAML lists it explicitly): with this off,
-  // consecutive knots have NO process-factor link at all (only the
-  // optional smoothness prior above, if nonzero, and each knot's own
-  // LiDAR factors) -- a genuinely degenerate configuration, kept only for
-  // testing that the IMU factor is actually doing something.
-  bool pose_knots_use_imu_factors = true;
-  // POST-REVIEW ADDITION (item 3, "the threshold is still an arbitrary
-  // numerical cutoff... add a config parameter and test 1e-4...1e-8,
-  // record lambda_min(A)/lambda_max(A)/cond(A) plus the stationary
-  // trajectory error. If results are stable, this issue can be
-  // retired"): Q9's own pseudo-inverse relative eigenvalue threshold,
-  // now a live knob instead of the hardcoded 1e-6 (which remains the
-  // default -- this is deliberately NOT re-tuned by this change itself,
-  // only made sweepable). Config key: estimator/coupled/pose_knots/
-  // q_pinv_rel_thresh. Does NOT affect Omega0's own pseudo-inverse (the
-  // head prior P0^-1) -- that one is not the rank-deficient quantity the
-  // review is asking about, and stays at its own fixed 1e-6.
-  double pose_knots_q_pinv_rel_thresh = 1e-6;
-
-  // Phase-2 diagnostic (2026-09-22 process-factor nullspace investigation):
-  // TEMPORARY soft penalty lambda_C*||N_j^T r_j||^2 added on top of the
-  // existing r_j^T Q_j^+ r_j process cost, where N_j spans the 3 lowest
-  // eigenvectors of that same GN iteration's relinearized Q9 (NOT the
-  // configurable q_pinv_rel_thresh nullspace -- deliberately fixed at "the 3
-  // smallest" per Phase 1's own dim(null(Q))=3 finding, to avoid confounding
-  // this experiment with a q_pinv_rel_thresh sweep). Does NOT touch the
-  // existing pseudoinverse, IMU/LiDAR weighting, or anything else -- this is
-  // an additive diagnostic term only, default off. See pose_knots_G_rank_check
-  // diagnostic / the nullspace-projection diagnostic this builds on.
-  bool pose_knots_det_constraint_en = false;
-  double pose_knots_det_constraint_weight = 1.0e4;
-
-  // Phase-3 production candidate (2026-09-22): the soft penalty above
-  // demonstrated (4/4 md5 gate, 719m->0.04m stationary drift, 16080->1.05
-  // m/s^2 accel, kappa(A) 2.4e16->2.1e10 -- see the Phase-2 report) that
-  // the pathological pose_knots stationary drift is explained by the bare
-  // Q9 pseudoinverse omitting a DETERMINISTIC (zero-noise) component of
-  // the process model, not by tuning. This flag replaces the soft penalty
-  // with the mathematically exact version: N^T r = 0 enforced as a hard
-  // equality constraint via nullspace elimination (delta = delta_p + Z*eta,
-  // Z=null(C), C stacking each segment's N_j^T[-F_j I]), while the
-  // stochastic term keeps EXACTLY r_stochastic^T Q^+ r_stochastic (Lambda
-  // built from the SAME 6 non-null Q9 eigendirections N_j's complement
-  // spans, not the separately-thresholded q_pinv_rel_thresh -- avoids
-  // double-counting/gap between the two). Default false pending the
-  // Phase-3 validation the user requested (exact-constraint solution vs
-  // the lambda_C=1e6 soft-penalty solution on stationary eee_01 scan 1)
-  // before this becomes the production default. When true, takes
-  // precedence over pose_knots_det_constraint_en (soft path is skipped,
-  // with a one-time diagnostic warning if both are set -- they are
-  // mutually exclusive, not additive).
-  bool pose_knots_exact_det_constraint_en = false;
-
-  // Phase-4 (2026-09-22): whether F9_j/Q9_j are recomputed every GN
-  // iteration from the trial's CURRENT (moving) state (true, matches
-  // shipped/all-prior-phase behavior) or relinearized ONCE per scan at
-  // the first iteration and then held fixed for the rest of that scan's
-  // GN iterations (false). Re-testing this axis now that the exact
-  // deterministic constraint exists -- the earlier finding ("frozen ->
-  // oscillatory stationary error, relinearized -> catastrophic
-  // divergence") was obtained while the process model was missing that
-  // constraint, so it needs to be reconsidered. Default true (unchanged
-  // live behavior).
-  bool pose_knots_relinearize_fq = true;
-
-  // Velocity-observability campaign (2026-09-22), Part 7: which knot
-  // velocity DOFs the GN solve actually optimizes. Meaningful only under
-  // spline_mode=pose_knots. Default "free_per_knot" is EXACTLY today's
-  // shipped behavior (no behavioral change at default). Config key:
-  // estimator/coupled/pose_knots/velocity_mode.
-  //   free_per_knot -- current implementation, N independent 3D velocity
-  //     corrections (one per knot), unchanged.
-  //   fixed_nominal -- knot velocities stay at their IMU-propagated
-  //     nominal values for the whole scan (delta_vel is a hard-
-  //     constrained-to-zero homogeneous equality, NOT a huge prior and
-  //     NOT set to zero VALUE -- the nominal velocity itself is whatever
-  //     the IMU predicted, typically nonzero); zero optimized velocity
-  //     DOFs.
-  //   shared_scan -- exactly one shared 3D velocity correction
-  //     delta_v_scan, hard-constrained equal across every knot
-  //     (v_j = v_j_nominal + delta_v_scan for all j); 3 optimized
-  //     velocity DOFs total instead of 3*N.
-  //   derivative_defined (2026-09-22, pose-spline-derivative-state
-  //     campaign) -- v_j is HARD-CONSTRAINED to equal the analytic
-  //     time-derivative of the position-only (Catmull-Rom) spline
-  //     through the position control points, NOT frozen and NOT free:
-  //     v_j = (p_{j+1}-p_{j-1}) / (t_{j+1}-t_{j-1}) for interior knots,
-  //     one-sided at the two boundary knots -- an AFFINE equality
-  //     constraint (nonzero d_exact, unlike fixed_nominal/shared_scan's
-  //     homogeneous rows), so v_j's optimized value changes automatically
-  //     whenever a neighboring POSITION control point's own correction
-  //     changes, with zero independent velocity DOFs. See
-  //     estimateCoupledPoseKnotSpline()'s own derivation comment at the
-  //     velmode_derivative constraint-row-fill site for the exact algebra
-  //     and why this reuses the exact-constraint nullspace-elimination
-  //     machinery rather than needing a new solver path.
-  // Implemented as ADDITIONAL equality-constraint rows appended to the
-  // SAME nullspace-elimination machinery exact_deterministic_constraint_
-  // enable already uses (see estimateCoupledPoseKnotSpline()'s C_exact/
-  // Z_ns construction) -- every velocity_mode value composes cleanly with
-  // that flag (both independently on/off), rather than needing a
-  // separate code path.
-  std::string pose_knots_velocity_mode = "free_per_knot";
 
   // CQ-85 item 1: rule 58f's exact failure mode -- CQ-72's own 96-cell grid
   // produced a cell reporting completed=yes with ATE=396,499,288.300 mm (a
@@ -747,27 +620,14 @@ private:
   // needed -- the pose basis's own trajectory already IS an absolute
   // pose, not a correction requiring re-propagation).
   double estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out);
-  // User instruction 2026-09-21 item 24: a NEW solver, not a further
-  // extension of estimateCoupledCorrectionPoseBasis() ("that name now
-  // describes the old coefficient-based architecture"). Owns: knot states/
-  // covariance (coupled_pose_knots_), the joint per-GN-iteration
-  // information system (item 14's "mathematically clean" batch form -- ALL
-  // knots solved together, not independent sequential updates), IMU
-  // process factors between adjacent knots (item 16), LiDAR factors
-  // attached to each residual's own bracketing knot pair (item 8/9), and
-  // the joint posterior A^-1 this class reads knot marginal/cross
-  // covariance from directly (items 12/13/27 -- see pose_knot_spline.h's
-  // own doc comment for why no basis-coefficient translation is needed
-  // here, unlike coupled_pose_head_cov_ above).
-  double estimateCoupledPoseKnotSpline(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out);
-  // 2026-09-22: one GN iteration of the pose-control-point-only estimator
+  // One GN iteration of the pose-control-point-only estimator
   // (spline_mode=pose_control). Rebuilds LiDAR + process-factor normal
   // equations fresh each call against z=[c_free;sT] (coupled_pose_control_layout_),
   // solves, applies the mean update in place to coupled_pose_control_spline_
   // (free control points) and coupled_pose_control_sT_{bg,ba,g}_, reconciles
   // the tail (R/p/v read directly off the optimized spline at t1, never an
   // independent variable), and writes state_->setPropagatedState(...) every
-  // call -- exactly like estimateCoupledPoseKnotSpline()'s own pattern.
+  // call.
   // Covariance is NOT written here (spec: mean every iteration, covariance
   // once after convergence) -- see processLIO()'s own
   // copts_.poseControlSplineBasis() early-return block for that.
@@ -851,36 +711,8 @@ private:
   // (the real-coupling path); untouched, unread otherwise.
   Eigen::Matrix<double, 6, 6> coupled_pose_head_cov_ = Eigen::Matrix<double, 6, 6>::Zero();
 
-  // User instruction 2026-09-21 items 1-4/24: the physical-knot analogue
-  // of coupled_pose_spline_/coupled_c_pos_/coupled_c_rot_ above. Built
-  // ONCE per scan (first GN iteration) via PoseKnotSpline::init(); the
-  // ACCUMULATED per-knot [delta_theta,delta_p,delta_v] corrections (9*N,
-  // same flattened order as the joint solve) persist across this scan's
-  // GN iterations, reset at scan start, exactly mirroring coupled_c_pos_/
-  // coupled_c_rot_'s own pattern. Only meaningful when
-  // copts_.poseKnotsBasis().
-  PoseKnotSpline coupled_pose_knots_;
-  bool coupled_pose_knots_valid_ = false;
-  std::vector<V3D> coupled_knot_delta_theta_, coupled_knot_delta_pos_, coupled_knot_delta_vel_;
-  // The joint posterior's own knot-diagonal covariance blocks after the
-  // LAST (converged) GN iteration's solve -- items 12/13/27: read
-  // DIRECTLY off A^-1 at each knot's own row/col range, no basis-
-  // coefficient Jacobian chaining needed (see pose_knot_spline.h). Index
-  // j holds knot j's own 9x9 [theta,p,v] marginal.
-  std::vector<Eigen::Matrix<double, 9, 9>> coupled_knot_cov_;
-  // Phase-4 (2026-09-22, frozen vs relinearized F/Q re-test now that the
-  // exact deterministic process constraint exists): when
-  // pose_knots_relinearize_fq is false, F9_j/Q9_j are relinearized ONCE
-  // per scan (at the first GN iteration, from the scan-start trial --
-  // i.e. coupled_pose_knots_ itself, all deltas still zero) and cached
-  // here for reuse on every subsequent iteration of that same scan,
-  // instead of being recomputed from the moving trial each iteration.
-  // Sized N-1 (one per segment), reset alongside coupled_knot_delta_*
-  // above at scan start.
-  std::vector<Eigen::Matrix<double, 9, 9>> pose_knots_frozen_F9_, pose_knots_frozen_Q9_;
-  bool pose_knots_frozen_fq_valid_ = false;
-  // The pose-control-point analogue of coupled_pose_knots_ above -- only
-  // meaningful when copts_.poseControlSplineBasis().
+  // The pose-control-point trajectory state -- only meaningful when
+  // copts_.poseControlSplineBasis().
   //
   // 2026-09-22 correction: the head is a TRUE NULLSPACE ELIMINATION
   // (coupled_pose_control_hns_, built ONCE at scan start from p0/v0/R0 --
@@ -908,8 +740,7 @@ private:
       coupled_pose_control_g_prior_ = V3D::Zero();
   // Raw IMU samples bucketed onto the spline's own breakpoint grid ONCE at
   // scan start (bucketing depends only on fixed breakpoint times, not on
-  // the moving trial trajectory) -- reused every GN iteration, mirroring
-  // coupled_pose_knots_'s own seg_samples_ caching.
+  // the moving trial trajectory) -- reused every GN iteration.
   std::vector<std::vector<ImuSample>> coupled_pose_control_seg_samples_;
   // The reduced posterior z=[eta;delta_sT] covariance from the LAST
   // (converged) GN iteration's own information matrix -- written once,

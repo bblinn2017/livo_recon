@@ -134,7 +134,9 @@ add_executable(livo_recon_node
   src/lio/residual_weighting.cpp
   src/lio/coupled_estimator.cpp
   src/lio/pose_spline_system.cpp
-  src/lio/pose_knot_spline.cpp
+  src/lio/imu_process_step9.cpp
+  src/lio/pose_control_adaptive_q.cpp
+  src/lio/pose_control_directional_redundancy.cpp
   src/lio/pose_control_spline.cpp
   src/lio/pose_control_process_factor.cpp
   src/lio/pose_control_covariance.cpp
@@ -244,4 +246,51 @@ target_link_libraries(test_pose_control_prior_math_debugeigen
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
   ${OpenCV_LIBS}
+)
+
+# 2026-09-23 implementation-completion phase: registered synthetic test for
+# the physical-residual adaptive-Q wiring (pose_control_adaptive_q.h/.cpp)
+# and the surface-agnostic directional-LiDAR-redundancy diagnostic
+# (pose_control_directional_redundancy.h/.cpp). See scripts/test/test_pose_
+# control_adaptive_q_directional.cpp's own header comment for exactly what
+# each check validates.
+add_executable(test_pose_control_adaptive_q_directional
+  src/utils/state/state.cpp
+  src/lio/spline.cpp
+  src/utils/log/debug_log_dir.cpp
+  src/lio/pose_control_spline.cpp
+  src/lio/pose_control_adaptive_q.cpp
+  src/lio/pose_control_directional_redundancy.cpp
+  src/lio/pose_control_lidar_factor.cpp
+  src/lio/pose_control_process_factor.cpp
+  src/lio/imu_process_step9.cpp
+  scripts/test/test_pose_control_adaptive_q_directional.cpp
+)
+target_link_libraries(test_pose_control_adaptive_q_directional
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  OpenMP::OpenMP_CXX
+)
+
+add_executable(test_pose_control_adaptive_q_directional_debugeigen
+  src/utils/state/state.cpp
+  src/lio/spline.cpp
+  src/utils/log/debug_log_dir.cpp
+  src/lio/pose_control_spline.cpp
+  src/lio/pose_control_adaptive_q.cpp
+  src/lio/pose_control_directional_redundancy.cpp
+  src/lio/pose_control_lidar_factor.cpp
+  src/lio/pose_control_process_factor.cpp
+  src/lio/imu_process_step9.cpp
+  scripts/test/test_pose_control_adaptive_q_directional.cpp
+)
+target_compile_options(test_pose_control_adaptive_q_directional_debugeigen PRIVATE
+  $<$<COMPILE_LANGUAGE:CXX>:-UNDEBUG;-O0;-g>
+)
+target_link_libraries(test_pose_control_adaptive_q_directional_debugeigen
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  OpenMP::OpenMP_CXX
 )

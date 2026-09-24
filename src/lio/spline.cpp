@@ -1121,7 +1121,14 @@ SplineImuResidualStats computeSplineImuResidual(
     rw.push_back(w_pred - s.gyro);
   }
 
-  st.n = static_cast<int>(ra.size());
+  return reduceImuResidualSamples(ra, rw);
+}
+
+SplineImuResidualStats reduceImuResidualSamples(
+    const std::vector<V3D>& ra, const std::vector<V3D>& rw)
+{
+  SplineImuResidualStats st;
+  st.n = static_cast<int>(std::min(ra.size(), rw.size()));
   if (st.n < 8) { st.n = 0; return st; }
 
   V3D ma = V3D::Zero(), mw = V3D::Zero();
@@ -1141,14 +1148,26 @@ SplineImuResidualStats computeSplineImuResidual(
   st.cov_acc = sa / (3.0 * (st.n - 1));
   st.cov_gyr = sw / (3.0 * (st.n - 1));
 
-  double na = 0.0, nw = 0.0;
-  for (int i = 1; i < st.n; ++i)
-  {
-    na += (ra[i] - ma).dot(ra[i - 1] - ma);
-    nw += (rw[i] - mw).dot(rw[i - 1] - mw);
-  }
-  if (sa > 0.0) st.acf1_acc = na / sa;
-  if (sw > 0.0) st.acf1_gyr = nw / sw;
+  // Lag-k autocorrelation (k=1,2,5): sum_i (r_i-mean).(r_{i-k}-mean) /
+  // sum_i (r_i-mean).(r_i-mean). Only k=1 gates AdaptiveQ::update() (see
+  // its own doc comment); k=2,5 are recorded for the whiteness diagnostic
+  // (item 19/27) but not part of the acceptance rule -- a process with
+  // strong lag-1 correlation is already rejected before lag-2/5 matter,
+  // and demanding ALL THREE be small is a strictly stricter (and
+  // unvalidated) gate this change does not introduce silently.
+  auto lagAcf = [&](const std::vector<V3D>& r, const V3D& mean, double denom, int lag) -> double {
+    if (!(denom > 0.0) || static_cast<int>(r.size()) <= lag) return 0.0;
+    double num = 0.0;
+    for (int i = lag; i < static_cast<int>(r.size()); ++i)
+      num += (r[i] - mean).dot(r[i - lag] - mean);
+    return num / denom;
+  };
+  st.acf1_acc = lagAcf(ra, ma, sa, 1);
+  st.acf1_gyr = lagAcf(rw, mw, sw, 1);
+  st.acf2_acc = lagAcf(ra, ma, sa, 2);
+  st.acf2_gyr = lagAcf(rw, mw, sw, 2);
+  st.acf5_acc = lagAcf(ra, ma, sa, 5);
+  st.acf5_gyr = lagAcf(rw, mw, sw, 5);
 
   return st;
 }

@@ -125,14 +125,9 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // same cross-class read pattern as the two flags above, one more OR term.
   std::string coupled_spline_mode = "raw_imu";
   paramWarn<std::string>(pnh, "estimator/coupled/spline_mode", coupled_spline_mode, std::string("raw_imu"));
-  // POST-REVIEW FIX: pose_knots (PoseKnotSpline::init()) needs the raw
-  // stream just as much as "pose" does -- it was missing here entirely,
-  // so mg.imu_samples_raw stayed empty and init() correctly (but
-  // unhelpfully) refused every single scan with "no valid initial
-  // trajectory", discovered via a live crash on scan 1.
-  // 2026-09-22: pose_control was missing from this enumeration -- same
-  // stale-list bug the comment above already documents fixing once for
-  // pose_knots. mg.imu_samples_raw stayed permanently EMPTY for every
+  // 2026-09-22: pose_control was missing from this enumeration -- a
+  // stale-list bug (the same class of bug "pose" needed fixed for
+  // earlier). mg.imu_samples_raw stayed permanently EMPTY for every
   // pose_control run to date (confirmed live via pose_control_seg_debug.txt
   // instrumentation: imu_samples_raw.size()=0 on every scan), which meant
   // the ENTIRE process factor (addPoseControlProcessFactorReduced, both in
@@ -145,7 +140,7 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // engaging despite appearing to converge.
   opts_.keep_raw_samples = (spline_mode != "raw_imu") || coupled_adaptive_sigma ||
                            coupled_bias_freeze_on_vibration ||
-                           (coupled_spline_mode == "pose") || (coupled_spline_mode == "pose_knots") ||
+                           (coupled_spline_mode == "pose") ||
                            (coupled_spline_mode == "pose_control");
   { std::lock_guard<std::mutex> lock(g_qhat_mtx); g_qhat_enabled = opts_.log_qhat_en; }
 

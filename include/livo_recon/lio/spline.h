@@ -789,6 +789,14 @@ struct SplineImuResidualStats
   double cov_gyr = 0.0;    // (rad/s)^2, isotropic -- same caveat.
   double acf1_acc = 0.0;
   double acf1_gyr = 0.0;
+  // 2026-09-23: lag-2/lag-5 autocorrelation, diagnostic-only (only acf1
+  // gates AdaptiveQ::update() -- see that function's own doc comment for
+  // why lag-1 alone is the acceptance rule and 2/5 are recorded, not
+  // gated on).
+  double acf2_acc = 0.0;
+  double acf2_gyr = 0.0;
+  double acf5_acc = 0.0;
+  double acf5_gyr = 0.0;
   double max_abs_acc = 0.0;  // also mean-subtracted -- see cov_acc's caveat.
   double max_abs_gyr = 0.0;
   // Mean-residual magnitude: ||mean_i(pred_i - raw_i)|| -- a genuine, honest
@@ -806,5 +814,16 @@ SplineImuResidualStats computeSplineImuResidual(
     const ScanSpline& spline,
     const std::vector<ImuSample>& imu,
     const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity);
+
+// Shared reduction: mean/cov/acf1/acf2/acf5/max_abs from a pair of
+// per-sample residual sequences (predicted - raw), one 3-vector per IMU
+// sample, in physical units. Extracted 2026-09-23 so any spline
+// parameterization (ScanSpline via computeSplineImuResidual() above,
+// PoseControlSpline via computePoseControlImuResidual() in
+// pose_control_adaptive_q.h) reduces its own per-sample residuals through
+// the SAME statistics -- one authoritative reduction, not two copies that
+// can drift.
+SplineImuResidualStats reduceImuResidualSamples(
+    const std::vector<V3D>& ra, const std::vector<V3D>& rw);
 
 }  // namespace livo_recon
