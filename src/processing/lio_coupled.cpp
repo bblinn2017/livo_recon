@@ -1628,6 +1628,19 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
             P_ba_g = P_T.block<3, 3>(state_->idxBA(), state_->idxG());
           applyPoseControlAdaptiveQBiasGravityCorrection(
               pcq_st, spline.rotAt(t1), P_ba, P_bg, P_g, P_ba_g);
+          // Trajectory-state term (item 5/P14): evaluated at the residual
+          // window's midpoint (a representative time -- see
+          // pose_control_adaptive_q.h's own doc comment), sandwiched
+          // through the eta-block of THIS scan's own posterior
+          // (Sigma_full_post, already computed above).
+          {
+            Eigen::MatrixXd J_acc_eta, J_gyr_eta;
+            computePoseControlImuResidualStateJacobian(
+                spline, layout, hns, 0.5 * (spline.t0() + spline.t1()), state_->gravity(),
+                J_acc_eta, J_gyr_eta);
+            const Eigen::MatrixXd P_eta = Sigma_full_post.block(9, 9, dEta, dEta);
+            applyPoseControlAdaptiveQTrajectoryStateCorrection(pcq_st, J_acc_eta, J_gyr_eta, P_eta);
+          }
           coupled_pose_control_adaptive_q_.setNominal(state_->varAcc().mean(), state_->varGyr().mean());
           coupled_pose_control_adaptive_q_.update(pcq_st);
           coupled_pose_control_adaptive_q_primed_ = true;

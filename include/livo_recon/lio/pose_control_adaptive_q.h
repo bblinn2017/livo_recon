@@ -2,6 +2,7 @@
 
 #include "livo_recon/lio/spline.h"
 #include "livo_recon/lio/pose_control_spline.h"
+#include "livo_recon/lio/pose_control_layout.h"
 
 // ============================================================================
 // 2026-09-23: wires AdaptiveQ (adaptive_q.h/.cpp) into the pose-control
@@ -40,24 +41,22 @@
 // this file, since this path did not previously exist) with the real
 // Jacobian-propagated contribution, including the ba/gravity CROSS term.
 //
-// DISCLOSED SCOPE LIMITATION: J_state (the sensitivity of e_acc/e_gyr to
-// TRAJECTORY-state uncertainty -- errors in the converged spline's own
-// control points, as distinct from bias/gravity) is NOT included in C_pred
-// here. Building it requires the sensitivity of accAt(t)/rotAt(t) at every
-// raw IMU sample time to the eta/control-point posterior
-// (coupled_pose_control_P_z_post_'s eta block) -- a per-sample Jacobian
-// chain of the same shape as poseControlHeadRotJacobian()/dPosDcp()/
-// dVelDcp() but evaluated at every IMU sample time within the scan rather
-// than once at t1, then propagated through the FULL eta covariance (not
-// just its diagonal). That is real, buildable work, but a distinct,
-// larger addition than the bias/gravity terms (whose Jacobians are exact
-// constants, not per-sample chain rules) -- not implemented in this pass.
-// Consequence: the "extra" variance this file estimates is downward-biased
-// whenever trajectory-state uncertainty is large relative to bias/gravity
-// uncertainty (i.e. it does not yet fully satisfy item 14's C_pred
-// definition, only its bias+gravity terms) -- disclosed here and in
-// pose_control_implementation_report_v3.md rather than silently claimed
-// complete.
+// 2026-09-24: TRAJECTORY-STATE term added. J_state (the sensitivity of
+// e_acc/e_gyr to uncertainty in the converged spline's own control points,
+// as distinct from bias/gravity) is now included via
+// computePoseControlImuResidualStateJacobian(), evaluated at ONE
+// representative time (the residual window's midpoint) rather than
+// per-IMU-sample -- a documented simplification consistent with the
+// bias/gravity terms' own treatment (both are systematic, not i.i.d.,
+// across the sample window, and neither addresses the mean-centering
+// interaction rigorously; this term is not a new category of
+// approximation beyond what the bias/gravity terms already accept, see
+// pose_control_implementation_report_v4.md). The Jacobian primitives
+// (dAccDcp, dOmegaDcphi, dThetaDcphi) are the SAME ones
+// addPoseControlLidarFactor() already uses, chained the same way the
+// LiDAR factor's own dr_dcp_phi is; the sign/convention is verified by a
+// finite-difference check in the registered test (not asserted from
+// derivation alone).
 // ============================================================================
 
 namespace livo_recon
@@ -83,5 +82,33 @@ void applyPoseControlAdaptiveQBiasGravityCorrection(
     SplineImuResidualStats& st, const M3D& R_rep,
     const Eigen::Matrix3d& P_ba, const Eigen::Matrix3d& P_bg,
     const Eigen::Matrix3d& P_g, const Eigen::Matrix3d& P_ba_g_cross);
+
+// d(e_acc)/d(eta) and d(e_gyr)/d(eta) (each 3 x hns.freeDim()) at time t,
+// via the SAME production Jacobian primitives (dAccDcp/dOmegaDcphi/
+// dThetaDcphi) addPoseControlLidarFactor() uses for its own per-point
+// rows, chained through the SAME head-nullspace basis Z the mean solve
+// projects onto. e_acc = R(t)^T*(accAt(t)-gravity)+bias_acc - a_measured,
+// e_gyr = omegaBodyAt(t)+bias_gyr - omega_measured -- only the accAt(t)/
+// rotAt(t)/omegaBodyAt(t) terms depend on the trajectory (eta); bias/
+// gravity/measurement terms are constants w.r.t. eta and contribute
+// nothing here (handled separately, see
+// applyPoseControlAdaptiveQBiasGravityCorrection above).
+void computePoseControlImuResidualStateJacobian(
+    const PoseControlSpline& spline, const PoseControlFreeLayout& layout,
+    const PoseControlHeadNullspace& hns, double t, const V3D& gravity,
+    Eigen::MatrixXd& J_acc_eta, Eigen::MatrixXd& J_gyr_eta);
+
+// Sandwiches J_acc_eta/J_gyr_eta (from the function above) through P_eta
+// (the eta-block of the posterior/prior covariance -- dEta x dEta) and
+// folds the result into st.cov_acc/st.cov_gyr the same way
+// applyPoseControlAdaptiveQBiasGravityCorrection() folds in bias/gravity
+// -- call this AFTER that function (both subtract from the SAME running
+// st.cov_acc/st.cov_gyr, each independently PSD-projected before being
+// subtracted, matching item 6's "project C_extra onto the PSD cone" for
+// each contribution as it is removed).
+void applyPoseControlAdaptiveQTrajectoryStateCorrection(
+    SplineImuResidualStats& st,
+    const Eigen::MatrixXd& J_acc_eta, const Eigen::MatrixXd& J_gyr_eta,
+    const Eigen::MatrixXd& P_eta);
 
 }  // namespace livo_recon

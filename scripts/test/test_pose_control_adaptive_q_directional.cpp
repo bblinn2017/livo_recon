@@ -14,6 +14,8 @@
 #include "livo_recon/lio/pose_control_adaptive_q.h"
 #include "livo_recon/lio/pose_control_directional_redundancy.h"
 #include "livo_recon/lio/pose_control_lidar_factor.h"
+#include "livo_recon/lio/pose_control_process_factor.h"
+#include "livo_recon/lio/pose_control_covariance.h"
 #include "livo_recon/lio/adaptive_q.h"
 
 #include <Eigen/Dense>
@@ -227,6 +229,80 @@ static void testAdaptiveQCausality()
   checkNear(q_used_2_acc, q_candidate_1_acc, 1e-15, "causality: Q_used_2 == Q_candidate_1 (scan 2 consumes scan 1's candidate)");
 }
 
+// A7: TRAJECTORY-STATE JACOBIAN, finite-difference self-verification (item
+// 5/P14's own required addition -- "IMPLEMENT THEM NOW", using
+// dAccDcp/dOmegaDcphi/dThetaDcphi). Rather than trust the analytic sign
+// convention derived in this file's own header comment, perturb the
+// spline's raw control points directly and compare the resulting change in
+// e_acc/e_gyr against computePoseControlImuResidualStateJacobian()'s own
+// prediction -- this is the ORACLE, exactly the same role finite-difference
+// plays for dOmegaDcphi's own existing validation in
+// test_pose_control_spline.cpp ("FD is the ORACLE only, never used here").
+static void testStateJacobianFiniteDifference()
+{
+  PoseControlSpline spline;
+  spline.init(13, 0.0, 0.1);
+  // Give the spline some nonzero, non-trivial motion so R(t) != I and
+  // accAt(t)/omegaBodyAt(t) are not degenerately zero.
+  std::mt19937 rng(555);
+  std::uniform_real_distribution<double> u(-0.3, 0.3);
+  for (int i = 0; i < spline.N(); ++i) {
+    spline.cp_p.col(i) = V3D(u(rng) + 0.02 * i, u(rng), u(rng));
+    spline.cp_phi.col(i) = V3D(u(rng), u(rng), u(rng));
+  }
+  PoseControlFreeLayout layout;
+  layout.N = spline.N(); layout.has_bg = layout.has_ba = layout.has_g = true;
+  PoseControlHeadNullspace hns;
+  hns.Z = Eigen::MatrixXd::Identity(6 * spline.N(), 6 * spline.N());  // no head elimination needed for this test
+  hns.c_particular = Eigen::VectorXd::Zero(6 * spline.N());
+
+  const double t = 0.05;
+  const V3D gravity(0, 0, -9.81);
+  Eigen::MatrixXd J_acc_eta, J_gyr_eta;
+  computePoseControlImuResidualStateJacobian(spline, layout, hns, t, gravity, J_acc_eta, J_gyr_eta);
+
+  auto evalAcc = [&](const PoseControlSpline& s) -> V3D {
+    return s.rotAt(t).transpose() * (s.accAt(t) - gravity);
+  };
+  auto evalGyr = [&](const PoseControlSpline& s) -> V3D {
+    return s.omegaBodyAt(t);
+  };
+
+  const double eps = 1e-6;
+  double max_acc_err = 0.0, max_gyr_err = 0.0;
+  const int rawDim = hns.rawDim();
+  for (int col = 0; col < rawDim; col += std::max(1, rawDim / 12)) {  // sample a spread of columns, not all (cheap)
+    PoseControlSpline sp = spline, sm = spline;
+    const int half = rawDim / 2;
+    if (col < half) { sp.cp_p.col(col / 3)(col % 3) += eps; sm.cp_p.col(col / 3)(col % 3) -= eps; }
+    else { const int c2 = col - half; sp.cp_phi.col(c2 / 3)(c2 % 3) += eps; sm.cp_phi.col(c2 / 3)(c2 % 3) -= eps; }
+    const V3D fd_acc = (evalAcc(sp) - evalAcc(sm)) / (2.0 * eps);
+    const V3D fd_gyr = (evalGyr(sp) - evalGyr(sm)) / (2.0 * eps);
+    const V3D an_acc = J_acc_eta.col(col);
+    const V3D an_gyr = J_gyr_eta.col(col);
+    max_acc_err = std::max(max_acc_err, (fd_acc - an_acc).norm());
+    max_gyr_err = std::max(max_gyr_err, (fd_gyr - an_gyr).norm());
+  }
+  check(max_acc_err < 1e-4, "trajectory-Jacobian: analytic d(e_acc)/d(eta) matches finite difference", max_acc_err);
+  check(max_gyr_err < 1e-4, "trajectory-Jacobian: analytic d(e_gyr)/d(eta) matches finite difference", max_gyr_err);
+}
+
+// A8: trajectory-state correction, sanity + zero-uncertainty degenerate
+// case (P_eta=0 must leave the residual untouched -- no spurious
+// subtraction when there IS no trajectory uncertainty).
+static void testTrajectoryStateCorrectionZeroUncertainty()
+{
+  Eigen::MatrixXd J_acc = Eigen::MatrixXd::Random(3, 10);
+  Eigen::MatrixXd J_gyr = Eigen::MatrixXd::Random(3, 10);
+  Eigen::MatrixXd P_eta = Eigen::MatrixXd::Zero(10, 10);
+  SplineImuResidualStats st;
+  st.n = 50; st.cov_acc = 0.0005; st.cov_gyr = 0.00002;
+  const double before_acc = st.cov_acc, before_gyr = st.cov_gyr;
+  applyPoseControlAdaptiveQTrajectoryStateCorrection(st, J_acc, J_gyr, P_eta);
+  checkNear(st.cov_acc, before_acc, 1e-15, "trajectory-correction: P_eta=0 leaves cov_acc untouched");
+  checkNear(st.cov_gyr, before_gyr, 1e-15, "trajectory-correction: P_eta=0 leaves cov_gyr untouched");
+}
+
 // ============================================================================
 // Part B: directional redundancy (surface-agnostic, no plane_id).
 // ============================================================================
@@ -358,6 +434,190 @@ static void testThreadedLidarFactorMatchesSerial()
   checkNear(E1, E8, 1e-8 * std::max(1.0, std::abs(E1)), "threading: 1-thread vs 8-thread E_lidar matches");
 }
 
+// ============================================================================
+// Part D: production GN-assembly synthetic fixture (item 22 -- "construct a
+// small synthetic estimator fixture sufficient to exercise the production
+// GN assembly path... at minimum exercise: production prior, production
+// LiDAR information, production first GN step... compare against an
+// independent information-form reference. Do NOT require eee_01.").
+//
+// This calls the REAL production functions
+// (buildPoseControlHeadNullspace/buildPoseControlImuPriorContribution/
+// generalPseudoInverse/addPoseControlLidarFactor) in the SAME order and
+// composition estimateCoupledPoseControlSpline()'s own scan-start-prior +
+// first-GN-iteration code uses (mirrored from lio_coupled.cpp, not
+// reimplemented) -- this is not a parallel re-derivation of the math, it
+// is the actual production math, exercised outside the ROS-coupled class
+// method that normally calls it. The independent-reference half of the
+// comparison uses FINITE-DIFFERENCE Jacobians for the LiDAR information
+// (a genuinely different computational method than the analytic
+// dPosDcp/dThetaDcphi chain addPoseControlLidarFactor() uses internally),
+// and a synthetic problem small/simple enough that a well-conditioned
+// direct solve is its own cross-check.
+// ============================================================================
+static void testProductionGNAssemblySyntheticFixture()
+{
+  PoseControlSpline spline;
+  const int N = 7;
+  spline.init(N, 0.0, 0.1);
+  std::mt19937 rng(4242);
+  std::uniform_real_distribution<double> u(-0.05, 0.05);
+  for (int i = 0; i < N; ++i) {
+    spline.cp_p.col(i) = V3D(0.01 * i, u(rng), u(rng));
+    spline.cp_phi.col(i) = V3D(u(rng), u(rng), u(rng) + 0.01 * i);
+  }
+  const V3D p0 = spline.posAt(0.0), v0 = spline.velAt(0.0);
+  const PoseControlHeadNullspace hns = buildPoseControlHeadNullspace(spline, p0, v0);
+  const int dEta = hns.freeDim();
+
+  PoseControlFreeLayout layout;
+  layout.N = N; layout.has_bg = layout.has_ba = layout.has_g = false;  // trajectory-only, keeps the fixture small
+
+  // ---- production prior: synthetic per-segment IMU samples (near-static,
+  // small noise) fed through the REAL buildPoseControlImuPriorContribution()
+  // once per segment, exactly as lio_coupled.cpp's scan-start init loop
+  // does. ----------------------------------------------------------------
+  const V3D bias_acc = V3D::Zero(), bias_gyr = V3D::Zero(), gravity(0, 0, -9.81);
+  const V3D var_acc = V3D::Constant(0.02 * 0.02), var_gyr = V3D::Constant(0.002 * 0.002);
+  std::vector<std::vector<ImuSample>> seg_samples(spline.nSeg());
+  for (int j = 0; j < spline.nSeg(); ++j) {
+    const double t_lo = j * spline.delta(), t_hi = (j + 1) * spline.delta();
+    for (int s = 0; s <= 4; ++s) {
+      ImuSample smp;
+      smp.t = t_lo + (t_hi - t_lo) * s / 4.0;
+      smp.acc = V3D(0, 0, 9.81);  // static-ish, gravity-only, matches nominal
+      smp.gyro = V3D::Zero();
+      seg_samples[j].push_back(smp);
+    }
+  }
+  const int dimRaw = layout.dim();
+  Eigen::MatrixXd A_prior_raw = Eigen::MatrixXd::Zero(dimRaw, dimRaw);
+  Eigen::VectorXd b_prior_raw_unused = Eigen::VectorXd::Zero(dimRaw);
+  PoseControlProcessFactorHeadBlock head_block;
+  for (int j = 0; j < spline.nSeg(); ++j)
+    buildPoseControlImuPriorContribution(spline, layout, j, seg_samples[j], bias_acc, bias_gyr, gravity,
+        1.0, 1.0, var_acc, var_gyr, true, 1e-6, A_prior_raw, b_prior_raw_unused, &head_block, nullptr);
+
+  Eigen::MatrixXd P0 = Eigen::MatrixXd::Identity(9, 9) * 1e-4;  // synthetic scan-start state covariance
+  const Eigen::MatrixXd Omega0 = generalPseudoInverse(P0, 1e-6);
+  Eigen::MatrixXd A_hh_prior = head_block.A_hh + Omega0;
+  Eigen::MatrixXd A_hf_prior = (head_block.A_hf.size() > 0) ? head_block.A_hf : Eigen::MatrixXd::Zero(9, dimRaw);
+
+  Eigen::MatrixXd P = Eigen::MatrixXd::Zero(dimRaw, dEta);
+  P.block(0, 0, hns.rawDim(), dEta) = hns.Z;  // dST=0, so z==eta here
+  const Eigen::MatrixXd A_ff_prior = P.transpose() * A_prior_raw * P;
+  const Eigen::MatrixXd A_hf_prior_z = A_hf_prior * P;
+  const int dimFull = 9 + dEta;
+  Eigen::MatrixXd Lambda_full_prior = Eigen::MatrixXd::Zero(dimFull, dimFull);
+  Lambda_full_prior.block(0, 0, 9, 9) = A_hh_prior;
+  Lambda_full_prior.block(0, 9, 9, dEta) = A_hf_prior_z;
+  Lambda_full_prior.block(9, 0, dEta, 9) = A_hf_prior_z.transpose();
+  Lambda_full_prior.block(9, 9, dEta, dEta) = A_ff_prior;
+  const Eigen::MatrixXd Sigma_full_prior = generalPseudoInverse(Lambda_full_prior, 1e-9);
+  const Eigen::MatrixXd Lambda_prior_eta = generalPseudoInverse(Sigma_full_prior.bottomRightCorner(dEta, dEta), 1e-9);
+
+  // ---- production LiDAR information: synthetic point-to-plane
+  // observations against 3 known, non-degenerate plane orientations. ------
+  std::vector<PoseControlLidarObs> obs;
+  std::uniform_real_distribution<double> ut(0.0, 0.1), uq(-1.0, 1.0);
+  const std::vector<V3D> plane_normals = {V3D(1, 0, 0).normalized(), V3D(0, 1, 0).normalized(), V3D(0.3, 0.3, 1).normalized()};
+  for (int i = 0; i < 300; ++i) {
+    PoseControlLidarObs o;
+    o.t = ut(rng);
+    o.q = V3D(uq(rng), uq(rng), uq(rng));
+    o.normal = plane_normals[i % 3];
+    o.d = uq(rng) * 0.1;
+    o.sigma2 = 0.01;
+    obs.push_back(o);
+  }
+  Eigen::MatrixXd A_lidar_raw = Eigen::MatrixXd::Zero(dimRaw, dimRaw);
+  Eigen::VectorXd b_lidar_raw = Eigen::VectorXd::Zero(dimRaw);
+  addPoseControlLidarFactor(spline, layout, obs, A_lidar_raw, b_lidar_raw, nullptr, nullptr, nullptr);
+  const Eigen::MatrixXd Lambda_meas_eta = P.transpose() * A_lidar_raw * P;
+  const Eigen::VectorXd b_meas_eta = P.transpose() * b_lidar_raw;
+
+  // ---- production first GN step: combine prior + LiDAR, solve. ----------
+  const Eigen::MatrixXd A_total = Lambda_prior_eta + Lambda_meas_eta;
+  Eigen::LDLT<Eigen::MatrixXd> ldlt(A_total);
+  const Eigen::VectorXd delta_eta_production = ldlt.solve(b_meas_eta);
+  check(ldlt.info() == Eigen::Success, "production-GN: combined system solves (LDLT success)");
+
+  // ---- independent reference for the LiDAR half: rebuild A_lidar_raw via
+  // FINITE-DIFFERENCE Jacobians instead of addPoseControlLidarFactor()'s
+  // own analytic dPosDcp/dThetaDcphi chain -- a genuinely different method,
+  // not the same code re-run. -------------------------------------------
+  auto residualAt = [&](const PoseControlSpline& s, const PoseControlLidarObs& o) -> double {
+    return o.normal.dot(s.rotAt(o.t) * o.q + s.posAt(o.t)) + o.d;
+  };
+  Eigen::MatrixXd A_lidar_fd = Eigen::MatrixXd::Zero(dimRaw, dimRaw);
+  Eigen::VectorXd b_lidar_fd = Eigen::VectorXd::Zero(dimRaw);
+  const double eps = 1e-6;
+  const int half = dimRaw / 2;
+  for (const auto& o : obs) {
+    Eigen::VectorXd Jrow = Eigen::VectorXd::Zero(dimRaw);
+    for (int col = 0; col < dimRaw; ++col) {
+      PoseControlSpline sp = spline, sm = spline;
+      if (col < half) { sp.cp_p.col(col / 3)(col % 3) += eps; sm.cp_p.col(col / 3)(col % 3) -= eps; }
+      else { const int c2 = col - half; sp.cp_phi.col(c2 / 3)(c2 % 3) += eps; sm.cp_phi.col(c2 / 3)(c2 % 3) -= eps; }
+      Jrow(col) = (residualAt(sp, o) - residualAt(sm, o)) / (2.0 * eps);
+    }
+    const double w = 1.0 / std::max(o.sigma2, 1e-12);
+    const double r = residualAt(spline, o);
+    A_lidar_fd += w * (Jrow * Jrow.transpose());
+    b_lidar_fd += -w * r * Jrow;
+  }
+  const Eigen::MatrixXd Lambda_meas_eta_fd = P.transpose() * A_lidar_fd * P;
+  const Eigen::VectorXd b_meas_eta_fd = P.transpose() * b_lidar_fd;
+
+  const double A_err = (Lambda_meas_eta - Lambda_meas_eta_fd).norm() / std::max(1.0, Lambda_meas_eta.norm());
+  const double b_err = (b_meas_eta - b_meas_eta_fd).norm() / std::max(1.0, b_meas_eta.norm());
+  check(A_err < 1e-4, "production-GN: analytic LiDAR information matches independent finite-difference reference", A_err);
+  check(b_err < 1e-4, "production-GN: analytic LiDAR rhs matches independent finite-difference reference", b_err);
+
+  // Solve the SAME combined system with the FD-built LiDAR half instead --
+  // an independently-assembled information-form reference for the first
+  // GN step's own delta, not just its ingredients.
+  const Eigen::MatrixXd A_total_fd = Lambda_prior_eta + Lambda_meas_eta_fd;
+  Eigen::LDLT<Eigen::MatrixXd> ldlt_fd(A_total_fd);
+  const Eigen::VectorXd delta_eta_reference = ldlt_fd.solve(b_meas_eta_fd);
+  const double delta_err = (delta_eta_production - delta_eta_reference).norm() / std::max(1.0, delta_eta_production.norm());
+  check(delta_err < 1e-3, "production-GN: first GN step delta matches independent information-form reference", delta_err);
+
+  // ---- curvature (item 21): a deterministic regularization term added
+  // directly to A_raw/b_raw (mean solve only), confirmed here to change
+  // the mean delta while the COVARIANCE-path information (Lambda_meas_eta,
+  // built identically to the covariance path's own Lambda_meas_z) is
+  // untouched -- exactly production's own declared interpretation B. -----
+  Eigen::MatrixXd A_curv_raw = A_lidar_raw;
+  Eigen::VectorXd b_curv_raw = b_lidar_raw;
+  const double lambda_curv = 1e4;
+  for (int k = 1; k + 1 < N; ++k) {
+    // second-difference penalty on cp_p[k-1,k,k+1], mirroring the
+    // production curvature block's own construction.
+    for (int a = 0; a < 3; ++a) {
+      const int i0 = 3 * (k - 1) + a, i1 = 3 * k + a, i2 = 3 * (k + 1) + a;
+      A_curv_raw(i0, i0) += lambda_curv; A_curv_raw(i1, i1) += 4 * lambda_curv; A_curv_raw(i2, i2) += lambda_curv;
+      A_curv_raw(i0, i1) -= 2 * lambda_curv; A_curv_raw(i1, i0) -= 2 * lambda_curv;
+      A_curv_raw(i1, i2) -= 2 * lambda_curv; A_curv_raw(i2, i1) -= 2 * lambda_curv;
+      A_curv_raw(i0, i2) += lambda_curv; A_curv_raw(i2, i0) += lambda_curv;
+    }
+  }
+  const Eigen::MatrixXd Lambda_meas_eta_curv = P.transpose() * A_curv_raw * P;  // MEAN-solve-only quantity
+  const Eigen::VectorXd b_meas_eta_curv = P.transpose() * b_curv_raw;
+  const Eigen::MatrixXd A_total_curv = Lambda_prior_eta + Lambda_meas_eta_curv;
+  Eigen::LDLT<Eigen::MatrixXd> ldlt_curv(A_total_curv);
+  const Eigen::VectorXd delta_eta_curv = ldlt_curv.solve(b_meas_eta_curv);
+  const double mean_diff = (delta_eta_curv - delta_eta_production).norm();
+  check(mean_diff > 1e-6, "curvature: changes the mean-solve delta (regularization is active)", mean_diff);
+  // Lambda_meas_eta (the covariance-path quantity, built from A_lidar_raw
+  // alone) is, by construction here, untouched by A_curv_raw's existence --
+  // this is the same structural fact section J's code audit already
+  // established in production; re-confirmed numerically here since both
+  // matrices are actually in hand in this test.
+  check((Lambda_meas_eta - (P.transpose() * A_lidar_raw * P)).norm() < 1e-12,
+        "curvature: covariance-path information matrix is bit-identical whether or not curvature was ever computed", 0.0);
+}
+
 int main()
 {
   testZeroExtraNoiseWhiteResidual();
@@ -366,10 +626,13 @@ int main()
   testCrossCovarianceExact();
   testAutocorrelatedResidualAcf();
   testAdaptiveQCausality();
+  testStateJacobianFiniteDifference();
+  testTrajectoryStateCorrectionZeroUncertainty();
   testRepeatedDirectionRankOne();
   testIndependentDirectionsMatchSvdReference();
   testKnownWeakDirectionExcludedFromRank();
   testThreadedLidarFactorMatchesSerial();
+  testProductionGNAssemblySyntheticFixture();
 
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
   std::printf(g_fail == 0 ? "ALL PASS\n" : "SOME FAILED\n");

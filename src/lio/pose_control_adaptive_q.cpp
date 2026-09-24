@@ -64,4 +64,74 @@ void applyPoseControlAdaptiveQBiasGravityCorrection(
   st.cov_gyr = clampedTraceOver3(C_emp_gyr - P_bg);
 }
 
+namespace
+{
+inline M3D skew3v(const V3D& v)
+{
+  M3D S;
+  S <<     0, -v.z(),  v.y(),
+        v.z(),      0, -v.x(),
+       -v.y(),  v.x(),      0;
+  return S;
+}
+}  // namespace
+
+void computePoseControlImuResidualStateJacobian(
+    const PoseControlSpline& spline, const PoseControlFreeLayout& layout,
+    const PoseControlHeadNullspace& hns, double t, const V3D& gravity,
+    Eigen::MatrixXd& J_acc_eta, Eigen::MatrixXd& J_gyr_eta)
+{
+  const int rawDim = hns.rawDim();
+  Eigen::MatrixXd J_acc_raw = Eigen::MatrixXd::Zero(3, rawDim);
+  Eigen::MatrixXd J_gyr_raw = Eigen::MatrixXd::Zero(3, rawDim);
+
+  const auto jac = spline.jacobianAt(t);
+  const M3D R = spline.rotAt(t);
+  const V3D v = spline.accAt(t) - gravity;
+  // e_acc = R(t)^T*v + bias_acc - a_measured. Under the SAME body-frame
+  // right-perturbation convention as the LiDAR factor's own dr_dtheta
+  // (R -> R*Exp(theta)): R(t)^T*v -> Exp(theta)^T*(R^T*v)
+  // ~= (R^T*v) - theta x (R^T*v), so d(R^T*v)/d(theta) = skew(R^T*v).
+  // Sign/convention verified by finite difference in the registered test
+  // (testStateJacobianFiniteDifference), not asserted from derivation
+  // alone.
+  const V3D Rtv = R.transpose() * v;
+  const M3D d_acc_d_theta = skew3v(Rtv);
+
+  for (int k = 0; k < 4; ++k)
+  {
+    const int abs_k = jac.s + k;
+    const int colp = layout.colPos(abs_k);
+    const int colph = layout.colPhi(abs_k);
+    if (colp >= 0)
+      J_acc_raw.block<3, 3>(0, colp) = R.transpose() * PoseControlSpline::dAccDcp(jac, k);
+    if (colph >= 0)
+    {
+      const M3D dtheta_dcphi = spline.dThetaDcphi(jac, k, t);
+      J_acc_raw.block<3, 3>(0, colph) = d_acc_d_theta * dtheta_dcphi;
+      J_gyr_raw.block<3, 3>(0, colph) = spline.dOmegaDcphi(jac, k, t);
+    }
+  }
+
+  J_acc_eta = J_acc_raw * hns.Z;
+  J_gyr_eta = J_gyr_raw * hns.Z;
+}
+
+void applyPoseControlAdaptiveQTrajectoryStateCorrection(
+    SplineImuResidualStats& st,
+    const Eigen::MatrixXd& J_acc_eta, const Eigen::MatrixXd& J_gyr_eta,
+    const Eigen::MatrixXd& P_eta)
+{
+  if (st.n <= 0) return;
+  if (J_acc_eta.cols() != P_eta.rows() || J_gyr_eta.cols() != P_eta.rows()) return;
+
+  const Eigen::Matrix3d C_pred_traj_acc = J_acc_eta * P_eta * J_acc_eta.transpose();
+  const Eigen::Matrix3d C_emp_acc = Eigen::Matrix3d::Identity() * st.cov_acc;
+  st.cov_acc = clampedTraceOver3(C_emp_acc - C_pred_traj_acc);
+
+  const Eigen::Matrix3d C_pred_traj_gyr = J_gyr_eta * P_eta * J_gyr_eta.transpose();
+  const Eigen::Matrix3d C_emp_gyr = Eigen::Matrix3d::Identity() * st.cov_gyr;
+  st.cov_gyr = clampedTraceOver3(C_emp_gyr - C_pred_traj_gyr);
+}
+
 }  // namespace livo_recon
