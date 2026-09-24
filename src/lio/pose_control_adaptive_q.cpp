@@ -1,4 +1,5 @@
 #include "livo_recon/lio/pose_control_adaptive_q.h"
+#include "livo_recon/utils/algo/omp_utils.h"
 
 #include <Eigen/Eigenvalues>
 #include <algorithm>
@@ -12,18 +13,38 @@ SplineImuResidualStats computePoseControlImuResidual(
 {
   if (imu.size() < 8) return SplineImuResidualStats();
 
-  std::vector<V3D> ra; ra.reserve(imu.size());
-  std::vector<V3D> rw; rw.reserve(imu.size());
-
+  // Filter to the in-window subset FIRST (a fixed, index-addressable
+  // sequence, still in chronological order), then compute each sample's
+  // residual in a parallel loop that writes to a fixed, disjoint index
+  // per sample -- item 9: "per-thread local statistics, one merge after
+  // the parallel loop". There is no reduction race here at all (each
+  // thread only ever writes its own indices, and the final reduction
+  // (reduceImuResidualSamples(), which needs the ORIGINAL chronological
+  // order for its lag-k autocorrelation) reads the fully-populated,
+  // correctly-ordered array afterward, single-threaded) -- this is safer
+  // than an append-and-concatenate pattern for an order-sensitive
+  // reduction. In practice a scan's in-window IMU sample count is tens,
+  // not thousands (unlike the LiDAR residual loop, which genuinely
+  // benefits from cappedOmpThreads()'s full thread count) -- the loop is
+  // still threaded here for the required pattern/correctness property,
+  // not because it is expected to move the needle on wall-clock time.
+  std::vector<ImuSample> windowed;
+  windowed.reserve(imu.size());
   const double t0 = spline.t0(), t1 = spline.t1();
-  for (const auto& s : imu)
+  for (const auto& s : imu) if (s.t >= t0 && s.t <= t1) windowed.push_back(s);
+
+  const int n = static_cast<int>(windowed.size());
+  std::vector<V3D> ra(n), rw(n);
+  const int threads = std::max(1, std::min(cappedOmpThreads(), std::max(1, n)));
+  #pragma omp parallel for num_threads(threads) schedule(static)
+  for (int i = 0; i < n; ++i)
   {
-    if (s.t < t0 || s.t > t1) continue;
+    const ImuSample& s = windowed[i];
     const M3D R = spline.rotAt(s.t);
     const V3D a_pred = R.transpose() * (spline.accAt(s.t) - gravity) + bias_acc;
     const V3D w_pred = spline.omegaBodyAt(s.t) + bias_gyr;
-    ra.push_back(a_pred - s.acc);
-    rw.push_back(w_pred - s.gyro);
+    ra[i] = a_pred - s.acc;
+    rw[i] = w_pred - s.gyro;
   }
 
   return reduceImuResidualSamples(ra, rw);
