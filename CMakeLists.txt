@@ -456,6 +456,28 @@ target_link_libraries(test_pose_control_continuous_prior_reference
   OpenMP::OpenMP_CXX
 )
 
+add_executable(test_pose_control_continuous_prior_reference_asan
+  src/lio/spline.cpp
+  src/utils/log/debug_log_dir.cpp
+  src/lio/pose_control_spline.cpp
+  src/lio/imu_process_step9.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
+  src/lio/pose_control_covariance.cpp
+  src/lio/pose_control_adaptive_q.cpp
+  src/lio/pose_control_physical_diagnostics.cpp
+  scripts/test/test_pose_control_continuous_prior_reference.cpp
+)
+target_compile_options(test_pose_control_continuous_prior_reference_asan PRIVATE
+  $<$<COMPILE_LANGUAGE:CXX>:-fsanitize=address;-g;-O0>
+)
+target_link_libraries(test_pose_control_continuous_prior_reference_asan
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  OpenMP::OpenMP_CXX
+  -fsanitize=address
+)
+
 add_executable(test_pose_control_continuous_prior_reference_debugeigen
   src/lio/spline.cpp
   src/utils/log/debug_log_dir.cpp
