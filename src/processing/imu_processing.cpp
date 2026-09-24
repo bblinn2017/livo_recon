@@ -130,7 +130,7 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // earlier). mg.imu_samples_raw stayed permanently EMPTY for every
   // pose_control run to date (confirmed live via pose_control_seg_debug.txt
   // instrumentation: imu_samples_raw.size()=0 on every scan), which meant
-  // the ENTIRE process factor (addPoseControlProcessFactorReduced, both in
+  // the ENTIRE process factor (accumulatePoseControlImuPriorSegmentReduced, both in
   // the mean GN solve and the covariance block) silently contributed ZERO
   // information on every call (empty per-segment sample buckets ->
   // Q9==0 -> Lambda==pseudoInverse9(Q9)==0) -- this is the true root cause

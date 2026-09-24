@@ -4,7 +4,7 @@
 #include "livo_recon/lio/coupled_estimator.h"
 #include "livo_recon/lio/pose_spline_system.h"
 #include "livo_recon/lio/pose_control_spline.h"
-#include "livo_recon/lio/pose_control_process_factor.h"
+#include "livo_recon/lio/pose_control_imu_prior_builder.h"
 #include "livo_recon/lio/pose_control_lidar_factor.h"
 #include "livo_recon/lio/pose_control_covariance.h"
 #include "livo_recon/lio/adaptive_q.h"
@@ -49,7 +49,7 @@ struct LioProcCoupledOptions
   // (default spline_mode is "raw_imu"); its two genuinely shared IMU-
   // propagation functions (buildImuStep9x9/integrateAndAccumulateStep) were
   // extracted into imu_process_step9.h before deletion, since
-  // pose_control_process_factor.cpp depends on them for the scan-start
+  // pose_control_imu_prior_builder.cpp depends on them for the scan-start
   // joint IMU prior. "pose_knots" is no longer a valid spline_mode value --
   // configuring it now trips the unclaimed-mode-value abort in
   // cfg.nestedMode(), same as any other unrecognized string.
@@ -60,7 +60,7 @@ struct LioProcCoupledOptions
   // 2026-09-22: the pose-CONTROL-POINT-only trajectory state -- z=[c_free;
   // sT], no independent velocity/angular-velocity DOF, head mean fixed
   // (not a GN variable), tail free (spline-derived R/p/v + free bg/ba/g).
-  // See pose_control_spline.h/pose_control_process_factor.h/
+  // See pose_control_spline.h/pose_control_imu_prior_builder.h/
   // pose_control_lidar_factor.h/pose_control_covariance.h and
   // estimateCoupledPoseControlSpline()'s own doc comment for the mechanism.
   bool poseControlSplineBasis() const { return spline_mode == "pose_control"; }
@@ -94,19 +94,7 @@ struct LioProcCoupledOptions
   // A/B/C, weight sweep, P0-scale sweep) can be told apart in the one
   // shared CSV. Purely a label, no effect on estimator behavior.
   std::string pose_control_test_id = "unlabeled";
-  // 2026-09-23 targeted diagnostic campaign, item 15: COUNTERFACTUAL
-  // DIAGNOSTIC MODE ONLY, default false (production behavior unchanged).
-  // When true, the mean solve's z-space normal equations additionally
-  // receive coupled_pose_control_lambda_imu_meas_z_/b_imu_meas_z_ (a raw
-  // IMU-measurement information factor computed once per scan at scan
-  // start, see pose_control_imu_measurement_diagnostics.h) on top of the
-  // production prior + LiDAR + curvature terms. This deliberately
-  // double-counts the same IMU samples the production prior already
-  // consumed -- see estimateCoupledPoseControlSpline()'s own comment at
-  // the injection site and pose_control_targeted_live_diagnostics_report.md.
-  bool pose_control_imu_measurement_info_counterfactual = false;
-  // frozen_process_hessian_prior, true_imu_prior, and legacy_process_factor
-  // (comparison-only ablation modes) were removed. There is exactly one
+  // There is exactly one
   // production pose-control prior representation (coupled_pose_control_
   // sigma_full_prior_/lambda_prior_z_/z_imu_, built once at scan-start,
   // shared verbatim by the mean solve and the covariance computation) and
@@ -795,17 +783,6 @@ private:
   // start by construction) the residual is measured against.
   Eigen::MatrixXd coupled_pose_control_lambda_prior_z_;
   Eigen::VectorXd coupled_pose_control_z_imu_;
-  // 2026-09-23 targeted diagnostic campaign: the COUNTERFACTUAL raw IMU-
-  // measurement information factor (Lambda_imu_meas_z_/b_imu_meas_z_),
-  // computed ONCE per scan at scan start (same treatment/lifetime as the
-  // joint prior above -- see pose_control_imu_measurement_diagnostics.h),
-  // from the PRE-LiDAR-update ("prior") spline/bias/gravity trial values.
-  // Always computed (for diagnostic reporting, items 13/14/31) but only
-  // ADDED into the mean solve's A/b when
-  // pose_control_imu_measurement_info_counterfactual is true.
-  Eigen::MatrixXd coupled_pose_control_lambda_imu_meas_z_;
-  Eigen::VectorXd coupled_pose_control_b_imu_meas_z_;
-  bool coupled_pose_control_lambda_imu_meas_valid_ = false;
   // item 10/51's corrected EKF-reference test: the reference step computed
   // mid-iteration (using THAT iteration's own LiDAR linearization + the
   // fixed prior), held here until the actual delta_z for the SAME

@@ -5,26 +5,20 @@
 #include "livo_recon/lio/pose_control_layout.h"
 
 // ============================================================================
-// 2026-09-23: TARGETED REAL-DATA DIAGNOSTIC CAMPAIGN instrumentation.
+// TARGETED VALIDATION PHASE instrumentation (2026-09-24).
 //
-// This file computes, as an explicit COUNTERFACTUAL DIAGNOSTIC MODE, the
-// "raw IMU measurement" information a scan's IMU samples would provide if
-// treated as an explicit measurement factor against the converged spline --
-// as distinct from (and NOT a replacement for) the production joint IMU
-// PRIOR (coupled_pose_control_sigma_full_prior_ / lambda_prior_z_), which
-// already consumes the same raw IMU samples via a completely different
-// mechanism (integrated process propagation, not a per-sample measurement
-// residual). Whether this diagnostic factor's information duplicates the
-// prior's is exactly the open question this campaign exists to answer --
-// see pose_control_targeted_live_diagnostics_report.md. This file NEVER
-// mutates the production prior/covariance objects; it only reads spline/
-// layout/hns state and returns diagnostic quantities. Wiring the result
-// into the actual GN solve (the "counterfactual" A/b) is done by the
-// caller (lio_coupled.cpp), gated behind
-// LioProcCoupledOptions::pose_control_imu_measurement_info_counterfactual
-// (default false -- production formulation unchanged at default).
+// Pure diagnostics -- never mutates production prior/covariance state, and
+// nothing here is wired into the mean solve's A/b. Two families of
+// quantities:
 //
-// e_acc(t) = R(t)^T*(accAt(t)-gravity) + bias_acc - a_measured(t)
+// (1) evaluatePoseControlPhysicalSample() (item 8): p(t)/R(t)/v(t)/a(t)/
+//     omega(t) and their Jacobians w.r.t. the reduced control state eta,
+//     independent of LiDAR -- the basis for the parameterization/
+//     covariance/information-invariance tests (items 9-13).
+//
+// (2) The raw IMU-vs-spline residual/Jacobian/information diagnostics
+//     (items 18/19/32, carried over from the prior real-data campaign) --
+//     e_acc(t) = R(t)^T*(accAt(t)-gravity) + bias_acc - a_measured(t)
 // e_gyr(t) = omegaBodyAt(t) + bias_gyr - omega_measured(t)
 // -- the SAME convention pose_control_adaptive_q.h/.cpp already uses (see
 // its own header comment); this file's per-sample loop is a second,
@@ -41,6 +35,26 @@
 
 namespace livo_recon
 {
+
+// ============================================================================
+// Item 8: physical trajectory sample + Jacobians w.r.t. the reduced control
+// state eta (dEta-wide, the SAME coordinate the mean solve's A/b uses).
+// Independent of LiDAR -- constructed purely from the spline + head-
+// nullspace basis. p/v/a/omega share ONE spline.jacobianAt(t) evaluation
+// (item 34: no duplicated computation).
+// ============================================================================
+struct PoseControlPhysicalSample
+{
+  double t = 0.0;
+  V3D p = V3D::Zero(), v = V3D::Zero(), a = V3D::Zero(), omega = V3D::Zero();
+  M3D R = M3D::Identity();
+  // Each dQ_deta is 3 x hns.freeDim().
+  Eigen::MatrixXd dp_deta, dv_deta, da_deta, domega_deta;
+};
+
+PoseControlPhysicalSample evaluatePoseControlPhysicalSample(
+    const PoseControlSpline& spline, const PoseControlFreeLayout& layout,
+    const PoseControlHeadNullspace& hns, double t, const V3D& gravity);
 
 // One IMU sample's full residual breakdown against the converged spline --
 // mirrors computePoseControlImuResidual()'s per-sample loop body but

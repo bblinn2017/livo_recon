@@ -2,7 +2,7 @@
 
 #include "livo_recon/lio/pose_control_spline.h"
 #include "livo_recon/lio/pose_control_layout.h"
-#include "livo_recon/lio/pose_control_process_factor.h"   // PoseControlProcessFactorHeadBlock
+#include "livo_recon/lio/pose_control_imu_prior_builder.h"   // PoseControlProcessFactorHeadBlock
 
 // ============================================================================
 // LiDAR point-to-plane factor against PoseControlSpline, built directly in

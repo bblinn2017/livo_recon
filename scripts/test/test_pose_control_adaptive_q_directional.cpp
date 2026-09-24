@@ -14,11 +14,11 @@
 #include "livo_recon/lio/pose_control_adaptive_q.h"
 #include "livo_recon/lio/pose_control_directional_redundancy.h"
 #include "livo_recon/lio/pose_control_lidar_factor.h"
-#include "livo_recon/lio/pose_control_process_factor.h"
+#include "livo_recon/lio/pose_control_imu_prior_builder.h"
 #include "livo_recon/lio/pose_control_covariance.h"
 #include "livo_recon/lio/pose_control_gt_diagnostics.h"
 #include "livo_recon/lio/adaptive_q.h"
-#include "livo_recon/lio/pose_control_imu_measurement_diagnostics.h"
+#include "livo_recon/lio/pose_control_physical_diagnostics.h"
 
 #include <Eigen/Dense>
 #include <cmath>

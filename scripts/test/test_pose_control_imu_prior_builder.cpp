@@ -2,8 +2,8 @@
 // verify the process residual Jacobian against a finite-difference
 // derivative of the WHOLE nonlinear residual... Do not proceed to a bag if
 // this fails." FD is the validation ORACLE here only -- the process
-// factor itself (pose_control_process_factor.cpp) contains no FD.
-#include "livo_recon/lio/pose_control_process_factor.h"
+// factor itself (pose_control_imu_prior_builder.cpp) contains no FD.
+#include "livo_recon/lio/pose_control_imu_prior_builder.h"
 #include <cstdio>
 #include <random>
 using namespace livo_recon;
@@ -88,12 +88,12 @@ int main() {
   Eigen::MatrixXd A = Eigen::MatrixXd::Zero(6 * N, 6 * N);
   Eigen::VectorXd b = Eigen::VectorXd::Zero(6 * N);
   double E_process = 0.0;
-  addPoseControlProcessFactor(s, j, samples, bias_acc, bias_gyr, gravity,
+  accumulatePoseControlImuPriorSegment(s, j, samples, bias_acc, bias_gyr, gravity,
                               q_alpha_acc, q_alpha_gyr, var_acc, var_gyr, second_order,
                               1e-6, A, b, &E_process);
   check(std::isfinite(E_process) && E_process >= 0.0, "E_process finite/nonneg", E_process);
 
-  // Reconstruct Jcur (9 x 6N) exactly as addPoseControlProcessFactor()
+  // Reconstruct Jcur (9 x 6N) exactly as accumulatePoseControlImuPriorSegment()
   // built it internally, by re-deriving via the SAME public pieces (F9,
   // Lambda, Jxj/Jxj1) so this test doesn't just re-check its own math --
   // it FD-validates the analytic Jcur against the actual residual.
@@ -118,7 +118,7 @@ int main() {
 
   const Eigen::Matrix<double, 9, 1> r0 = residualAt(s, j, samples, bias_acc, bias_gyr, gravity,
                                                      q_alpha_acc, q_alpha_gyr, var_acc, var_gyr, second_order);
-  // Theta-row boxminus correction (see pose_control_process_factor.cpp's
+  // Theta-row boxminus correction (see pose_control_imu_prior_builder.cpp's
   // in-file comment on this exact derivation) -- reimplemented here (not
   // exported) purely for this test's independent reconstruction of Jcur.
   {

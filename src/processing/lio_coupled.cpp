@@ -7,7 +7,7 @@
 #include "livo_recon/utils/algo/omp_utils.h"
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/lio/pose_control_adaptive_q.h"
-#include "livo_recon/lio/pose_control_imu_measurement_diagnostics.h"
+#include "livo_recon/lio/pose_control_physical_diagnostics.h"
 #include "livo_recon/lio/pose_control_directional_redundancy.h"
 
 #include <algorithm>
@@ -246,6 +246,14 @@ static const std::vector<std::string>& fullDiagColumns()
     "a_meas_x","a_meas_y","a_meas_z","a_spline_body_x","a_spline_body_y","a_spline_body_z",
     "omega_meas_x","omega_meas_y","omega_meas_z","omega_spline_x","omega_spline_y","omega_spline_z",
     "bg_x","bg_y","bg_z","ba_x","ba_y","ba_z","g_x","g_y","g_z",
+    // x1_covariance item 24 addition: full P_p_x1 3x3
+    "Pp_xx","Pp_yy","Pp_zz","Pp_xy","Pp_xz","Pp_yz",
+    // spline_physical_sample (item 8/29): p/v/a/omega at a labeled
+    // representative time (x1 or tail), independent of LiDAR.
+    "sample_label","phys_t","phys_p_x","phys_p_y","phys_p_z",
+    "phys_v_x","phys_v_y","phys_v_z","phys_a_x","phys_a_y","phys_a_z",
+    "phys_omega_x","phys_omega_y","phys_omega_z",
+    "phys_dp_deta_norm","phys_dv_deta_norm","phys_da_deta_norm","phys_domega_deta_norm",
   };
   return cols;
 }
@@ -346,7 +354,6 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/curvature_weight_pos", copts_.pose_control_curvature_weight_pos, 0.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/curvature_weight_rot", copts_.pose_control_curvature_weight_rot, 0.0);
   cfg.nested<std::string>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/test_id", copts_.pose_control_test_id, std::string("unlabeled"));
-  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/imu_measurement_info_counterfactual", copts_.pose_control_imu_measurement_info_counterfactual, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/adaptive_q/enable", copts_.pose_control_adaptive_q.enable, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/adaptive_q/beta_acc", copts_.pose_control_adaptive_q.beta_acc, 0.3);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/adaptive_q/beta_gyr", copts_.pose_control_adaptive_q.beta_gyr, 0.3);
@@ -1026,27 +1033,24 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
             blockNorm("ba", layoutS.colBA() >= 0 ? 3 : 0);
             blockNorm("g", layoutS.colG() >= 0 ? 3 : 0);
             bkv["trace_P0"] = std::to_string(P0s.trace());
-            emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "bias_information", voxel_map_->frame_idx_, -1, bkv);
+            emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "prior_information", voxel_map_->frame_idx_, -1, bkv);
           }
 
           // ====================================================================
-          // 2026-09-23 TARGETED REAL-DATA DIAGNOSTIC CAMPAIGN, items 6-19/31:
-          // the raw IMU-measurement-information COUNTERFACTUAL DIAGNOSTIC
-          // factor, computed ONCE per scan here at scan start (frozen for the
-          // rest of the scan, same lifetime as the joint prior directly
-          // above) from the PRE-LiDAR-update ("prior") spline and bias/
-          // gravity trial values -- NOT the converged post-LiDAR trajectory.
-          // Always computed (needed for the information diagnostics even in
-          // runs where the counterfactual injection itself is OFF); only
-          // ADDED to the mean solve's A/b (see estimateCoupledPoseControlSpline)
-          // when pose_control_imu_measurement_info_counterfactual is true.
+          // Targeted validation phase, items 8/18/19/32: pure diagnostic
+          // measurement of the raw IMU-vs-spline residual and its implied
+          // measurement information, computed ONCE per scan here at scan
+          // start from the PRE-LiDAR-update ("prior") spline and bias/
+          // gravity trial values. DIAGNOSTIC ONLY -- never added to the mean
+          // solve's A/b (the counterfactual production-injection path that
+          // previously lived here has been removed; see git history if the
+          // reference calculation is ever needed again).
           // ====================================================================
           {
             const auto samples = computePoseControlImuSplineResidualSamples(
                 spline, mg.imu_samples_raw, coupled_pose_control_ba_trial_,
                 coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_);
             const int n = static_cast<int>(samples.size());
-            coupled_pose_control_lambda_imu_meas_valid_ = false;
             if (n >= 3) {
               const double t_rep = 0.5 * (spline.t0() + spline.t1());
               const int off_bg = layoutS.colBG() >= 0 ? dEtaS + layoutS.colBG() - layoutS.dimCFree() : -1;
@@ -1065,9 +1069,6 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
               const V3D R_acc_diag = state_->varAcc(), R_gyr_diag = state_->varGyr();
               const ImuMeasurementInformation info = computePoseControlImuMeasurementInformation(
                   H_acc, H_gyr, R_acc_diag, R_gyr_diag, n, n, mean_e_acc, mean_e_gyr);
-              coupled_pose_control_lambda_imu_meas_z_ = info.Lambda_imu_meas;
-              coupled_pose_control_b_imu_meas_z_ = info.b_imu_meas;
-              coupled_pose_control_lambda_imu_meas_valid_ = true;
 
               if (copts_.psd_audit_en) {
                 const int off_bg_l = layoutS.colBG() >= 0 ? layoutS.colBG() - layoutS.dimCFree() : -1;
@@ -1088,7 +1089,6 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
 
                 std::vector<double> acc_norms, gyr_norms;
                 acc_norms.reserve(n); gyr_norms.reserve(n);
-                double bag_x=0,bag_y=0,bag_z=0;
                 for (int i = 0; i < n; ++i) { acc_norms.push_back(samples[i].e_acc.norm()); gyr_norms.push_back(samples[i].e_gyr.norm()); }
                 auto pct = [](std::vector<double> v, double p) {
                   if (v.empty()) return 0.0;
@@ -1119,12 +1119,12 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
                 emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "imu_residual_summary", voxel_map_->frame_idx_, -1, rkv);
 
                 std::map<std::string, std::string> jkv = {
-                  {"t_rep", std::to_string(t_rep)},
+                  {"t_rep", std::to_string(t_rep)}, {"quantity", "imu_residual_jacobian"},
                   {"H_acc_eta_norm", std::to_string(J_acc_eta_pr.norm())}, {"H_gyr_eta_norm", std::to_string(J_gyr_eta_pr.norm())},
                   {"H_acc_ba_present", std::to_string(off_ba >= 0)}, {"H_acc_g_present", std::to_string(off_g >= 0)},
                   {"H_gyr_bg_present", std::to_string(off_bg >= 0)},
                 };
-                emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "imu_measurement_jacobian", voxel_map_->frame_idx_, -1, jkv);
+                emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "spline_jacobian", voxel_map_->frame_idx_, -1, jkv);
 
                 std::map<std::string, std::string> ikv = {
                   {"trace_Lambda_imu_meas", std::to_string(info.trace_lambda_imu_meas)},
@@ -1136,9 +1136,8 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
                   {"trace_Lambda_curvature", std::to_string(coupled_pose_control_last_lambda_curvature_trace_)},
                   {"imu_meas_to_prior_ratio", std::to_string(coupled_pose_control_lambda_prior_z_.trace() > 1e-300 ?
                       info.trace_lambda_imu_meas / coupled_pose_control_lambda_prior_z_.trace() : 0.0)},
-                  {"counterfactual_enabled", std::to_string(copts_.pose_control_imu_measurement_info_counterfactual)},
                 };
-                emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "imu_measurement_information", voxel_map_->frame_idx_, -1, ikv);
+                emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "prior_information", voxel_map_->frame_idx_, -1, ikv);
 
                 for (int i = 0; i < n; ++i) {
                   const auto& s = samples[i];
@@ -1191,7 +1190,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           {"delta_p_pre_norm", std::to_string(dp_pre)}, {"delta_v_pre_norm", std::to_string(dv_pre)}, {"delta_R_pre_norm", std::to_string(dR_pre)},
           {"delta_p_post_norm", std::to_string(dp_post)}, {"delta_v_post_norm", std::to_string(dv_post)}, {"delta_R_post_norm", std::to_string(dR_post)},
         };
-        emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "x1_init_state", voxel_map_->frame_idx_, -1, x1kv);
+        emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "x1_state", voxel_map_->frame_idx_, -1, x1kv);
       }
       if (copts_.psd_audit_en) {
         const auto& hns = coupled_pose_control_hns_;
@@ -1457,7 +1456,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
            std::to_string(dstats.cumulative_information_fraction.size() > 4
                                ? dstats.cumulative_information_fraction(4) : 1.0)},
         };
-        emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "directional_redundancy", voxel_map_->frame_idx_, -1, dkv);
+        emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "lidar_directional_spectrum", voxel_map_->frame_idx_, -1, dkv);
       }
     }
 
@@ -1739,11 +1738,42 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
             {"cond_P_x1_prior", std::to_string(x1_cond)}, {"rank_P_x1_prior", std::to_string(rank_x1)},
             {"sigma_distance_p", std::to_string(sigma_dist_p)}, {"sigma_distance_R", std::to_string(sigma_dist_R)}, {"sigma_distance_v", std::to_string(sigma_dist_v)},
             {"abs_err_head_propagation_check", std::to_string(abs_err_x1_check)}, {"rel_err_head_propagation_check", std::to_string(rel_err_x1_check)},
+            // item 24: full P_p_x1 3x3 (not just trace), so real position-GT
+            // NEES can be computed post-hoc (e_p_gt^T * P_p_x1^-1 * e_p_gt)
+            // once matched against Leica GT at t_x1 -- the GT itself is not
+            // read here (see the standing note on gt_queue/EvoProc above).
+            {"Pp_xx", std::to_string(P_p_x1(0,0))}, {"Pp_yy", std::to_string(P_p_x1(1,1))}, {"Pp_zz", std::to_string(P_p_x1(2,2))},
+            {"Pp_xy", std::to_string(P_p_x1(0,1))}, {"Pp_xz", std::to_string(P_p_x1(0,2))}, {"Pp_yz", std::to_string(P_p_x1(1,2))},
           };
           emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "x1_covariance", voxel_map_->frame_idx_, -1, x1covkv);
 
           logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_x1_prior", P_x1_prior);
           logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_x1_post", P_x1_post);
+
+          // item 8/29: physical trajectory samples (p/v/a/omega + Jacobian
+          // norms w.r.t. eta), independent of LiDAR, at x1 and the tail --
+          // the raw material for items 9-13's invariance analysis when
+          // applied to this REAL converged spline (as distinct from the
+          // synthetic-trajectory measurement in
+          // test_pose_control_parameterization_invariance).
+          if (copts_.psd_audit_en) {
+            const V3D gravity_now = state_->gravity();
+            auto emitPhysSample = [&](const char* label, double t_sample) {
+              const auto ps = evaluatePoseControlPhysicalSample(spline, layout, hns, t_sample, gravity_now);
+              std::map<std::string, std::string> pkv = {
+                {"sample_label", label}, {"phys_t", std::to_string(ps.t)},
+                {"phys_p_x", std::to_string(ps.p.x())}, {"phys_p_y", std::to_string(ps.p.y())}, {"phys_p_z", std::to_string(ps.p.z())},
+                {"phys_v_x", std::to_string(ps.v.x())}, {"phys_v_y", std::to_string(ps.v.y())}, {"phys_v_z", std::to_string(ps.v.z())},
+                {"phys_a_x", std::to_string(ps.a.x())}, {"phys_a_y", std::to_string(ps.a.y())}, {"phys_a_z", std::to_string(ps.a.z())},
+                {"phys_omega_x", std::to_string(ps.omega.x())}, {"phys_omega_y", std::to_string(ps.omega.y())}, {"phys_omega_z", std::to_string(ps.omega.z())},
+                {"phys_dp_deta_norm", std::to_string(ps.dp_deta.norm())}, {"phys_dv_deta_norm", std::to_string(ps.dv_deta.norm())},
+                {"phys_da_deta_norm", std::to_string(ps.da_deta.norm())}, {"phys_domega_deta_norm", std::to_string(ps.domega_deta.norm())},
+              };
+              emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "spline_physical_sample", voxel_map_->frame_idx_, -1, pkv);
+            };
+            emitPhysSample("x1", t_x1);
+            emitPhysSample("tail", spline.t1());
+          }
         }
       }
 
@@ -4945,7 +4975,7 @@ double LioProcCoupled::estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D&
 // ONE GN iteration of the pose-control-point-only estimator, called
 // repeatedly from processLIO()'s `for (; iter < opts_.max_iterations;
 // iter++)` loop. Builds against z=[c_free;sT] (coupled_pose_control_layout_)
-// -- see pose_control_spline.h/pose_control_process_factor.h/
+// -- see pose_control_spline.h/pose_control_imu_prior_builder.h/
 // pose_control_lidar_factor.h for the validated math this function
 // assembles.
 double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out)
@@ -5102,22 +5132,6 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
     A += coupled_pose_control_lambda_prior_z_;
     b += -coupled_pose_control_lambda_prior_z_ * r_prior_z;
 
-    // 2026-09-23 targeted diagnostic campaign, item 15/16: COUNTERFACTUAL
-    // DIAGNOSTIC MODE ONLY. Adds the raw IMU-measurement-information factor
-    // (frozen at scan start alongside the prior above -- see this scan's
-    // own scan-start init block) directly on top of the production
-    // prior+LiDAR+curvature information. THIS DOUBLE-COUNTS THE SAME IMU
-    // SAMPLES THE PRIOR ABOVE ALREADY CONSUMED -- default false, production
-    // formulation unchanged unless this flag is explicitly set. See
-    // pose_control_imu_measurement_diagnostics.h and
-    // pose_control_targeted_live_diagnostics_report.md.
-    if (copts_.pose_control_imu_measurement_info_counterfactual &&
-        coupled_pose_control_lambda_imu_meas_valid_ &&
-        coupled_pose_control_lambda_imu_meas_z_.rows() == dimZ &&
-        coupled_pose_control_b_imu_meas_z_.size() == dimZ) {
-      A += coupled_pose_control_lambda_imu_meas_z_;
-      b += coupled_pose_control_b_imu_meas_z_;
-    }
 
     // ========================================================================
     // item 10/51: the CORRECT EKF/MAP-equivalence test. Unlike the earlier

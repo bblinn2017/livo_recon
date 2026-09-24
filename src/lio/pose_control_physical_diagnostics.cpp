@@ -1,4 +1,4 @@
-#include "livo_recon/lio/pose_control_imu_measurement_diagnostics.h"
+#include "livo_recon/lio/pose_control_physical_diagnostics.h"
 #include "livo_recon/lio/pose_control_adaptive_q.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 
@@ -18,6 +18,52 @@ inline M3D skew3v_(const V3D& v)
        -v.y(),  v.x(),      0;
   return S;
 }
+}  // namespace
+
+PoseControlPhysicalSample evaluatePoseControlPhysicalSample(
+    const PoseControlSpline& spline, const PoseControlFreeLayout& layout,
+    const PoseControlHeadNullspace& hns, double t, const V3D& gravity)
+{
+  PoseControlPhysicalSample out;
+  out.t = t;
+  out.p = spline.posAt(t);
+  out.v = spline.velAt(t);
+  out.a = spline.accAt(t);
+  out.R = spline.rotAt(t);
+  out.omega = spline.omegaBodyAt(t);
+
+  const int rawDim = hns.rawDim();
+  Eigen::MatrixXd dp_raw = Eigen::MatrixXd::Zero(3, rawDim);
+  Eigen::MatrixXd dv_raw = Eigen::MatrixXd::Zero(3, rawDim);
+  Eigen::MatrixXd da_raw = Eigen::MatrixXd::Zero(3, rawDim);
+  Eigen::MatrixXd domega_raw = Eigen::MatrixXd::Zero(3, rawDim);
+
+  const auto jac = spline.jacobianAt(t);
+  for (int k = 0; k < 4; ++k)
+  {
+    const int abs_k = jac.s + k;
+    const int colp = layout.colPos(abs_k);
+    const int colph = layout.colPhi(abs_k);
+    if (colp >= 0)
+    {
+      dp_raw.block<3, 3>(0, colp) = PoseControlSpline::dPosDcp(jac, k);
+      dv_raw.block<3, 3>(0, colp) = PoseControlSpline::dVelDcp(jac, k);
+      da_raw.block<3, 3>(0, colp) = PoseControlSpline::dAccDcp(jac, k);
+    }
+    if (colph >= 0)
+      domega_raw.block<3, 3>(0, colph) = spline.dOmegaDcphi(jac, k, t);
+  }
+
+  out.dp_deta = dp_raw * hns.Z;
+  out.dv_deta = dv_raw * hns.Z;
+  out.da_deta = da_raw * hns.Z;
+  out.domega_deta = domega_raw * hns.Z;
+  (void)gravity;  // a(t) here is the WORLD-frame spline acceleration itself (gravity not subtracted) -- see e_acc's own convention for the specific-force version.
+  return out;
+}
+
+namespace
+{
 }  // namespace
 
 std::vector<ImuSplineResidualSample> computePoseControlImuSplineResidualSamples(
@@ -101,7 +147,6 @@ ImuMeasurementInformation computePoseControlImuMeasurementInformation(
     int n_acc, int n_gyr, const V3D& mean_e_acc, const V3D& mean_e_gyr)
 {
   ImuMeasurementInformation out;
-  const int dimZ = static_cast<int>(H_acc.cols());
   const Eigen::Vector3d Rinv_acc = R_acc_diag.cwiseInverse();
   const Eigen::Vector3d Rinv_gyr = R_gyr_diag.cwiseInverse();
 

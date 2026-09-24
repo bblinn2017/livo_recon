@@ -1,4 +1,4 @@
-#include "livo_recon/lio/pose_control_process_factor.h"
+#include "livo_recon/lio/pose_control_imu_prior_builder.h"
 
 namespace livo_recon
 {
@@ -22,7 +22,7 @@ inline M3D skew3v(const V3D& v)
 // JrInv(r_theta) factor is what carries that local tangent frame back to
 // the actual Log() residual reported, and was the source of a measured
 // ~3.5% cross-axis Jacobian error before being added (confirmed via
-// test_pose_control_process_factor.cpp's FD check -- see that file).
+// test_pose_control_imu_prior_builder.cpp's FD check -- see that file).
 M3D jrInvLocal(const V3D& phi)
 {
   const double n = phi.norm();
@@ -192,7 +192,7 @@ Eigen::Matrix<double, 9, 9> poseControlPseudoInverse9(
   return out;
 }
 
-void addPoseControlProcessFactor(
+void accumulatePoseControlImuPriorSegment(
     const PoseControlSpline& spline, int j,
     const std::vector<ImuSample>& samples,
     const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
@@ -280,7 +280,7 @@ void addPoseControlProcessFactor(
   // Confirmed empirically: the naive uniform "JrInv(r)*(Jxj1-F9*Jxj)"
   // (missing the g^T factor on the j-side term) measured WORSE against
   // FD (2.8e-2) than omitting the correction entirely (1.76e-2) -- this
-  // g^T-corrected form is what test_pose_control_process_factor.cpp's FD
+  // g^T-corrected form is what test_pose_control_imu_prior_builder.cpp's FD
   // check validates.
   {
     const M3D g = rot_pred.transpose() * Rj1;
@@ -322,7 +322,7 @@ Eigen::MatrixXd chainProcessFactorJacobian(
 }
 }  // namespace
 
-void addPoseControlProcessFactorReduced(
+void accumulatePoseControlImuPriorSegmentReduced(
     const PoseControlSpline& spline, const PoseControlFreeLayout& layout, int j,
     const std::vector<ImuSample>& samples,
     const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,

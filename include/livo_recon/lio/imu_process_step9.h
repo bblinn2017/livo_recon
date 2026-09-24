@@ -13,9 +13,9 @@
 // [theta,p,v] 9x9 block of the EXACT SAME F_x/cov_w construction
 // ImuProc::propagate() (imu_processing.cpp) uses for the full state. They
 // are the ONLY part of the old pose-knot file that current production code
-// depends on -- pose_control_process_factor.cpp uses them to build the
+// depends on -- pose_control_imu_prior_builder.cpp uses them to build the
 // scan-start joint IMU prior (buildPoseControlImuPriorContribution(), see
-// pose_control_process_factor.h). Bias/gravity rows/columns are absent
+// pose_control_imu_prior_builder.h). Bias/gravity rows/columns are absent
 // (held fixed at their scan-start ESIKF values by both callers).
 // ============================================================================
 

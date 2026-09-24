@@ -1,11 +1,11 @@
-// Validates addPoseControlProcessFactorReduced()'s two Jacobian paths:
+// Validates accumulatePoseControlImuPriorSegmentReduced()'s two Jacobian paths:
 // (1) the free-variable columns (z=[c_free;sT]) against FD of the
 //     residual w.r.t. free control points and bias/gravity directly, and
 // (2) the head block (A_hh/A_hf) against FD of the residual w.r.t. the
 //     FIXED head x0=[theta0,p0,v0] itself (rebuilding cp[0..2]/R_anchor
 //     from scratch each perturbation via solveHeadControlPoints(), exactly
 //     mirroring test_pose_control_spline.cpp's Test G methodology).
-#include "livo_recon/lio/pose_control_process_factor.h"
+#include "livo_recon/lio/pose_control_imu_prior_builder.h"
 #include <cstdio>
 #include <random>
 #include <functional>
@@ -75,7 +75,7 @@ int main() {
   // standard GN linearization identity) -- a REAL, end-to-end check of
   // the reduced system's bookkeeping (which z-columns get written where,
   // sT wiring), not a re-derivation of the core chain rule (already
-  // FD-gated in test_pose_control_process_factor.cpp).
+  // FD-gated in test_pose_control_imu_prior_builder.cpp).
   {
     const int j = 5;   // interior segment, well clear of the head (j>2)
     // Lambda held FIXED at the nominal linearization point (standard GN
@@ -94,7 +94,7 @@ int main() {
 
     Eigen::MatrixXd A = Eigen::MatrixXd::Zero(layout.dim(), layout.dim());
     Eigen::VectorXd b = Eigen::VectorXd::Zero(layout.dim());
-    addPoseControlProcessFactorReduced(s, layout, j, segs.seg_samples[j], bias_acc, bias_gyr, gravity,
+    accumulatePoseControlImuPriorSegmentReduced(s, layout, j, segs.seg_samples[j], bias_acc, bias_gyr, gravity,
         qa, qg, var_acc, var_gyr, so, 1e-6, A, b, nullptr, nullptr);
 
     const double h = 1e-6;
@@ -152,7 +152,7 @@ int main() {
     // Absolute tolerance is scale-aware: Lambda's eigenvalues span many
     // orders of magnitude here (a near-singular Q9 direction, same
     // characteristic already documented in
-    // test_pose_control_process_factor.cpp's E_process~1e9 note) -- the
+    // test_pose_control_imu_prior_builder.cpp's E_process~1e9 note) -- the
     // RELATIVE check is the meaningful gate; report the absolute number
     // honestly rather than picking a threshold to make it pass.
     check(max_rel < 1e-2, "max_relative_reduced_gradient_error", max_rel);
@@ -167,7 +167,7 @@ int main() {
     Eigen::MatrixXd A = Eigen::MatrixXd::Zero(layout.dim(), layout.dim());
     Eigen::VectorXd b = Eigen::VectorXd::Zero(layout.dim());
     for (int j = 0; j < s.nSeg(); ++j)
-      addPoseControlProcessFactorReduced(s, layout, j, segs.seg_samples[j], bias_acc, bias_gyr, gravity,
+      accumulatePoseControlImuPriorSegmentReduced(s, layout, j, segs.seg_samples[j], bias_acc, bias_gyr, gravity,
           qa, qg, var_acc, var_gyr, so, 1e-6, A, b, &head_block, nullptr);
 
     check(head_block.A_hh.allFinite(), "A_hh finite");
@@ -188,7 +188,7 @@ int main() {
     PoseControlProcessFactorHeadBlock head_block_seg0_only;
     Eigen::MatrixXd A0 = Eigen::MatrixXd::Zero(layout.dim(), layout.dim());
     Eigen::VectorXd b0 = Eigen::VectorXd::Zero(layout.dim());
-    addPoseControlProcessFactorReduced(s, layout, 0, segs.seg_samples[0], bias_acc, bias_gyr, gravity,
+    accumulatePoseControlImuPriorSegmentReduced(s, layout, 0, segs.seg_samples[0], bias_acc, bias_gyr, gravity,
         qa, qg, var_acc, var_gyr, so, 1e-6, A0, b0, &head_block_seg0_only, nullptr);
     double tr_full = head_block.A_hh.block<3, 3>(0, 0).trace();
     double tr_seg0 = head_block_seg0_only.A_hh.block<3, 3>(0, 0).trace();
@@ -199,7 +199,7 @@ int main() {
 
   // ---- (3) DIRECT FD validation of the head Jacobian (Jhead) itself, one
   // segment (j=0, both position AND rotation head-sensitivity active),
-  // reconstructed independently of addPoseControlProcessFactorReduced's
+  // reconstructed independently of accumulatePoseControlImuPriorSegmentReduced's
   // internals: perturb x0=[theta0,p0,v0] directly (rebuilding cp[0..2]/
   // R_anchor from scratch, exactly like test_pose_control_spline.cpp's
   // Test G), FD the segment-0 residual, and compare A_hh_fd=Jhead_fd^T*
@@ -240,7 +240,7 @@ int main() {
     PoseControlProcessFactorHeadBlock hb_seg0;
     Eigen::MatrixXd A00 = Eigen::MatrixXd::Zero(layout.dim(), layout.dim());
     Eigen::VectorXd b00 = Eigen::VectorXd::Zero(layout.dim());
-    addPoseControlProcessFactorReduced(s, layout, 0, segs.seg_samples[0], bias_acc, bias_gyr, gravity,
+    accumulatePoseControlImuPriorSegmentReduced(s, layout, 0, segs.seg_samples[0], bias_acc, bias_gyr, gravity,
         qa, qg, var_acc, var_gyr, so, 1e-6, A00, b00, &hb_seg0, nullptr);
 
     double err_abs = (A_hh_fd - hb_seg0.A_hh).norm();

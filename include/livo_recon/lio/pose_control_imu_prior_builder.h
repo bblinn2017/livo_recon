@@ -13,7 +13,7 @@
 // CURRENT PRODUCTION ROLE: the ONE production call site
 // (LioProcCoupled's coupled-pose-control init block, lio_coupled.cpp, via
 // buildPoseControlImuPriorContribution() below) invokes
-// addPoseControlProcessFactorReduced() EXACTLY ONCE PER SCAN, at scan
+// accumulatePoseControlImuPriorSegmentReduced() EXACTLY ONCE PER SCAN, at scan
 // start, before any Gauss-Newton iteration runs. Its output (A/b) is folded
 // into the fixed scan-start joint IMU/bias/gravity prior
 // (Lambda_prior_z/z_imu_, see lio_coupled.cpp's init-block comment) and is
@@ -24,7 +24,7 @@
 // role of the now-removed legacy_process_factor/frozen_process_hessian_prior
 // modes -- see git history, commit 12d61eb and earlier).
 //
-// addPoseControlProcessFactor() (the non-reduced, full-6N-column variant)
+// accumulatePoseControlImuPriorSegment() (the non-reduced, full-6N-column variant)
 // and relinearizePoseControlSegment() (without the bias/gravity Jacobian)
 // have NO production call site at all -- they exist solely as reference
 // implementations exercised by scripts/test/test_pose_control_process_
@@ -127,9 +127,9 @@ void relinearizePoseControlSegment(
 // buildImuStep9x9/integrateAndAccumulateStep already use for F9/Q9:
 //     G_seg = F9_step * G_seg + L_step
 // where L_step is that step's own LOCAL partial derivative (holding the
-// entering state fixed) -- see pose_control_process_factor.cpp for the
+// entering state fixed) -- see pose_control_imu_prior_builder.cpp for the
 // full per-block derivation. FD-validated in
-// test_pose_control_process_factor.cpp (perturbing bias_acc/bias_gyr/
+// test_pose_control_imu_prior_builder.cpp (perturbing bias_acc/bias_gyr/
 // gravity directly and re-walking the SAME raw samples).
 void relinearizePoseControlSegmentWithBiasJac(
     const std::vector<ImuSample>& samples,
@@ -154,7 +154,7 @@ Eigen::Matrix<double, 9, 9> poseControlPseudoInverse9(
 // [c_p(3N);c_phi(3N)] layout buildHeadConstraintRows() uses).
 // If out_E_process is non-null, accumulates 0.5*r^T*Lambda*r into it
 // (E_process, for the campaign CSV / GN diagnostics).
-void addPoseControlProcessFactor(
+void accumulatePoseControlImuPriorSegment(
     const PoseControlSpline& spline, int j,
     const std::vector<ImuSample>& samples,
     const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
@@ -178,7 +178,7 @@ struct PoseControlProcessFactorHeadBlock
   Eigen::MatrixXd A_hf;   // lazily sized to (9, layout.dim()) on first use
 };
 
-// REDUCED-layout version of addPoseControlProcessFactor(): builds against
+// REDUCED-layout version of accumulatePoseControlImuPriorSegment(): builds against
 // z=[c_free; sT] (layout.dim() total) instead of the full 6N. Fixed
 // (head, k<3) control-point columns are simply omitted from the free
 // Jacobian (they are not GN variables); their sensitivity is captured
@@ -189,7 +189,7 @@ struct PoseControlProcessFactorHeadBlock
 // (the head correction being fixed at zero removes decoupled LIO's usual
 // pose-correction-via-prior-cross-covariance pathway -- see that
 // function's header comment).
-void addPoseControlProcessFactorReduced(
+void accumulatePoseControlImuPriorSegmentReduced(
     const PoseControlSpline& spline, const PoseControlFreeLayout& layout, int j,
     const std::vector<ImuSample>& samples,
     const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
@@ -204,7 +204,7 @@ void addPoseControlProcessFactorReduced(
 // per scan, at scan-start, to accumulate this segment's contribution to the
 // fixed joint IMU/bias/gravity PRIOR -- never called again during the GN
 // loop for that scan. A thin, deliberately-named forwarder to
-// addPoseControlProcessFactorReduced() (see the file-level comment above)
+// accumulatePoseControlImuPriorSegmentReduced() (see the file-level comment above)
 // so the production call site (lio_coupled.cpp) never has to say
 // "process factor" -- a term this codebase's history also used for the
 // now-removed per-iteration-relinearized legacy modes -- to describe what
@@ -220,7 +220,7 @@ inline void buildPoseControlImuPriorContribution(
     PoseControlProcessFactorHeadBlock* head_block,
     double* out_E_process = nullptr)
 {
-  addPoseControlProcessFactorReduced(spline, layout, j, samples, bias_acc, bias_gyr, gravity,
+  accumulatePoseControlImuPriorSegmentReduced(spline, layout, j, samples, bias_acc, bias_gyr, gravity,
       q_alpha_acc, q_alpha_gyr, var_acc, var_gyr, second_order, q_pinv_rel_thresh,
       A, b, head_block, out_E_process);
 }

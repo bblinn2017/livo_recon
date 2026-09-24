@@ -136,10 +136,10 @@ add_executable(livo_recon_node
   src/lio/pose_spline_system.cpp
   src/lio/imu_process_step9.cpp
   src/lio/pose_control_adaptive_q.cpp
-  src/lio/pose_control_imu_measurement_diagnostics.cpp
+  src/lio/pose_control_physical_diagnostics.cpp
   src/lio/pose_control_directional_redundancy.cpp
   src/lio/pose_control_spline.cpp
-  src/lio/pose_control_process_factor.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
   src/lio/pose_control_gt_diagnostics.cpp
   src/lio/pose_control_covariance.cpp
   src/lio/pose_control_lidar_factor.cpp
@@ -229,6 +229,71 @@ target_link_libraries(test_pose_control_prior_math
   ${OpenCV_LIBS}
 )
 
+# Previously-orphaned FD reference tests for the IMU-process-model math
+# (pose_control_imu_prior_builder.cpp) -- item 1/6 of the targeted
+# validation phase: these existed on disk but were never registered as a
+# CMake target, so they silently never ran. accumulatePoseControlImuPriorSegmentReduced()
+# IS the production scan-start prior builder's own core math (see
+# buildPoseControlImuPriorContribution() in pose_control_imu_prior_builder.h),
+# so this coverage is genuinely load-bearing, not dead reference code.
+add_executable(test_pose_control_imu_prior_builder
+  src/lio/pose_control_spline.cpp
+  src/lio/imu_process_step9.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
+  scripts/test/test_pose_control_imu_prior_builder.cpp
+)
+target_link_libraries(test_pose_control_imu_prior_builder
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+)
+
+add_executable(test_pose_control_imu_prior_builder_reduced
+  src/lio/pose_control_spline.cpp
+  src/lio/imu_process_step9.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
+  scripts/test/test_pose_control_imu_prior_builder_reduced.cpp
+)
+target_link_libraries(test_pose_control_imu_prior_builder_reduced
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+)
+
+# Targeted validation phase items 9-13: parameterization/covariance/
+# information invariance across N -- the highest-priority new test.
+add_executable(test_pose_control_parameterization_invariance
+  src/utils/log/debug_log_dir.cpp
+  src/lio/spline.cpp
+  src/lio/pose_control_spline.cpp
+  src/lio/imu_process_step9.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
+  src/lio/pose_control_covariance.cpp
+  src/lio/pose_control_adaptive_q.cpp
+  src/lio/pose_control_physical_diagnostics.cpp
+  scripts/test/test_pose_control_parameterization_invariance.cpp
+)
+target_link_libraries(test_pose_control_parameterization_invariance
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  OpenMP::OpenMP_CXX
+)
+
+# Item 4/14/15: LiDAR H/information physical equivalence between pose-
+# control and decoupled, for the same point/normal/residual.
+add_executable(test_pose_control_lidar_physical_equivalence
+  src/lio/pose_control_spline.cpp
+  src/lio/pose_control_lidar_factor.cpp
+  scripts/test/test_pose_control_lidar_physical_equivalence.cpp
+)
+target_link_libraries(test_pose_control_lidar_physical_equivalence
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  OpenMP::OpenMP_CXX
+)
+
 # Item 38 of the 2026-09-24 implementation + code-validation phase: "the
 # earlier implementation had a real Eigen dimension mismatch hidden by
 # NDEBUG... create/run at least one test build where Eigen assertions are
@@ -264,10 +329,10 @@ add_executable(test_pose_control_adaptive_q_directional
   src/utils/log/debug_log_dir.cpp
   src/lio/pose_control_spline.cpp
   src/lio/pose_control_adaptive_q.cpp
-  src/lio/pose_control_imu_measurement_diagnostics.cpp
+  src/lio/pose_control_physical_diagnostics.cpp
   src/lio/pose_control_directional_redundancy.cpp
   src/lio/pose_control_lidar_factor.cpp
-  src/lio/pose_control_process_factor.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
   src/lio/imu_process_step9.cpp
   src/lio/adaptive_q.cpp
   src/lio/pose_control_gt_diagnostics.cpp
@@ -287,10 +352,10 @@ add_executable(test_pose_control_adaptive_q_directional_debugeigen
   src/utils/log/debug_log_dir.cpp
   src/lio/pose_control_spline.cpp
   src/lio/pose_control_adaptive_q.cpp
-  src/lio/pose_control_imu_measurement_diagnostics.cpp
+  src/lio/pose_control_physical_diagnostics.cpp
   src/lio/pose_control_directional_redundancy.cpp
   src/lio/pose_control_lidar_factor.cpp
-  src/lio/pose_control_process_factor.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
   src/lio/imu_process_step9.cpp
   src/lio/adaptive_q.cpp
   src/lio/pose_control_gt_diagnostics.cpp
@@ -323,10 +388,10 @@ add_executable(test_pose_control_adaptive_q_directional_ubsan
   src/utils/log/debug_log_dir.cpp
   src/lio/pose_control_spline.cpp
   src/lio/pose_control_adaptive_q.cpp
-  src/lio/pose_control_imu_measurement_diagnostics.cpp
+  src/lio/pose_control_physical_diagnostics.cpp
   src/lio/pose_control_directional_redundancy.cpp
   src/lio/pose_control_lidar_factor.cpp
-  src/lio/pose_control_process_factor.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
   src/lio/imu_process_step9.cpp
   src/lio/adaptive_q.cpp
   src/lio/pose_control_gt_diagnostics.cpp
