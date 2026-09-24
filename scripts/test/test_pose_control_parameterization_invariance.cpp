@@ -219,6 +219,20 @@ int main() {
     trace_Pomega_by_N.push_back(P_omega.trace());
     std::printf("  N=%2d  trace(P_p)=%.6e  trace(P_v)=%.6e  trace(P_a)=%.6e  trace(P_omega)=%.6e  trace(P_control_raw)=%.6e\n",
                 f.N, P_p.trace(), P_v.trace(), P_a.trace(), P_omega.trace(), P_c.trace());
+
+    // item 15: the prior MEAN, mapped to physical p(t_probe), should be a
+    // near-zero correction at every N -- these IMU samples were generated
+    // FROM f.spline itself (zero noise), so f.spline is ALREADY its own
+    // IMU-only optimum; z_prior's correction should confirm that (not
+    // silently return some other, spurious nonzero shift) regardless of N.
+    const Eigen::MatrixXd A_c = A_raw.topLeftCorner(6 * f.N, 6 * f.N);
+    const Eigen::VectorXd b_c = b_raw.head(6 * f.N);
+    const Eigen::VectorXd delta_c_prior = generalPseudoInverse(A_c, 1e-6) * b_c;
+    const V3D delta_p_prior = sample.dp_deta * delta_c_prior;
+    const V3D delta_a_prior = sample.da_deta * delta_c_prior;
+    std::printf("         prior-mean physical correction at t_probe: |delta_p|=%.6e  |delta_a|=%.6e\n",
+                delta_p_prior.norm(), delta_a_prior.norm());
+    check(delta_p_prior.norm() < 1e-6, "item 15: prior-mean position correction ~0 (spline already IMU-optimal) at this N", delta_p_prior.norm());
   }
   const double pa_ratio_13_over_4 = trace_Pa_by_N[0] > 1e-300 ? trace_Pa_by_N[2] / trace_Pa_by_N[0] : 0.0;
   const double pomega_ratio_13_over_4 = trace_Pomega_by_N[0] > 1e-300 ? trace_Pomega_by_N[2] / trace_Pomega_by_N[0] : 0.0;

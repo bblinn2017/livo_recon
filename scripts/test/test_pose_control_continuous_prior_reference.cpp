@@ -232,6 +232,72 @@ static void testRepresentationCapacity()
   check(err_highfreq_N13 < err_highfreq_N4 * 0.5, "N=13 represents the high-frequency trajectory substantially better than N=4", err_highfreq_N13);
 }
 
+// ============================================================================
+// item 22/23: timestep-refinement test. var_acc/var_gyr are audited
+// (pose_control_imu_prior_builder.h's own header comment) as PER-SAMPLE
+// variances calibrated AT a fixed native rate -- this test demonstrates the
+// two directly relevant consequences: (a) naively reusing the SAME
+// var_acc/var_gyr while resampling more densely (which production never
+// actually does -- the real IMU rate is fixed) increases total information
+// roughly proportionally to sample count, the CORRECT behavior for
+// genuinely independent per-sample measurements, not a double-counting
+// bug; (b) rescaling var_acc/var_gyr consistently with a fixed continuous-
+// time PSD (var(dt) = var(dt0)*dt0/dt) makes the resulting information
+// converge to a stable limit as dt shrinks, confirming there is no
+// uncontrolled/inconsistent blow-up hiding in the discretization itself.
+// ============================================================================
+static void testTimestepRefinement()
+{
+  const int N = 7;
+  const double t0 = 0.0, t1 = 0.1;
+  PoseControlSpline spline = makeStationaryTrajectory(N, t0, t1, 888);
+  PoseControlFreeLayout layout;
+  layout.N = N; layout.has_bg = layout.has_ba = layout.has_g = true;
+  const V3D bias_acc = V3D::Zero(), bias_gyr = V3D::Zero(), gravity(0, 0, -9.81);
+  const double dt0 = 1.0 / 200.0;
+  const V3D var_acc0 = V3D::Constant(0.02 * 0.02), var_gyr0 = V3D::Constant(0.002 * 0.002);
+
+  auto buildAtRate = [&](double dt, bool psd_consistent_rescale) {
+    std::vector<ImuSample> imu;
+    for (double t = t0; t <= t1 + 1e-9; t += dt) {
+      ImuSample s; s.t = t;
+      s.acc = spline.rotAt(t).transpose() * (spline.accAt(t) - gravity);
+      s.gyro = spline.omegaBodyAt(t);
+      imu.push_back(s);
+    }
+    const V3D var_acc = psd_consistent_rescale ? V3D(var_acc0 * (dt0 / dt)) : var_acc0;
+    const V3D var_gyr = psd_consistent_rescale ? V3D(var_gyr0 * (dt0 / dt)) : var_gyr0;
+    const int dimRaw = layout.dim();
+    Eigen::MatrixXd A = Eigen::MatrixXd::Zero(dimRaw, dimRaw);
+    Eigen::VectorXd b_unused = Eigen::VectorXd::Zero(dimRaw);
+    buildPoseControlContinuousImuPrior(spline, layout, imu, bias_acc, bias_gyr, gravity, var_acc, var_gyr, A, b_unused, nullptr, nullptr);
+    return A.trace();
+  };
+
+  std::printf("  -- naive (var_acc/var_gyr held FIXED regardless of dt -- matches production's actual behavior, since the real IMU rate never changes) --\n");
+  const double tr_dt0_naive = buildAtRate(dt0, false);
+  const double tr_dt0_2_naive = buildAtRate(dt0 / 2, false);
+  const double tr_dt0_4_naive = buildAtRate(dt0 / 4, false);
+  std::printf("  dt=%.5f trace(A)=%.6e | dt/2 trace(A)=%.6e (ratio=%.3f) | dt/4 trace(A)=%.6e (ratio=%.3f)\n",
+              dt0, tr_dt0_naive, tr_dt0_2_naive, tr_dt0_2_naive / tr_dt0_naive, tr_dt0_4_naive, tr_dt0_4_naive / tr_dt0_naive);
+  check(std::isfinite(tr_dt0_4_naive), "naive (fixed-variance) resampling stays FINITE at dt/4 (no NaN/Inf blowup)", tr_dt0_4_naive);
+  check(tr_dt0_2_naive / tr_dt0_naive > 1.5 && tr_dt0_2_naive / tr_dt0_naive < 2.5,
+        "naive resampling: information scales ~proportionally with sample count (correct for independent per-sample noise, item 22's audited interpretation)",
+        tr_dt0_2_naive / tr_dt0_naive);
+
+  std::printf("  -- PSD-consistent rescaling (var(dt) = var(dt0)*dt0/dt) --\n");
+  const double tr_dt0_psd = buildAtRate(dt0, true);
+  const double tr_dt0_2_psd = buildAtRate(dt0 / 2, true);
+  const double tr_dt0_4_psd = buildAtRate(dt0 / 4, true);
+  std::printf("  dt=%.5f trace(A)=%.6e | dt/2 trace(A)=%.6e (ratio=%.3f) | dt/4 trace(A)=%.6e (ratio=%.3f)\n",
+              dt0, tr_dt0_psd, tr_dt0_2_psd, tr_dt0_2_psd / tr_dt0_psd, tr_dt0_4_psd, tr_dt0_4_psd / tr_dt0_psd);
+  check(tr_dt0_2_psd / tr_dt0_psd > 0.7 && tr_dt0_2_psd / tr_dt0_psd < 1.3,
+        "PSD-consistent rescaling: information CONVERGES (stays ~constant) as dt shrinks -- item 23's 'converge consistently' criterion",
+        tr_dt0_2_psd / tr_dt0_psd);
+  check(tr_dt0_4_psd / tr_dt0_psd > 0.7 && tr_dt0_4_psd / tr_dt0_psd < 1.3,
+        "PSD-consistent rescaling: still converged at dt/4", tr_dt0_4_psd / tr_dt0_psd);
+}
+
 int main() {
   std::printf("Continuous-prior independent-reference + high-frequency + representation-capacity tests\n");
   std::printf("-- item 6/22/39: independent reference --\n");
@@ -242,6 +308,8 @@ int main() {
   testJointTrajectoryBiasCrossCovariance();
   std::printf("-- item 26: representation capacity --\n");
   testRepresentationCapacity();
+  std::printf("-- item 22/23: timestep refinement --\n");
+  testTimestepRefinement();
   std::printf("\n%d failed\n", g_fail);
   return g_fail == 0 ? 0 : 1;
 }
