@@ -264,6 +264,7 @@ add_executable(test_pose_control_adaptive_q_directional
   src/lio/pose_control_lidar_factor.cpp
   src/lio/pose_control_process_factor.cpp
   src/lio/imu_process_step9.cpp
+  src/lio/adaptive_q.cpp
   scripts/test/test_pose_control_adaptive_q_directional.cpp
 )
 target_link_libraries(test_pose_control_adaptive_q_directional
@@ -283,6 +284,7 @@ add_executable(test_pose_control_adaptive_q_directional_debugeigen
   src/lio/pose_control_lidar_factor.cpp
   src/lio/pose_control_process_factor.cpp
   src/lio/imu_process_step9.cpp
+  src/lio/adaptive_q.cpp
   scripts/test/test_pose_control_adaptive_q_directional.cpp
 )
 target_compile_options(test_pose_control_adaptive_q_directional_debugeigen PRIVATE
@@ -315,6 +317,7 @@ add_executable(test_pose_control_adaptive_q_directional_ubsan
   src/lio/pose_control_lidar_factor.cpp
   src/lio/pose_control_process_factor.cpp
   src/lio/imu_process_step9.cpp
+  src/lio/adaptive_q.cpp
   scripts/test/test_pose_control_adaptive_q_directional.cpp
 )
 target_compile_options(test_pose_control_adaptive_q_directional_ubsan PRIVATE

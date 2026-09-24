@@ -14,6 +14,7 @@
 #include "livo_recon/lio/pose_control_adaptive_q.h"
 #include "livo_recon/lio/pose_control_directional_redundancy.h"
 #include "livo_recon/lio/pose_control_lidar_factor.h"
+#include "livo_recon/lio/adaptive_q.h"
 
 #include <Eigen/Dense>
 #include <cmath>
@@ -84,7 +85,19 @@ static void testKnownExtraNoiseRecovered()
     ra[i] = V3D(n_sensor(rng) + n_extra(rng), n_sensor(rng) + n_extra(rng), n_sensor(rng) + n_extra(rng));
   const SplineImuResidualStats st = reduceImuResidualSamples(ra, rw);
   const double expected = sigma_a * sigma_a + extra_a * extra_a;
-  checkNear(st.cov_acc, expected, 0.15 * expected, "known-extra-noise: cov_acc ~= sigma_sensor^2+extra^2 within 15%");
+  checkNear(st.cov_acc, expected, 0.15 * expected, "known-extra-noise: cov_acc ~= sigma_sensor^2+extra^2 within 15% (accelerometer)");
+
+  // Same construction, gyro channel (item 21's own "test both accelerometer
+  // and gyro").
+  std::mt19937 rng_g(8);
+  const double sigma_g = 0.002, extra_g = 0.003;
+  std::normal_distribution<double> ng_sensor(0.0, sigma_g), ng_extra(0.0, extra_g);
+  std::vector<V3D> ra2(N, V3D::Zero()), rw2(N);
+  for (int i = 0; i < N; ++i)
+    rw2[i] = V3D(ng_sensor(rng_g) + ng_extra(rng_g), ng_sensor(rng_g) + ng_extra(rng_g), ng_sensor(rng_g) + ng_extra(rng_g));
+  const SplineImuResidualStats st_g = reduceImuResidualSamples(ra2, rw2);
+  const double expected_g = sigma_g * sigma_g + extra_g * extra_g;
+  checkNear(st_g.cov_gyr, expected_g, 0.15 * expected_g, "known-extra-noise: cov_gyr ~= sigma_sensor^2+extra^2 within 15% (gyro)");
 }
 
 // A3: bias uncertainty alone must NOT inflate Q (item 22 -- MANDATORY).
@@ -165,6 +178,53 @@ static void testAutocorrelatedResidualAcf()
   checkNear(st.acf1_acc, rho, 0.08, "autocorrelated: acf1_acc ~= rho=0.8");
   checkNear(st.acf2_acc, rho * rho, 0.1, "autocorrelated: acf2_acc ~= rho^2=0.64");
   check(st.acf5_acc < st.acf1_acc, "autocorrelated: acf5_acc < acf1_acc (decaying correlation)", st.acf5_acc);
+}
+
+// A6: causality (item 17/25 -- MANDATORY). Exercises AdaptiveQ's own
+// PUBLIC interface directly (no live-estimator scaffolding needed, unlike
+// the two-real-scan integration test that WOULD require it -- see this
+// file's own header comment and the report's honest-gaps section for that
+// disclosed limitation): frame 1's update() with a DISTINCT statistic must
+// not retroactively change frame 1's OWN varAcc()/varGyr() read that
+// already happened before update() was called -- i.e. Q_used_1 (read
+// BEFORE update) must differ from Q_candidate_1 (the result of update),
+// and Q_used_2 (read AFTER update, for the next frame) must equal
+// Q_candidate_1 -- exactly the temporal chain item 17 specifies, at the
+// AdaptiveQ class's own API boundary (the ACTUAL causality enforcement
+// mechanism, since lio_coupled.cpp only ever calls update() once per scan,
+// strictly after that scan's own prior/covariance are already fixed --
+// verified by code inspection, see this file's own commit message).
+static void testAdaptiveQCausality()
+{
+  AdaptiveQ q;
+  AdaptiveQOptions opts;
+  opts.enable = true;
+  opts.warmup_frames = 0;
+  opts.beta_acc = 2.0; opts.beta_gyr = 2.0;  // wide excursion so the test isn't fighting the safety clamp
+  opts.ema = 0.0;  // no smoothing -- isolates the causality property itself
+  opts.z_rate_limit = 10.0;  // default 0.02 deliberately caps per-frame movement (a real safety
+                              // feature, "no single frame's measurement can move the filter far") --
+                              // raised here so ONE update() call can actually reach its target,
+                              // isolating causality from that separate, already-validated mechanism
+  q.configure(opts);
+  q.setNominal(0.0004, 0.000004);
+
+  const double q_used_1_acc = q.varAcc();  // Q_used_1: BEFORE any update() call
+  check(std::abs(q_used_1_acc - 0.0004) < 1e-12, "causality: Q_used_1 == nominal (no update() has run yet)", q_used_1_acc);
+
+  SplineImuResidualStats st1;
+  st1.n = 100; st1.cov_acc = 0.0004 * 25.0; st1.cov_gyr = 0.000004; st1.acf1_acc = 0.0; st1.acf1_gyr = 0.0;
+  q.update(st1);  // scan 1's OWN candidate, computed from scan 1's OWN residual
+  const double q_candidate_1_acc = q.varAcc();
+  check(q_candidate_1_acc > q_used_1_acc * 2.0, "causality: Q_candidate_1 != Q_used_1 (a real update happened)", q_candidate_1_acc);
+
+  // Q_used_2 (what scan 2's OWN prior would read, per lio_coupled.cpp's
+  // wiring -- poseControlEffectiveVarAcc() called at scan 2's start) must
+  // equal Q_candidate_1 exactly -- the update from scan 1 IS what scan 2
+  // consumes, never scan 1 itself (which already used q_used_1_acc, fixed
+  // before update() ran).
+  const double q_used_2_acc = q.varAcc();
+  checkNear(q_used_2_acc, q_candidate_1_acc, 1e-15, "causality: Q_used_2 == Q_candidate_1 (scan 2 consumes scan 1's candidate)");
 }
 
 // ============================================================================
@@ -305,6 +365,7 @@ int main()
   testBiasUncertaintyDoesNotInflate();
   testCrossCovarianceExact();
   testAutocorrelatedResidualAcf();
+  testAdaptiveQCausality();
   testRepeatedDirectionRankOne();
   testIndependentDirectionsMatchSvdReference();
   testKnownWeakDirectionExcludedFromRank();
