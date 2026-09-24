@@ -938,12 +938,18 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       {
         const int dimRawScanstart = coupled_pose_control_layout_.dim();
         Eigen::MatrixXd A_process_scanstart_shared = Eigen::MatrixXd::Zero(dimRawScanstart, dimRawScanstart);
-        Eigen::VectorXd b_unused_scanstart = Eigen::VectorXd::Zero(dimRawScanstart);
+        // items 3-5/8-9 of the prior-mean-correctness phase: this information
+        // VECTOR (xi_imu = J^T W r0, the continuous-time IMU factor's own
+        // gradient at the current linearization point) is NOT discarded --
+        // see its use in xi_z_priorS/delta_z_prior below, which derives the
+        // prior MEAN as the actual (head-fixed-conditional) minimizer of the
+        // IMU-only objective, not merely "whatever eta currently is".
+        Eigen::VectorXd b_process_scanstart_shared = Eigen::VectorXd::Zero(dimRawScanstart);
         PoseControlProcessFactorHeadBlock head_block_scanstart;
         buildPoseControlContinuousImuPrior(spline, coupled_pose_control_layout_, mg.imu_samples_raw,
             coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
             poseControlEffectiveVarAcc(), poseControlEffectiveVarGyr(),
-            A_process_scanstart_shared, b_unused_scanstart, &head_block_scanstart,
+            A_process_scanstart_shared, b_process_scanstart_shared, &head_block_scanstart,
             &coupled_pose_control_imu_residual_samples_);
         const auto& hns2 = coupled_pose_control_hns_;
         // items 4/5/6: the joint marginalized prior over z=[eta;sT] at scan
@@ -1018,8 +1024,42 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           const Eigen::MatrixXd P_z_priorS = coupled_pose_control_sigma_full_prior_.bottomRightCorner(dimZS, dimZS);
           coupled_pose_control_lambda_prior_z_ =
               generalPseudoInverse(P_z_priorS, copts_.pose_control_q_pinv_rel_thresh);
+
+          // ====================================================================
+          // items 3-13 of the prior-mean-correctness phase: the prior MEAN,
+          // in z-space, is the minimizer of the continuous-time IMU-only
+          // objective, HOLDING THE FIXED HEAD BOUNDARY (theta0/p0/v0) EXACTLY
+          // AT ITS OWN LINEARIZATION POINT (item 7: head mean never becomes
+          // an optimization DOF, not even here) -- i.e. minimize over z alone
+          // of [1/2 z^T A_ff_priorS z - xi_z^T z], since A_ff_priorS/xi_z are
+          // ALREADY exactly the IMU factor's z-only Hessian/gradient with x0
+          // held fixed (head_block_scanstart's own A_hh/A_hf carry ALL of the
+          // x0-touching sensitivity separately -- A_process_scanstart_shared,
+          // and therefore A_ff_priorS/xi_z, contain ONLY the c_free/sT
+          // columns, by construction of buildPoseControlContinuousImuPrior).
+          // This is NOT the marginal (Schur-complement) mean over the joint
+          // [x0;z] posterior -- that would let x0's own uncertainty pull the
+          // z-mean, which item 7 forbids ("do not confuse fixed mean
+          // coordinate with deterministic state" -- the covariance path
+          // above correctly marginalizes x0's uncertainty INTO z's
+          // covariance; the mean path below correctly holds x0's MEAN fixed
+          // while still using the exact IMU-implied correction for z).
+          // delta_z_prior is the FIRST-ORDER (single-linearization) Newton
+          // correction from the current trial eta/sT toward the IMU-only
+          // optimum -- exactly matching how every other factor in this
+          // estimator is linearized once per scan and refined across GN
+          // iterations by the OUTER loop, not by iterating the prior itself.
+          // Reuses the SAME q_pinv_rel_thresh-based generalPseudoInverse
+          // (not a fresh ad hoc threshold) for the structural-vs-numerical
+          // nullspace distinction test_pose_control_prior_math.cpp already
+          // validates (item 41).
+          // ====================================================================
+          const Eigen::VectorXd xi_z_priorS = Ps.transpose() * b_process_scanstart_shared;
+          const Eigen::MatrixXd A_ff_priorS_pinv = generalPseudoInverse(A_ff_priorS, copts_.pose_control_q_pinv_rel_thresh);
+          const Eigen::VectorXd delta_z_prior = A_ff_priorS_pinv * xi_z_priorS;
           coupled_pose_control_z_imu_ = Eigen::VectorXd::Zero(dimZS);
-          coupled_pose_control_z_imu_.head(dEtaS) = coupled_pose_control_eta_;  // == eta_imu at this point (pre-GN)
+          coupled_pose_control_z_imu_.head(dEtaS) = coupled_pose_control_eta_ + delta_z_prior.head(dEtaS);
+          if (dSTS > 0) coupled_pose_control_z_imu_.tail(dSTS) = delta_z_prior.tail(dSTS);
 
           // items 5/12: bias/gravity <-> trajectory cross-covariance export
           // (P_eta_bg/ba/g), directly from the joint P_z_priorS block this

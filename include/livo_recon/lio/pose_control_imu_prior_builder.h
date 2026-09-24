@@ -224,24 +224,51 @@ void accumulatePoseControlImuPriorSegmentReduced(
 // PRODUCTION: continuous-time IMU collocation prior (items 1-27 of the
 // continuous-prior implementation phase).
 //
-// DISCRETIZATION CHOICE (item 15): sample-level, i.e. every raw IMU sample
-// in [spline.t0(), spline.t1()] is treated as an independent physical
-// measurement of e_acc(t)/e_gyr(t), weighted by var_acc/var_gyr. This
-// codebase's OWN noise model is already a per-sample (not power-spectral-
-// density) quantity everywhere else it is used -- state_->varAcc()/
-// varGyr() broadcast one scalar variance per axis, consumed identically by
-// computePoseControlImuResidual()'s reduceImuResidualSamples() (which
-// compares directly against this same per-sample variance, with no dt
-// scaling anywhere in that comparison) and by AdaptiveQ itself. Treating
-// each sample as an independent factor with that SAME per-sample variance
-// is therefore the discretization that is already consistent with every
-// other place this codebase interprets "IMU noise" -- introducing a
-// midpoint/trapezoidal/PSD-based scheme here would require inventing a new
-// dt-scaling convention not used anywhere else, exactly what item 9
-// prohibits ("do not invent a new empirical process-weight scalar"). No
-// information is double-counted across samples: each sample contributes
-// its own factor once, at its own timestamp, and nothing else touches A/b
-// for that sample.
+// DISCRETIZATION CHOICE (item 15, audited explicitly per the continuous-
+// prior-validation phase's item 22): sample-level, i.e. every raw IMU
+// sample in [spline.t0(), spline.t1()] is treated as an independent
+// physical measurement of e_acc(t)/e_gyr(t), weighted by var_acc/var_gyr.
+//
+// UNITS AUDIT (item 22): var_acc/var_gyr (state_->varAcc()/varGyr(), read
+// here via poseControlEffectiveVarAcc()/VarGyr()) are PER-SAMPLE
+// measurement variances AT THE IMU's OWN NATIVE SAMPLE RATE, not a
+// continuous-time power spectral density. Traced to source:
+// CalibProc::computeBiasAndNoise() (calib_processing.cpp) computes them as
+// the literal sample variance (sum((x_i-mean)^2)/(N-1)) of N raw,
+// consecutively-sampled stationary IMU readings taken at the sensor's
+// actual streaming rate (~200Hz for this codebase's NTU_VIRAL configs) --
+// this is unambiguously a discrete-time, fixed-rate quantity, not a
+// PSD (which would carry units of variance-per-Hz and require dividing by
+// dt to get a per-sample variance). Because production NEVER resamples
+// the real IMU stream at a different rate than the one var_acc/var_gyr
+// were calibrated at, applying var_acc/var_gyr identically to every raw
+// sample (no additional dt-dependent rescaling) is the physically-
+// consistent, self-calibrated discretization for THIS system -- not an
+// approximation of a "real" continuous-time model that happens to be
+// convenient. This is also the SAME per-sample interpretation every other
+// consumer of varAcc()/varGyr() in this codebase already uses (e.g.
+// computePoseControlImuResidual()'s reduceImuResidualSamples(), AdaptiveQ)
+// -- no second interpretation exists anywhere in the codebase.
+//
+// A theoretical caveat, tested explicitly (item 23,
+// test_pose_control_prior_mean_correctness.cpp / the timestep-refinement
+// test in test_pose_control_continuous_prior_reference.cpp): if the SAME
+// fixed var_acc/var_gyr were ever applied while artificially resampling a
+// bag at a DIFFERENT rate than it was calibrated at (something production
+// never does), total information would scale with sample count rather
+// than converging to a fixed continuous-time limit -- this is the correct
+// behavior for genuinely independent per-sample measurement noise (more
+// real, independent samples of the same true signal ARE more information,
+// not double-counting), and is NOT a bug in this implementation; it would
+// only become a modeling error if var_acc/var_gyr's own calibration rate
+// and the actual runtime IMU rate were ever allowed to diverge, which nothing
+// in this codebase permits. Introducing a midpoint/trapezoidal/PSD-based
+// scheme here would require inventing a new dt-scaling convention not used
+// anywhere else, exactly what item 9 of an earlier phase prohibited ("do
+// not invent a new empirical process-weight scalar"). No information is
+// double-counted across samples: each sample contributes its own factor
+// once, at its own timestamp, and nothing else touches A/b for that
+// sample.
 //
 // RESIDUALS (items 7/8, EXACT convention, matching pose_control_adaptive_q.h
 // byte-for-byte):

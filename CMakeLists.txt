@@ -652,3 +652,86 @@ target_link_libraries(test_pose_control_prior_math_ubsan
   ${PCL_LIBRARIES}
   ${OpenCV_LIBS}
 )
+
+add_executable(test_pose_control_prior_mean_correctness
+  src/lio/spline.cpp
+  src/utils/log/debug_log_dir.cpp
+  src/lio/pose_control_spline.cpp
+  src/lio/imu_process_step9.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
+  src/lio/pose_control_covariance.cpp
+  src/lio/pose_control_adaptive_q.cpp
+  src/lio/pose_control_physical_diagnostics.cpp
+  scripts/test/test_pose_control_prior_mean_correctness.cpp
+)
+target_link_libraries(test_pose_control_prior_mean_correctness
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  OpenMP::OpenMP_CXX
+)
+
+add_executable(test_pose_control_prior_mean_correctness_debugeigen
+  src/lio/spline.cpp
+  src/utils/log/debug_log_dir.cpp
+  src/lio/pose_control_spline.cpp
+  src/lio/imu_process_step9.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
+  src/lio/pose_control_covariance.cpp
+  src/lio/pose_control_adaptive_q.cpp
+  src/lio/pose_control_physical_diagnostics.cpp
+  scripts/test/test_pose_control_prior_mean_correctness.cpp
+)
+target_compile_options(test_pose_control_prior_mean_correctness_debugeigen PRIVATE
+  $<$<COMPILE_LANGUAGE:CXX>:-UNDEBUG;-O0;-g>
+)
+target_link_libraries(test_pose_control_prior_mean_correctness_debugeigen
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  OpenMP::OpenMP_CXX
+)
+
+add_executable(test_pose_control_prior_mean_correctness_ubsan
+  src/lio/spline.cpp
+  src/utils/log/debug_log_dir.cpp
+  src/lio/pose_control_spline.cpp
+  src/lio/imu_process_step9.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
+  src/lio/pose_control_covariance.cpp
+  src/lio/pose_control_adaptive_q.cpp
+  src/lio/pose_control_physical_diagnostics.cpp
+  scripts/test/test_pose_control_prior_mean_correctness.cpp
+)
+target_compile_options(test_pose_control_prior_mean_correctness_ubsan PRIVATE
+  $<$<COMPILE_LANGUAGE:CXX>:-fsanitize=undefined;-fno-sanitize-recover=undefined;-g>
+)
+target_link_libraries(test_pose_control_prior_mean_correctness_ubsan
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  OpenMP::OpenMP_CXX
+  -fsanitize=undefined
+)
+
+add_executable(test_pose_control_prior_mean_correctness_asan
+  src/lio/spline.cpp
+  src/utils/log/debug_log_dir.cpp
+  src/lio/pose_control_spline.cpp
+  src/lio/imu_process_step9.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
+  src/lio/pose_control_covariance.cpp
+  src/lio/pose_control_adaptive_q.cpp
+  src/lio/pose_control_physical_diagnostics.cpp
+  scripts/test/test_pose_control_prior_mean_correctness.cpp
+)
+target_compile_options(test_pose_control_prior_mean_correctness_asan PRIVATE
+  $<$<COMPILE_LANGUAGE:CXX>:-fsanitize=address;-g;-O0>
+)
+target_link_libraries(test_pose_control_prior_mean_correctness_asan
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  OpenMP::OpenMP_CXX
+  -fsanitize=address
+)
