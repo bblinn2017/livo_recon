@@ -2,15 +2,35 @@
 
 #include "livo_recon/lio/pose_control_spline.h"
 #include "livo_recon/lio/pose_control_layout.h"
-#include "livo_recon/lio/imu_process_step9.h"   // buildImuStep9x9/integrateAndAccumulateStep
+#include "livo_recon/lio/pose_control_physical_diagnostics.h"   // ImuSplineResidualSample
+#include "livo_recon/lio/imu_process_step9.h"   // buildImuStep9x9/integrateAndAccumulateStep (test-only reference math below)
+
+// ============================================================================
+// CONTINUOUS-TIME PRIOR REPLACEMENT (2026-09-24 targeted phase). Production
+// now builds the pose-control IMU prior via buildPoseControlContinuousImuPrior()
+// below: a direct continuous-time collocation factor that penalizes
+// e_acc(t)/e_gyr(t) (the SAME residual convention pose_control_adaptive_q.h
+// documents) AT EVERY RAW IMU SAMPLE against the spline's own p/v/a/omega,
+// differentiated w.r.t. the control points/bias/gravity DIRECTLY -- there is
+// no intermediate discrete-time state propagation/integration step. This
+// REPLACES (does not augment) the old endpoint/segment-propagation prior
+// below, which is retained ONLY as test-only reference math (exercised by
+// test_pose_control_imu_prior_builder{,_reduced}.cpp for FD validation of
+// the underlying G9/F9 IMU-integration Jacobian) -- it has NO production
+// call site as of this phase. See buildPoseControlContinuousImuPrior()'s own
+// header comment below for the full derivation/rationale.
+// ============================================================================
 
 // ============================================================================
 // 2026-09-24 PRODUCTION ROLE CLARIFICATION (item 5 of the implementation +
-// code-validation phase): this file's name and the "process factor"
-// terminology below predate a change in how this math is actually used in
-// production. Read this note before the derivation comment that follows.
+// code-validation phase, SUPERSEDED BY THE CONTINUOUS-TIME REPLACEMENT
+// ABOVE): this file's name and the "process factor" terminology below
+// predate a change in how this math is actually used in production. Read
+// this note before the derivation comment that follows. This describes the
+// OLD (now test-only) endpoint/segment-propagation math, kept for FD
+// reference only.
 //
-// CURRENT PRODUCTION ROLE: the ONE production call site
+// FORMER PRODUCTION ROLE (through commit 3bf7151): the ONE production call site
 // (LioProcCoupled's coupled-pose-control init block, lio_coupled.cpp, via
 // buildPoseControlImuPriorContribution() below) invokes
 // accumulatePoseControlImuPriorSegmentReduced() EXACTLY ONCE PER SCAN, at scan
@@ -200,29 +220,102 @@ void accumulatePoseControlImuPriorSegmentReduced(
     PoseControlProcessFactorHeadBlock* head_block,
     double* out_E_process = nullptr);
 
-// Unambiguous name for production's ONE use of the math above: called once
-// per scan, at scan-start, to accumulate this segment's contribution to the
-// fixed joint IMU/bias/gravity PRIOR -- never called again during the GN
-// loop for that scan. A thin, deliberately-named forwarder to
-// accumulatePoseControlImuPriorSegmentReduced() (see the file-level comment above)
-// so the production call site (lio_coupled.cpp) never has to say
-// "process factor" -- a term this codebase's history also used for the
-// now-removed per-iteration-relinearized legacy modes -- to describe what
-// it is actually doing.
-inline void buildPoseControlImuPriorContribution(
-    const PoseControlSpline& spline, const PoseControlFreeLayout& layout, int j,
-    const std::vector<ImuSample>& samples,
+// ============================================================================
+// PRODUCTION: continuous-time IMU collocation prior (items 1-27 of the
+// continuous-prior implementation phase).
+//
+// DISCRETIZATION CHOICE (item 15): sample-level, i.e. every raw IMU sample
+// in [spline.t0(), spline.t1()] is treated as an independent physical
+// measurement of e_acc(t)/e_gyr(t), weighted by var_acc/var_gyr. This
+// codebase's OWN noise model is already a per-sample (not power-spectral-
+// density) quantity everywhere else it is used -- state_->varAcc()/
+// varGyr() broadcast one scalar variance per axis, consumed identically by
+// computePoseControlImuResidual()'s reduceImuResidualSamples() (which
+// compares directly against this same per-sample variance, with no dt
+// scaling anywhere in that comparison) and by AdaptiveQ itself. Treating
+// each sample as an independent factor with that SAME per-sample variance
+// is therefore the discretization that is already consistent with every
+// other place this codebase interprets "IMU noise" -- introducing a
+// midpoint/trapezoidal/PSD-based scheme here would require inventing a new
+// dt-scaling convention not used anywhere else, exactly what item 9
+// prohibits ("do not invent a new empirical process-weight scalar"). No
+// information is double-counted across samples: each sample contributes
+// its own factor once, at its own timestamp, and nothing else touches A/b
+// for that sample.
+//
+// RESIDUALS (items 7/8, EXACT convention, matching pose_control_adaptive_q.h
+// byte-for-byte):
+//   e_acc(t) = R(t)^T * (a_spline(t) - gravity) + bias_acc - a_measured(t)
+//     units: m/s^2 (specific force). a_spline(t) = spline.accAt(t), the
+//     WORLD-frame second derivative of the position spline. gravity is
+//     SUBTRACTED in the world frame before rotating into the body frame
+//     (matches this codebase's existing gravity-in-world convention used
+//     throughout pose_control_adaptive_q.cpp/pose_control_process_factor's
+//     own G9 derivation). bias_acc is ADDED (matches the IMU model
+//     a_measured = R^T(a-g) + bias_acc + noise, solved for the residual
+//     against the CURRENT bias estimate).
+//   e_gyr(t) = spline.omegaBodyAt(t) + bias_gyr - omega_measured(t)
+//     units: rad/s (body-frame angular rate). bias_gyr ADDED, matching
+//     omega_measured = omega_body + bias_gyr + noise.
+//
+// JACOBIANS (items 6/10, reusing PoseControlSpline's own basis exclusively
+// -- no second basis implementation):
+//   de_acc/d(cp_p[k])   = R(t)^T * dAccDcp(jac,k)            (local, via a_spline)
+//   de_acc/d(cp_phi[k]) = skew(R(t)^T*(a_spline(t)-gravity)) * dThetaDcphi(jac,k,t)
+//   de_acc/d(ba)        = I                                  (item 10)
+//   de_acc/d(g)         = -R(t)^T                             (item 10, since e_acc = R^T(a-g)+ba-a_meas)
+//   de_gyr/d(cp_phi[k]) = dOmegaDcphi(jac,k,t)
+//   de_gyr/d(bg)        = I                                  (item 10)
+//   de_acc/d(cp_p[k]) for k in {0,1,2} additionally carries HEAD coupling
+//     (item 4/11/13): d(cp_p[k])/d(p0)=Minv(k,0)*I, d(cp_p[k])/d(v0)=Minv(k,1)*I
+//     (poseControlHeadPosSensitivity()) -- chained the SAME way
+//     addPoseControlLidarFactor() already chains its own position head
+//     coupling. de_acc/d(theta0) = skew(R^T*(a-g)) * poseControlHeadRotJacobian(t)
+//     (theta0's GLOBAL rotation-sensitivity, exactly mirroring
+//     addPoseControlLidarFactor()'s Jrow_head_theta). de_gyr/d(theta0) = 0
+//     and de_gyr/d(p0)=de_gyr/d(v0)=0 EXACTLY: omegaBodyAt(t) is a function
+//     of cp_phi/phiDotAt(t) alone (a LOCAL body-frame rate), and cp_phi does
+//     not depend on theta0/p0/v0 at all (see pose_control_spline.h's own
+//     head-covariance-sensitivity derivation) -- a rigid relabeling of the
+//     fixed reference frame R_anchor cannot change a body-frame rate.
+//
+// This is what makes high-frequency position-knot jitter expensive (item
+// 16): dAccDcp scales as 1/Delta_t^2, so a knot oscillation that shows up
+// as a large a_spline(t) at collocation points directly produces a large
+// e_acc(t), weighted by the SAME physical accelerometer variance every
+// other sample uses -- no separate curvature/stiffness knob is needed or
+// added (item 17).
+//
+// P0 (item 4/11/13/14): incoming state covariance enters via head_block
+// (A_hh/A_hf), EXACTLY the same joint-[x0;z]-then-marginalize construction
+// the LiDAR factor and (formerly) the old process factor already use --
+// the caller (lio_coupled.cpp) builds Omega0=pinv(P0), adds it to A_hh, and
+// Schur-complements x0 out, so P0's FULL cross-covariance structure
+// (position/velocity/bias/gravity, never just a diagonal -- item 14)
+// propagates into the resulting z=[eta;sT] prior by construction, not by
+// an ad hoc diagonal approximation.
+//
+// THREADING (item 36): parallel loop over samples, thread-local
+// accumulators (A/b/A_hh/A_hf/E_imu), single linear merge -- the SAME
+// pattern addPoseControlLidarFactor() already uses. out_samples (if
+// non-null) also collects each sample's residual (item 27/37: ONE
+// evaluation feeds the prior, adaptive-Q, and diagnostics -- the caller
+// passes these same samples to adaptive-Q instead of re-evaluating the
+// spline).
+// ============================================================================
+struct PoseControlContinuousImuPriorStats
+{
+  int n_samples = 0;
+  double E_imu = 0.0;
+};
+
+PoseControlContinuousImuPriorStats buildPoseControlContinuousImuPrior(
+    const PoseControlSpline& spline, const PoseControlFreeLayout& layout,
+    const std::vector<ImuSample>& imu_samples,
     const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity,
-    double q_alpha_acc, double q_alpha_gyr,
-    const V3D& var_acc, const V3D& var_gyr, bool second_order,
-    double q_pinv_rel_thresh,
+    const V3D& var_acc, const V3D& var_gyr,
     Eigen::MatrixXd& A, Eigen::VectorXd& b,
     PoseControlProcessFactorHeadBlock* head_block,
-    double* out_E_process = nullptr)
-{
-  accumulatePoseControlImuPriorSegmentReduced(spline, layout, j, samples, bias_acc, bias_gyr, gravity,
-      q_alpha_acc, q_alpha_gyr, var_acc, var_gyr, second_order, q_pinv_rel_thresh,
-      A, b, head_block, out_E_process);
-}
+    std::vector<ImuSplineResidualSample>* out_samples = nullptr);
 
 }  // namespace livo_recon

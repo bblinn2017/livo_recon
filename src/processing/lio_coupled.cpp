@@ -239,7 +239,6 @@ static const std::vector<std::string>& fullDiagColumns()
     // imu_measurement_information
     "trace_Lambda_imu_meas","min_eig_Lambda_imu_meas","max_eig_Lambda_imu_meas","condition_Lambda_imu_meas",
     "effective_rank_imu_meas","trace_Lambda_imu_prior","trace_Lambda_curvature","imu_meas_to_prior_ratio",
-    "counterfactual_enabled",
     // imu_spline_residual (per-sample)
     "t_abs","t_rel",
     "e_acc_x","e_acc_y","e_acc_z","e_acc_norm","e_gyr_x","e_gyr_y","e_gyr_z","e_gyr_norm",
@@ -914,8 +913,6 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       coupled_pose_control_layout_.has_ba = state_->estBA();
       coupled_pose_control_layout_.has_g = state_->estGravity();
       coupled_pose_control_layout_.fix_head = false;
-      coupled_pose_control_seg_samples_ =
-          bucketPoseControlImuSamples(mg.imu_samples_raw, spline).seg_samples;
       coupled_pose_control_P_z_post_.resize(0, 0);
       // ==========================================================================
       // PRODUCTION joint IMU/bias Gaussian prior. Computed ONCE per scan, at
@@ -927,18 +924,27 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       // the post-loop covariance computation (directly) -- neither ever
       // re-derives a separate prior. This is what makes "mean update
       // information == covariance update information" hold by construction.
+      //
+      // items 1-16 of the continuous-prior implementation phase: this
+      // prior is now built via buildPoseControlContinuousImuPrior() --
+      // one continuous-time collocation factor evaluated directly against
+      // every raw IMU sample in this scan's window, replacing the former
+      // endpoint/segment-propagation construction (accumulatePoseControlImuPriorSegmentReduced,
+      // now test-only reference math -- see pose_control_imu_prior_builder.h).
+      // The SAME IMU samples enter this ONE factor exactly once -- no
+      // separate diagnostic/counterfactual factor exists.
       // ==========================================================================
+      coupled_pose_control_imu_residual_samples_.clear();
       {
         const int dimRawScanstart = coupled_pose_control_layout_.dim();
         Eigen::MatrixXd A_process_scanstart_shared = Eigen::MatrixXd::Zero(dimRawScanstart, dimRawScanstart);
         Eigen::VectorXd b_unused_scanstart = Eigen::VectorXd::Zero(dimRawScanstart);
         PoseControlProcessFactorHeadBlock head_block_scanstart;
-        for (int j = 0; j < spline.nSeg(); ++j)
-          buildPoseControlImuPriorContribution(spline, coupled_pose_control_layout_, j, coupled_pose_control_seg_samples_[j],
-              coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
-              copts_.repro_q_alpha_acc, copts_.repro_q_alpha_gyr, poseControlEffectiveVarAcc(), poseControlEffectiveVarGyr(),
-              copts_.repro_second_order, copts_.pose_control_q_pinv_rel_thresh,
-              A_process_scanstart_shared, b_unused_scanstart, &head_block_scanstart, nullptr);
+        buildPoseControlContinuousImuPrior(spline, coupled_pose_control_layout_, mg.imu_samples_raw,
+            coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
+            poseControlEffectiveVarAcc(), poseControlEffectiveVarGyr(),
+            A_process_scanstart_shared, b_unused_scanstart, &head_block_scanstart,
+            &coupled_pose_control_imu_residual_samples_);
         const auto& hns2 = coupled_pose_control_hns_;
         // items 4/5/6: the joint marginalized prior over z=[eta;sT] at scan
         // start, INCLUDING P0's propagated uncertainty (via head_block_
@@ -1037,19 +1043,16 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           }
 
           // ====================================================================
-          // Targeted validation phase, items 8/18/19/32: pure diagnostic
-          // measurement of the raw IMU-vs-spline residual and its implied
-          // measurement information, computed ONCE per scan here at scan
-          // start from the PRE-LiDAR-update ("prior") spline and bias/
-          // gravity trial values. DIAGNOSTIC ONLY -- never added to the mean
-          // solve's A/b (the counterfactual production-injection path that
-          // previously lived here has been removed; see git history if the
-          // reference calculation is ever needed again).
+          // Continuous-prior phase, item 27/37: reuses
+          // coupled_pose_control_imu_residual_samples_ -- the SAME per-
+          // sample e_acc/e_gyr evaluation buildPoseControlContinuousImuPrior()
+          // already produced as a byproduct of building the production
+          // prior above, at the SAME (scan-start, pre-LiDAR) linearization
+          // point -- rather than a second, redundant residual computation.
+          // DIAGNOSTIC ONLY below this point -- nothing here mutates A/b.
           // ====================================================================
           {
-            const auto samples = computePoseControlImuSplineResidualSamples(
-                spline, mg.imu_samples_raw, coupled_pose_control_ba_trial_,
-                coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_);
+            const auto& samples = coupled_pose_control_imu_residual_samples_;
             const int n = static_cast<int>(samples.size());
             if (n >= 3) {
               const double t_rep = 0.5 * (spline.t0() + spline.t1());

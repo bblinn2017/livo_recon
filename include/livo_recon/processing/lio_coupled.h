@@ -737,10 +737,16 @@ private:
       coupled_pose_control_g_trial_ = V3D::Zero();
   V3D coupled_pose_control_bg_prior_ = V3D::Zero(), coupled_pose_control_ba_prior_ = V3D::Zero(),
       coupled_pose_control_g_prior_ = V3D::Zero();
-  // Raw IMU samples bucketed onto the spline's own breakpoint grid ONCE at
-  // scan start (bucketing depends only on fixed breakpoint times, not on
-  // the moving trial trajectory) -- reused every GN iteration.
-  std::vector<std::vector<ImuSample>> coupled_pose_control_seg_samples_;
+  // Per-sample e_acc/e_gyr residuals against the SCAN-START (pre-LiDAR)
+  // spline, produced as a byproduct of buildPoseControlContinuousImuPrior()
+  // -- the ONE evaluation of the continuous-time IMU prior's own residual,
+  // reused directly for diagnostics (item 27/37) instead of a second,
+  // redundant computePoseControlImuSplineResidualSamples() call. Distinct
+  // from (and NOT a substitute for) adaptive-Q's own residual, which is
+  // deliberately evaluated against the CONVERGED post-LiDAR spline (see
+  // the adaptive-Q block's own comment) -- these are two genuinely
+  // different linearization points, not duplicated work.
+  std::vector<ImuSplineResidualSample> coupled_pose_control_imu_residual_samples_;
   // The reduced posterior z=[eta;delta_sT] covariance from the LAST
   // (converged) GN iteration's own information matrix -- written once,
   // post-loop, in processLIO()'s own poseControlSplineBasis() block (never

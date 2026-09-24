@@ -201,15 +201,12 @@ int main() {
       s.gyro = f.spline.omegaBodyAt(t);
       imu.push_back(s);
     }
-    const auto segs = bucketPoseControlImuSamples(imu, f.spline);
     const int dimRaw = f.layout.dim();
     Eigen::MatrixXd A_raw = Eigen::MatrixXd::Zero(dimRaw, dimRaw);
     Eigen::VectorXd b_raw = Eigen::VectorXd::Zero(dimRaw);
     const V3D var_acc(1e-4, 1e-4, 1e-4), var_gyr(1e-6, 1e-6, 1e-6);
-    for (int j = 0; j < f.spline.nSeg(); ++j)
-      buildPoseControlImuPriorContribution(f.spline, f.layout, j, segs.seg_samples[j],
-          bias_acc, bias_gyr, gravity, 1.0, 1.0, var_acc, var_gyr, true, 1e-6,
-          A_raw, b_raw, nullptr, nullptr);
+    buildPoseControlContinuousImuPrior(f.spline, f.layout, imu, bias_acc, bias_gyr, gravity,
+        var_acc, var_gyr, A_raw, b_raw, nullptr, nullptr);
     const Eigen::MatrixXd P_raw = generalPseudoInverse(A_raw, 1e-9);
     const double t_probe = 0.5 * (t0 + t1);
     const auto sample = evaluatePoseControlPhysicalSample(f.spline, f.layout, f.hns, t_probe, gravity);
@@ -227,8 +224,15 @@ int main() {
   const double pomega_ratio_13_over_4 = trace_Pomega_by_N[0] > 1e-300 ? trace_Pomega_by_N[2] / trace_Pomega_by_N[0] : 0.0;
   std::printf("  physical_information_invariance: trace(P_a)_N13/trace(P_a)_N4 = %.4e, trace(P_omega)_N13/trace(P_omega)_N4 = %.4e\n",
               pa_ratio_13_over_4, pomega_ratio_13_over_4);
-  // Report only -- no pass/fail gate here (this ratio IS the answer to
-  // report question 3/4, not a thing with an a priori "correct" value).
+  // Report only for the ratio itself -- no a priori "correct" value.
+  // item 40 (N=13 pathology regression, continuous-prior phase): the
+  // production prior's own physical acceleration covariance must remain
+  // FINITE and NOT unboundedly large at N=13 -- this is a genuine gate,
+  // unlike the ratio above.
+  for (size_t i = 0; i < fits.size(); ++i) {
+    check(std::isfinite(trace_Pa_by_N[i]) && trace_Pa_by_N[i] < 1e6,
+          "item 40 regression: trace(P_a) is finite and physically bounded (N=4/7/13)", trace_Pa_by_N[i]);
+  }
 
   std::printf("\n%d failed (measurement checks above; see printed ratios for the invariance answer)\n", g_fail);
   return g_fail == 0 ? 0 : 1;

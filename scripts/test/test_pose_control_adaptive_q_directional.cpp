@@ -544,7 +544,7 @@ static void testThreadedLidarFactorMatchesSerial()
 // independent information-form reference. Do NOT require eee_01.").
 //
 // This calls the REAL production functions
-// (buildPoseControlHeadNullspace/buildPoseControlImuPriorContribution/
+// (buildPoseControlHeadNullspace/buildPoseControlContinuousImuPrior/
 // generalPseudoInverse/addPoseControlLidarFactor) in the SAME order and
 // composition estimateCoupledPoseControlSpline()'s own scan-start-prior +
 // first-GN-iteration code uses (mirrored from lio_coupled.cpp, not
@@ -575,13 +575,13 @@ static void testProductionGNAssemblySyntheticFixture()
   PoseControlFreeLayout layout;
   layout.N = N; layout.has_bg = layout.has_ba = layout.has_g = false;  // trajectory-only, keeps the fixture small
 
-  // ---- production prior: synthetic per-segment IMU samples (near-static,
-  // small noise) fed through the REAL buildPoseControlImuPriorContribution()
-  // once per segment, exactly as lio_coupled.cpp's scan-start init loop
-  // does. ----------------------------------------------------------------
+  // ---- production prior: synthetic raw IMU samples (near-static, small
+  // noise) fed through the REAL buildPoseControlContinuousImuPrior() ONCE
+  // for the whole window, exactly as lio_coupled.cpp's scan-start init
+  // block does. ------------------------------------------------------------
   const V3D bias_acc = V3D::Zero(), bias_gyr = V3D::Zero(), gravity(0, 0, -9.81);
   const V3D var_acc = V3D::Constant(0.02 * 0.02), var_gyr = V3D::Constant(0.002 * 0.002);
-  std::vector<std::vector<ImuSample>> seg_samples(spline.nSeg());
+  std::vector<ImuSample> imu_samples;
   for (int j = 0; j < spline.nSeg(); ++j) {
     const double t_lo = j * spline.delta(), t_hi = (j + 1) * spline.delta();
     for (int s = 0; s <= 4; ++s) {
@@ -589,16 +589,15 @@ static void testProductionGNAssemblySyntheticFixture()
       smp.t = t_lo + (t_hi - t_lo) * s / 4.0;
       smp.acc = V3D(0, 0, 9.81);  // static-ish, gravity-only, matches nominal
       smp.gyro = V3D::Zero();
-      seg_samples[j].push_back(smp);
+      imu_samples.push_back(smp);
     }
   }
   const int dimRaw = layout.dim();
   Eigen::MatrixXd A_prior_raw = Eigen::MatrixXd::Zero(dimRaw, dimRaw);
   Eigen::VectorXd b_prior_raw_unused = Eigen::VectorXd::Zero(dimRaw);
   PoseControlProcessFactorHeadBlock head_block;
-  for (int j = 0; j < spline.nSeg(); ++j)
-    buildPoseControlImuPriorContribution(spline, layout, j, seg_samples[j], bias_acc, bias_gyr, gravity,
-        1.0, 1.0, var_acc, var_gyr, true, 1e-6, A_prior_raw, b_prior_raw_unused, &head_block, nullptr);
+  buildPoseControlContinuousImuPrior(spline, layout, imu_samples, bias_acc, bias_gyr, gravity,
+      var_acc, var_gyr, A_prior_raw, b_prior_raw_unused, &head_block, nullptr);
 
   Eigen::MatrixXd P0 = Eigen::MatrixXd::Identity(9, 9) * 1e-4;  // synthetic scan-start state covariance
   const Eigen::MatrixXd Omega0 = generalPseudoInverse(P0, 1e-6);
