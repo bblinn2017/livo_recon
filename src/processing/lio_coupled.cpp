@@ -7,6 +7,7 @@
 #include "livo_recon/utils/algo/omp_utils.h"
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/lio/pose_control_adaptive_q.h"
+#include "livo_recon/lio/pose_control_imu_measurement_diagnostics.h"
 #include "livo_recon/lio/pose_control_directional_redundancy.h"
 
 #include <algorithm>
@@ -223,7 +224,28 @@ static const std::vector<std::string>& fullDiagColumns()
     "point_index","residual","sigma2","whitened_residual","H_i_norm","H_i_dim",
     // spline_derivative_health (items 13/22)
     "quantity","median","p95","p99","max_val","sample_count",
-    "notes"
+    "notes",
+    // ================================================================
+    // 2026-09-23 TARGETED REAL-DATA DIAGNOSTIC CAMPAIGN columns
+    // ================================================================
+    // imu_residual_summary
+    "t_rel_start","t_rel_end","n_samples",
+    "acc_residual_mean","acc_residual_RMS","acc_residual_p50","acc_residual_p95","acc_residual_p99","acc_residual_max",
+    "gyr_residual_mean","gyr_residual_RMS","gyr_residual_p50","gyr_residual_p95","gyr_residual_p99","gyr_residual_max",
+    "C_empirical_acc","C_pred_state_acc","C_sensor_acc","C_extra_acc","C_extra_acc_psd",
+    "C_empirical_gyr","C_pred_state_gyr","C_sensor_gyr","C_extra_gyr","C_extra_gyr_psd",
+    // imu_measurement_jacobian
+    "t_rep","H_acc_eta_norm","H_gyr_eta_norm","H_acc_ba_present","H_acc_g_present","H_gyr_bg_present",
+    // imu_measurement_information
+    "trace_Lambda_imu_meas","min_eig_Lambda_imu_meas","max_eig_Lambda_imu_meas","condition_Lambda_imu_meas",
+    "effective_rank_imu_meas","trace_Lambda_imu_prior","trace_Lambda_curvature","imu_meas_to_prior_ratio",
+    "counterfactual_enabled",
+    // imu_spline_residual (per-sample)
+    "t_abs","t_rel",
+    "e_acc_x","e_acc_y","e_acc_z","e_acc_norm","e_gyr_x","e_gyr_y","e_gyr_z","e_gyr_norm",
+    "a_meas_x","a_meas_y","a_meas_z","a_spline_body_x","a_spline_body_y","a_spline_body_z",
+    "omega_meas_x","omega_meas_y","omega_meas_z","omega_spline_x","omega_spline_y","omega_spline_z",
+    "bg_x","bg_y","bg_z","ba_x","ba_y","ba_z","g_x","g_y","g_z",
   };
   return cols;
 }
@@ -324,6 +346,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/curvature_weight_pos", copts_.pose_control_curvature_weight_pos, 0.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/curvature_weight_rot", copts_.pose_control_curvature_weight_rot, 0.0);
   cfg.nested<std::string>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/test_id", copts_.pose_control_test_id, std::string("unlabeled"));
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/imu_measurement_info_counterfactual", copts_.pose_control_imu_measurement_info_counterfactual, false);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/adaptive_q/enable", copts_.pose_control_adaptive_q.enable, false);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/adaptive_q/beta_acc", copts_.pose_control_adaptive_q.beta_acc, 0.3);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/adaptive_q/beta_gyr", copts_.pose_control_adaptive_q.beta_gyr, 0.3);
@@ -1006,6 +1029,138 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
             emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "bias_information", voxel_map_->frame_idx_, -1, bkv);
           }
 
+          // ====================================================================
+          // 2026-09-23 TARGETED REAL-DATA DIAGNOSTIC CAMPAIGN, items 6-19/31:
+          // the raw IMU-measurement-information COUNTERFACTUAL DIAGNOSTIC
+          // factor, computed ONCE per scan here at scan start (frozen for the
+          // rest of the scan, same lifetime as the joint prior directly
+          // above) from the PRE-LiDAR-update ("prior") spline and bias/
+          // gravity trial values -- NOT the converged post-LiDAR trajectory.
+          // Always computed (needed for the information diagnostics even in
+          // runs where the counterfactual injection itself is OFF); only
+          // ADDED to the mean solve's A/b (see estimateCoupledPoseControlSpline)
+          // when pose_control_imu_measurement_info_counterfactual is true.
+          // ====================================================================
+          {
+            const auto samples = computePoseControlImuSplineResidualSamples(
+                spline, mg.imu_samples_raw, coupled_pose_control_ba_trial_,
+                coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_);
+            const int n = static_cast<int>(samples.size());
+            coupled_pose_control_lambda_imu_meas_valid_ = false;
+            if (n >= 3) {
+              const double t_rep = 0.5 * (spline.t0() + spline.t1());
+              const int off_bg = layoutS.colBG() >= 0 ? dEtaS + layoutS.colBG() - layoutS.dimCFree() : -1;
+              const int off_ba = layoutS.colBA() >= 0 ? dEtaS + layoutS.colBA() - layoutS.dimCFree() : -1;
+              const int off_g  = layoutS.colG()  >= 0 ? dEtaS + layoutS.colG()  - layoutS.dimCFree() : -1;
+              Eigen::MatrixXd H_acc, H_gyr;
+              computePoseControlImuMeasurementJacobianZ(spline, layoutS, hns2, t_rep,
+                  coupled_pose_control_g_trial_, dimZS, off_bg, off_ba, off_g, H_acc, H_gyr);
+
+              V3D mean_e_acc = V3D::Zero(), mean_e_gyr = V3D::Zero();
+              std::vector<V3D> ra(n), rw(n);
+              for (int i = 0; i < n; ++i) { ra[i] = samples[i].e_acc; rw[i] = samples[i].e_gyr; mean_e_acc += ra[i]; mean_e_gyr += rw[i]; }
+              mean_e_acc /= static_cast<double>(n); mean_e_gyr /= static_cast<double>(n);
+              const SplineImuResidualStats emp_st = reduceImuResidualSamples(ra, rw);
+
+              const V3D R_acc_diag = state_->varAcc(), R_gyr_diag = state_->varGyr();
+              const ImuMeasurementInformation info = computePoseControlImuMeasurementInformation(
+                  H_acc, H_gyr, R_acc_diag, R_gyr_diag, n, n, mean_e_acc, mean_e_gyr);
+              coupled_pose_control_lambda_imu_meas_z_ = info.Lambda_imu_meas;
+              coupled_pose_control_b_imu_meas_z_ = info.b_imu_meas;
+              coupled_pose_control_lambda_imu_meas_valid_ = true;
+
+              if (copts_.psd_audit_en) {
+                const int off_bg_l = layoutS.colBG() >= 0 ? layoutS.colBG() - layoutS.dimCFree() : -1;
+                const int off_ba_l = layoutS.colBA() >= 0 ? layoutS.colBA() - layoutS.dimCFree() : -1;
+                const int off_g_l  = layoutS.colG()  >= 0 ? layoutS.colG()  - layoutS.dimCFree() : -1;
+                Eigen::Matrix3d P_ba_pr = Eigen::Matrix3d::Zero(), P_bg_pr = Eigen::Matrix3d::Zero(),
+                                P_g_pr = Eigen::Matrix3d::Zero(), P_ba_g_pr = Eigen::Matrix3d::Zero();
+                if (off_ba_l >= 0) P_ba_pr = P_z_priorS.block(dEtaS + off_ba_l, dEtaS + off_ba_l, 3, 3);
+                if (off_bg_l >= 0) P_bg_pr = P_z_priorS.block(dEtaS + off_bg_l, dEtaS + off_bg_l, 3, 3);
+                if (off_g_l  >= 0) P_g_pr  = P_z_priorS.block(dEtaS + off_g_l,  dEtaS + off_g_l,  3, 3);
+                if (off_ba_l >= 0 && off_g_l >= 0) P_ba_g_pr = P_z_priorS.block(dEtaS + off_ba_l, dEtaS + off_g_l, 3, 3);
+                const Eigen::MatrixXd J_acc_eta_pr = H_acc.leftCols(dEtaS);
+                const Eigen::MatrixXd J_gyr_eta_pr = H_gyr.leftCols(dEtaS);
+                const Eigen::MatrixXd P_eta_pr = P_z_priorS.topLeftCorner(dEtaS, dEtaS);
+                const ResidualToQAccounting acct = computePoseControlResidualToQAccounting(
+                    emp_st.cov_acc, emp_st.cov_gyr, spline.rotAt(t_rep), P_ba_pr, P_bg_pr, P_g_pr, P_ba_g_pr,
+                    J_acc_eta_pr, J_gyr_eta_pr, P_eta_pr, R_acc_diag.mean(), R_gyr_diag.mean());
+
+                std::vector<double> acc_norms, gyr_norms;
+                acc_norms.reserve(n); gyr_norms.reserve(n);
+                double bag_x=0,bag_y=0,bag_z=0;
+                for (int i = 0; i < n; ++i) { acc_norms.push_back(samples[i].e_acc.norm()); gyr_norms.push_back(samples[i].e_gyr.norm()); }
+                auto pct = [](std::vector<double> v, double p) {
+                  if (v.empty()) return 0.0;
+                  std::sort(v.begin(), v.end());
+                  const size_t idx = std::min(v.size() - 1, static_cast<size_t>(p * (v.size() - 1)));
+                  return v[idx];
+                };
+                auto meanOf = [](const std::vector<double>& v) { double s=0; for (double x: v) s+=x; return v.empty()?0.0:s/v.size(); };
+                auto rmsOf = [](const std::vector<double>& v) { double s=0; for (double x: v) s+=x*x; return v.empty()?0.0:std::sqrt(s/v.size()); };
+                auto maxOf = [](const std::vector<double>& v) { double m=0; for (double x: v) m=std::max(m,x); return m; };
+
+                std::map<std::string, std::string> rkv = {
+                  {"t_rel_start", std::to_string(spline.t0())}, {"t_rel_end", std::to_string(spline.t1())},
+                  {"n_samples", std::to_string(n)},
+                  {"acc_residual_mean", std::to_string(meanOf(acc_norms))}, {"acc_residual_RMS", std::to_string(rmsOf(acc_norms))},
+                  {"acc_residual_p50", std::to_string(pct(acc_norms,0.50))}, {"acc_residual_p95", std::to_string(pct(acc_norms,0.95))},
+                  {"acc_residual_p99", std::to_string(pct(acc_norms,0.99))}, {"acc_residual_max", std::to_string(maxOf(acc_norms))},
+                  {"gyr_residual_mean", std::to_string(meanOf(gyr_norms))}, {"gyr_residual_RMS", std::to_string(rmsOf(gyr_norms))},
+                  {"gyr_residual_p50", std::to_string(pct(gyr_norms,0.50))}, {"gyr_residual_p95", std::to_string(pct(gyr_norms,0.95))},
+                  {"gyr_residual_p99", std::to_string(pct(gyr_norms,0.99))}, {"gyr_residual_max", std::to_string(maxOf(gyr_norms))},
+                  {"acf1_acc", std::to_string(emp_st.acf1_acc)}, {"acf2_acc", std::to_string(emp_st.acf2_acc)}, {"acf5_acc", std::to_string(emp_st.acf5_acc)},
+                  {"acf1_gyr", std::to_string(emp_st.acf1_gyr)}, {"acf2_gyr", std::to_string(emp_st.acf2_gyr)}, {"acf5_gyr", std::to_string(emp_st.acf5_gyr)},
+                  {"C_empirical_acc", std::to_string(acct.C_empirical_acc)}, {"C_pred_state_acc", std::to_string(acct.C_pred_state_acc)},
+                  {"C_sensor_acc", std::to_string(acct.C_sensor_acc)}, {"C_extra_acc", std::to_string(acct.C_extra_acc)}, {"C_extra_acc_psd", std::to_string(acct.C_extra_acc_psd)},
+                  {"C_empirical_gyr", std::to_string(acct.C_empirical_gyr)}, {"C_pred_state_gyr", std::to_string(acct.C_pred_state_gyr)},
+                  {"C_sensor_gyr", std::to_string(acct.C_sensor_gyr)}, {"C_extra_gyr", std::to_string(acct.C_extra_gyr)}, {"C_extra_gyr_psd", std::to_string(acct.C_extra_gyr_psd)},
+                };
+                emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "imu_residual_summary", voxel_map_->frame_idx_, -1, rkv);
+
+                std::map<std::string, std::string> jkv = {
+                  {"t_rep", std::to_string(t_rep)},
+                  {"H_acc_eta_norm", std::to_string(J_acc_eta_pr.norm())}, {"H_gyr_eta_norm", std::to_string(J_gyr_eta_pr.norm())},
+                  {"H_acc_ba_present", std::to_string(off_ba >= 0)}, {"H_acc_g_present", std::to_string(off_g >= 0)},
+                  {"H_gyr_bg_present", std::to_string(off_bg >= 0)},
+                };
+                emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "imu_measurement_jacobian", voxel_map_->frame_idx_, -1, jkv);
+
+                std::map<std::string, std::string> ikv = {
+                  {"trace_Lambda_imu_meas", std::to_string(info.trace_lambda_imu_meas)},
+                  {"min_eig_Lambda_imu_meas", std::to_string(info.min_eig)},
+                  {"max_eig_Lambda_imu_meas", std::to_string(info.max_eig)},
+                  {"condition_Lambda_imu_meas", std::to_string(info.condition)},
+                  {"effective_rank_imu_meas", std::to_string(info.effective_rank)},
+                  {"trace_Lambda_imu_prior", std::to_string(coupled_pose_control_lambda_prior_z_.trace())},
+                  {"trace_Lambda_curvature", std::to_string(coupled_pose_control_last_lambda_curvature_trace_)},
+                  {"imu_meas_to_prior_ratio", std::to_string(coupled_pose_control_lambda_prior_z_.trace() > 1e-300 ?
+                      info.trace_lambda_imu_meas / coupled_pose_control_lambda_prior_z_.trace() : 0.0)},
+                  {"counterfactual_enabled", std::to_string(copts_.pose_control_imu_measurement_info_counterfactual)},
+                };
+                emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "imu_measurement_information", voxel_map_->frame_idx_, -1, ikv);
+
+                for (int i = 0; i < n; ++i) {
+                  const auto& s = samples[i];
+                  std::map<std::string, std::string> skv = {
+                    {"t_abs", std::to_string(s.t)}, {"t_rel", std::to_string(s.t)},
+                    {"e_acc_x", std::to_string(s.e_acc.x())}, {"e_acc_y", std::to_string(s.e_acc.y())}, {"e_acc_z", std::to_string(s.e_acc.z())},
+                    {"e_acc_norm", std::to_string(s.e_acc.norm())},
+                    {"e_gyr_x", std::to_string(s.e_gyr.x())}, {"e_gyr_y", std::to_string(s.e_gyr.y())}, {"e_gyr_z", std::to_string(s.e_gyr.z())},
+                    {"e_gyr_norm", std::to_string(s.e_gyr.norm())},
+                    {"a_meas_x", std::to_string(s.a_meas.x())}, {"a_meas_y", std::to_string(s.a_meas.y())}, {"a_meas_z", std::to_string(s.a_meas.z())},
+                    {"a_spline_body_x", std::to_string(s.a_spline_body.x())}, {"a_spline_body_y", std::to_string(s.a_spline_body.y())}, {"a_spline_body_z", std::to_string(s.a_spline_body.z())},
+                    {"omega_meas_x", std::to_string(s.omega_meas.x())}, {"omega_meas_y", std::to_string(s.omega_meas.y())}, {"omega_meas_z", std::to_string(s.omega_meas.z())},
+                    {"omega_spline_x", std::to_string(s.omega_spline_body.x())}, {"omega_spline_y", std::to_string(s.omega_spline_body.y())}, {"omega_spline_z", std::to_string(s.omega_spline_body.z())},
+                    {"bg_x", std::to_string(coupled_pose_control_bg_trial_.x())}, {"bg_y", std::to_string(coupled_pose_control_bg_trial_.y())}, {"bg_z", std::to_string(coupled_pose_control_bg_trial_.z())},
+                    {"ba_x", std::to_string(coupled_pose_control_ba_trial_.x())}, {"ba_y", std::to_string(coupled_pose_control_ba_trial_.y())}, {"ba_z", std::to_string(coupled_pose_control_ba_trial_.z())},
+                    {"g_x", std::to_string(coupled_pose_control_g_trial_.x())}, {"g_y", std::to_string(coupled_pose_control_g_trial_.y())}, {"g_z", std::to_string(coupled_pose_control_g_trial_.z())},
+                  };
+                  emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "imu_spline_residual", voxel_map_->frame_idx_, i, skv);
+                }
+              }
+            }
+          }
         }
       }
       coupled_pose_control_valid_ = true;
@@ -4946,6 +5101,23 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
     const Eigen::VectorXd r_prior_z = z_current - coupled_pose_control_z_imu_;
     A += coupled_pose_control_lambda_prior_z_;
     b += -coupled_pose_control_lambda_prior_z_ * r_prior_z;
+
+    // 2026-09-23 targeted diagnostic campaign, item 15/16: COUNTERFACTUAL
+    // DIAGNOSTIC MODE ONLY. Adds the raw IMU-measurement-information factor
+    // (frozen at scan start alongside the prior above -- see this scan's
+    // own scan-start init block) directly on top of the production
+    // prior+LiDAR+curvature information. THIS DOUBLE-COUNTS THE SAME IMU
+    // SAMPLES THE PRIOR ABOVE ALREADY CONSUMED -- default false, production
+    // formulation unchanged unless this flag is explicitly set. See
+    // pose_control_imu_measurement_diagnostics.h and
+    // pose_control_targeted_live_diagnostics_report.md.
+    if (copts_.pose_control_imu_measurement_info_counterfactual &&
+        coupled_pose_control_lambda_imu_meas_valid_ &&
+        coupled_pose_control_lambda_imu_meas_z_.rows() == dimZ &&
+        coupled_pose_control_b_imu_meas_z_.size() == dimZ) {
+      A += coupled_pose_control_lambda_imu_meas_z_;
+      b += coupled_pose_control_b_imu_meas_z_;
+    }
 
     // ========================================================================
     // item 10/51: the CORRECT EKF/MAP-equivalence test. Unlike the earlier

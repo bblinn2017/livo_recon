@@ -18,6 +18,7 @@
 #include "livo_recon/lio/pose_control_covariance.h"
 #include "livo_recon/lio/pose_control_gt_diagnostics.h"
 #include "livo_recon/lio/adaptive_q.h"
+#include "livo_recon/lio/pose_control_imu_measurement_diagnostics.h"
 
 #include <Eigen/Dense>
 #include <cmath>
@@ -286,6 +287,106 @@ static void testStateJacobianFiniteDifference()
   }
   check(max_acc_err < 1e-4, "trajectory-Jacobian: analytic d(e_acc)/d(eta) matches finite difference", max_acc_err);
   check(max_gyr_err < 1e-4, "trajectory-Jacobian: analytic d(e_gyr)/d(eta) matches finite difference", max_gyr_err);
+}
+
+// Targeted diagnostic campaign item 12: full measurement Jacobian
+// d(e_acc)/dz, d(e_gyr)/dz including the bg/ba/g blocks (not just eta),
+// finite-difference-verified against the SAME evalAcc/evalGyr probes as
+// testStateJacobianFiniteDifference, plus direct perturbation of the
+// bias/gravity inputs themselves.
+static void testImuMeasurementJacobianFiniteDifference()
+{
+  PoseControlSpline spline;
+  spline.init(13, 0.0, 0.1);
+  std::mt19937 rng(777);
+  std::uniform_real_distribution<double> u(-0.3, 0.3);
+  for (int i = 0; i < spline.N(); ++i) {
+    spline.cp_p.col(i) = V3D(u(rng) + 0.02 * i, u(rng), u(rng));
+    spline.cp_phi.col(i) = V3D(u(rng), u(rng), u(rng));
+  }
+  PoseControlFreeLayout layout;
+  layout.N = spline.N(); layout.has_bg = layout.has_ba = layout.has_g = true;
+  PoseControlHeadNullspace hns;
+  hns.Z = Eigen::MatrixXd::Identity(6 * spline.N(), 6 * spline.N());
+  hns.c_particular = Eigen::VectorXd::Zero(6 * spline.N());
+
+  const double t = 0.05;
+  const V3D gravity(0, 0, -9.81);
+  const V3D bias_acc(0.01, -0.02, 0.03), bias_gyr(0.001, 0.002, -0.001);
+  const int dEta = hns.freeDim();
+  const int off_bg = dEta + 0, off_ba = dEta + 3, off_g = dEta + 6;
+  const int dimZ = dEta + 9;
+
+  Eigen::MatrixXd H_acc, H_gyr;
+  computePoseControlImuMeasurementJacobianZ(spline, layout, hns, t, gravity, dimZ, off_bg, off_ba, off_g, H_acc, H_gyr);
+
+  auto evalE = [&](const PoseControlSpline& s, const V3D& ba, const V3D& bg, const V3D& g, V3D& e_acc, V3D& e_gyr) {
+    e_acc = s.rotAt(t).transpose() * (s.accAt(t) - g) + ba;  // a_measured term cancels in the FD difference
+    e_gyr = s.omegaBodyAt(t) + bg;
+  };
+
+  const double eps = 1e-6;
+  double max_acc_err = 0.0, max_gyr_err = 0.0;
+  const int rawDim = hns.rawDim();
+  for (int col = 0; col < rawDim; col += std::max(1, rawDim / 12)) {
+    PoseControlSpline sp = spline, sm = spline;
+    const int half = rawDim / 2;
+    if (col < half) { sp.cp_p.col(col / 3)(col % 3) += eps; sm.cp_p.col(col / 3)(col % 3) -= eps; }
+    else { const int c2 = col - half; sp.cp_phi.col(c2 / 3)(c2 % 3) += eps; sm.cp_phi.col(c2 / 3)(c2 % 3) -= eps; }
+    V3D e_acc_p, e_gyr_p, e_acc_m, e_gyr_m;
+    evalE(sp, bias_acc, bias_gyr, gravity, e_acc_p, e_gyr_p);
+    evalE(sm, bias_acc, bias_gyr, gravity, e_acc_m, e_gyr_m);
+    const V3D fd_acc = (e_acc_p - e_acc_m) / (2.0 * eps);
+    const V3D fd_gyr = (e_gyr_p - e_gyr_m) / (2.0 * eps);
+    max_acc_err = std::max(max_acc_err, (fd_acc - H_acc.col(col)).norm());
+    max_gyr_err = std::max(max_gyr_err, (fd_gyr - H_gyr.col(col)).norm());
+  }
+  check(max_acc_err < 1e-4, "H_acc: eta columns match finite difference", max_acc_err);
+  check(max_gyr_err < 1e-4, "H_gyr: eta columns match finite difference", max_gyr_err);
+
+  // Bias/gravity columns, perturbing the inputs directly (not the spline).
+  for (int i = 0; i < 3; ++i) {
+    V3D ba_p = bias_acc, ba_m = bias_acc; ba_p(i) += eps; ba_m(i) -= eps;
+    V3D e_acc_p, e_gyr_p, e_acc_m, e_gyr_m;
+    evalE(spline, ba_p, bias_gyr, gravity, e_acc_p, e_gyr_p);
+    evalE(spline, ba_m, bias_gyr, gravity, e_acc_m, e_gyr_m);
+    const V3D fd = (e_acc_p - e_acc_m) / (2.0 * eps);
+    check((fd - H_acc.col(off_ba + i)).norm() < 1e-6, "H_acc: d/d(delta_ba) column matches finite difference", (fd - H_acc.col(off_ba + i)).norm());
+  }
+  for (int i = 0; i < 3; ++i) {
+    V3D g_p = gravity, g_m = gravity; g_p(i) += eps; g_m(i) -= eps;
+    V3D e_acc_p, e_gyr_p, e_acc_m, e_gyr_m;
+    evalE(spline, bias_acc, bias_gyr, g_p, e_acc_p, e_gyr_p);
+    evalE(spline, bias_acc, bias_gyr, g_m, e_acc_m, e_gyr_m);
+    const V3D fd = (e_acc_p - e_acc_m) / (2.0 * eps);
+    check((fd - H_acc.col(off_g + i)).norm() < 1e-6, "H_acc: d/d(delta_g) column matches finite difference", (fd - H_acc.col(off_g + i)).norm());
+  }
+  for (int i = 0; i < 3; ++i) {
+    V3D bg_p = bias_gyr, bg_m = bias_gyr; bg_p(i) += eps; bg_m(i) -= eps;
+    V3D e_acc_p, e_gyr_p, e_acc_m, e_gyr_m;
+    evalE(spline, bias_acc, bg_p, gravity, e_acc_p, e_gyr_p);
+    evalE(spline, bias_acc, bg_m, gravity, e_acc_m, e_gyr_m);
+    const V3D fd = (e_gyr_p - e_gyr_m) / (2.0 * eps);
+    check((fd - H_gyr.col(off_bg + i)).norm() < 1e-6, "H_gyr: d/d(delta_bg) column matches finite difference", (fd - H_gyr.col(off_bg + i)).norm());
+  }
+}
+
+// Item 13: information accumulation sanity -- more samples / smaller
+// R must produce a larger information trace, and the sandwich Lambda =
+// H^T R^-1 H must be exactly symmetric PSD for a diagonal R.
+static void testImuMeasurementInformationSanity()
+{
+  Eigen::MatrixXd H_acc = Eigen::MatrixXd::Random(3, 10);
+  Eigen::MatrixXd H_gyr = Eigen::MatrixXd::Random(3, 10);
+  const V3D R_acc(0.01, 0.01, 0.01), R_gyr(0.001, 0.001, 0.001);
+  const V3D mean_e_acc(0.1, 0.05, -0.02), mean_e_gyr(0.01, -0.01, 0.02);
+  const auto info10 = computePoseControlImuMeasurementInformation(H_acc, H_gyr, R_acc, R_gyr, 10, 10, mean_e_acc, mean_e_gyr);
+  const auto info100 = computePoseControlImuMeasurementInformation(H_acc, H_gyr, R_acc, R_gyr, 100, 100, mean_e_acc, mean_e_gyr);
+  check(info100.trace_lambda_imu_meas > info10.trace_lambda_imu_meas, "more IMU samples strictly increase information trace", info100.trace_lambda_imu_meas - info10.trace_lambda_imu_meas);
+  const Eigen::MatrixXd Lsym = info10.Lambda_imu_meas - info10.Lambda_imu_meas.transpose();
+  check(Lsym.norm() < 1e-10, "Lambda_imu_meas is exactly symmetric", Lsym.norm());
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(info10.Lambda_imu_meas);
+  check(es.eigenvalues().minCoeff() > -1e-9, "Lambda_imu_meas is PSD", es.eigenvalues().minCoeff());
 }
 
 // A8: trajectory-state correction, sanity + zero-uncertainty degenerate
@@ -677,6 +778,8 @@ int main()
   testAutocorrelatedResidualAcf();
   testAdaptiveQCausality();
   testStateJacobianFiniteDifference();
+  testImuMeasurementJacobianFiniteDifference();
+  testImuMeasurementInformationSanity();
   testTrajectoryStateCorrectionZeroUncertainty();
   testRepeatedDirectionRankOne();
   testIndependentDirectionsMatchSvdReference();

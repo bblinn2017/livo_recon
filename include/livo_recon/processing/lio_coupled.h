@@ -94,6 +94,17 @@ struct LioProcCoupledOptions
   // A/B/C, weight sweep, P0-scale sweep) can be told apart in the one
   // shared CSV. Purely a label, no effect on estimator behavior.
   std::string pose_control_test_id = "unlabeled";
+  // 2026-09-23 targeted diagnostic campaign, item 15: COUNTERFACTUAL
+  // DIAGNOSTIC MODE ONLY, default false (production behavior unchanged).
+  // When true, the mean solve's z-space normal equations additionally
+  // receive coupled_pose_control_lambda_imu_meas_z_/b_imu_meas_z_ (a raw
+  // IMU-measurement information factor computed once per scan at scan
+  // start, see pose_control_imu_measurement_diagnostics.h) on top of the
+  // production prior + LiDAR + curvature terms. This deliberately
+  // double-counts the same IMU samples the production prior already
+  // consumed -- see estimateCoupledPoseControlSpline()'s own comment at
+  // the injection site and pose_control_targeted_live_diagnostics_report.md.
+  bool pose_control_imu_measurement_info_counterfactual = false;
   // frozen_process_hessian_prior, true_imu_prior, and legacy_process_factor
   // (comparison-only ablation modes) were removed. There is exactly one
   // production pose-control prior representation (coupled_pose_control_
@@ -784,6 +795,17 @@ private:
   // start by construction) the residual is measured against.
   Eigen::MatrixXd coupled_pose_control_lambda_prior_z_;
   Eigen::VectorXd coupled_pose_control_z_imu_;
+  // 2026-09-23 targeted diagnostic campaign: the COUNTERFACTUAL raw IMU-
+  // measurement information factor (Lambda_imu_meas_z_/b_imu_meas_z_),
+  // computed ONCE per scan at scan start (same treatment/lifetime as the
+  // joint prior above -- see pose_control_imu_measurement_diagnostics.h),
+  // from the PRE-LiDAR-update ("prior") spline/bias/gravity trial values.
+  // Always computed (for diagnostic reporting, items 13/14/31) but only
+  // ADDED into the mean solve's A/b when
+  // pose_control_imu_measurement_info_counterfactual is true.
+  Eigen::MatrixXd coupled_pose_control_lambda_imu_meas_z_;
+  Eigen::VectorXd coupled_pose_control_b_imu_meas_z_;
+  bool coupled_pose_control_lambda_imu_meas_valid_ = false;
   // item 10/51's corrected EKF-reference test: the reference step computed
   // mid-iteration (using THAT iteration's own LiDAR linearization + the
   // fixed prior), held here until the actual delta_z for the SAME

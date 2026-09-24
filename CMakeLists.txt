@@ -136,6 +136,7 @@ add_executable(livo_recon_node
   src/lio/pose_spline_system.cpp
   src/lio/imu_process_step9.cpp
   src/lio/pose_control_adaptive_q.cpp
+  src/lio/pose_control_imu_measurement_diagnostics.cpp
   src/lio/pose_control_directional_redundancy.cpp
   src/lio/pose_control_spline.cpp
   src/lio/pose_control_process_factor.cpp
@@ -263,6 +264,7 @@ add_executable(test_pose_control_adaptive_q_directional
   src/utils/log/debug_log_dir.cpp
   src/lio/pose_control_spline.cpp
   src/lio/pose_control_adaptive_q.cpp
+  src/lio/pose_control_imu_measurement_diagnostics.cpp
   src/lio/pose_control_directional_redundancy.cpp
   src/lio/pose_control_lidar_factor.cpp
   src/lio/pose_control_process_factor.cpp
@@ -285,6 +287,7 @@ add_executable(test_pose_control_adaptive_q_directional_debugeigen
   src/utils/log/debug_log_dir.cpp
   src/lio/pose_control_spline.cpp
   src/lio/pose_control_adaptive_q.cpp
+  src/lio/pose_control_imu_measurement_diagnostics.cpp
   src/lio/pose_control_directional_redundancy.cpp
   src/lio/pose_control_lidar_factor.cpp
   src/lio/pose_control_process_factor.cpp
@@ -320,6 +323,7 @@ add_executable(test_pose_control_adaptive_q_directional_ubsan
   src/utils/log/debug_log_dir.cpp
   src/lio/pose_control_spline.cpp
   src/lio/pose_control_adaptive_q.cpp
+  src/lio/pose_control_imu_measurement_diagnostics.cpp
   src/lio/pose_control_directional_redundancy.cpp
   src/lio/pose_control_lidar_factor.cpp
   src/lio/pose_control_process_factor.cpp
