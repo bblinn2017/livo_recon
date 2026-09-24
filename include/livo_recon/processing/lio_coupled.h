@@ -748,6 +748,10 @@ private:
   // inside the per-iteration solve -- spec: mean every iteration,
   // covariance once after convergence).
   Eigen::MatrixXd coupled_pose_control_P_z_post_;
+  // item 12/21: curvature block's own trace contribution to A_raw, cached
+  // by estimateCoupledPoseControlSpline() (mean solve) for the post-loop
+  // covariance block to log alongside Lambda_lidar/Lambda_prior traces.
+  double coupled_pose_control_last_lambda_curvature_trace_ = 0.0;
   // 2026-09-23 x1/head-propagation campaign: the LAST GN iteration's own
   // delta_z (mean-solve step, z=[eta;delta_sT]) -- captured so the
   // post-loop covariance block (item 7's EKF-reference check) can compare

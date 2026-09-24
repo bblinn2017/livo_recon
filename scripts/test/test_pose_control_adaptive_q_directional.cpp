@@ -16,6 +16,7 @@
 #include "livo_recon/lio/pose_control_lidar_factor.h"
 #include "livo_recon/lio/pose_control_process_factor.h"
 #include "livo_recon/lio/pose_control_covariance.h"
+#include "livo_recon/lio/pose_control_gt_diagnostics.h"
 #include "livo_recon/lio/adaptive_q.h"
 
 #include <Eigen/Dense>
@@ -618,6 +619,55 @@ static void testProductionGNAssemblySyntheticFixture()
         "curvature: covariance-path information matrix is bit-identical whether or not curvature was ever computed", 0.0);
 }
 
+// A9/A10: ground-truth error / NEES calibration diagnostic (items 7/24).
+// Correctly-calibrated synthetic errors (drawn from EXACTLY N(0,P)) must
+// give NEES averaging to ~1.0 per DOF (chi-square/k expectation); errors
+// drawn from a covariance DOUBLE the reported P (an under-confident-by-2x,
+// i.e. actually over-confident P) must give NEES averaging near 2.0 --
+// item 24's own "do not equate covariance contraction with calibration":
+// a NEES test is what actually distinguishes correct calibration from a
+// merely-smaller-looking covariance.
+static void testNeesCalibration()
+{
+  std::mt19937 rng(777);
+  Eigen::Matrix<double, 9, 9> P = Eigen::Matrix<double, 9, 9>::Identity() * 0.01;
+  for (int i = 0; i < 9; ++i) P(i, i) *= (1.0 + 0.1 * i);  // non-uniform, still diagonal/PD
+  Eigen::LLT<Eigen::Matrix<double, 9, 9>> llt(P);
+  const Eigen::Matrix<double, 9, 9> L = llt.matrixL();
+
+  std::normal_distribution<double> nd(0.0, 1.0);
+  const int N = 3000;
+  double sum_nees_calibrated = 0.0, sum_nees_miscalibrated = 0.0;
+  for (int i = 0; i < N; ++i) {
+    Eigen::Matrix<double, 9, 1> z;
+    for (int k = 0; k < 9; ++k) z(k) = nd(rng);
+    const Eigen::Matrix<double, 9, 1> e_calibrated = L * z;            // ~ N(0, P) EXACTLY
+    const Eigen::Matrix<double, 9, 1> e_miscal = L * z * std::sqrt(2.0); // ~ N(0, 2P) -- reported P is too small by 2x
+
+    PoseControlGtError err_cal; err_cal.e_R = e_calibrated.segment<3>(0); err_cal.e_p = e_calibrated.segment<3>(3); err_cal.e_v = e_calibrated.segment<3>(6);
+    PoseControlGtError err_mis; err_mis.e_R = e_miscal.segment<3>(0); err_mis.e_p = e_miscal.segment<3>(3); err_mis.e_v = e_miscal.segment<3>(6);
+
+    sum_nees_calibrated += computeNees(err_cal, P).nees_rpv;
+    sum_nees_miscalibrated += computeNees(err_mis, P).nees_rpv;
+  }
+  const double mean_nees_cal = sum_nees_calibrated / N;
+  const double mean_nees_mis = sum_nees_miscalibrated / N;
+  checkNear(mean_nees_cal, 1.0, 0.1, "NEES calibration: correctly-calibrated errors give mean joint NEES ~= 1.0");
+  checkNear(mean_nees_mis, 2.0, 0.2, "NEES calibration: 2x-under-confident-P errors give mean joint NEES ~= 2.0 (detects miscalibration)");
+}
+
+static void testGtErrorConvention()
+{
+  const M3D R_gt = Exp(V3D(0.1, -0.05, 0.2));
+  const M3D R_est = R_gt * Exp(V3D(0.01, 0.0, 0.0));  // small body-frame rotation error
+  const V3D p_gt(1.0, 2.0, 3.0), p_est(1.01, 2.0, 3.0);
+  const V3D v_gt(0.0, 0.0, 0.0), v_est(0.02, 0.0, 0.0);
+  const auto err = computeGtError(p_est, R_est, v_est, p_gt, R_gt, v_gt);
+  checkNear(err.e_p.norm(), 0.01, 1e-9, "GT error: e_p norm matches |p_est - p_gt|");
+  checkNear(err.e_R.norm(), 0.01, 1e-6, "GT error: e_R norm matches the injected 0.01 rad body-frame rotation error");
+  checkNear(err.e_v.norm(), 0.02, 1e-9, "GT error: e_v norm matches |v_est - v_gt|");
+}
+
 int main()
 {
   testZeroExtraNoiseWhiteResidual();
@@ -633,6 +683,8 @@ int main()
   testKnownWeakDirectionExcludedFromRank();
   testThreadedLidarFactorMatchesSerial();
   testProductionGNAssemblySyntheticFixture();
+  testNeesCalibration();
+  testGtErrorConvention();
 
   std::printf("\n%d passed, %d failed\n", g_pass, g_fail);
   std::printf(g_fail == 0 ? "ALL PASS\n" : "SOME FAILED\n");

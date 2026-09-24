@@ -173,7 +173,6 @@ static const std::vector<std::string>& fullDiagColumns()
     "delta_eta_actual","delta_eta_reference","delta_bg_actual","delta_bg_reference",
     "delta_ba_actual","delta_ba_reference","delta_g_actual","delta_g_reference",
     "lambda_prior_trace","lambda_total_trace","curvature_weight_pos","curvature_weight_rot",
-    "P_eta_bg_norm","P_eta_ba_norm","P_eta_g_norm",
     // q_estimation (items 13-19/39-40)
     "q_used_acc","q_used_gyr","q_candidate_acc","q_candidate_gyr","q_next_acc","q_next_gyr",
     "residual_var_acc","residual_var_gyr","acf1_acc","acf1_gyr","acf2_acc","acf2_gyr","acf5_acc","acf5_gyr",
@@ -204,6 +203,26 @@ static const std::vector<std::string>& fullDiagColumns()
     "knot_index","knot_time","p_x","p_y","p_z","rlog_x","rlog_y","rlog_z",
     "v_x","v_y","v_z","a_x","a_y","a_z","omega_x","omega_y","omega_z",
     "d1_pos_norm","d2_pos_norm","d1_rot_norm","d2_rot_norm",
+    // knot_prior_posterior (items 2/4/6/8/23/25 -- every free knot's prior/
+    // posterior state+covariance+Mahalanobis, generalizing x1_covariance)
+    "p_prior_x","p_prior_y","p_prior_z","v_prior_x","v_prior_y","v_prior_z",
+    "p_post_x","p_post_y","p_post_z","v_post_x","v_post_y","v_post_z",
+    "delta_p_norm_knot","delta_R_norm_knot","delta_v_norm_knot",
+    "mahalanobis_sigma_p","mahalanobis_sigma_R","mahalanobis_sigma_v",
+    "trace_P_knot_prior","trace_P_knot_post","min_eig_P_knot_prior","max_eig_P_knot_prior","cond_P_knot_prior",
+    "trace_DeltaP_knot","min_eig_DeltaP_knot","max_eig_DeltaP_knot",
+    // adaptive_q_breakdown (items 11/16/18 -- staged C_pred subtraction)
+    "empirical_cov_acc","empirical_cov_gyr","after_bias_gravity_cov_acc","after_bias_gravity_cov_gyr",
+    "bias_gravity_contribution_acc","bias_gravity_contribution_gyr",
+    "trajectory_contribution_acc","trajectory_contribution_gyr",
+    // curvature_information (items 12/21)
+    "lambda_curvature_trace","lambda_lidar_trace","lambda_prior_eta_trace","curvature_to_lidar_ratio","curvature_to_prior_ratio",
+    // lidar_correlation_diff (items 10/15 -- independent vs corrected, full trace not just scalar)
+    "trace_A_independent","trace_A_corrected","trace_diff","frobenius_diff",
+    // lidar_point_sample (item 8/12 -- sampled per-point diagnostic)
+    "point_index","residual","sigma2","whitened_residual","H_i_norm","H_i_dim",
+    // spline_derivative_health (items 13/22)
+    "quantity","median","p95","p99","max_val","sample_count",
     "notes"
   };
   return cols;
@@ -1190,9 +1209,42 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       const bool want_records = copts_.pose_control_lidar_correlation.mode != "off";
       addPoseControlLidarFactor(spline, layout, lidar_obs, A_lidar_raw, b_lidar_raw, nullptr, nullptr,
                                  want_records ? &lidar_records : nullptr);
+      // items 10/15: snapshot the INDEPENDENT (pre-correction) A/b before
+      // applyPoseControlLidarCorrelationCorrection() mutates them in
+      // place, so both versions are diagnosable as a pair.
+      const Eigen::MatrixXd A_lidar_independent = (copts_.psd_audit_en && want_records) ? A_lidar_raw : Eigen::MatrixXd();
       if (want_records)
         pose_control_lidar_corr_stats = applyPoseControlLidarCorrelationCorrection(
             lidar_records, copts_.pose_control_lidar_correlation, A_lidar_raw, b_lidar_raw);
+      if (copts_.psd_audit_en && want_records) {
+        std::map<std::string, std::string> lcdkv = {
+          {"trace_A_independent", std::to_string(A_lidar_independent.trace())},
+          {"trace_A_corrected", std::to_string(A_lidar_raw.trace())},
+          {"trace_diff", std::to_string(A_lidar_independent.trace() - A_lidar_raw.trace())},
+          {"frobenius_diff", std::to_string((A_lidar_independent - A_lidar_raw).norm())},
+        };
+        emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "lidar_correlation_diff", voxel_map_->frame_idx_, -1, lcdkv);
+
+        // items 8/12: a SAMPLED subset of per-point diagnostics (not all M
+        // points -- item 8's own "for REPRESENTATIVE LiDAR points"), reusing
+        // the already-built lidar_records (Jrow_z IS H_i, the 1 x dim(z)
+        // row -- NOT the plane normal, per item 12's explicit warning).
+        constexpr int kMaxLidarSamples = 20;
+        const int stride = std::max(1, static_cast<int>(lidar_records.size()) / kMaxLidarSamples);
+        for (size_t pi = 0; pi < lidar_records.size(); pi += static_cast<size_t>(stride)) {
+          const auto& rec = lidar_records[pi];
+          const double sigma = std::sqrt(std::max(rec.sigma2, 1e-300));
+          std::map<std::string, std::string> lpkv = {
+            {"point_index", std::to_string(pi)},
+            {"residual", std::to_string(rec.r)},
+            {"sigma2", std::to_string(rec.sigma2)},
+            {"whitened_residual", std::to_string(rec.r / sigma)},
+            {"H_i_norm", std::to_string(rec.Jrow_z.norm())},
+            {"H_i_dim", std::to_string(rec.Jrow_z.size())},
+          };
+          emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "lidar_point_sample", voxel_map_->frame_idx_, static_cast<int>(pi), lpkv);
+        }
+      }
       if (copts_.psd_audit_en && want_records) {
         std::map<std::string, std::string> lkv = {
           {"num_raw_residuals", std::to_string(lidar_records.size())},
@@ -1263,6 +1315,21 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_z_prior", Sigma_full_prior.bottomRightCorner(dimZ, dimZ));
       logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_eta_prior", Sigma_full_prior.block(9, 9, dEta, dEta));
       logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_sT_prior", Sigma_full_prior.bottomRightCorner(dST, dST));
+      // item 9: the eta/bg/ba/g CROSS blocks -- previously declared in the
+      // CSV schema but never actually emitted. Rectangular (dEta x 3);
+      // logCovTraceStage() already handles non-square matrices generically
+      // (frobenius/rows/cols, eigenvalues only when square) -- "enough
+      // information to inspect the matrix structure" for a cross block
+      // without materializing an M x M object or a bespoke helper.
+      if (layout.colBG() >= 0)
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_eta_bg_prior",
+                          Sigma_full_prior.block(9, 9 + dEta + layout.colBG() - layout.dimCFree(), dEta, 3));
+      if (layout.colBA() >= 0)
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_eta_ba_prior",
+                          Sigma_full_prior.block(9, 9 + dEta + layout.colBA() - layout.dimCFree(), dEta, 3));
+      if (layout.colG() >= 0)
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_eta_g_prior",
+                          Sigma_full_prior.block(9, 9 + dEta + layout.colG() - layout.dimCFree(), dEta, 3));
     }
     if (schur_ok) {
       Eigen::MatrixXd Lambda_meas_full = Eigen::MatrixXd::Zero(dimFull, dimFull);
@@ -1277,6 +1344,33 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_z_post", coupled_pose_control_P_z_post_);
         logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_eta_post", Sigma_full_post.block(9, 9, dEta, dEta));
         logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_sT_post", Sigma_full_post.bottomRightCorner(dST, dST));
+        if (layout.colBG() >= 0)
+          logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_eta_bg_post",
+                            Sigma_full_post.block(9, 9 + dEta + layout.colBG() - layout.dimCFree(), dEta, 3));
+        if (layout.colBA() >= 0)
+          logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_eta_ba_post",
+                            Sigma_full_post.block(9, 9 + dEta + layout.colBA() - layout.dimCFree(), dEta, 3));
+        if (layout.colG() >= 0)
+          logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_eta_g_post",
+                            Sigma_full_post.block(9, 9 + dEta + layout.colG() - layout.dimCFree(), dEta, 3));
+
+        // items 12/21: curvature's own scale vs LiDAR/prior information --
+        // Lambda_lidar_trace = Lambda_meas_z's own trace (LiDAR-only,
+        // computed above); Lambda_prior_eta_trace via the SAME
+        // generalPseudoInverse() convention used throughout this file.
+        const double lambda_lidar_trace = Lambda_meas_z.trace();
+        const Eigen::MatrixXd Lambda_prior_eta =
+            generalPseudoInverse(Sigma_full_prior.block(9, 9, dEta, dEta), copts_.pose_control_q_pinv_rel_thresh);
+        const double lambda_prior_eta_trace = Lambda_prior_eta.trace();
+        const double curv_trace = coupled_pose_control_last_lambda_curvature_trace_;
+        std::map<std::string, std::string> curvkv = {
+          {"lambda_curvature_trace", std::to_string(curv_trace)},
+          {"lambda_lidar_trace", std::to_string(lambda_lidar_trace)},
+          {"lambda_prior_eta_trace", std::to_string(lambda_prior_eta_trace)},
+          {"curvature_to_lidar_ratio", std::to_string(lambda_lidar_trace > 0.0 ? curv_trace / lambda_lidar_trace : 0.0)},
+          {"curvature_to_prior_ratio", std::to_string(lambda_prior_eta_trace > 0.0 ? curv_trace / lambda_prior_eta_trace : 0.0)},
+        };
+        emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "curvature_information", voxel_map_->frame_idx_, -1, curvkv);
       }
 
       // M_T: dimState() x dimZ, mapping z -> the FULL tail StateGroup
@@ -1498,6 +1592,140 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         }
       }
 
+      // ====================================================================
+      // 2026-09-24 pre-real-data-campaign instrumentation, items 2/4/6/8/
+      // 23/25: the EXACT SAME prior/posterior-knot-covariance construction
+      // used above for x1 (t_x1), generalized to EVERY free knot -- this is
+      // a mechanical loop over the already-verified J_x1_eta/M_x1_full
+      // recipe, not new mathematics. Mahalanobis distances use the PRIOR
+      // covariance (item 23: "this must use prior covariance, not
+      // posterior"), and DeltaP_knot = P_knot_prior - P_knot_post (item 8)
+      // is reported alongside the same trace/eigenvalue/condition/rank
+      // summary x1_covariance already reports for its own single knot.
+      // Flows through the SAME unified CSV (one new row type,
+      // "knot_prior_posterior") -- no new file.
+      // ====================================================================
+      if (copts_.psd_audit_en) {
+        for (int kk = 0; kk < layout.N; ++kk) {
+          const double t_k = std::min(t1, spline.t0() + kk * spline.delta());
+          Eigen::MatrixXd dR_dc_k = Eigen::MatrixXd::Zero(3, hns.rawDim());
+          Eigen::MatrixXd dp_dc_k = Eigen::MatrixXd::Zero(3, hns.rawDim());
+          Eigen::MatrixXd dv_dc_k = Eigen::MatrixXd::Zero(3, hns.rawDim());
+          const auto jac_k = spline.jacobianAt(t_k);
+          for (int kb = 0; kb < 4; ++kb) {
+            const int abs_kb = jac_k.s + kb;
+            const int colp = layout.colPos(abs_kb), colph = layout.colPhi(abs_kb);
+            if (colph >= 0) dR_dc_k.block<3, 3>(0, colph) = spline.dThetaDcphi(jac_k, kb, t_k);
+            if (colp >= 0) {
+              dp_dc_k.block<3, 3>(0, colp) = PoseControlSpline::dPosDcp(jac_k, kb);
+              dv_dc_k.block<3, 3>(0, colp) = PoseControlSpline::dVelDcp(jac_k, kb);
+            }
+          }
+          const Eigen::MatrixXd J_R_k = dR_dc_k * hns.Z;
+          const Eigen::MatrixXd J_p_k = dp_dc_k * hns.Z;
+          const Eigen::MatrixXd J_v_k = dv_dc_k * hns.Z;
+
+          M3D dR_dtheta0_k = poseControlHeadRotJacobian(spline, t_k);
+          M3D dp_dp0_k, dp_dv0_k, dv_dp0_k, dv_dv0_k;
+          {
+            const auto hs_head_k = poseControlHeadPosSensitivity(spline);
+            poseControlHeadPosJacobians(spline, hs_head_k, t_k, dp_dp0_k, dp_dv0_k, dv_dp0_k, dv_dv0_k);
+          }
+          Eigen::MatrixXd J_h_k = Eigen::MatrixXd::Zero(9, 9);
+          J_h_k.block<3, 3>(0, 0) = dR_dtheta0_k;
+          J_h_k.block<3, 3>(3, 3) = dp_dp0_k; J_h_k.block<3, 3>(3, 6) = dp_dv0_k;
+          J_h_k.block<3, 3>(6, 3) = dv_dp0_k; J_h_k.block<3, 3>(6, 6) = dv_dv0_k;
+
+          Eigen::MatrixXd J_k_eta = Eigen::MatrixXd::Zero(9, dimZ);
+          J_k_eta.block(0, 0, 3, dEta) = J_R_k;
+          J_k_eta.block(3, 0, 3, dEta) = J_p_k;
+          J_k_eta.block(6, 0, 3, dEta) = J_v_k;
+
+          Eigen::MatrixXd M_k_full = Eigen::MatrixXd::Zero(9, dimFull);
+          M_k_full.block(0, 0, 9, 9) = J_h_k;
+          M_k_full.block(0, 9, 9, dimZ) = J_k_eta;
+
+          const Eigen::MatrixXd P_k_prior_raw = M_k_full * Sigma_full_prior * M_k_full.transpose();
+          const Eigen::MatrixXd P_k_prior = 0.5 * (P_k_prior_raw + P_k_prior_raw.transpose());
+          const Eigen::MatrixXd P_k_post_raw = M_k_full * Sigma_full_post * M_k_full.transpose();
+          const Eigen::MatrixXd P_k_post = 0.5 * (P_k_post_raw + P_k_post_raw.transpose());
+          const Eigen::MatrixXd DeltaP_k = P_k_prior - P_k_post;
+
+          const V3D p_k_final = spline.posAt(t_k), v_k_final = spline.velAt(t_k);
+          const M3D R_k_final = spline.rotAt(t_k);
+          V3D p_k_prior_phys, v_k_prior_phys; M3D R_k_prior_phys;
+          interpPose6DAt(mg.poses, t_k, p_k_prior_phys, v_k_prior_phys, R_k_prior_phys);
+          const V3D delta_p_k = p_k_final - p_k_prior_phys;
+          const V3D delta_R_k = Log(M3D(R_k_prior_phys.transpose() * R_k_final));
+          const V3D delta_v_k = v_k_final - v_k_prior_phys;
+
+          // Mahalanobis distance using PRIOR covariance (item 23 -- NOT
+          // posterior: "we need to determine how far LiDAR moves the
+          // estimate relative to what the IMU prior said was plausible").
+          const M3D P_p_k = P_k_prior.block<3, 3>(3, 3), P_R_k = P_k_prior.block<3, 3>(0, 0), P_v_k = P_k_prior.block<3, 3>(6, 6);
+          const double sigma_p_k = std::sqrt(std::max(0.0, (delta_p_k.transpose() * generalPseudoInverse(P_p_k, copts_.pose_control_q_pinv_rel_thresh) * delta_p_k)(0)));
+          const double sigma_R_k = std::sqrt(std::max(0.0, (delta_R_k.transpose() * generalPseudoInverse(P_R_k, copts_.pose_control_q_pinv_rel_thresh) * delta_R_k)(0)));
+          const double sigma_v_k = std::sqrt(std::max(0.0, (delta_v_k.transpose() * generalPseudoInverse(P_v_k, copts_.pose_control_q_pinv_rel_thresh) * delta_v_k)(0)));
+
+          Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_k(P_k_prior);
+          Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_dk(DeltaP_k);
+          const double min_eig_k = es_k.eigenvalues().minCoeff(), max_eig_k = es_k.eigenvalues().maxCoeff();
+          const double cond_k = (std::abs(min_eig_k) > 1e-300) ? max_eig_k / min_eig_k : 0.0;
+
+          std::map<std::string, std::string> kpkv = {
+            {"knot_index", std::to_string(kk)}, {"knot_time", std::to_string(t_k)},
+            {"p_prior_x", std::to_string(p_k_prior_phys.x())}, {"p_prior_y", std::to_string(p_k_prior_phys.y())}, {"p_prior_z", std::to_string(p_k_prior_phys.z())},
+            {"v_prior_x", std::to_string(v_k_prior_phys.x())}, {"v_prior_y", std::to_string(v_k_prior_phys.y())}, {"v_prior_z", std::to_string(v_k_prior_phys.z())},
+            {"p_post_x", std::to_string(p_k_final.x())}, {"p_post_y", std::to_string(p_k_final.y())}, {"p_post_z", std::to_string(p_k_final.z())},
+            {"v_post_x", std::to_string(v_k_final.x())}, {"v_post_y", std::to_string(v_k_final.y())}, {"v_post_z", std::to_string(v_k_final.z())},
+            {"delta_p_norm_knot", std::to_string(delta_p_k.norm())}, {"delta_R_norm_knot", std::to_string(delta_R_k.norm())}, {"delta_v_norm_knot", std::to_string(delta_v_k.norm())},
+            {"mahalanobis_sigma_p", std::to_string(sigma_p_k)}, {"mahalanobis_sigma_R", std::to_string(sigma_R_k)}, {"mahalanobis_sigma_v", std::to_string(sigma_v_k)},
+            {"trace_P_knot_prior", std::to_string(P_k_prior.trace())}, {"trace_P_knot_post", std::to_string(P_k_post.trace())},
+            {"min_eig_P_knot_prior", std::to_string(min_eig_k)}, {"max_eig_P_knot_prior", std::to_string(max_eig_k)}, {"cond_P_knot_prior", std::to_string(cond_k)},
+            {"trace_DeltaP_knot", std::to_string(DeltaP_k.trace())},
+            {"min_eig_DeltaP_knot", std::to_string(es_dk.eigenvalues().minCoeff())}, {"max_eig_DeltaP_knot", std::to_string(es_dk.eigenvalues().maxCoeff())},
+          };
+          emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "knot_prior_posterior", voxel_map_->frame_idx_, kk, kpkv);
+        }
+      }
+
+      // items 13/22: spline derivative health -- median/p95/p99/max of
+      // |velocity|/|acceleration|/|angular velocity| sampled densely across
+      // the converged trajectory (not just at knots), one row per
+      // quantity, flowing through the SAME unified CSV.
+      if (copts_.psd_audit_en) {
+        constexpr int kNumSamples = 50;
+        std::vector<double> vel_norms, acc_norms, omega_norms;
+        vel_norms.reserve(kNumSamples); acc_norms.reserve(kNumSamples); omega_norms.reserve(kNumSamples);
+        for (int si = 0; si <= kNumSamples; ++si) {
+          const double t_s = spline.t0() + (spline.t1() - spline.t0()) * (static_cast<double>(si) / kNumSamples);
+          vel_norms.push_back(spline.velAt(t_s).norm());
+          acc_norms.push_back(spline.accAt(t_s).norm());
+          omega_norms.push_back(spline.omegaBodyAt(t_s).norm());
+        }
+        auto percentileStats = [&](std::vector<double> v, const char* name) {
+          std::sort(v.begin(), v.end());
+          auto pct = [&](double p) -> double {
+            if (v.empty()) return 0.0;
+            const double idx = p * (v.size() - 1);
+            const size_t lo = static_cast<size_t>(std::floor(idx)), hi = static_cast<size_t>(std::ceil(idx));
+            return v[lo] + (v[hi] - v[lo]) * (idx - lo);
+          };
+          std::map<std::string, std::string> shkv = {
+            {"quantity", name},
+            {"median", std::to_string(pct(0.5))},
+            {"p95", std::to_string(pct(0.95))},
+            {"p99", std::to_string(pct(0.99))},
+            {"max_val", std::to_string(v.empty() ? 0.0 : v.back())},
+            {"sample_count", std::to_string(v.size())},
+          };
+          emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "spline_derivative_health", voxel_map_->frame_idx_, -1, shkv);
+        };
+        percentileStats(vel_norms, "velocity");
+        percentileStats(acc_norms, "acceleration");
+        percentileStats(omega_norms, "angular_velocity");
+      }
+
       // item 10/51's EKF-reference test is now computed INSIDE the mean-
       // solve loop, at iterations 0/1/2, comparing against that SAME
       // iteration's own actual step (see estimateCoupledPoseControlSpline's
@@ -1609,6 +1837,21 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       state_->applyDelta(dx);
       state_->covMut() = P_T;
 
+      // items 7/24 (GT error / NEES calibration diagnostic): the
+      // CALCULATION machinery (computeGtError()/computeNees(),
+      // pose_control_gt_diagnostics.h, synthetically tested via
+      // testNeesCalibration()/testGtErrorConvention()) is implemented and
+      // ready -- NOT called here. The only GT channel in this codebase
+      // (DataQueues::popGt()/EvoProc's gt_buffer_) is a CONSUMING queue
+      // EvoProc itself drains for the estimator's own authoritative ATE
+      // scoring; reading it here risks starving that pipeline, and pose-
+      // control real-data runs (the only way to verify a live GT-queue
+      // read doesn't perturb ATE scoring) are forbidden this phase. Wiring
+      // this in requires either a non-destructive "peek" API on
+      // DataQueues (does not currently exist) or an explicitly-authorized
+      // real-data verification pass -- deferred, not skipped; see
+      // pose_control_gt_diagnostics.h's own header comment.
+
       // 2026-09-23: adaptive-Q candidate for scan k, computed from THIS
       // scan's own converged trajectory/IMU residual, AFTER the LiDAR
       // update above -- causality (item 17): this can only affect
@@ -1626,8 +1869,13 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           if (state_->idxG()  >= 0) P_g  = P_T.block<3, 3>(state_->idxG(),  state_->idxG());
           if (state_->idxBA() >= 0 && state_->idxG() >= 0)
             P_ba_g = P_T.block<3, 3>(state_->idxBA(), state_->idxG());
+          // items 11/16/18: stage each subtraction so the empirical value
+          // and each intermediate correction are separately observable,
+          // not just the final result.
+          const double empirical_cov_acc = pcq_st.cov_acc, empirical_cov_gyr = pcq_st.cov_gyr;
           applyPoseControlAdaptiveQBiasGravityCorrection(
               pcq_st, spline.rotAt(t1), P_ba, P_bg, P_g, P_ba_g);
+          const double after_bias_gravity_cov_acc = pcq_st.cov_acc, after_bias_gravity_cov_gyr = pcq_st.cov_gyr;
           // Trajectory-state term (item 5/P14): evaluated at the residual
           // window's midpoint (a representative time -- see
           // pose_control_adaptive_q.h's own doc comment), sandwiched
@@ -1640,6 +1888,17 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
                 J_acc_eta, J_gyr_eta);
             const Eigen::MatrixXd P_eta = Sigma_full_post.block(9, 9, dEta, dEta);
             applyPoseControlAdaptiveQTrajectoryStateCorrection(pcq_st, J_acc_eta, J_gyr_eta, P_eta);
+          }
+          if (copts_.psd_audit_en) {
+            std::map<std::string, std::string> qbkv = {
+              {"empirical_cov_acc", std::to_string(empirical_cov_acc)}, {"empirical_cov_gyr", std::to_string(empirical_cov_gyr)},
+              {"after_bias_gravity_cov_acc", std::to_string(after_bias_gravity_cov_acc)}, {"after_bias_gravity_cov_gyr", std::to_string(after_bias_gravity_cov_gyr)},
+              {"bias_gravity_contribution_acc", std::to_string(empirical_cov_acc - after_bias_gravity_cov_acc)},
+              {"bias_gravity_contribution_gyr", std::to_string(empirical_cov_gyr - after_bias_gravity_cov_gyr)},
+              {"trajectory_contribution_acc", std::to_string(after_bias_gravity_cov_acc - pcq_st.cov_acc)},
+              {"trajectory_contribution_gyr", std::to_string(after_bias_gravity_cov_gyr - pcq_st.cov_gyr)},
+            };
+            emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "adaptive_q_breakdown", voxel_map_->frame_idx_, -1, qbkv);
           }
           coupled_pose_control_adaptive_q_.setNominal(state_->varAcc().mean(), state_->varGyr().mean());
           coupled_pose_control_adaptive_q_.update(pcq_st);
@@ -4611,6 +4870,7 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   // the head ones (their contribution to eta is via the SAME Z-projection
   // as any other factor -- no special-casing needed, matching how LiDAR/
   // process factors already touch cp[0..2] uniformly under fix_head=false).
+  const double A_raw_trace_before_curvature = A_raw.trace();
   if (copts_.pose_control_curvature_weight_pos > 0.0 || copts_.pose_control_curvature_weight_rot > 0.0) {
     const int N = layout.N;
     for (int k = 1; k < N - 1; ++k) {
@@ -4637,6 +4897,13 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
       }
     }
   }
+
+  // item 12/21: the curvature block's OWN contribution to A_raw's trace,
+  // isolated by before/after diffing (exact, not re-derived by hand) --
+  // cached for the covariance block (processLIO(), a different function)
+  // to log alongside Lambda_lidar/Lambda_prior's own traces for scale
+  // comparison.
+  coupled_pose_control_last_lambda_curvature_trace_ = A_raw.trace() - A_raw_trace_before_curvature;
 
   // sT is covered entirely by the joint production prior (Lambda_prior_z,
   // applied below in z-space) -- no separate Omega_ss block here. The two

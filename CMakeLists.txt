@@ -139,6 +139,7 @@ add_executable(livo_recon_node
   src/lio/pose_control_directional_redundancy.cpp
   src/lio/pose_control_spline.cpp
   src/lio/pose_control_process_factor.cpp
+  src/lio/pose_control_gt_diagnostics.cpp
   src/lio/pose_control_covariance.cpp
   src/lio/pose_control_lidar_factor.cpp
   src/lio/pose_control_lidar_correlation.cpp
@@ -216,6 +217,7 @@ target_link_libraries(cache_tracker_output_livo_recon
 # honest scope limits.
 add_executable(test_pose_control_prior_math
   src/utils/state/state.cpp
+  src/lio/pose_control_gt_diagnostics.cpp
   src/lio/pose_control_covariance.cpp
   src/lio/pose_control_lidar_correlation.cpp
   scripts/test/test_pose_control_prior_math.cpp
@@ -235,6 +237,7 @@ target_link_libraries(test_pose_control_prior_math
 # actually fire.
 add_executable(test_pose_control_prior_math_debugeigen
   src/utils/state/state.cpp
+  src/lio/pose_control_gt_diagnostics.cpp
   src/lio/pose_control_covariance.cpp
   src/lio/pose_control_lidar_correlation.cpp
   scripts/test/test_pose_control_prior_math.cpp
@@ -265,6 +268,7 @@ add_executable(test_pose_control_adaptive_q_directional
   src/lio/pose_control_process_factor.cpp
   src/lio/imu_process_step9.cpp
   src/lio/adaptive_q.cpp
+  src/lio/pose_control_gt_diagnostics.cpp
   src/lio/pose_control_covariance.cpp
   scripts/test/test_pose_control_adaptive_q_directional.cpp
 )
@@ -286,6 +290,7 @@ add_executable(test_pose_control_adaptive_q_directional_debugeigen
   src/lio/pose_control_process_factor.cpp
   src/lio/imu_process_step9.cpp
   src/lio/adaptive_q.cpp
+  src/lio/pose_control_gt_diagnostics.cpp
   src/lio/pose_control_covariance.cpp
   scripts/test/test_pose_control_adaptive_q_directional.cpp
 )
@@ -320,6 +325,7 @@ add_executable(test_pose_control_adaptive_q_directional_ubsan
   src/lio/pose_control_process_factor.cpp
   src/lio/imu_process_step9.cpp
   src/lio/adaptive_q.cpp
+  src/lio/pose_control_gt_diagnostics.cpp
   src/lio/pose_control_covariance.cpp
   scripts/test/test_pose_control_adaptive_q_directional.cpp
 )
@@ -336,6 +342,7 @@ target_link_libraries(test_pose_control_adaptive_q_directional_ubsan
 
 add_executable(test_pose_control_prior_math_ubsan
   src/utils/state/state.cpp
+  src/lio/pose_control_gt_diagnostics.cpp
   src/lio/pose_control_covariance.cpp
   src/lio/pose_control_lidar_correlation.cpp
   scripts/test/test_pose_control_prior_math.cpp
