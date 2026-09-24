@@ -65,12 +65,29 @@ bool covarianceInformationUpdate(
     Eigen::MatrixXd& P_post, CovarianceUpdateDiagnostics& diag, double tol = 1e-6);
 
 // Dynamic-size SPD pseudo-inverse via eigendecomposition of the symmetrized
-// matrix, relative eigenvalue floor. Still used for computing P_z_prior
-// FROM a prior/process-only information matrix (a legitimate, standard use
-// of pinv -- "no information in this prior direction" genuinely means
-// "infinite prior variance, represented as pinv-zero-information->large-
-// but-finite covariance"), which is a different situation from thresholding
-// away MEASUREMENT information in the posterior (what the old, superseded
+// matrix, relative eigenvalue floor: for eigenvalue lambda_k > rel_thresh *
+// lambda_max, contributes (1/lambda_k) * v_k v_k^T; for lambda_k at or
+// below that threshold, contributes EXACTLY ZERO (standard Moore-Penrose
+// behavior) -- NOT a large value. Still used for computing P_z_prior FROM
+// a prior/process-only information matrix.
+//
+// 2026-09-24 CLARIFICATION (found via test_pose_control_prior_math.cpp's
+// testStructuralVsNumericalNullspace(), which numerically checks this):
+// an EARLIER version of this comment said a discarded (near-zero-
+// eigenvalue) direction represents "infinite prior variance". That is true
+// only in the RESTRICTED-PSEUDO-INVERSE sense used when this matrix is
+// later COMBINED with other information (e.g. covarianceInformationUpdate's
+// Woodbury update reading a genuinely-zero row/column here as "this factor
+// contributes nothing here, defer entirely to whatever else covers this
+// direction") -- it is NOT true as a standalone claim about a query vector
+// along that exact eigendirection: v_k^T * generalPseudoInverse(M) * v_k is
+// EXACTLY ZERO for a discarded eigenvalue, not large. A weak-but-RETAINED
+// eigenvalue (above rel_thresh) DOES get a large-but-finite 1/lambda_k
+// contribution, which is the case the "infinite variance" language actually
+// describes accurately. Read call sites accordingly: a hard structural
+// zero and a numerically-weak-but-real mode are OPPOSITE outcomes here
+// (zero vs. large), which is a different situation from thresholding away
+// MEASUREMENT information in the posterior (what the old, superseded
 // mechanism did and this file's covarianceInformationUpdate() above never
 // does).
 Eigen::MatrixXd generalPseudoInverse(const Eigen::MatrixXd& M, double rel_thresh);
