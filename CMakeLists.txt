@@ -294,3 +294,52 @@ target_link_libraries(test_pose_control_adaptive_q_directional_debugeigen
   ${OpenCV_LIBS}
   OpenMP::OpenMP_CXX
 )
+
+# Item 45/38 (sanitizer/static validation): AddressSanitizer was attempted
+# and found genuinely unavailable in this container (a trivial `int
+# main(){}` compiled with -fsanitize=address segfaults immediately on
+# startup with "AddressSanitizer:DEADLYSIGNAL" before reaching main() at
+# all -- confirmed 2026-09-23, not specific to this codebase -- almost
+# certainly the container's seccomp/capability profile blocking ASan's
+# shadow-memory mmap). UndefinedBehaviorSanitizer (-fsanitize=undefined)
+# DOES work in this container (confirmed the same way) -- built here as
+# this phase's available sanitizer coverage, same sources as the two
+# targets above.
+add_executable(test_pose_control_adaptive_q_directional_ubsan
+  src/utils/state/state.cpp
+  src/lio/spline.cpp
+  src/utils/log/debug_log_dir.cpp
+  src/lio/pose_control_spline.cpp
+  src/lio/pose_control_adaptive_q.cpp
+  src/lio/pose_control_directional_redundancy.cpp
+  src/lio/pose_control_lidar_factor.cpp
+  src/lio/pose_control_process_factor.cpp
+  src/lio/imu_process_step9.cpp
+  scripts/test/test_pose_control_adaptive_q_directional.cpp
+)
+target_compile_options(test_pose_control_adaptive_q_directional_ubsan PRIVATE
+  $<$<COMPILE_LANGUAGE:CXX>:-fsanitize=undefined;-fno-sanitize-recover=undefined;-g;-O1>
+)
+target_link_options(test_pose_control_adaptive_q_directional_ubsan PRIVATE -fsanitize=undefined)
+target_link_libraries(test_pose_control_adaptive_q_directional_ubsan
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  OpenMP::OpenMP_CXX
+)
+
+add_executable(test_pose_control_prior_math_ubsan
+  src/utils/state/state.cpp
+  src/lio/pose_control_covariance.cpp
+  src/lio/pose_control_lidar_correlation.cpp
+  scripts/test/test_pose_control_prior_math.cpp
+)
+target_compile_options(test_pose_control_prior_math_ubsan PRIVATE
+  $<$<COMPILE_LANGUAGE:CXX>:-fsanitize=undefined;-fno-sanitize-recover=undefined;-g;-O1>
+)
+target_link_options(test_pose_control_prior_math_ubsan PRIVATE -fsanitize=undefined)
+target_link_libraries(test_pose_control_prior_math_ubsan
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+)
