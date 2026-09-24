@@ -11,7 +11,7 @@ for the stub route if OpenCV is not on the include path.
 OPENCV=$(pkg-config --cflags opencv4 2>/dev/null || echo -I/usr/include/opencv4)
 for t in test_spline_rotation test_spline_refine test_spline_channels; do
   g++ -std=c++17 -O2 -Wall -Wextra -I include -I /usr/include/eigen3 $OPENCV \
-      scripts/test/$t.cpp src/lio/spline.cpp -o /tmp/$t && /tmp/$t
+      tests/$t.cpp src/lio/spline.cpp -o /tmp/$t && /tmp/$t
 done
 ```
 

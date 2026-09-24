@@ -39,7 +39,7 @@
 // diagnostic tooling, zero risk to any shipped behavior.
 //
 //   g++ -std=c++17 -O2 -I include -I /usr/include/eigen3 \
-//       scripts/test/test_coupled_phix_full18.cpp src/lio/coupled_estimator.cpp \
+//       tests/test_coupled_phix_full18.cpp src/lio/coupled_estimator.cpp \
 //       -o /tmp/test_coupled_phix_full18 && /tmp/test_coupled_phix_full18
 #include "livo_recon/lio/coupled_estimator.h"
 #include <cstdio>

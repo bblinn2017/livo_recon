@@ -1,5 +1,5 @@
-#include "livo_recon/utils/eval/nees_logger.h"
-#include "livo_recon/utils/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/eval/nees_logger.h"
+#include "livo_recon/diagnostics/log/debug_log_dir.h"
 
 #include <Eigen/Eigenvalues>
 #include <Eigen/LU>

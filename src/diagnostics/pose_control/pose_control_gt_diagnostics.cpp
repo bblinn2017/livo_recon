@@ -1,4 +1,4 @@
-#include "livo_recon/lio/pose_control_gt_diagnostics.h"
+#include "livo_recon/diagnostics/pose_control/pose_control_gt_diagnostics.h"
 #include "livo_recon/lio/pose_control_covariance.h"
 
 namespace livo_recon

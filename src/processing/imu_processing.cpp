@@ -1,7 +1,7 @@
 #include "livo_recon/processing/imu_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/state/state.h"
-#include "livo_recon/utils/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/log/debug_log_dir.h"
 
 #include <fstream>
 #include <iomanip>
@@ -125,19 +125,9 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // same cross-class read pattern as the two flags above, one more OR term.
   std::string coupled_spline_mode = "raw_imu";
   paramWarn<std::string>(pnh, "estimator/coupled/spline_mode", coupled_spline_mode, std::string("raw_imu"));
-  // 2026-09-22: pose_control was missing from this enumeration -- a
-  // stale-list bug (the same class of bug "pose" needed fixed for
-  // earlier). mg.imu_samples_raw stayed permanently EMPTY for every
-  // pose_control run to date (confirmed live via pose_control_seg_debug.txt
-  // instrumentation: imu_samples_raw.size()=0 on every scan), which meant
-  // the ENTIRE process factor (accumulatePoseControlImuPriorSegmentReduced, both in
-  // the mean GN solve and the covariance block) silently contributed ZERO
-  // information on every call (empty per-segment sample buckets ->
-  // Q9==0 -> Lambda==pseudoInverse9(Q9)==0) -- this is the true root cause
-  // of the trace(P_R)=trace(P_p)=0 covariance bug (not a Jacobian/pinv
-  // issue), and also means every pose_control trajectory to date was
-  // fit by LiDAR alone, with the process/IMU factor never actually
-  // engaging despite appearing to converge.
+  // "pose_control" must appear in this OR chain -- without it,
+  // mg.imu_samples_raw stays empty and the continuous-time IMU prior has
+  // no samples to build from.
   opts_.keep_raw_samples = (spline_mode != "raw_imu") || coupled_adaptive_sigma ||
                            coupled_bias_freeze_on_vibration ||
                            (coupled_spline_mode == "pose") ||

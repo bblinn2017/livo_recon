@@ -1,6 +1,6 @@
 #include "livo_recon/processing/combined_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
-#include "livo_recon/utils/log/consistency_log.h"
+#include "livo_recon/diagnostics/log/consistency_log.h"
 #include "livo_recon/processing/lio_base.h"
 #include "livo_recon/processing/vio_processing.h"
 

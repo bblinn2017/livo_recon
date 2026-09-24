@@ -17,7 +17,7 @@
 // a pass/fail gate second -- see the report for interpretation).
 #include "livo_recon/lio/pose_control_spline.h"
 #include "livo_recon/lio/pose_control_layout.h"
-#include "livo_recon/lio/pose_control_physical_diagnostics.h"
+#include "livo_recon/diagnostics/pose_control/pose_control_physical_diagnostics.h"
 #include "livo_recon/lio/pose_control_imu_prior_builder.h"
 #include "livo_recon/lio/pose_control_covariance.h"
 

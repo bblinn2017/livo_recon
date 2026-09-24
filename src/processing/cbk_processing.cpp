@@ -1,7 +1,7 @@
 #include "livo_recon/processing/cbk_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/profiler.h"
-#include "livo_recon/utils/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/vio/tracker.h"
 
 #include <chrono>

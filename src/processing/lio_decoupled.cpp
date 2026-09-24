@@ -2,10 +2,10 @@
 #include "livo_recon/processing/imu_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/config_resolve.h"
-#include "livo_recon/utils/log/consistency_log.h"
+#include "livo_recon/diagnostics/log/consistency_log.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 #include "livo_recon/utils/algo/hashing.h"
-#include "livo_recon/utils/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/utils/algo/math.h"
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/lio/voxelplane.h"   // voxelPlaneInformationFitCount()

@@ -86,7 +86,7 @@ inline void poseControlBasisU(double u, Eigen::Vector4d& b, Eigen::Vector4d& db,
 // this codebase's <15 deg per-scan chords -- CHART_MAX_PHI_RAD=1.0 rad
 // documents the same regime assumption already accepted for ScanSpline).
 // Validated empirically against central FD in
-// scripts/test/test_pose_control_spline.cpp (unit test B) rather than
+// tests/test_pose_control_spline.cpp (unit test B) rather than
 // asserted -- see that file's reported max_abs_omega_error.
 struct PoseControlJac
 {

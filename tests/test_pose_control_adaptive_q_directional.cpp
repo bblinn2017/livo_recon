@@ -16,9 +16,9 @@
 #include "livo_recon/lio/pose_control_lidar_factor.h"
 #include "livo_recon/lio/pose_control_imu_prior_builder.h"
 #include "livo_recon/lio/pose_control_covariance.h"
-#include "livo_recon/lio/pose_control_gt_diagnostics.h"
+#include "livo_recon/diagnostics/pose_control/pose_control_gt_diagnostics.h"
 #include "livo_recon/lio/adaptive_q.h"
-#include "livo_recon/lio/pose_control_physical_diagnostics.h"
+#include "livo_recon/diagnostics/pose_control/pose_control_physical_diagnostics.h"
 
 #include <Eigen/Dense>
 #include <cmath>
@@ -595,7 +595,7 @@ static void testProductionGNAssemblySyntheticFixture()
   const int dimRaw = layout.dim();
   Eigen::MatrixXd A_prior_raw = Eigen::MatrixXd::Zero(dimRaw, dimRaw);
   Eigen::VectorXd b_prior_raw_unused = Eigen::VectorXd::Zero(dimRaw);
-  PoseControlProcessFactorHeadBlock head_block;
+  PoseControlPriorHeadBlock head_block;
   buildPoseControlContinuousImuPrior(spline, layout, imu_samples, bias_acc, bias_gyr, gravity,
       var_acc, var_gyr, A_prior_raw, b_prior_raw_unused, &head_block, nullptr);
 

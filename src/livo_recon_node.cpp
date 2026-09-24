@@ -1,6 +1,6 @@
 #include "livo_recon/livo_recon_node.h"
 #include "livo_recon/map/voxelmap.h"
-#include "livo_recon/utils/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/lio/voxelplane.h"
 

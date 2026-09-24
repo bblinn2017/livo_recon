@@ -50,7 +50,7 @@ int main() {
   }
 
   PoseControlFreeLayout layout; layout.N = N; layout.has_bg = layout.has_ba = layout.has_g = true;
-  PoseControlProcessFactorHeadBlock head_block;
+  PoseControlPriorHeadBlock head_block;
   Eigen::MatrixXd A = Eigen::MatrixXd::Zero(layout.dim(), layout.dim());
   Eigen::VectorXd b = Eigen::VectorXd::Zero(layout.dim());
   double E_lidar = 0.0;

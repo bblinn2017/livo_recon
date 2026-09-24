@@ -30,7 +30,7 @@
 //
 // ---------------------------------------------------------------------------
 // ROTATION.  Two parameterisations, selectable, and the choice between them is
-// MEASURED rather than argued -- see scripts/test/test_spline_rotation.cpp.
+// MEASURED rather than argued -- see tests/test_spline_rotation.cpp.
 //
 // "tangent" (DEFAULT) -- a cubic spline of phi(t) in ONE tangent chart about a
 // mid-scan anchor:

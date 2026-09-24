@@ -1,6 +1,6 @@
 #include "livo_recon/vio/vio_accumulator.h"
 #include "livo_recon/utils/algo/omp_utils.h"
-#include "livo_recon/utils/log/consistency_log.h"
+#include "livo_recon/diagnostics/log/consistency_log.h"
 
 #include <cmath>
 #include <fstream>

@@ -24,7 +24,7 @@ void addPoseControlLidarFactor(
     const PoseControlSpline& spline, const PoseControlFreeLayout& layout,
     const std::vector<PoseControlLidarObs>& obs,
     Eigen::MatrixXd& A, Eigen::VectorXd& b,
-    PoseControlProcessFactorHeadBlock* head_block,
+    PoseControlPriorHeadBlock* head_block,
     double* out_E_lidar,
     std::vector<PoseControlLidarRecord>* out_records)
 {

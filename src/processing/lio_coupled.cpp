@@ -2,12 +2,12 @@
 #include "livo_recon/processing/imu_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/config_resolve.h"
-#include "livo_recon/utils/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/utils/algo/math.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/lio/pose_control_adaptive_q.h"
-#include "livo_recon/lio/pose_control_physical_diagnostics.h"
+#include "livo_recon/diagnostics/pose_control/pose_control_physical_diagnostics.h"
 #include "livo_recon/lio/pose_control_directional_redundancy.h"
 
 #include <algorithm>
@@ -831,7 +831,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       const double t1 = mg.image.t;
       // 2026-09-23 x1/head-propagation campaign item 12: floor relaxed from
       // 6 to 4 (the true architectural minimum -- N=4 gives nSeg=N-3=1
-      // process-factor segment and exactly ONE free control point, cp[3],
+      // IMU prior segment and exactly ONE free control point, cp[3],
       // which is simultaneously x1 (first free knot) AND the tail (scan-end)
       // for this N; a real, intended edge case, not a bug) so N=4 can
       // actually be dispatched. The old floor of 6 was never justified by a
@@ -917,23 +917,9 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       // ==========================================================================
       // PRODUCTION joint IMU/bias Gaussian prior. Computed ONCE per scan, at
       // scan start, from the joint [x0;z] marginalize-then-invert
-      // construction below. This is the estimator's ONE authoritative
-      // prior: coupled_pose_control_sigma_full_prior_ (the full joint
-      // covariance, 9+dimZ square) is stored and reused VERBATIM by the
-      // mean solve (via its z-marginal information, lambda_prior_z_) and by
-      // the post-loop covariance computation (directly) -- neither ever
-      // re-derives a separate prior. This is what makes "mean update
-      // information == covariance update information" hold by construction.
-      //
-      // items 1-16 of the continuous-prior implementation phase: this
-      // prior is now built via buildPoseControlContinuousImuPrior() --
-      // one continuous-time collocation factor evaluated directly against
-      // every raw IMU sample in this scan's window, replacing the former
-      // endpoint/segment-propagation construction (accumulatePoseControlImuPriorSegmentReduced,
-      // now test-only reference math -- see pose_control_imu_prior_builder.h).
-      // The SAME IMU samples enter this ONE factor exactly once -- no
-      // separate diagnostic/counterfactual factor exists.
-      // ==========================================================================
+      // Build the fixed scan-start continuous-time IMU prior once.
+      // Its mean, covariance, and information representation are reused
+      // throughout the current scan.
       coupled_pose_control_imu_residual_samples_.clear();
       {
         const int dimRawScanstart = coupled_pose_control_layout_.dim();
@@ -945,7 +931,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         // prior MEAN as the actual (head-fixed-conditional) minimizer of the
         // IMU-only objective, not merely "whatever eta currently is".
         Eigen::VectorXd b_process_scanstart_shared = Eigen::VectorXd::Zero(dimRawScanstart);
-        PoseControlProcessFactorHeadBlock head_block_scanstart;
+        PoseControlPriorHeadBlock head_block_scanstart;
         buildPoseControlContinuousImuPrior(spline, coupled_pose_control_layout_, mg.imu_samples_raw,
             coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
             poseControlEffectiveVarAcc(), poseControlEffectiveVarGyr(),
@@ -1007,11 +993,11 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           // deficiency by construction: every IMU-process-only direction
           // the raw 6N/dimST space contains that neither the head
           // constraints nor any process/prior term touches (e.g. any
-          // spline column entirely outside the process factor's segment
+          // spline column entirely outside the IMU prior's segment
           // window for a large N) is an EXACT zero row/column of
           // A_process_scanstart_shared, not a numerically-weak one --
           // expected structural nullity is layoutS.dim() minus the number
-          // of columns the process-factor segments + head constraints
+          // of columns the IMU prior segments + head constraints
           // actually touch (bounded above by dimFullS - dEtaS - dSTS - 9
           // for a fully-constrained scan). The retained eigenvalue range
           // after pinv is [rel_thresh * lambda_max, lambda_max] by
@@ -1082,15 +1068,8 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
             emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "prior_information", voxel_map_->frame_idx_, -1, bkv);
           }
 
-          // ====================================================================
-          // Continuous-prior phase, item 27/37: reuses
-          // coupled_pose_control_imu_residual_samples_ -- the SAME per-
-          // sample e_acc/e_gyr evaluation buildPoseControlContinuousImuPrior()
-          // already produced as a byproduct of building the production
-          // prior above, at the SAME (scan-start, pre-LiDAR) linearization
-          // point -- rather than a second, redundant residual computation.
-          // DIAGNOSTIC ONLY below this point -- nothing here mutates A/b.
-          // ====================================================================
+          // Record scan-start IMU residual and information diagnostics without
+          // modifying the production normal equations.
           {
             const auto& samples = coupled_pose_control_imu_residual_samples_;
             const int n = static_cast<int>(samples.size());
@@ -1358,7 +1337,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   // 2026-09-22: pose-control-point post-loop covariance + full-tail
   // write-back. Mirrors poseBasis()'s own early-return pattern below --
   // the GN loop itself already ran every iteration's mean update (LiDAR+
-  // process factor, state_->setPropagatedState() every call); this block
+  // IMU prior, state_->setPropagatedState() every call); this block
   // does the ONE-TIME (not per-iteration, per spec item 5) covariance
   // solve: relinearize the FULL system (LiDAR+process+sT-prior+head_block)
   // at the converged trial, Schur-complement the head out, map the
@@ -1373,21 +1352,13 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     const int dEta = hns.freeDim(), dST = layout.dimST(), dimZ = dEta + dST;
 
     // ==========================================================================
-    // process-prior-REFORMULATION phase, item 29's hard invariant: the
-    // prior used here MUST be the EXACT SAME object the mean solve used,
-    // not a fresh re-derivation from the converged trial. coupled_pose_
-    // control_sigma_full_prior_ was computed ONCE at scan-start (in the
-    // init block, unconditionally) and is reused verbatim here -- this
-    // covariance block no longer re-derives A_process_raw/head_block/Omega0/
-    // Lambda_full_prior at all. Only the LiDAR side is rebuilt (relinearized
-    // at the converged trial, matching item 9's "LiDAR: relinearize; IMU
-    // prior: FIXED"). NOTE: under the comparison-only legacy_process_factor/
-    // frozen_process_hessian_prior modes, the MEAN solve used a DIFFERENT
-    // effective prior than this -- for those modes the item-29 invariant is
-    // deliberately NOT claimed (they are explicitly non-production
-    // comparison paths; the covariance reported for them still reflects the
-    // production joint prior, not their own ad hoc information, and this is
-    // disclosed here rather than silently mismatched).
+    // Invariant: the prior used here is the EXACT SAME object the mean
+    // solve used, not a fresh re-derivation from the converged trial.
+    // coupled_pose_control_sigma_full_prior_ was computed ONCE at scan
+    // start and is reused verbatim -- this covariance block never
+    // re-derives A_process_raw/head_block/Omega0/Lambda_full_prior. Only
+    // the LiDAR side is rebuilt, relinearized at the converged trial; the
+    // IMU prior is fixed for the current scan.
     // ==========================================================================
     Eigen::MatrixXd A_lidar_raw = Eigen::MatrixXd::Zero(dimRaw, dimRaw);
     Eigen::VectorXd b_lidar_raw = Eigen::VectorXd::Zero(dimRaw);
@@ -5097,7 +5068,7 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   // control points, over EVERY interior control point (k=1..N-2) including
   // the head ones (their contribution to eta is via the SAME Z-projection
   // as any other factor -- no special-casing needed, matching how LiDAR/
-  // process factors already touch cp[0..2] uniformly under fix_head=false).
+  // IMU priors already touch cp[0..2] uniformly under fix_head=false).
   const double A_raw_trace_before_curvature = A_raw.trace();
   if (copts_.pose_control_curvature_weight_pos > 0.0 || copts_.pose_control_curvature_weight_rot > 0.0) {
     const int N = layout.N;
@@ -5134,10 +5105,8 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   coupled_pose_control_last_lambda_curvature_trace_ = A_raw.trace() - A_raw_trace_before_curvature;
 
   // sT is covered entirely by the joint production prior (Lambda_prior_z,
-  // applied below in z-space) -- no separate Omega_ss block here. The two
-  // modes that once needed their own sT-only prior (legacy_process_factor,
-  // frozen_process_hessian_prior) are removed from production; git history
-  // is the recovery path if either is ever needed again for comparison.
+  // applied below in z-space) -- no separate Omega_ss block here. Retired
+  // estimator-specific prior branches are not part of production.
 
   // ---- project onto z=[eta;delta_sT] (item 1: the mean solve operates
   // DIRECTLY in the head-constraint nullspace) -----------------------------

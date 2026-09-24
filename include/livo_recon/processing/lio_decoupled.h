@@ -3,7 +3,7 @@
 #include "livo_recon/processing/lio_base.h"
 #include "livo_recon/lio/spline.h"
 #include "livo_recon/lio/adaptive_q.h"
-#include "livo_recon/utils/eval/nees_logger.h"
+#include "livo_recon/diagnostics/eval/nees_logger.h"
 
 #include <array>
 

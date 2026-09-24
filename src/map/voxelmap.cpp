@@ -2,7 +2,7 @@
 #include "livo_recon/lio/voxelplane.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/config_resolve.h"
-#include "livo_recon/utils/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 
 #include <algorithm>

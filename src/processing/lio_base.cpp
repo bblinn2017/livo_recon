@@ -6,7 +6,7 @@
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/lio/voxelplane.h"   // voxelPlaneInformationFitCount(), flushVarianceShareLog/flushConsistencyCorrLog
 #include "livo_recon/lio/lio_accumulator.h"
-#include "livo_recon/utils/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/log/debug_log_dir.h"
 
 #include <cmath>
 #include <fstream>

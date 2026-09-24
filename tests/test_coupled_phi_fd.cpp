@@ -15,7 +15,7 @@
 // worldRotAt() and interpolatePhiX() are mutually consistent.
 //
 //   g++ -std=c++17 -O2 -I include -I /usr/include/eigen3 \
-//       scripts/test/test_coupled_phi_fd.cpp src/lio/coupled_estimator.cpp \
+//       tests/test_coupled_phi_fd.cpp src/lio/coupled_estimator.cpp \
 //       -o /tmp/test_coupled_phi_fd && /tmp/test_coupled_phi_fd
 //
 // coupled_estimator.h/.cpp only depend on utils/algo/math.h and

@@ -24,7 +24,7 @@
 // pose_spline_system.h's own doc comment).
 //
 //   g++ -std=c++17 -O2 -I include -I /usr/include/eigen3 \
-//       scripts/test/test_pose_spline_cblock.cpp src/lio/spline.cpp \
+//       tests/test_pose_spline_cblock.cpp src/lio/spline.cpp \
 //       src/lio/pose_spline_system.cpp \
 //       -o /tmp/test_pose_spline_cblock && /tmp/test_pose_spline_cblock
 #include "livo_recon/lio/pose_spline_system.h"

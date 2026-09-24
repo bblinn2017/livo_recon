@@ -1,4 +1,4 @@
-#include "livo_recon/lio/pose_control_physical_diagnostics.h"
+#include "livo_recon/diagnostics/pose_control/pose_control_physical_diagnostics.h"
 #include "livo_recon/lio/pose_control_adaptive_q.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 

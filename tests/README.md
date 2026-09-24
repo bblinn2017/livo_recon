@@ -8,11 +8,11 @@ whether the full node builds.
 ```sh
 # from the repo root
 g++ -std=c++17 -O2 -I include -I /usr/include/eigen3 \
-    scripts/test/test_spline.cpp src/lio/spline.cpp src/lio/adaptive_q.cpp \
+    tests/test_spline.cpp src/lio/spline.cpp src/lio/adaptive_q.cpp \
     -o /tmp/test_spline && /tmp/test_spline
 
 g++ -std=c++17 -O2 -I include -I /usr/include/eigen3 \
-    scripts/test/test_indirect.cpp src/lio/spline.cpp \
+    tests/test_indirect.cpp src/lio/spline.cpp \
     -o /tmp/test_indirect && /tmp/test_indirect
 ```
 
@@ -94,7 +94,7 @@ own analytic prediction.
 
 ```sh
 g++ -std=c++17 -O2 -I include -I /usr/include/eigen3 \
-    scripts/test/test_coupled_phi_fd.cpp src/lio/coupled_estimator.cpp \
+    tests/test_coupled_phi_fd.cpp src/lio/coupled_estimator.cpp \
     -o /tmp/test_coupled_phi_fd && /tmp/test_coupled_phi_fd
 ```
 

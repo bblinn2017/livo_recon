@@ -10,7 +10,7 @@
 #include "livo_recon/lio/adaptive_q.h"
 #include "livo_recon/lio/residual_redundancy.h"
 #include "livo_recon/lio/pose_control_lidar_correlation.h"
-#include "livo_recon/utils/eval/nees_logger.h"
+#include "livo_recon/diagnostics/eval/nees_logger.h"
 
 #include <limits>
 #include <unordered_set>
@@ -42,17 +42,6 @@ struct LioProcCoupledOptions
   //   "pose_control": the pose-control-point-only trajectory state (see
   //     below) -- the current, supported joint-prior formulation.
   //
-  // 2026-09-23: the "pose_knots" physical-knot B-spline estimator (a fourth
-  // mode that existed here, PoseKnotSpline/pose_knot_spline.h) has been
-  // retired -- see pose_control_implementation_report_v3.md's estimator-
-  // retirement section. It was never selected by any shipped config
-  // (default spline_mode is "raw_imu"); its two genuinely shared IMU-
-  // propagation functions (buildImuStep9x9/integrateAndAccumulateStep) were
-  // extracted into imu_process_step9.h before deletion, since
-  // pose_control_imu_prior_builder.cpp depends on them for the scan-start
-  // joint IMU prior. "pose_knots" is no longer a valid spline_mode value --
-  // configuring it now trips the unclaimed-mode-value abort in
-  // cfg.nestedMode(), same as any other unrecognized string.
   // Config key: estimator/coupled/spline_mode.
   std::string spline_mode = "raw_imu";
   static constexpr const char* SPLINE_MODES[] = { "raw_imu", "pose", "pose_control" };
@@ -86,7 +75,7 @@ struct LioProcCoupledOptions
   // than misusing the unwired ones. Penalizes the second difference
   // cp[k+1]-2*cp[k]+cp[k-1] (position) / cp_phi likewise (rotation) for
   // every interior free control point, added directly into the raw normal
-  // equations alongside the process factor.
+  // equations alongside the IMU prior.
   double pose_control_curvature_weight_pos = 0.0;
   double pose_control_curvature_weight_rot = 0.0;
   // 2026-09-23: free-text test label, written into pose_control_full_
@@ -620,7 +609,7 @@ private:
   // pose, not a correction requiring re-propagation).
   double estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out);
   // One GN iteration of the pose-control-point-only estimator
-  // (spline_mode=pose_control). Rebuilds LiDAR + process-factor normal
+  // (spline_mode=pose_control). Rebuilds LiDAR + IMU prior normal
   // equations fresh each call against z=[c_free;sT] (coupled_pose_control_layout_),
   // solves, applies the mean update in place to coupled_pose_control_spline_
   // (free control points) and coupled_pose_control_sT_{bg,ba,g}_, reconciles

@@ -2,7 +2,7 @@
 
 #include "livo_recon/lio/pose_control_spline.h"
 #include "livo_recon/lio/pose_control_layout.h"
-#include "livo_recon/lio/pose_control_imu_prior_builder.h"   // PoseControlProcessFactorHeadBlock
+#include "livo_recon/lio/pose_control_imu_prior_builder.h"   // PoseControlPriorHeadBlock
 
 // ============================================================================
 // LiDAR point-to-plane factor against PoseControlSpline, built directly in
@@ -60,7 +60,7 @@ void addPoseControlLidarFactor(
     const PoseControlSpline& spline, const PoseControlFreeLayout& layout,
     const std::vector<PoseControlLidarObs>& obs,
     Eigen::MatrixXd& A, Eigen::VectorXd& b,
-    PoseControlProcessFactorHeadBlock* head_block,
+    PoseControlPriorHeadBlock* head_block,
     double* out_E_lidar = nullptr,
     std::vector<PoseControlLidarRecord>* out_records = nullptr);
 

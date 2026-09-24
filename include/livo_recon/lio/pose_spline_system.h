@@ -14,7 +14,7 @@
 // is a separate, larger integration task. This file gives CQ-82's own
 // Artifact 3 (item 6's correctness gate) a real, testable implementation of
 // the pose basis's own normal-equations construction, verifiable in complete
-// isolation (see scripts/test/test_pose_spline_cblock.cpp) -- zero risk to
+// isolation (see tests/test_pose_spline_cblock.cpp) -- zero risk to
 // any shipped behavior, since nothing here is called from the live node.
 //
 // LiDAR term (linear in c_p, chain rule in c_phi via Jr(phi)):

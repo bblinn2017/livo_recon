@@ -1075,9 +1075,9 @@ Dated historical/narrative comments migrated out of source on 2026-09-01, per th
 ```
 
 
-## include/livo_recon/utils/log/consistency_log.h
+## include/livo_recon/diagnostics/log/consistency_log.h
 
-### include/livo_recon/utils/log/consistency_log.h:2-17
+### include/livo_recon/diagnostics/log/consistency_log.h:2-17
 
 <a id="include-livo_recon-utils-log-consistency_log.h-2"></a>
 

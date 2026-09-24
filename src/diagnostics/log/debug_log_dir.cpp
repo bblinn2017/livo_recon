@@ -1,4 +1,4 @@
-#include "livo_recon/utils/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/log/debug_log_dir.h"
 
 #include <filesystem>
 

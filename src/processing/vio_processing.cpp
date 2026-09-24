@@ -1,7 +1,7 @@
 #include "livo_recon/processing/vio_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/algo/omp_utils.h"
-#include "livo_recon/utils/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
