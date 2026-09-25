@@ -253,6 +253,26 @@ static const std::vector<std::string>& fullDiagColumns()
     "phys_v_x","phys_v_y","phys_v_z","phys_a_x","phys_a_y","phys_a_z",
     "phys_omega_x","phys_omega_y","phys_omega_z",
     "phys_dp_deta_norm","phys_dv_deta_norm","phys_da_deta_norm","phys_domega_deta_norm",
+    // ================================================================
+    // First real-data campaign (eee_01) instrumentation, 2026-09-25:
+    // information / hessian / weak_mode / covariance (normalized-spline-
+    // time) / bias rows. See lio_coupled.cpp's injection-site comment for
+    // the exact caveat on curvature's exclusion from Lambda_total_z.
+    // ================================================================
+    // information (trace_Lambda_imu_prior, trace_Lambda_curvature already
+    // whitelisted above via imu_measurement_information/curvature_information)
+    "trace_Lambda_lidar","trace_Lambda_total",
+    // hessian
+    "min_eig","max_eig","hessian_condition_number","dim",
+    // weak_mode
+    "mode_index","eigenvalue","position_contribution","velocity_contribution",
+    "acceleration_contribution","attitude_contribution","angular_velocity_contribution","bias_gravity_contribution",
+    // covariance (normalized spline time)
+    "normalized_t","t_rel","trace_P_position","trace_P_velocity","trace_P_acceleration",
+    "trace_P_attitude","trace_P_angular_velocity","trace_P_position_velocity_cross",
+    "min_eig_P_position","max_eig_P_position",
+    // bias
+    "trace_P_ba","trace_P_bg","trace_P_g","norm_P_eta_ba_cross","norm_P_eta_bg_cross",
   };
   return cols;
 }
@@ -1539,6 +1559,113 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           {"curvature_to_prior_ratio", std::to_string(lambda_prior_eta_trace > 0.0 ? curv_trace / lambda_prior_eta_trace : 0.0)},
         };
         emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "curvature_information", voxel_map_->frame_idx_, -1, curvkv);
+
+        // ====================================================================
+        // First real-data campaign instrumentation: total-Hessian/weak-mode,
+        // normalized-spline-time covariance, and bias rows. Reuses the SAME
+        // Lambda_meas_z/coupled_pose_control_lambda_prior_z_/Sigma_full_post
+        // objects already computed above -- no second information/covariance
+        // derivation. Lambda_total_z deliberately EXCLUDES curvature (see the
+        // curvature-semantics comment above this block: curvature is a
+        // deterministic regularizer, not Gaussian information).
+        // ====================================================================
+        const Eigen::MatrixXd Lambda_total_z = coupled_pose_control_lambda_prior_z_ + Lambda_meas_z;
+        {
+          std::map<std::string, std::string> infokv = {
+            {"trace_Lambda_lidar", std::to_string(Lambda_meas_z.trace())},
+            {"trace_Lambda_imu_prior", std::to_string(coupled_pose_control_lambda_prior_z_.trace())},
+            {"trace_Lambda_curvature", std::to_string(coupled_pose_control_last_lambda_curvature_trace_)},
+            {"trace_Lambda_total", std::to_string(Lambda_total_z.trace())},
+          };
+          emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "information", voxel_map_->frame_idx_, -1, infokv);
+        }
+
+        const Eigen::MatrixXd Lsym_total = 0.5 * (Lambda_total_z + Lambda_total_z.transpose());
+        Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_total(Lsym_total);
+        const Eigen::VectorXd ev_total = es_total.eigenvalues();
+        const double h_min_eig = ev_total.size() > 0 ? ev_total(0) : 0.0;
+        const double h_max_eig = ev_total.size() > 0 ? ev_total(ev_total.size() - 1) : 0.0;
+        const double h_cond = (std::abs(h_min_eig) > 1e-300) ? h_max_eig / h_min_eig
+                                                              : std::numeric_limits<double>::infinity();
+        {
+          std::map<std::string, std::string> hkv = {
+            {"min_eig", std::to_string(h_min_eig)}, {"max_eig", std::to_string(h_max_eig)},
+            {"hessian_condition_number", std::to_string(h_cond)}, {"dim", std::to_string(dimZ)},
+          };
+          emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "hessian", voxel_map_->frame_idx_, -1, hkv);
+        }
+
+        // Weak-mode physical decomposition, evaluated at the scan's mid-time
+        // -- a single representative t, the same simplification already
+        // documented/used for the trajectory-state adaptive-Q term.
+        const double t_probe_mode = 0.5 * (spline.t0() + spline.t1());
+        const auto phys_mode = evaluatePoseControlPhysicalSample(spline, layout, hns, t_probe_mode, coupled_pose_control_g_trial_);
+        const int n_weak = std::min(5, static_cast<int>(ev_total.size()));
+        for (int m = 0; m < n_weak; ++m) {
+          const Eigen::VectorXd v_eta = es_total.eigenvectors().col(m).head(dEta);
+          const double bias_gravity_contribution = (dST > 0)
+              ? es_total.eigenvectors().col(m).tail(dST).norm() : 0.0;
+          std::map<std::string, std::string> wkv = {
+            {"mode_index", std::to_string(m)}, {"eigenvalue", std::to_string(ev_total(m))},
+            {"position_contribution", std::to_string((phys_mode.dp_deta * v_eta).norm())},
+            {"velocity_contribution", std::to_string((phys_mode.dv_deta * v_eta).norm())},
+            {"acceleration_contribution", std::to_string((phys_mode.da_deta * v_eta).norm())},
+            {"attitude_contribution", std::to_string((phys_mode.dtheta_deta * v_eta).norm())},
+            {"angular_velocity_contribution", std::to_string((phys_mode.domega_deta * v_eta).norm())},
+            {"bias_gravity_contribution", std::to_string(bias_gravity_contribution)},
+          };
+          emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "weak_mode", voxel_map_->frame_idx_, m, wkv);
+        }
+
+        // Normalized-spline-time covariance (0/0.25/0.5/0.75/1.0), mapping
+        // the SAME P_eta_post block (already computed above) through the
+        // physical Jacobians at each fraction.
+        const Eigen::MatrixXd P_eta_post_for_cov = Sigma_full_post.block(9, 9, dEta, dEta);
+        for (const double frac : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+          const double t_s = spline.t0() + frac * (spline.t1() - spline.t0());
+          const auto ps = evaluatePoseControlPhysicalSample(spline, layout, hns, t_s, coupled_pose_control_g_trial_);
+          const Eigen::Matrix3d P_p_s = ps.dp_deta * P_eta_post_for_cov * ps.dp_deta.transpose();
+          const Eigen::Matrix3d P_v_s = ps.dv_deta * P_eta_post_for_cov * ps.dv_deta.transpose();
+          const Eigen::Matrix3d P_a_s = ps.da_deta * P_eta_post_for_cov * ps.da_deta.transpose();
+          const Eigen::Matrix3d P_theta_s = ps.dtheta_deta * P_eta_post_for_cov * ps.dtheta_deta.transpose();
+          const Eigen::Matrix3d P_omega_s = ps.domega_deta * P_eta_post_for_cov * ps.domega_deta.transpose();
+          const Eigen::Matrix3d P_pv_cross_s = ps.dp_deta * P_eta_post_for_cov * ps.dv_deta.transpose();
+          Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es_p_s(P_p_s);
+          std::map<std::string, std::string> ckv = {
+            {"normalized_t", std::to_string(frac)}, {"t_rel", std::to_string(t_s)},
+            {"trace_P_position", std::to_string(P_p_s.trace())},
+            {"trace_P_velocity", std::to_string(P_v_s.trace())},
+            {"trace_P_acceleration", std::to_string(P_a_s.trace())},
+            {"trace_P_attitude", std::to_string(P_theta_s.trace())},
+            {"trace_P_angular_velocity", std::to_string(P_omega_s.trace())},
+            {"trace_P_position_velocity_cross", std::to_string(P_pv_cross_s.trace())},
+            {"min_eig_P_position", std::to_string(es_p_s.eigenvalues().minCoeff())},
+            {"max_eig_P_position", std::to_string(es_p_s.eigenvalues().maxCoeff())},
+          };
+          emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "covariance", voxel_map_->frame_idx_, -1, ckv);
+        }
+
+        // Bias values + their marginal/cross covariance (post-update),
+        // reusing the SAME Sigma_full_post block-extraction convention as
+        // the P_eta_bg_post/P_eta_ba_post logCovTraceStage() calls above.
+        {
+          const int off_bg = layout.colBG() >= 0 ? 9 + dEta + layout.colBG() - layout.dimCFree() : -1;
+          const int off_ba = layout.colBA() >= 0 ? 9 + dEta + layout.colBA() - layout.dimCFree() : -1;
+          const int off_g  = layout.colG()  >= 0 ? 9 + dEta + layout.colG()  - layout.dimCFree() : -1;
+          const double trace_P_bg = off_bg >= 0 ? Sigma_full_post.block(off_bg, off_bg, 3, 3).trace() : std::numeric_limits<double>::quiet_NaN();
+          const double trace_P_ba = off_ba >= 0 ? Sigma_full_post.block(off_ba, off_ba, 3, 3).trace() : std::numeric_limits<double>::quiet_NaN();
+          const double trace_P_g  = off_g  >= 0 ? Sigma_full_post.block(off_g,  off_g,  3, 3).trace() : std::numeric_limits<double>::quiet_NaN();
+          const double trace_P_eta_bg = off_bg >= 0 ? Sigma_full_post.block(9, off_bg, dEta, 3).norm() : std::numeric_limits<double>::quiet_NaN();
+          const double trace_P_eta_ba = off_ba >= 0 ? Sigma_full_post.block(9, off_ba, dEta, 3).norm() : std::numeric_limits<double>::quiet_NaN();
+          std::map<std::string, std::string> bikv = {
+            {"ba_x", std::to_string(coupled_pose_control_ba_trial_.x())}, {"ba_y", std::to_string(coupled_pose_control_ba_trial_.y())}, {"ba_z", std::to_string(coupled_pose_control_ba_trial_.z())},
+            {"bg_x", std::to_string(coupled_pose_control_bg_trial_.x())}, {"bg_y", std::to_string(coupled_pose_control_bg_trial_.y())}, {"bg_z", std::to_string(coupled_pose_control_bg_trial_.z())},
+            {"g_x", std::to_string(coupled_pose_control_g_trial_.x())}, {"g_y", std::to_string(coupled_pose_control_g_trial_.y())}, {"g_z", std::to_string(coupled_pose_control_g_trial_.z())},
+            {"trace_P_ba", std::to_string(trace_P_ba)}, {"trace_P_bg", std::to_string(trace_P_bg)}, {"trace_P_g", std::to_string(trace_P_g)},
+            {"norm_P_eta_ba_cross", std::to_string(trace_P_eta_ba)}, {"norm_P_eta_bg_cross", std::to_string(trace_P_eta_bg)},
+          };
+          emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "bias", voxel_map_->frame_idx_, -1, bikv);
+        }
       }
 
       // M_T: dimState() x dimZ, mapping z -> the FULL tail StateGroup

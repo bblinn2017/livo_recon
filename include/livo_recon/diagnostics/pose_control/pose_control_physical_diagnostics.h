@@ -48,8 +48,11 @@ struct PoseControlPhysicalSample
   double t = 0.0;
   V3D p = V3D::Zero(), v = V3D::Zero(), a = V3D::Zero(), omega = V3D::Zero();
   M3D R = M3D::Identity();
-  // Each dQ_deta is 3 x hns.freeDim().
-  Eigen::MatrixXd dp_deta, dv_deta, da_deta, domega_deta;
+  // Each dQ_deta is 3 x hns.freeDim(). dtheta_deta is d(local body-frame
+  // rotation perturbation at t)/d(eta) -- the attitude analogue of the
+  // others (distinct from domega_deta, which is the angular-RATE
+  // sensitivity); attitude covariance at t is J_theta*P_eta*J_theta^T.
+  Eigen::MatrixXd dp_deta, dv_deta, da_deta, domega_deta, dtheta_deta;
 };
 
 PoseControlPhysicalSample evaluatePoseControlPhysicalSample(

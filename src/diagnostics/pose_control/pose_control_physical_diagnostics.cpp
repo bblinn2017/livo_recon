@@ -37,6 +37,7 @@ PoseControlPhysicalSample evaluatePoseControlPhysicalSample(
   Eigen::MatrixXd dv_raw = Eigen::MatrixXd::Zero(3, rawDim);
   Eigen::MatrixXd da_raw = Eigen::MatrixXd::Zero(3, rawDim);
   Eigen::MatrixXd domega_raw = Eigen::MatrixXd::Zero(3, rawDim);
+  Eigen::MatrixXd dtheta_raw = Eigen::MatrixXd::Zero(3, rawDim);
 
   const auto jac = spline.jacobianAt(t);
   for (int k = 0; k < 4; ++k)
@@ -51,13 +52,17 @@ PoseControlPhysicalSample evaluatePoseControlPhysicalSample(
       da_raw.block<3, 3>(0, colp) = PoseControlSpline::dAccDcp(jac, k);
     }
     if (colph >= 0)
+    {
       domega_raw.block<3, 3>(0, colph) = spline.dOmegaDcphi(jac, k, t);
+      dtheta_raw.block<3, 3>(0, colph) = spline.dThetaDcphi(jac, k, t);
+    }
   }
 
   out.dp_deta = dp_raw * hns.Z;
   out.dv_deta = dv_raw * hns.Z;
   out.da_deta = da_raw * hns.Z;
   out.domega_deta = domega_raw * hns.Z;
+  out.dtheta_deta = dtheta_raw * hns.Z;
   (void)gravity;  // a(t) here is the WORLD-frame spline acceleration itself (gravity not subtracted) -- see e_acc's own convention for the specific-force version.
   return out;
 }
