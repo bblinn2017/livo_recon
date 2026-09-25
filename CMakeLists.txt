@@ -1,12 +1,15 @@
 cmake_minimum_required(VERSION 3.16)
+
 project(livo_recon)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
+
 enable_language(CUDA)
 
 set(CMAKE_BUILD_TYPE Release)
+
 # Restrict host-only flags to CXX so nvcc doesn't receive them directly
 add_compile_options(
   $<$<COMPILE_LANGUAGE:CXX>:-Wall>
@@ -16,6 +19,7 @@ add_compile_options(
   $<$<COMPILE_LANGUAGE:CXX>:-march=native>
   $<$<COMPILE_LANGUAGE:CXX>:-g>
 )
+
 # Match system PCL's Eigen alignment config. libpcl_filters.so allocates
 # pcl::PointCloud::points with posix_memalign (16-byte path), but -march=native
 # can raise EIGEN_MAX_ALIGN_BYTES to 32/64 which switches our deallocation to
@@ -37,7 +41,7 @@ find_package(catkin REQUIRED COMPONENTS
   image_transport
   message_generation
   livox_ros_driver
-  jsk_rviz_plugins  # OverlayText, for publishEvoStats' rviz table (see pub_processing.cpp)
+  jsk_rviz_plugins
 )
 
 find_package(Eigen3 REQUIRED)
@@ -50,6 +54,7 @@ find_package(CUDA REQUIRED)  # provides ${CUDA_LIBRARIES} (includes libcudart)
 # CMake/CUDA setup with a "requires CUDA17 dialect" error) — declare the
 # architecture explicitly (matches livo_cuda's -arch=sm_89 below).
 set(TORCH_CUDA_ARCH_LIST "8.9")
+
 find_package(Torch REQUIRED)  # LibTorch, for running CoTracker natively
 
 # Torch's config sets CMAKE_CUDA_STANDARD=17, a dialect this CMake (3.16)
@@ -87,17 +92,20 @@ include_directories(
 add_library(livo_cuda STATIC
   src/cuda/lio_kernels.cu
 )
+
 set_target_properties(livo_cuda PROPERTIES
   CUDA_SEPARABLE_COMPILATION ON
   POSITION_INDEPENDENT_CODE ON
   CUDA_STANDARD 14
   CUDA_STANDARD_REQUIRED OFF
 )
+
 target_include_directories(livo_cuda PRIVATE
   include
   ${EIGEN3_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
 )
+
 target_compile_options(livo_cuda PRIVATE
   # -arch=sm_89 instead of CMAKE_CUDA_ARCHITECTURES (requires CMake 3.18)
   $<$<COMPILE_LANGUAGE:CUDA>:-arch=sm_89 --use_fast_math -O3 -lineinfo>
@@ -155,6 +163,7 @@ add_executable(livo_recon_node
   src/vio/tapnext/tapnext_backend.cpp
   src/vio/trackon/trackon_backend.cpp
 )
+
 target_compile_options(livo_recon_node PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:${TORCH_CXX_FLAGS}>
 )
@@ -193,9 +202,11 @@ add_executable(cache_tracker_output_livo_recon
   src/vio/tapnext/tapnext_backend.cpp
   src/vio/trackon/trackon_backend.cpp
 )
+
 target_compile_options(cache_tracker_output_livo_recon PRIVATE
   $<$<COMPILE_LANGUAGE:CXX>:${TORCH_CXX_FLAGS}>
 )
+
 target_link_libraries(cache_tracker_output_livo_recon
   livo_cuda
   ${CUDA_LIBRARIES}
@@ -208,6 +219,7 @@ target_link_libraries(cache_tracker_output_livo_recon
 )
 
 # Standalone pose-control unit tests.
+
 add_executable(test_pose_control_continuous_prior_physical
   src/lio/spline.cpp
   src/diagnostics/log/debug_log_dir.cpp
@@ -216,6 +228,7 @@ add_executable(test_pose_control_continuous_prior_physical
   src/diagnostics/pose_control/pose_control_physical_diagnostics.cpp
   tests/test_pose_control_continuous_prior_physical.cpp
 )
+
 target_link_libraries(test_pose_control_continuous_prior_physical
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
@@ -230,6 +243,7 @@ add_executable(test_pose_control_prior_math
   src/lio/pose_control_lidar_correlation.cpp
   tests/test_pose_control_prior_math.cpp
 )
+
 target_link_libraries(test_pose_control_prior_math
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
@@ -240,14 +254,53 @@ add_executable(test_pose_control_parameterization_invariance
   src/diagnostics/log/debug_log_dir.cpp
   src/lio/spline.cpp
   src/lio/pose_control_spline.cpp
-
   src/lio/pose_control_imu_prior_builder.cpp
   src/lio/pose_control_covariance.cpp
   src/lio/pose_control_adaptive_q.cpp
   src/diagnostics/pose_control/pose_control_physical_diagnostics.cpp
   tests/test_pose_control_parameterization_invariance.cpp
 )
+
 target_link_libraries(test_pose_control_parameterization_invariance
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  OpenMP::OpenMP_CXX
+)
+
+add_executable(test_pose_control_prior_uncertainty
+  src/lio/pose_control_spline.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
+  src/lio/pose_control_covariance.cpp
+  src/diagnostics/pose_control/pose_control_physical_diagnostics.cpp
+  tests/pose_control/reference/physical_trajectory_reference.cpp
+  tests/test_pose_control_prior_uncertainty.cpp
+)
+
+target_include_directories(test_pose_control_prior_uncertainty PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/tests/pose_control/reference
+)
+
+target_link_libraries(test_pose_control_prior_uncertainty
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  OpenMP::OpenMP_CXX
+)
+
+add_executable(test_pose_control_prior_discretization
+  src/lio/pose_control_spline.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
+  src/diagnostics/pose_control/pose_control_physical_diagnostics.cpp
+  tests/test_pose_control_prior_discretization.cpp
+  tests/pose_control/reference/physical_trajectory_reference.cpp
+)
+
+target_include_directories(test_pose_control_prior_discretization PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/tests/pose_control/reference
+)
+
+target_link_libraries(test_pose_control_prior_discretization
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
   ${OpenCV_LIBS}
@@ -259,11 +312,11 @@ add_executable(test_pose_control_lidar_physical_equivalence
   src/lio/pose_control_lidar_factor.cpp
   tests/test_pose_control_lidar_physical_equivalence.cpp
 )
+
 target_link_libraries(test_pose_control_lidar_physical_equivalence
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
   ${OpenCV_LIBS}
-  OpenMP::OpenMP_CXX
 )
 
 add_executable(test_pose_control_adaptive_q_directional
@@ -276,12 +329,12 @@ add_executable(test_pose_control_adaptive_q_directional
   src/lio/pose_control_directional_redundancy.cpp
   src/lio/pose_control_lidar_factor.cpp
   src/lio/pose_control_imu_prior_builder.cpp
-
   src/lio/adaptive_q.cpp
   src/diagnostics/pose_control/pose_control_gt_diagnostics.cpp
   src/lio/pose_control_covariance.cpp
   tests/test_pose_control_adaptive_q_directional.cpp
 )
+
 target_link_libraries(test_pose_control_adaptive_q_directional
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
@@ -293,16 +346,15 @@ add_executable(test_pose_control_prior_mean_correctness
   src/lio/spline.cpp
   src/diagnostics/log/debug_log_dir.cpp
   src/lio/pose_control_spline.cpp
-
   src/lio/pose_control_imu_prior_builder.cpp
   src/lio/pose_control_covariance.cpp
   src/lio/pose_control_adaptive_q.cpp
   src/diagnostics/pose_control/pose_control_physical_diagnostics.cpp
   tests/test_pose_control_prior_mean_correctness.cpp
 )
+
 target_link_libraries(test_pose_control_prior_mean_correctness
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
   ${OpenCV_LIBS}
-  OpenMP::OpenMP_CXX
 )
