@@ -100,7 +100,7 @@ void testPerSampleVarianceScaling()
         measured_ratio / count_ratio, 0.10);
 }
 
-void testContinuousNoiseDensityScaling()
+void testContinuousNoiseDensityDiscretization()
 {
   const PoseControlSpline spline = makeSpline();
   PoseControlFreeLayout layout;
@@ -110,14 +110,16 @@ void testContinuousNoiseDensityScaling()
 
   const double dt1 = 0.002;
   const double dt2 = 0.001;
-  const V3D var_acc_1 = V3D::Constant(0.02 * 0.02);
-  const V3D var_gyr_1 = V3D::Constant(0.005 * 0.005);
+  const V3D q_acc = V3D::Constant(0.02 * 0.02);
+  const V3D q_gyr = V3D::Constant(0.005 * 0.005);
 
-  // If var is interpreted as a continuous-time noise density, the equivalent
-  // per-sample covariance scales with dt. This test checks the corresponding
-  // refinement behavior explicitly rather than assuming the interpretation.
-  const V3D var_acc_2 = var_acc_1 * (dt2 / dt1);
-  const V3D var_gyr_2 = var_gyr_1 * (dt2 / dt1);
+  // Interpret q_acc and q_gyr as continuous-time noise densities.
+  // For the Riemann-sum approximation of the continuous-time objective,
+  // the equivalent per-sample covariance is q / dt.
+  const V3D var_acc_1 = q_acc / dt1;
+  const V3D var_gyr_1 = q_gyr / dt1;
+  const V3D var_acc_2 = q_acc / dt2;
+  const V3D var_gyr_2 = q_gyr / dt2;
 
   const double I1 = directionalInformation(spline, layout, makeImu(spline, dt1),
                                             var_acc_1, var_gyr_1, d);
@@ -125,9 +127,9 @@ void testContinuousNoiseDensityScaling()
                                             var_acc_2, var_gyr_2, d);
   const double ratio = I2 / I1;
   check(std::isfinite(ratio) && ratio > 0.0,
-        "noise-density refinement ratio is finite", ratio, 0.0);
+        "continuous-time density refinement ratio is finite", ratio, 0.0);
   check(std::abs(ratio - 1.0) < 0.10,
-        "noise-density scaling: information converges under timestep refinement",
+        "continuous-time density: information converges under timestep refinement",
         ratio, 0.10);
 }
 }
@@ -136,6 +138,6 @@ int main()
 {
   std::printf("Pose-control IMU-prior discretization tests\n");
   testPerSampleVarianceScaling();
-  testContinuousNoiseDensityScaling();
+  testContinuousNoiseDensityDiscretization();
   return failures == 0 ? 0 : 1;
 }

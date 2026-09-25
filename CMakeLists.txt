@@ -307,6 +307,20 @@ target_link_libraries(test_pose_control_prior_discretization
   OpenMP::OpenMP_CXX
 )
 
+add_executable(test_pose_control_prior_batch_validation
+  src/lio/pose_control_spline.cpp
+  src/lio/pose_control_imu_prior_builder.cpp
+  src/lio/pose_control_covariance.cpp
+  src/diagnostics/pose_control/pose_control_physical_diagnostics.cpp
+  tests/test_pose_control_prior_batch_validation.cpp
+)
+target_link_libraries(test_pose_control_prior_batch_validation
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  OpenMP::OpenMP_CXX
+)
+
 add_executable(test_pose_control_lidar_physical_equivalence
   src/lio/pose_control_spline.cpp
   src/lio/pose_control_lidar_factor.cpp

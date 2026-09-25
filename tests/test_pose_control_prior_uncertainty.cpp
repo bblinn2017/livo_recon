@@ -48,40 +48,57 @@ std::vector<ImuSample> perfectImu(const PoseControlSpline& s, const V3D& gravity
   return out;
 }
 
-// Independent closed-form first-segment head mapping for the cubic B-spline.
+// Independent closed-form head mapping for the cubic B-spline, evaluated
+// with the same segment-local convention as the production spline.
 // This test reference intentionally retypes the three boundary basis rows so
 // that the test does not call poseControlHeadPosJacobians() on both sides.
-void independentHeadPVJacobian(double delta, double t,
+void independentHeadPVJacobian(int n_segments, double delta, double t,
                                Eigen::Matrix<double, 6, 6>& J)
 {
-  const double u = t / delta;
+  J.setZero();
   const double inv_delta = 1.0 / delta;
+  const double total_duration = n_segments * delta;
+  const double tc = std::min(std::max(t, 0.0), total_duration);
+  double x = tc * inv_delta;
+  int s = static_cast<int>(std::floor(x));
+  if (s >= n_segments) {
+    s = n_segments - 1;
+    x = static_cast<double>(n_segments);
+  }
+  const double u = x - static_cast<double>(s);
+
   const Eigen::Matrix3d M = (Eigen::Matrix3d() <<
       1.0 / 6.0, 4.0 / 6.0, 1.0 / 6.0,
       -0.5 * inv_delta, 0.0, 0.5 * inv_delta,
       inv_delta * inv_delta, -2.0 * inv_delta * inv_delta,
       inv_delta * inv_delta).finished();
-
   const Eigen::Matrix3d Minv = M.inverse();
-  Eigen::RowVector3d b, db;
+
   const double u2 = u * u;
+  const double u3 = u2 * u;
   const double om = 1.0 - u;
+  Eigen::Vector4d b, db;
   b << om * om * om / 6.0,
-       (3.0 * u * u2 - 6.0 * u2 + 4.0) / 6.0,
-       (-3.0 * u * u2 + 3.0 * u2 + 3.0 * u + 1.0) / 6.0;
+       (3.0 * u3 - 6.0 * u2 + 4.0) / 6.0,
+       (-3.0 * u3 + 3.0 * u2 + 3.0 * u + 1.0) / 6.0,
+       u3 / 6.0;
   db << -0.5 * om * om,
         0.5 * (3.0 * u2 - 4.0 * u),
-        0.5 * (-3.0 * u2 + 2.0 * u + 1.0);
+        0.5 * (-3.0 * u2 + 2.0 * u + 1.0),
+        0.5 * u2;
 
-  // The three-by-two inverse columns give the control-point response to p0/v0.
-  J.setZero();
-  for (int k = 0; k < 3; ++k) {
-    const double m_p = Minv(k, 0);
-    const double m_v = Minv(k, 1);
-    J.block<3, 3>(0, 0) += b(k) * m_p * Eigen::Matrix3d::Identity();
-    J.block<3, 3>(0, 3) += b(k) * m_v * Eigen::Matrix3d::Identity();
-    J.block<3, 3>(3, 0) += db(k) * inv_delta * m_p * Eigen::Matrix3d::Identity();
-    J.block<3, 3>(3, 3) += db(k) * inv_delta * m_v * Eigen::Matrix3d::Identity();
+  // Head p0/v0 affect absolute control points 0..2 only. For a query in
+  // segment s, map those absolute control points into local basis slots
+  // k = abs_k - s. Any local slot with abs_k >= 3 is independent of the head.
+  for (int k = 0; k < 4; ++k) {
+    const int abs_k = s + k;
+    if (abs_k >= 3) continue;
+    const double m_p = Minv(abs_k, 0);
+    const double m_v = Minv(abs_k, 1);
+    J.block<3, 3>(0, 0) += (b(k) * m_p) * Eigen::Matrix3d::Identity();
+    J.block<3, 3>(0, 3) += (b(k) * m_v) * Eigen::Matrix3d::Identity();
+    J.block<3, 3>(3, 0) += (db(k) * inv_delta * m_p) * Eigen::Matrix3d::Identity();
+    J.block<3, 3>(3, 3) += (db(k) * inv_delta * m_v) * Eigen::Matrix3d::Identity();
   }
 }
 
@@ -89,23 +106,26 @@ void testHeadSensitivityIndependentReference()
 {
   const PoseControlSpline s = makeSpline();
   const auto hs = poseControlHeadPosSensitivity(s);
-  const double t = 0.037;
+  const std::vector<double> test_times = {0.0, 0.011, 0.024, 0.037, 0.049, 0.062, 0.099};
+  double max_error = 0.0;
+  for (double t : test_times) {
+    M3D dp_dp0, dp_dv0, dv_dp0, dv_dv0;
+    poseControlHeadPosJacobians(s, hs, t, dp_dp0, dp_dv0, dv_dp0, dv_dv0);
 
-  M3D dp_dp0, dp_dv0, dv_dp0, dv_dv0;
-  poseControlHeadPosJacobians(s, hs, t, dp_dp0, dp_dv0, dv_dp0, dv_dv0);
+    Eigen::Matrix<double, 6, 6> J_ref;
+    independentHeadPVJacobian(s.nSeg(), s.delta(), t - s.t0(), J_ref);
 
-  Eigen::Matrix<double, 6, 6> J_ref;
-  independentHeadPVJacobian(s.delta(), t - s.t0(), J_ref);
+    Eigen::Matrix<double, 6, 6> J_prod = Eigen::Matrix<double, 6, 6>::Zero();
+    J_prod.block<3, 3>(0, 0) = dp_dp0;
+    J_prod.block<3, 3>(0, 3) = dp_dv0;
+    J_prod.block<3, 3>(3, 0) = dv_dp0;
+    J_prod.block<3, 3>(3, 3) = dv_dv0;
+    max_error = std::max(max_error, (J_prod - J_ref).norm());
+  }
 
-  Eigen::Matrix<double, 6, 6> J_prod = Eigen::Matrix<double, 6, 6>::Zero();
-  J_prod.block<3, 3>(0, 0) = dp_dp0;
-  J_prod.block<3, 3>(0, 3) = dp_dv0;
-  J_prod.block<3, 3>(3, 0) = dv_dp0;
-  J_prod.block<3, 3>(3, 3) = dv_dv0;
-
-  check((J_prod - J_ref).norm() < 1e-12,
-        "head p/v sensitivity matches independent cubic-boundary reference",
-        (J_prod - J_ref).norm(), 1e-12);
+  check(max_error < 1e-12,
+        "head p/v sensitivity matches independent segment-aware reference",
+        max_error, 1e-12);
 }
 
 struct PriorAssembly
@@ -197,7 +217,7 @@ void testFixedHeadMeanUncertainCovariance()
 
   const double t = 0.037;
   Eigen::Matrix<double, 6, 6> J_h;
-  independentHeadPVJacobian(s.delta(), t - s.t0(), J_h);
+  independentHeadPVJacobian(s.nSeg(), s.delta(), t - s.t0(), J_h);
   const auto sample = evaluatePoseControlPhysicalSample(
       s, layout, a.hns, t, V3D(0, 0, -9.81));
 
