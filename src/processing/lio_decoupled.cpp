@@ -1414,10 +1414,18 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
         const double predicted_delta_E_lidar = (dx.transpose() * ekf_.Htz)(0) - 0.5 * (dx.transpose() * ekf_.HtH * dx)(0);
         bool first;
         std::ofstream& ofs = gn_iter_log.stream(&first);
-        if (first) ofs << "scan_id,iter,n_residuals,dp_tail_x,dp_tail_y,dp_tail_z,dp_tail_norm,"
+        if (first) ofs << "scan_id,iter,n_residuals,t_abs_iter,"
+                          "tail_p_before_x,tail_p_before_y,tail_p_before_z,tail_p_after_x,tail_p_after_y,tail_p_after_z,"
+                          "tail_v_before_x,tail_v_before_y,tail_v_before_z,tail_v_after_x,tail_v_after_y,tail_v_after_z,"
+                          "dp_tail_x,dp_tail_y,dp_tail_z,dp_tail_norm,"
                           "dtheta_tail_x,dtheta_tail_y,dtheta_tail_z,dtheta_tail_norm,dv_tail_norm,"
                           "predicted_delta_E_lidar,avg_abs_residual\n";
-        ofs << voxel_map_->frame_idx_ << "," << iter << "," << residuals_.size() << ","
+        const double t_abs_iter = mg.image.t + data_queues_->start_time;
+        ofs << voxel_map_->frame_idx_ << "," << iter << "," << residuals_.size() << "," << t_abs_iter << ","
+            << p_tail_before.x() << "," << p_tail_before.y() << "," << p_tail_before.z() << ","
+            << p_tail_after.x() << "," << p_tail_after.y() << "," << p_tail_after.z() << ","
+            << v_tail_before.x() << "," << v_tail_before.y() << "," << v_tail_before.z() << ","
+            << v_tail_after.x() << "," << v_tail_after.y() << "," << v_tail_after.z() << ","
             << dp_tail.x() << "," << dp_tail.y() << "," << dp_tail.z() << "," << dp_tail.norm() << ","
             << dtheta_tail.x() << "," << dtheta_tail.y() << "," << dtheta_tail.z() << "," << dtheta_tail.norm() << ","
             << dv_tail.norm() << "," << predicted_delta_E_lidar << "," << error << "\n";
