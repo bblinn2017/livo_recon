@@ -1421,7 +1421,8 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
                           "dtheta_tail_x,dtheta_tail_y,dtheta_tail_z,dtheta_tail_norm,dv_tail_norm,"
                           "predicted_delta_E_lidar,avg_abs_residual\n";
         const double t_abs_iter = mg.image.t + data_queues_->start_time;
-        ofs << voxel_map_->frame_idx_ << "," << iter << "," << residuals_.size() << "," << t_abs_iter << ","
+        ofs << voxel_map_->frame_idx_ << "," << iter << "," << residuals_.size() << ","
+            << std::setprecision(12) << t_abs_iter << std::setprecision(6) << ","
             << p_tail_before.x() << "," << p_tail_before.y() << "," << p_tail_before.z() << ","
             << p_tail_after.x() << "," << p_tail_after.y() << "," << p_tail_after.z() << ","
             << v_tail_before.x() << "," << v_tail_before.y() << "," << v_tail_before.z() << ","
