@@ -230,6 +230,11 @@ static const std::vector<std::string>& fullDiagColumns()
     "trace_A_independent","trace_A_corrected","trace_diff","frobenius_diff",
     // lidar_point_sample (item 8/12 -- sampled per-point diagnostic)
     "point_index","residual","sigma2","whitened_residual","H_i_norm","H_i_dim",
+    // lidar_info_footprint / lidar_info_footprint_summary (pose_control_information_footprint_validation)
+    "knot_index","is_direct_support","direct_info_pos","indirect_info_pos","indirect_info_rot","point_t",
+    "n_knots_total","direct_knot0","direct_knot1","direct_knot2","direct_knot3",
+    "direct_total_info_pos","indirect_total_info_pos","indirect_total_info_rot",
+    "indirect_info_pos_at_direct_knots","indirect_info_pos_at_nonlocal_knots",
     // spline_derivative_health (items 13/22)
     "quantity","median","p95","p99","max_val","sample_count",
     "notes",
@@ -1468,6 +1473,101 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
             {"H_i_dim", std::to_string(rec.Jrow_z.size())},
           };
           emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "lidar_point_sample", voxel_map_->frame_idx_, static_cast<int>(pi), lpkv);
+        }
+
+        // ==================================================================
+        // pose_control_information_footprint_validation task, Phases 2/3/6:
+        // per-point DIRECT (4-knot-local) vs INDIRECT (all-knot, via the
+        // prior covariance) information footprint. Uses the SAME
+        // deterministic 20-point-per-scan stride subsample as the
+        // lidar_point_sample loop above (not a separately-chosen sample),
+        // and an additional documented scan-level subsample (every 10th
+        // scan) to keep write volume bounded -- both rules fixed in
+        // advance, not chosen from observed behavior.
+        //
+        // DIRECT: dr/dc_p[k] = b_k(t)*n^T (this file's own header formula)
+        // -- for a UNIT normal, the position-block information a single
+        // scalar point-to-plane residual contributes to knot k is exactly
+        // b_k(t)^2 * w_l (w_l=1/sigma2_l), zero for any knot NOT in this
+        // point's 4-wide local support by construction (item 12 of this
+        // task's own instruction: never claim direct support for
+        // non-supported knots -- verified by not even attempting to
+        // compute it for k outside jac.s..jac.s+3).
+        //
+        // INDIRECT: the standard scalar (rank-1) Woodbury/Schur covariance
+        // reduction for one scalar measurement against the PRIOR joint eta
+        // covariance (coupled_pose_control_sigma_full_prior_'s eta block --
+        // the prior BEFORE this scan's LiDAR update, matching "how much
+        // would this point alone reduce uncertainty at knot k" as an
+        // isolated/marginal question, not confounded by other points
+        // already folded in): DeltaP_l = (P_eta*J^T)(P_eta*J^T)^T /
+        // (J*P_eta*J^T + R_l), a rank-1 outer product -- computed via one
+        // matrix-vector product (P_eta*J^T), never forming or inverting a
+        // dEta x dEta matrix per point.
+        // ==================================================================
+        if (voxel_map_->frame_idx_ % 10 == 0) {
+          const Eigen::MatrixXd P_eta_prior = coupled_pose_control_sigma_full_prior_.block(9, 9, dEta, dEta);
+          const int Nc = spline.N();
+          for (size_t pi = 0; pi < lidar_records.size(); pi += static_cast<size_t>(stride)) {
+            const auto& rec = lidar_records[pi];
+            const auto& obs = lidar_obs[pi];
+            const auto jac = spline.jacobianAt(obs.t);
+            // DIRECT: 4 supported knots only.
+            double direct_total = 0.0;
+            std::array<double, 4> direct_k{};
+            std::array<int, 4> knot_idx{};
+            for (int k = 0; k < 4; ++k) {
+              knot_idx[k] = jac.s + k;
+              direct_k[k] = (jac.b[k] * jac.b[k]) * rec.w;
+              direct_total += direct_k[k];
+            }
+            // INDIRECT: rank-1 covariance reduction projected to raw
+            // control-point space, then read off per-knot position/
+            // rotation diagonal-block traces for EVERY knot (not just the
+            // 4 directly supported).
+            const Eigen::VectorXd J_eta = rec.Jrow_z.head(dEta);
+            const Eigen::VectorXd v_eta = P_eta_prior * J_eta;
+            const double denom = J_eta.dot(v_eta) + rec.sigma2;
+            const Eigen::VectorXd raw_v = hns.Z * v_eta;
+            double indirect_total_pos = 0.0, indirect_total_rot = 0.0;
+            double indirect_at_direct_knots_pos = 0.0;
+            for (int k = 0; k < Nc; ++k) {
+              double pos_k = 0.0, rot_k = 0.0;
+              if (denom > 1e-300) {
+                for (int a = 0; a < 3; ++a) pos_k += raw_v(3 * k + a) * raw_v(3 * k + a) / denom;
+                for (int a = 0; a < 3; ++a) rot_k += raw_v(3 * Nc + 3 * k + a) * raw_v(3 * Nc + 3 * k + a) / denom;
+              }
+              indirect_total_pos += pos_k;
+              indirect_total_rot += rot_k;
+              if (k == knot_idx[0] || k == knot_idx[1] || k == knot_idx[2] || k == knot_idx[3]) indirect_at_direct_knots_pos += pos_k;
+              // Only emit a row for knots outside the direct-support window,
+              // or one representative directly-supported knot, to keep row
+              // count bounded -- the AGGREGATE fields below (indirect_total_*,
+              // indirect_at_direct_knots_pos) already summarize the full span.
+              const bool is_direct = (k == knot_idx[0] || k == knot_idx[1] || k == knot_idx[2] || k == knot_idx[3]);
+              if (is_direct && k != knot_idx[0]) continue;
+              std::map<std::string, std::string> fkv = {
+                {"point_index", std::to_string(pi)}, {"knot_index", std::to_string(k)},
+                {"is_direct_support", std::to_string(is_direct ? 1 : 0)},
+                {"direct_info_pos", std::to_string(is_direct ? direct_k[k == knot_idx[0] ? 0 : (k == knot_idx[1] ? 1 : (k == knot_idx[2] ? 2 : 3))] : 0.0)},
+                {"indirect_info_pos", std::to_string(pos_k)}, {"indirect_info_rot", std::to_string(rot_k)},
+                {"point_t", std::to_string(obs.t)},
+              };
+              emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "lidar_info_footprint", voxel_map_->frame_idx_, static_cast<int>(pi), fkv);
+            }
+            std::map<std::string, std::string> fskv = {
+              {"point_index", std::to_string(pi)}, {"point_t", std::to_string(obs.t)},
+              {"n_knots_total", std::to_string(Nc)},
+              {"direct_knot0", std::to_string(knot_idx[0])}, {"direct_knot1", std::to_string(knot_idx[1])},
+              {"direct_knot2", std::to_string(knot_idx[2])}, {"direct_knot3", std::to_string(knot_idx[3])},
+              {"direct_total_info_pos", std::to_string(direct_total)},
+              {"indirect_total_info_pos", std::to_string(indirect_total_pos)},
+              {"indirect_total_info_rot", std::to_string(indirect_total_rot)},
+              {"indirect_info_pos_at_direct_knots", std::to_string(indirect_at_direct_knots_pos)},
+              {"indirect_info_pos_at_nonlocal_knots", std::to_string(indirect_total_pos - indirect_at_direct_knots_pos)},
+            };
+            emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "lidar_info_footprint_summary", voxel_map_->frame_idx_, static_cast<int>(pi), fskv);
+          }
         }
       }
       if (copts_.psd_audit_en && want_records) {
