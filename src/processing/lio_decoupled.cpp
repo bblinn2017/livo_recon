@@ -1414,22 +1414,30 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
         const double predicted_delta_E_lidar = (dx.transpose() * ekf_.Htz)(0) - 0.5 * (dx.transpose() * ekf_.HtH * dx)(0);
         bool first;
         std::ofstream& ofs = gn_iter_log.stream(&first);
-        if (first) ofs << "scan_id,iter,n_residuals,t_abs_iter,"
+        if (first) ofs << "scan_id,iter,n_residuals,t_abs_iter,scan_timestamp,"
                           "tail_p_before_x,tail_p_before_y,tail_p_before_z,tail_p_after_x,tail_p_after_y,tail_p_after_z,"
                           "tail_v_before_x,tail_v_before_y,tail_v_before_z,tail_v_after_x,tail_v_after_y,tail_v_after_z,"
                           "dp_tail_x,dp_tail_y,dp_tail_z,dp_tail_norm,"
-                          "dtheta_tail_x,dtheta_tail_y,dtheta_tail_z,dtheta_tail_norm,dv_tail_norm,"
+                          "dtheta_tail_x,dtheta_tail_y,dtheta_tail_z,dtheta_tail_norm,"
+                          "dv_tail_x,dv_tail_y,dv_tail_z,dv_tail_norm,"
                           "predicted_delta_E_lidar,avg_abs_residual\n";
         const double t_abs_iter = mg.image.t + data_queues_->start_time;
+        // scan_timestamp duplicates t_abs_iter under the column name the
+        // factor-isolation patch's offline analysis scripts and the pose-control
+        // side's own gn_iteration rows use -- kept as an alias rather than a
+        // rename so existing t_abs_iter-keyed consumers (analyze_tail_correction_gt.py,
+        // the prior task's build_final_csv.py) are unaffected.
+        const V3D dv_tail_vec = v_tail_after - v_tail_before;
         ofs << voxel_map_->frame_idx_ << "," << iter << "," << residuals_.size() << ","
-            << std::setprecision(12) << t_abs_iter << std::setprecision(6) << ","
+            << std::setprecision(12) << t_abs_iter << "," << t_abs_iter << std::setprecision(6) << ","
             << p_tail_before.x() << "," << p_tail_before.y() << "," << p_tail_before.z() << ","
             << p_tail_after.x() << "," << p_tail_after.y() << "," << p_tail_after.z() << ","
             << v_tail_before.x() << "," << v_tail_before.y() << "," << v_tail_before.z() << ","
             << v_tail_after.x() << "," << v_tail_after.y() << "," << v_tail_after.z() << ","
             << dp_tail.x() << "," << dp_tail.y() << "," << dp_tail.z() << "," << dp_tail.norm() << ","
             << dtheta_tail.x() << "," << dtheta_tail.y() << "," << dtheta_tail.z() << "," << dtheta_tail.norm() << ","
-            << dv_tail.norm() << "," << predicted_delta_E_lidar << "," << error << "\n";
+            << dv_tail_vec.x() << "," << dv_tail_vec.y() << "," << dv_tail_vec.z() << "," << dv_tail.norm() << ","
+            << predicted_delta_E_lidar << "," << error << "\n";
         ofs.flush();
       }
       // SHAPE, from the SAME residuals that solve just used.  Refinement and

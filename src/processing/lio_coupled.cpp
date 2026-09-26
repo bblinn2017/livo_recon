@@ -147,7 +147,7 @@ static std::mutex g_full_diag_mtx;
 static const std::vector<std::string>& fullDiagColumns()
 {
   static const std::vector<std::string> cols = {
-    "run_id","test_id","row_type","git_commit","sequence","scan_id","iteration","timestamp",
+    "run_id","test_id","row_type","git_commit","sequence","scan_id","iteration","timestamp","scan_timestamp",
     // run_summary / config
     "trajectory_parameterization","velocity_mode","jacobian_time_mode","N_control_points",
     "total_optimization_dimension","free_spline_dimension","tail_free_state_dimension",
@@ -300,6 +300,16 @@ static const std::vector<std::string>& fullDiagColumns()
     "normalized_t","t_rel","trace_P_position","trace_P_velocity","trace_P_acceleration",
     "trace_P_attitude","trace_P_angular_velocity","trace_P_position_velocity_cross",
     "min_eig_P_position","max_eig_P_position",
+    // Per-iteration factor-isolation diagnostics (tail_p/v_before/after
+    // already whitelisted above from the prior addendum's own insertion point).
+    "factor_step_lidar_dp_x","factor_step_lidar_dp_y","factor_step_lidar_dp_z","factor_step_lidar_dp_norm",
+    "factor_step_imu_dp_x","factor_step_imu_dp_y","factor_step_imu_dp_z","factor_step_imu_dp_norm",
+    "factor_step_joint_dp_x","factor_step_joint_dp_y","factor_step_joint_dp_z","factor_step_joint_dp_norm",
+    "factor_step_lidar_dtheta_norm","factor_step_imu_dtheta_norm","factor_step_joint_dtheta_norm",
+    "factor_step_lidar_rank","factor_step_imu_rank","factor_step_joint_rank",
+    "factor_step_lidar_lambda_min","factor_step_lidar_lambda_max",
+    "factor_step_imu_lambda_min","factor_step_imu_lambda_max",
+    "factor_step_joint_lambda_min","factor_step_joint_lambda_max",
     // tail-authority shape-vs-tail deltas (pose_control_tail_weak_mode_validation, Phase 3/4)
     "delta_p_shape_norm","delta_theta_shape_norm","delta_v_shape_norm","delta_omega_shape_norm",
     "delta_p_shape_x","delta_p_shape_y","delta_p_shape_z","delta_theta_shape_x","delta_theta_shape_y","delta_theta_shape_z",
@@ -344,6 +354,7 @@ static void emitFullDiagRow(const std::string& run_id, const std::string& test_i
   row["iteration"] = (iteration >= 0) ? std::to_string(iteration) : "NA";
   row["timestamp"] = std::to_string(std::chrono::duration<double>(
       std::chrono::system_clock::now().time_since_epoch()).count());
+  if (!row.count("scan_timestamp")) row["scan_timestamp"] = "NA";
   for (size_t i = 0; i < cols.size(); ++i) {
     auto it = row.find(cols[i]);
     ofs << (i ? "," : "") << (it != row.end() ? it->second : "NA");
@@ -5646,6 +5657,10 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   // the head ones (their contribution to eta is via the SAME Z-projection
   // as any other factor -- no special-casing needed, matching how LiDAR/
   // IMU priors already touch cp[0..2] uniformly under fix_head=false).
+  // Keep the pure LiDAR block before curvature so factor-isolation diagnostics
+  // never accidentally include the smoothness regularizer.
+  const Eigen::MatrixXd A_lidar_only_raw = A_raw;
+  const Eigen::VectorXd b_lidar_only_raw = b_raw;
   const double A_raw_trace_before_curvature = A_raw.trace();
   if (copts_.pose_control_curvature_weight_pos > 0.0 || copts_.pose_control_curvature_weight_rot > 0.0) {
     const int N = layout.N;
@@ -5698,8 +5713,8 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   // Saved before the prior is added below, purely so the EKF-reference
   // test (item 33) can reconstruct "LiDAR-only" information without
   // double-counting the prior it adds separately.
-  const Eigen::MatrixXd A_lidar_reduced = A;
-  const Eigen::VectorXd b_lidar_reduced = b;
+  const Eigen::MatrixXd A_lidar_reduced = P.transpose() * A_lidar_only_raw * P;
+  const Eigen::VectorXd b_lidar_reduced = P.transpose() * b_lidar_only_raw;
 
   // ONE production prior, unconditionally applied: the joint marginalized
   // prior over z=[eta;sT] (Lambda_prior_z was derived at scan-start
@@ -5710,6 +5725,8 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   // r_prior_z = z_current - z_imu, where z_current's sT part is read
   // directly off the trial (bg_trial_-bg_prior_ etc) since sT is not part
   // of the eta vector.
+  Eigen::VectorXd r_prior_z = Eigen::VectorXd::Zero(dimZ);
+  bool have_pose_control_prior = false;
   if (coupled_pose_control_lambda_prior_z_.rows() == dimZ &&
       coupled_pose_control_z_imu_.size() == dimZ) {
     Eigen::VectorXd z_current = Eigen::VectorXd::Zero(dimZ);
@@ -5717,7 +5734,8 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
     if (layout.colBG() >= 0) z_current.segment<3>(dEta + layout.colBG() - layout.dimCFree()) = coupled_pose_control_bg_trial_ - coupled_pose_control_bg_prior_;
     if (layout.colBA() >= 0) z_current.segment<3>(dEta + layout.colBA() - layout.dimCFree()) = coupled_pose_control_ba_trial_ - coupled_pose_control_ba_prior_;
     if (layout.colG()  >= 0) z_current.segment<3>(dEta + layout.colG()  - layout.dimCFree()) = coupled_pose_control_g_trial_  - coupled_pose_control_g_prior_;
-    const Eigen::VectorXd r_prior_z = z_current - coupled_pose_control_z_imu_;
+    r_prior_z = z_current - coupled_pose_control_z_imu_;
+    have_pose_control_prior = true;
     A += coupled_pose_control_lambda_prior_z_;
     b += -coupled_pose_control_lambda_prior_z_ * r_prior_z;
 
@@ -5771,6 +5789,75 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
     }
   }
 
+  // Factor-isolation diagnostic: solve LiDAR-only, IMU-prior-only, and
+  // joint(no-curvature) hypothetical steps in the SAME reduced coordinates,
+  // then map each eta step into physical tail translation/rotation. This is
+  // report-only and does not modify the production update.
+  //
+  // NOTE (merge fix, pose_control_factor_isolation_diagnostics.patch): the
+  // supplied patch inserted this block into estimateCoupledCorrection's own
+  // (unrelated, non-pose-control) `else { Eigen::LDLT... }` branch, which
+  // does not compile there -- A_lidar_reduced/b_lidar_reduced/r_prior_z/
+  // have_pose_control_prior/hns/dEta/coupled_pose_control_eta_/t1/spline/
+  // prev_tail_p/prev_tail_R are all local to THIS function
+  // (estimateCoupledPoseControlSpline), not that one. The two functions
+  // both happen to contain a textually-identical `Eigen::LDLT<Eigen::MatrixXd>
+  // ldlt(A);` line, which is almost certainly why an automated/manual context
+  // match landed on the wrong occurrence. Relocated here (this function's own
+  // analogous solve point) with the patch's code UNCHANGED -- no formulation
+  // logic was altered, only the insertion location.
+  if (copts_.psd_audit_en && have_pose_control_prior) {
+    const PoseControlFactorStep lidar_step =
+        solvePoseControlFactorStep(A_lidar_reduced, b_lidar_reduced, copts_.pose_control_mean_pinv_rel_thresh);
+    const PoseControlFactorStep imu_step =
+        solvePoseControlFactorStep(coupled_pose_control_lambda_prior_z_,
+                                    -coupled_pose_control_lambda_prior_z_ * r_prior_z,
+                                    copts_.pose_control_mean_pinv_rel_thresh);
+    const PoseControlFactorStep joint_step =
+        solvePoseControlFactorStep(A_lidar_reduced + coupled_pose_control_lambda_prior_z_,
+                                    b_lidar_reduced - coupled_pose_control_lambda_prior_z_ * r_prior_z,
+                                    copts_.pose_control_mean_pinv_rel_thresh);
+    auto tailDelta = [&](const Eigen::VectorXd& dz) {
+      PoseControlSpline trial = spline;
+      const Eigen::VectorXd eta_trial = coupled_pose_control_eta_ + dz.head(dEta);
+      poseControlUnflatten(hns.c_particular + hns.Z * eta_trial, trial);
+      const V3D dp = trial.posAt(t1) - prev_tail_p;
+      const V3D dth = Log(M3D(prev_tail_R.transpose() * trial.rotAt(t1)));
+      return std::pair<V3D,V3D>(dp, dth);
+    };
+    const auto lidar_tail = tailDelta(lidar_step.delta);
+    const auto imu_tail = tailDelta(imu_step.delta);
+    const auto joint_tail = tailDelta(joint_step.delta);
+    std::map<std::string, std::string> fkv = {
+      {"scan_timestamp", std::to_string(t1)},
+      {"factor_step_lidar_dp_x", std::to_string(lidar_tail.first.x())},
+      {"factor_step_lidar_dp_y", std::to_string(lidar_tail.first.y())},
+      {"factor_step_lidar_dp_z", std::to_string(lidar_tail.first.z())},
+      {"factor_step_lidar_dp_norm", std::to_string(lidar_tail.first.norm())},
+      {"factor_step_imu_dp_x", std::to_string(imu_tail.first.x())},
+      {"factor_step_imu_dp_y", std::to_string(imu_tail.first.y())},
+      {"factor_step_imu_dp_z", std::to_string(imu_tail.first.z())},
+      {"factor_step_imu_dp_norm", std::to_string(imu_tail.first.norm())},
+      {"factor_step_joint_dp_x", std::to_string(joint_tail.first.x())},
+      {"factor_step_joint_dp_y", std::to_string(joint_tail.first.y())},
+      {"factor_step_joint_dp_z", std::to_string(joint_tail.first.z())},
+      {"factor_step_joint_dp_norm", std::to_string(joint_tail.first.norm())},
+      {"factor_step_lidar_dtheta_norm", std::to_string(lidar_tail.second.norm())},
+      {"factor_step_imu_dtheta_norm", std::to_string(imu_tail.second.norm())},
+      {"factor_step_joint_dtheta_norm", std::to_string(joint_tail.second.norm())},
+      {"factor_step_lidar_rank", std::to_string(lidar_step.effective_rank)},
+      {"factor_step_imu_rank", std::to_string(imu_step.effective_rank)},
+      {"factor_step_joint_rank", std::to_string(joint_step.effective_rank)},
+      {"factor_step_lidar_lambda_min", std::to_string(lidar_step.lambda_min)},
+      {"factor_step_lidar_lambda_max", std::to_string(lidar_step.lambda_max)},
+      {"factor_step_imu_lambda_min", std::to_string(imu_step.lambda_min)},
+      {"factor_step_imu_lambda_max", std::to_string(imu_step.lambda_max)},
+      {"factor_step_joint_lambda_min", std::to_string(joint_step.lambda_min)},
+      {"factor_step_joint_lambda_max", std::to_string(joint_step.lambda_max)},
+    };
+    emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "factor_isolation",
+                    voxel_map_->frame_idx_, coupled_iters_, fkv);
+  }
 
   Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
   if (ldlt.info() != Eigen::Success) return 0.0;
@@ -5908,6 +5995,14 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
     }
 
     std::map<std::string, std::string> gkv = {
+      // scan_timestamp is the factor-isolation patch's own alias for the
+      // same absolute time as t_abs_iter below (kept for cross-formulation
+      // column-name compatibility with the offline analysis scripts).
+      // tail_p/v_before/after are populated once, further down in this same
+      // initializer list, from the identical prev_tail_p/new_tail_p/
+      // prev_tail_v/new_tail_v variables -- not duplicated here.
+      {"scan_timestamp", std::to_string(t1)},
+      {"tail_v_after_z", std::to_string(new_tail_v.z())},
       {"delta_eta_norm", std::to_string(delta_z.head(dEta).norm())},
       {"delta_bg_norm", std::to_string(layout.colBG() >= 0 ? delta_z.segment<3>(dEta + layout.colBG() - layout.dimCFree()).norm() : 0.0)},
       {"delta_ba_norm", std::to_string(layout.colBA() >= 0 ? delta_z.segment<3>(dEta + layout.colBA() - layout.dimCFree()).norm() : 0.0)},

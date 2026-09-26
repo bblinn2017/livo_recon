@@ -127,6 +127,56 @@ namespace
 {
 }  // namespace
 
+PoseControlCorrectionMetrics computePoseControlCorrectionMetrics(
+    const V3D& p_before, const V3D& p_after, const V3D& p_gt, double eps)
+{
+  PoseControlCorrectionMetrics out;
+  const V3D delta = p_after - p_before;
+  const V3D to_gt = p_gt - p_before;
+  out.correction_norm = delta.norm();
+  out.gt_distance_before = to_gt.norm();
+  out.gt_distance_after = (p_gt - p_after).norm();
+  out.gt_error_reduction = out.gt_distance_before - out.gt_distance_after;
+  if (out.correction_norm > eps && out.gt_distance_before > eps) {
+    const V3D gt_hat = to_gt / out.gt_distance_before;
+    out.gt_parallel = delta.dot(gt_hat);
+    const V3D perpendicular = delta - out.gt_parallel * gt_hat;
+    out.gt_perpendicular = perpendicular.norm();
+    out.gt_cosine = delta.dot(to_gt) / (out.correction_norm * out.gt_distance_before);
+    out.gt_cosine = std::max(-1.0, std::min(1.0, out.gt_cosine));
+    out.gt_direction_valid = true;
+  }
+  return out;
+}
+
+PoseControlFactorStep solvePoseControlFactorStep(
+    const Eigen::MatrixXd& A, const Eigen::VectorXd& b, double rel_threshold)
+{
+  PoseControlFactorStep out;
+  out.delta = Eigen::VectorXd::Zero(b.size());
+  if (A.rows() == 0 || A.rows() != A.cols() || b.size() != A.rows()) return out;
+  const Eigen::MatrixXd As = 0.5 * (A + A.transpose());
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(As);
+  if (es.info() != Eigen::Success) return out;
+  const Eigen::VectorXd ev = es.eigenvalues();
+  const Eigen::MatrixXd& V = es.eigenvectors();
+  out.lambda_min = ev.size() ? ev(0) : 0.0;
+  out.lambda_max = ev.size() ? ev(ev.size() - 1) : 0.0;
+  const double cutoff = std::max(0.0, rel_threshold) *
+      std::max(std::abs(out.lambda_max), 1.0);
+  Eigen::VectorXd coeff = V.transpose() * b;
+  for (int i = 0; i < ev.size(); ++i) {
+    if (ev(i) > cutoff) {
+      coeff(i) /= ev(i);
+      ++out.effective_rank;
+    } else {
+      coeff(i) = 0.0;
+    }
+  }
+  out.delta = V * coeff;
+  return out;
+}
+
 std::vector<ImuSplineResidualSample> computePoseControlImuSplineResidualSamples(
     const PoseControlSpline& spline, const std::vector<ImuSample>& imu,
     const V3D& bias_acc, const V3D& bias_gyr, const V3D& gravity)

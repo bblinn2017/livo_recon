@@ -36,6 +36,42 @@
 namespace livo_recon
 {
 
+// Diagnostics-only physical correction geometry used by the architecture
+// comparison. These helpers contain no estimator state and use independently
+// derived Euclidean/SO(3) formulas so the same math can be unit-tested and
+// reused by offline analysis.
+struct PoseControlCorrectionMetrics
+{
+  double correction_norm = 0.0;
+  double gt_distance_before = 0.0;
+  double gt_distance_after = 0.0;
+  double gt_error_reduction = 0.0;
+  double gt_cosine = 0.0;
+  double gt_parallel = 0.0;
+  double gt_perpendicular = 0.0;
+  bool gt_direction_valid = false;
+};
+
+PoseControlCorrectionMetrics computePoseControlCorrectionMetrics(
+    const V3D& p_before, const V3D& p_after, const V3D& p_gt,
+    double eps = 1e-12);
+
+// Solve a diagnostic quadratic factor step x = pinv(A) b. The input matrix
+// is symmetrized before the eigendecomposition. This is for analysis only; it
+// never modifies production matrices or the estimator state.
+struct PoseControlFactorStep
+{
+  Eigen::VectorXd delta;
+  double lambda_min = 0.0;
+  double lambda_max = 0.0;
+  int effective_rank = 0;
+};
+
+PoseControlFactorStep solvePoseControlFactorStep(
+    const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
+    double rel_threshold = 1e-12);
+
+
 // ============================================================================
 // Item 8: physical trajectory sample + Jacobians w.r.t. the reduced control
 // state eta (dEta-wide, the SAME coordinate the mean solve's A/b uses).
