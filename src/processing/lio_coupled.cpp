@@ -156,9 +156,15 @@ static const std::vector<std::string>& fullDiagColumns()
     "mean_pseudoinverse_threshold","p0_scale_config",
     // scan_summary
     "E_lidar","E_total","num_lidar_points","num_imu_samples","gn_iterations","total_delta_eta_norm",
+    // objective_change (pose_control_lidar_information_footprint_validation Phase 3/4)
+    "E_lidar_pre","E_lidar_post","delta_E_lidar","E_imu_pre","E_imu_post","delta_E_imu",
+    "E_total_pre","E_total_post","delta_E_total",
     "final_delta_eta_norm","final_delta_bg_norm","final_delta_ba_norm","final_delta_g_norm",
     // gn_iteration
     "delta_eta_norm","delta_bg_norm","delta_ba_norm","delta_g_norm",
+    // gn_iteration Phase 2A additions (pose_control_lidar_information_footprint_validation addendum)
+    "dt_out_x","dt_out_y","dt_out_z","dt_out_norm","dtheta_out_x","dtheta_out_y","dtheta_out_z","dtheta_out_norm",
+    "dv_out_norm","E_imu_iter_before","E_imu_iter_after","delta_E_imu_iter","interior_dp_norm_by_frac","num_lidar_residuals_iter",
     "head_p0_err","head_v0_err","head_R0_err",
     // covariance_summary / covariance_block
     "trace_P0","trace_P_tail_pred","trace_P_tail_post","min_eig_P0","min_eig_P_tail_pred","min_eig_P_tail_post",
@@ -294,6 +300,7 @@ static const std::vector<std::string>& fullDiagColumns()
     "min_eig_P_position","max_eig_P_position",
     // tail-authority shape-vs-tail deltas (pose_control_tail_weak_mode_validation, Phase 3/4)
     "delta_p_shape_norm","delta_theta_shape_norm","delta_v_shape_norm","delta_omega_shape_norm",
+    "delta_p_shape_x","delta_p_shape_y","delta_p_shape_z","delta_theta_shape_x","delta_theta_shape_y","delta_theta_shape_z",
     // bias
     "trace_P_ba","trace_P_bg","trace_P_g","norm_P_eta_ba_cross","norm_P_eta_bg_cross",
   };
@@ -932,6 +939,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           coupled_pose_control_hns_.Z.transpose() * (c_initial - coupled_pose_control_hns_.c_particular);
       coupled_pose_control_eta_imu_ = coupled_pose_control_eta_;  // item 16: frozen scan-start seed
       coupled_pose_control_eta_scan_start_ = coupled_pose_control_eta_;  // Phase 1: for the realized-update-per-mode diagnostic below
+      coupled_pose_control_spline_scan_start_ = spline;  // pose_control_lidar_information_footprint_validation Phase 3/4: full seed copy for E_lidar/E_imu pre/post
       // Rebuild the spline from the PROJECTED eta (not the raw guess) so
       // the head constraints hold exactly from iteration 0, not just
       // approximately from the initial guess.
@@ -1445,8 +1453,41 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       // (verified live: ATE unchanged from the prior campaign's own runs).
       const bool want_correction = copts_.pose_control_lidar_correlation.mode != "off";
       const bool want_records = want_correction || copts_.psd_audit_en;
-      addPoseControlLidarFactor(spline, layout, lidar_obs, A_lidar_raw, b_lidar_raw, nullptr, nullptr,
+      double E_lidar_converged = 0.0;
+      addPoseControlLidarFactor(spline, layout, lidar_obs, A_lidar_raw, b_lidar_raw, nullptr, &E_lidar_converged,
                                  want_records ? &lidar_records : nullptr);
+      // pose_control_lidar_information_footprint_validation Phase 3/4:
+      // E_lidar/E_imu at the SAME lidar_obs (residual set unchanged), seed
+      // vs converged spline -- a genuine "same accepted residuals, cost
+      // before vs after" comparison, not a re-association.
+      if (copts_.psd_audit_en) {
+        double E_lidar_seed = 0.0;
+        Eigen::MatrixXd A_seed_discard = Eigen::MatrixXd::Zero(dimRaw, dimRaw);
+        Eigen::VectorXd b_seed_discard = Eigen::VectorXd::Zero(dimRaw);
+        addPoseControlLidarFactor(coupled_pose_control_spline_scan_start_, layout, lidar_obs,
+                                   A_seed_discard, b_seed_discard, nullptr, &E_lidar_seed, nullptr);
+        // E_imu(z) = 0.5*(z-z_imu)^T * Lambda_prior_z * (z-z_imu) -- the
+        // exact IMU-prior quadratic cost this estimator's own joint
+        // objective uses, evaluated at z_scan_start (seed) vs z_converged.
+        Eigen::VectorXd z_seed = Eigen::VectorXd::Zero(dimZ);
+        z_seed.head(dEta) = coupled_pose_control_eta_scan_start_;
+        Eigen::VectorXd z_converged = Eigen::VectorXd::Zero(dimZ);
+        z_converged.head(dEta) = coupled_pose_control_eta_;
+        const Eigen::VectorXd d_seed = z_seed - coupled_pose_control_z_imu_;
+        const Eigen::VectorXd d_conv = z_converged - coupled_pose_control_z_imu_;
+        const double E_imu_seed = 0.5 * (d_seed.transpose() * coupled_pose_control_lambda_prior_z_ * d_seed)(0);
+        const double E_imu_converged = 0.5 * (d_conv.transpose() * coupled_pose_control_lambda_prior_z_ * d_conv)(0);
+        std::map<std::string, std::string> ockv = {
+          {"E_lidar_pre", std::to_string(E_lidar_seed)}, {"E_lidar_post", std::to_string(E_lidar_converged)},
+          {"delta_E_lidar", std::to_string(E_lidar_converged - E_lidar_seed)},
+          {"E_imu_pre", std::to_string(E_imu_seed)}, {"E_imu_post", std::to_string(E_imu_converged)},
+          {"delta_E_imu", std::to_string(E_imu_converged - E_imu_seed)},
+          {"E_total_pre", std::to_string(E_lidar_seed + E_imu_seed)}, {"E_total_post", std::to_string(E_lidar_converged + E_imu_converged)},
+          {"delta_E_total", std::to_string((E_lidar_converged + E_imu_converged) - (E_lidar_seed + E_imu_seed))},
+          {"num_lidar_points", std::to_string(lidar_obs.size())},
+        };
+        emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "objective_change", voxel_map_->frame_idx_, -1, ockv);
+      }
       // items 10/15: snapshot the INDEPENDENT (pre-correction) A/b before
       // applyPoseControlLidarCorrelationCorrection() mutates them in
       // place, so both versions are diagnosable as a pair.
@@ -1947,6 +1988,15 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
             {"delta_theta_shape_norm", std::to_string(delta_theta_shape.norm())},
             {"delta_v_shape_norm", std::to_string(delta_v_shape.norm())},
             {"delta_omega_shape_norm", std::to_string(delta_omega_shape.norm())},
+            // pose_control_lidar_information_footprint_validation Phase 9:
+            // the FULL VECTOR (not just norm), so cross-formulation
+            // direction/cosine-similarity comparisons are possible offline.
+            {"delta_p_shape_x", std::to_string(delta_p_shape.x())},
+            {"delta_p_shape_y", std::to_string(delta_p_shape.y())},
+            {"delta_p_shape_z", std::to_string(delta_p_shape.z())},
+            {"delta_theta_shape_x", std::to_string(delta_theta_shape.x())},
+            {"delta_theta_shape_y", std::to_string(delta_theta_shape.y())},
+            {"delta_theta_shape_z", std::to_string(delta_theta_shape.z())},
           };
           emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "covariance", voxel_map_->frame_idx_, -1, ckv);
         }
@@ -5527,6 +5577,7 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   const double t1 = spline.t1();
   const M3D prev_tail_R = spline.rotAt(t1);
   const V3D prev_tail_p = spline.posAt(t1);
+  const V3D prev_tail_v = spline.velAt(t1);   // Phase 2A (pose_control_lidar_information_footprint_validation addendum)
 
   // ---- deskew + associate ----------------------------------------------
   const M3D R_end_T = spline.rotAt(t1).transpose();
@@ -5786,6 +5837,16 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
     if (scale < 1.0) delta_z *= scale;
   }
 
+  // Phase 2A: eta/E_imu BEFORE this iteration's own delta_z is applied,
+  // for a per-iteration (not just per-scan) IMU-prior cost before/after.
+  Eigen::VectorXd z_iter_before = Eigen::VectorXd::Zero(dimZ);
+  double E_imu_iter_before = 0.0;
+  if (copts_.psd_audit_en) {
+    z_iter_before.head(dEta) = coupled_pose_control_eta_;
+    const Eigen::VectorXd d_before = z_iter_before - coupled_pose_control_z_imu_;
+    E_imu_iter_before = 0.5 * (d_before.transpose() * coupled_pose_control_lambda_prior_z_ * d_before)(0);
+  }
+
   // ---- apply the mean update: eta AND the tail_trial increment, every
   // iteration (item 4) -----------------------------------------------------
   coupled_pose_control_eta_ += delta_z.head(dEta);
@@ -5820,6 +5881,30 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
     const double head_p0_err = (spline.posAt(spline.t0()) - mg.poses.front().pos).norm();
     const double head_v0_err = (spline.velAt(spline.t0()) - mg.poses.front().vel).norm();
     const double head_R0_err = Log(M3D(spline.rotAt(spline.t0()).transpose() * mg.poses.front().rot)).norm();
+
+    // Phase 2A: E_imu AFTER this iteration's delta_z, and the exact
+    // per-iteration physical tail delta (dtheta_out/dt_out, already
+    // computed above via proper SO(3) Log -- not re-derived here) plus the
+    // velocity delta this iteration produced.
+    Eigen::VectorXd z_iter_after = Eigen::VectorXd::Zero(dimZ);
+    z_iter_after.head(dEta) = coupled_pose_control_eta_;
+    const Eigen::VectorXd d_after = z_iter_after - coupled_pose_control_z_imu_;
+    const double E_imu_iter_after = 0.5 * (d_after.transpose() * coupled_pose_control_lambda_prior_z_ * d_after)(0);
+    const V3D dv_out = new_tail_v - prev_tail_v;
+
+    // Phase 2A: interior-vs-tail physical motion produced by THIS
+    // iteration's own delta_eta, at the same 5 normalized-spline-time
+    // fractions used by the per-scan shape diagnostic -- reusing the SAME
+    // affine-in-eta shortcut (dp_deta(t)*delta_eta), evaluated with THIS
+    // iteration's delta_eta rather than the whole scan's cumulative one.
+    std::ostringstream interior_oss;
+    for (const double frac : {0.0, 0.25, 0.5, 0.75, 1.0}) {
+      const double t_s = spline.t0() + frac * (spline.t1() - spline.t0());
+      const auto ps_iter = evaluatePoseControlPhysicalSample(spline, layout, hns, t_s, coupled_pose_control_g_trial_);
+      const V3D dp_iter = ps_iter.dp_deta * delta_z.head(dEta);
+      interior_oss << (interior_oss.tellp() ? ";" : "") << frac << ":" << dp_iter.norm();
+    }
+
     std::map<std::string, std::string> gkv = {
       {"delta_eta_norm", std::to_string(delta_z.head(dEta).norm())},
       {"delta_bg_norm", std::to_string(layout.colBG() >= 0 ? delta_z.segment<3>(dEta + layout.colBG() - layout.dimCFree()).norm() : 0.0)},
@@ -5827,6 +5912,15 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
       {"delta_g_norm", std::to_string(layout.colG() >= 0 ? delta_z.segment<3>(dEta + layout.colG() - layout.dimCFree()).norm() : 0.0)},
       {"head_p0_err", std::to_string(head_p0_err)}, {"head_v0_err", std::to_string(head_v0_err)},
       {"head_R0_err", std::to_string(head_R0_err)}, {"E_lidar", std::to_string(E_lidar)},
+      {"dt_out_x", std::to_string(dt_out.x())}, {"dt_out_y", std::to_string(dt_out.y())}, {"dt_out_z", std::to_string(dt_out.z())},
+      {"dt_out_norm", std::to_string(dt_out.norm())},
+      {"dtheta_out_x", std::to_string(dtheta_out.x())}, {"dtheta_out_y", std::to_string(dtheta_out.y())}, {"dtheta_out_z", std::to_string(dtheta_out.z())},
+      {"dtheta_out_norm", std::to_string(dtheta_out.norm())},
+      {"dv_out_norm", std::to_string(dv_out.norm())},
+      {"E_imu_iter_before", std::to_string(E_imu_iter_before)}, {"E_imu_iter_after", std::to_string(E_imu_iter_after)},
+      {"delta_E_imu_iter", std::to_string(E_imu_iter_after - E_imu_iter_before)},
+      {"interior_dp_norm_by_frac", interior_oss.str()},
+      {"num_lidar_residuals_iter", std::to_string(residuals_.size())},
     };
     emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "gn_iteration", voxel_map_->frame_idx_, coupled_iters_, gkv);
   }

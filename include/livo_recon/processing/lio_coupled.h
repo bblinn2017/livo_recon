@@ -781,6 +781,13 @@ private:
   // convergence, where they trivially cancel by first-order optimality --
   // see the mode_gradient block's own comment).
   Eigen::VectorXd coupled_pose_control_eta_scan_start_;
+  // pose_control_lidar_information_footprint_validation task, Phase 3/4: a
+  // full COPY of the spline at scan-start (seed, before the GN loop
+  // mutates cp_p/cp_phi in place), so E_lidar/E_imu can be evaluated at
+  // the SAME residual set both before and after this scan's GN loop --
+  // "same accepted residual set, cost before vs after," per this task's
+  // own explicit instruction.
+  PoseControlSpline coupled_pose_control_spline_scan_start_;
   // Tail trial state (item 3/4 of the correction): tail_trial is the ONE
   // coherent current non-trajectory tail state, updated by INCREMENT
   // (delta_bg/ba/g solved by the GN step) every iteration -- never treated

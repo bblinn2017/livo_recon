@@ -1316,6 +1316,13 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
     // output before filing) truncate/interleave each other's writes rather
     // than sharing one file position.
     static PersistentLogStream cq43_tailmove_log("cq43_tailmove.txt");
+    // pose_control_lidar_information_footprint_validation Phase 2A: per-
+    // iteration physical tail state before/after this scan's REAL IEKF
+    // loop (the shadow/dry-run pass above is explicitly excluded -- see
+    // that pass's own doc comment, "this whole pass is discarded"). Reuses
+    // the SAME opts_.log_debug_en gate as cq43_tailmove_log immediately
+    // above -- diagnostic-only, zero cost when off, no new config key.
+    static PersistentLogStream gn_iter_log("decoupled_gn_iteration.csv");
 
     // Fixed IEKF prior for this frame's ENTIRE inner loop -- see ekf.h's
     // applyMeanUpdate() doc comment. Set once here, read (never rewritten)
@@ -1370,11 +1377,52 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
         ofs.flush();
       }
 
+      // Phase 2A: exact physical tail state BEFORE this iteration's own
+      // solve -- state_ IS the tail/current estimator state the IEKF
+      // updates directly (confirmed by source audit: solveSystem() below
+      // writes ekf_.dtheta/ekf_.dt, and LioProcBase::estimateStateCorrection
+      // applies them to state_ internally via the ESIKF update this
+      // codebase uses throughout) -- NOT a substitute for the deskew
+      // spline's own endpoint, which is a SEPARATE quantity
+      // (spline_.rotAt(t1)/posAt(t1), only used for re-deskewing points,
+      // per Phase 0's own architecture audit.
+      const bool log_iter = opts_.log_debug_en;
+      V3D p_tail_before, v_tail_before; M3D R_tail_before;
+      if (log_iter) { p_tail_before = state_->pos(); R_tail_before = state_->rot(); v_tail_before = state_->vel(); }
+
       // T0-D wants the first-iteration (pre-update, un-relinearized)
       // innovation only -- later iterations relinearize at an
       // already-partially-corrected state, which is not the quantity NIS
       // is defined over.
       double error = estimateStateCorrection(mg.points, dtheta, dt, /*allow_consistency_log=*/iter == 0);
+
+      if (log_iter) {
+        const V3D p_tail_after = state_->pos();
+        const M3D R_tail_after = state_->rot();
+        const V3D v_tail_after = state_->vel();
+        const V3D dp_tail = p_tail_after - p_tail_before;
+        const V3D dtheta_tail = Log(M3D(R_tail_before.transpose() * R_tail_after));
+        const V3D dv_tail = v_tail_after - v_tail_before;
+        // Linearized (predicted) LiDAR cost reduction for THIS iteration's
+        // own applied step dx=[dtheta;dt], from the SAME residuals_/
+        // ekf_.HtH/ekf_.Htz this iteration's solveSystem() just built --
+        // NOT a re-evaluated exact residual cost (that would require
+        // re-projecting every point through the new pose, not done here).
+        // Standard GN/LM predicted-reduction form: dE = dx^T*Htz -
+        // 0.5*dx^T*HtH*dx, documented explicitly as linearized/predicted.
+        Eigen::Matrix<double, 6, 1> dx; dx << dtheta, dt;   // (theta;pos) ordering matches ekf_.HtH/Htz's own (see idxR=0,idxP=3)
+        const double predicted_delta_E_lidar = (dx.transpose() * ekf_.Htz)(0) - 0.5 * (dx.transpose() * ekf_.HtH * dx)(0);
+        bool first;
+        std::ofstream& ofs = gn_iter_log.stream(&first);
+        if (first) ofs << "scan_id,iter,n_residuals,dp_tail_x,dp_tail_y,dp_tail_z,dp_tail_norm,"
+                          "dtheta_tail_x,dtheta_tail_y,dtheta_tail_z,dtheta_tail_norm,dv_tail_norm,"
+                          "predicted_delta_E_lidar,avg_abs_residual\n";
+        ofs << voxel_map_->frame_idx_ << "," << iter << "," << residuals_.size() << ","
+            << dp_tail.x() << "," << dp_tail.y() << "," << dp_tail.z() << "," << dp_tail.norm() << ","
+            << dtheta_tail.x() << "," << dtheta_tail.y() << "," << dtheta_tail.z() << "," << dtheta_tail.norm() << ","
+            << dv_tail.norm() << "," << predicted_delta_E_lidar << "," << error << "\n";
+        ofs.flush();
+      }
       // SHAPE, from the SAME residuals that solve just used.  Refinement and
       // the state update are therefore linearised at one trajectory, which
       // is the whole reason this sits here and not at the top of the next

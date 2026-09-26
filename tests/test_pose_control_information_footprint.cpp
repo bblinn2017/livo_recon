@@ -266,6 +266,60 @@ void testRepresentationCapacityMonotonicWithN()
 
 }  // namespace
 
+// ---------------------------------------------------------------------
+// pose_control_lidar_information_footprint_validation task, item 12:
+// correction-direction (cosine similarity) calculation -- independent
+// arithmetic check, not a reimplementation of any production function.
+// ---------------------------------------------------------------------
+void testCorrectionDirectionCosineSimilarity()
+{
+  const Eigen::Vector3d a(1.0, 0.0, 0.0);
+  const Eigen::Vector3d b(1.0, 0.0, 0.0);
+  const Eigen::Vector3d c(-1.0, 0.0, 0.0);
+  const Eigen::Vector3d d(0.0, 1.0, 0.0);
+  auto cosine = [](const Eigen::Vector3d& x, const Eigen::Vector3d& y) {
+    const double nx = x.norm(), ny = y.norm();
+    if (nx < 1e-300 || ny < 1e-300) return 0.0;
+    return x.dot(y) / (nx * ny);
+  };
+  check(std::abs(cosine(a, b) - 1.0) < 1e-12, "identical-direction vectors have cosine similarity exactly 1", cosine(a, b), 1.0);
+  check(std::abs(cosine(a, c) + 1.0) < 1e-12, "opposite-direction vectors have cosine similarity exactly -1", cosine(a, c), -1.0);
+  check(std::abs(cosine(a, d)) < 1e-12, "orthogonal vectors have cosine similarity exactly 0", cosine(a, d), 0.0);
+  const Eigen::Vector3d e(5.0, 0.0, 0.0);   // same direction as a, different magnitude
+  check(std::abs(cosine(a, e) - 1.0) < 1e-12, "cosine similarity is magnitude-invariant (same direction, different norm)", cosine(a, e), 1.0);
+}
+
+// ---------------------------------------------------------------------
+// pose_control_lidar_information_footprint_validation task, item 13:
+// objective pre/post consistency -- for a quadratic objective
+// E(z) = 0.5*(z-z0)^T*Lambda*(z-z0), E must be minimized (E_post <=
+// E_pre) whenever z_post is strictly closer to z0 than z_pre, and the
+// reduction must equal the exact algebraic difference (a self-
+// consistency check on the SAME formula production uses for E_imu).
+// ---------------------------------------------------------------------
+void testObjectivePrePostConsistency()
+{
+  std::mt19937 rng(606);
+  std::uniform_real_distribution<double> u(-1.0, 1.0);
+  const int n = 5;
+  Eigen::MatrixXd A(n, n);
+  for (int i = 0; i < n; ++i) for (int j = 0; j < n; ++j) A(i, j) = u(rng);
+  const Eigen::MatrixXd Lambda = A * A.transpose() + Eigen::MatrixXd::Identity(n, n);
+  Eigen::VectorXd z0(n), z_pre(n), z_post(n);
+  for (int i = 0; i < n; ++i) { z0(i) = u(rng); z_pre(i) = z0(i) + 2.0 * u(rng); z_post(i) = z0(i) + 0.1 * u(rng); }
+
+  auto E = [&](const Eigen::VectorXd& z) {
+    const Eigen::VectorXd d = z - z0;
+    return 0.5 * (d.transpose() * Lambda * d)(0);
+  };
+  const double E_pre = E(z_pre), E_post = E(z_post);
+  check(E_post < E_pre, "moving z closer to z0 strictly decreases the quadratic objective", E_pre - E_post, 0.0);
+  const double delta_direct = E_post - E_pre;
+  const Eigen::VectorXd d_pre = z_pre - z0, d_post = z_post - z0;
+  const double delta_recomputed = 0.5 * (d_post.transpose() * Lambda * d_post)(0) - 0.5 * (d_pre.transpose() * Lambda * d_pre)(0);
+  check(std::abs(delta_direct - delta_recomputed) < 1e-9, "delta_E recomputed independently matches the direct pre/post difference exactly", std::abs(delta_direct - delta_recomputed), 1e-9);
+}
+
 int main()
 {
   std::printf("Pose-control information-footprint / temporal-Q / representation-capacity synthetic validation suite\n");
@@ -275,6 +329,8 @@ int main()
   testTemporalQReferenceMatchesStateSpacePropagation();
   testJointUpdateEqualsAugmentedCovarianceUpdate();
   testRepresentationCapacityMonotonicWithN();
+  testCorrectionDirectionCosineSimilarity();
+  testObjectivePrePostConsistency();
   std::printf("%d failure(s)\n", failures);
   return failures ? 1 : 0;
 }
