@@ -269,6 +269,10 @@ static const std::vector<std::string>& fullDiagColumns()
     // weak_mode
     "mode_index","eigenvalue","position_contribution","velocity_contribution",
     "acceleration_contribution","attitude_contribution","angular_velocity_contribution","bias_gravity_contribution",
+    // mode_information (Phase 8: per-mode LiDAR/IMU/other information decomposition)
+    "lambda_total","I_lidar","I_imu","I_other","I_sum_check","abs_err_vs_lambda_total","frac_lidar","frac_imu",
+    // mode_gradient (Phase 9: per-mode factor-gradient disagreement)
+    "g_lidar","g_imu","mag_lidar","mag_imu","same_sign","step_lidar","step_imu","disagreement_strength",
     // covariance (normalized spline time)
     "normalized_t","t_rel","trace_P_position","trace_P_velocity","trace_P_acceleration",
     "trace_P_attitude","trace_P_angular_velocity","trace_P_position_velocity_cross",
@@ -1618,6 +1622,95 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
             {"bias_gravity_contribution", std::to_string(bias_gravity_contribution)},
           };
           emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "weak_mode", voxel_map_->frame_idx_, m, wkv);
+
+          // ==================================================================
+          // Phase 8: per-mode LiDAR/IMU information decomposition.
+          // v_full (the FULL dimZ eigenvector, not just its eta head) is an
+          // eigenvector of Lambda_total_z = Lambda_prior_z + Lambda_meas_z,
+          // so lambda_total_i = v_full^T*Lambda_total_z*v_full EXACTLY
+          // (by definition of an eigenpair) equals
+          // v_full^T*Lambda_prior_z*v_full + v_full^T*Lambda_meas_z*v_full
+          // -- an EXACT identity, not an approximation, checked directly by
+          // this task's own regression test. There is no third ("other")
+          // prior/process information source distinct from
+          // coupled_pose_control_lambda_prior_z_ in this formulation: the
+          // fixed-head state's own uncertainty is already marginalized INTO
+          // this IMU-derived z-prior at scan start (see the scan-start
+          // Sigma_full_priorS derivation), not held as a separate term here
+          // -- I_other is therefore reported as exactly 0, not fabricated.
+          // ==================================================================
+          const Eigen::VectorXd v_full = es_total.eigenvectors().col(m);
+          const double I_lidar = (v_full.transpose() * Lambda_meas_z * v_full)(0);
+          const double I_imu = (v_full.transpose() * coupled_pose_control_lambda_prior_z_ * v_full)(0);
+          const double I_other = 0.0;
+          const double I_sum = I_lidar + I_imu + I_other;
+          const double frac_lidar = I_sum > 1e-300 ? I_lidar / I_sum : 0.0;
+          const double frac_imu = I_sum > 1e-300 ? I_imu / I_sum : 0.0;
+          std::map<std::string, std::string> mikv = {
+            {"mode_index", std::to_string(m)}, {"lambda_total", std::to_string(ev_total(m))},
+            {"I_lidar", std::to_string(I_lidar)}, {"I_imu", std::to_string(I_imu)}, {"I_other", std::to_string(I_other)},
+            {"I_sum_check", std::to_string(I_sum)},
+            {"abs_err_vs_lambda_total", std::to_string(std::abs(I_sum - ev_total(m)))},
+            {"frac_lidar", std::to_string(frac_lidar)}, {"frac_imu", std::to_string(frac_imu)},
+          };
+          emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "mode_information", voxel_map_->frame_idx_, m, mikv);
+
+          // ==================================================================
+          // Phase 9: per-mode factor-gradient disagreement. b_lidar_z is the
+          // LiDAR factor's OWN gradient at the converged trial (already
+          // rebuilt above, this scan's own relinearization). b_imu_z at the
+          // converged trial is derived analytically from the ALREADY-FIXED
+          // (not relinearized mid-scan, by this estimator's own documented
+          // design) IMU-only prior: for a quadratic objective with
+          // information Lambda_prior_z and optimum z_imu, the GN-convention
+          // gradient at any point z is b(z) = Lambda_prior_z*(z_imu - z);
+          // z_current's eta block is the converged coupled_pose_control_eta_,
+          // its sT block is exactly zero by this estimator's own delta-from-
+          // current-trial parametrization (ba/bg/g deltas are always defined
+          // relative to the CURRENT trial, matching coupled_pose_control_z_imu_'s
+          // own sT convention -- see its assignment at scan-start).
+          // ==================================================================
+          {
+            const Eigen::VectorXd b_lidar_z = P.transpose() * b_lidar_raw;
+            Eigen::VectorXd z_current = Eigen::VectorXd::Zero(dimZ);
+            z_current.head(dEta) = coupled_pose_control_eta_;
+            const Eigen::VectorXd b_imu_z = coupled_pose_control_lambda_prior_z_ * (coupled_pose_control_z_imu_ - z_current);
+            const double g_lidar = (v_full.transpose() * b_lidar_z)(0);
+            const double g_imu = (v_full.transpose() * b_imu_z)(0);
+            const double mag_lidar = std::abs(g_lidar), mag_imu = std::abs(g_imu);
+            const bool same_sign = (g_lidar * g_imu) >= 0.0;
+            // IMPORTANT INTERPRETATION NOTE, confirmed EMPIRICALLY (not just
+            // in theory, via this exact diagnostic on real eee_01 data):
+            // at a CONVERGED GN solution, g_lidar+g_imu ~= 0 for EVERY mode
+            // by first-order optimality (the solver stops exactly where the
+            // total gradient vanishes) -- so g_lidar~=-g_imu ALWAYS, for
+            // every mode regardless of whether the two factors are
+            // genuinely fighting or both simply weak. "same_sign" is
+            // therefore ALWAYS false at convergence and is NOT a useful
+            // discriminator by itself (kept/reported for completeness, not
+            // as the disagreement signal). Rescaling each side by its own
+            // information (step = g/I, "the step that factor alone would
+            // prefer") does NOT escape this -- step_lidar and step_imu are
+            // still a positive rescaling of two already-opposite numbers,
+            // so they remain opposite in sign too, for the same reason.
+            // The metric that ACTUALLY discriminates "genuine tug of war"
+            // (both factors want to move this mode a lot, in opposite
+            // directions, and happen to net-cancel) from "not a real
+            // disagreement" (one or both factors are simply weak here) is
+            // the SMALLER of the two magnitudes: disagreement is only
+            // "real" if BOTH |step_lidar| and |step_imu| are large.
+            const double step_lidar = I_lidar > 1e-300 ? g_lidar / I_lidar : 0.0;
+            const double step_imu = I_imu > 1e-300 ? g_imu / I_imu : 0.0;
+            const double disagreement_strength = std::min(std::abs(step_lidar), std::abs(step_imu));
+            std::map<std::string, std::string> mgkv = {
+              {"mode_index", std::to_string(m)}, {"g_lidar", std::to_string(g_lidar)}, {"g_imu", std::to_string(g_imu)},
+              {"mag_lidar", std::to_string(mag_lidar)}, {"mag_imu", std::to_string(mag_imu)},
+              {"same_sign", std::to_string(same_sign ? 1 : 0)},
+              {"step_lidar", std::to_string(step_lidar)}, {"step_imu", std::to_string(step_imu)},
+              {"disagreement_strength", std::to_string(disagreement_strength)},
+            };
+            emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "mode_gradient", voxel_map_->frame_idx_, m, mgkv);
+          }
         }
 
         // Normalized-spline-time covariance (0/0.25/0.5/0.75/1.0). ITEM 3
