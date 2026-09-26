@@ -1532,6 +1532,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_z_post", coupled_pose_control_P_z_post_);
         logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_eta_post", Sigma_full_post.block(9, 9, dEta, dEta));
         logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_sT_post", Sigma_full_post.bottomRightCorner(dST, dST));
+        logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_x0_post", Sigma_full_post.topLeftCorner(9, 9));
         if (layout.colBG() >= 0)
           logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_eta_bg_post",
                             Sigma_full_post.block(9, 9 + dEta + layout.colBG() - layout.dimCFree(), dEta, 3));
