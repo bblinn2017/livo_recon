@@ -7,6 +7,7 @@ set(POSE_CONTROL_TEST_CORE_SOURCES
   ${PROJECT_SOURCE_DIR}/src/diagnostics/log/debug_log_dir.cpp
   ${PROJECT_SOURCE_DIR}/src/diagnostics/pose_control/pose_control_physical_diagnostics.cpp
   ${PROJECT_SOURCE_DIR}/src/diagnostics/pose_control/pose_control_gt_diagnostics.cpp
+  ${PROJECT_SOURCE_DIR}/src/diagnostics/gt_interp.cpp
   ${PROJECT_SOURCE_DIR}/src/lio/spline.cpp
   ${PROJECT_SOURCE_DIR}/src/lio/adaptive_q.cpp
   ${PROJECT_SOURCE_DIR}/src/lio/pose_control_adaptive_q.cpp

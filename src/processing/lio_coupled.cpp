@@ -1786,16 +1786,41 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_p_post", P_T.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()));
         logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_v_post", P_T.block<3, 3>(StateGroup::idxV(), StateGroup::idxV()));
 
-        // Real-data covariance-calibration diagnostic (GT is NOT read here
-        // -- matched post-hoc against t_abs, mirroring the x1_covariance
-        // row's own documented convention): the corrected physical position
-        // covariance actually reported for the CURRENT state (state_->pos(),
-        // what odometry.txt/ATE scoring uses), full 3x3 entries (not just
-        // trace) so position NEES can be computed against interpolated GT.
-        // t_abs is the spline's own t1 -- confirmed to be the scan's real
-        // absolute (bag-epoch) timestamp, the SAME clock ImuSample.t and GT
-        // timestamps use (NOT emitFullDiagRow's own "timestamp" column,
-        // which records wall-clock write time).
+        // ====================================================================
+        // Covariance-quantity taxonomy (so downstream analysis never
+        // substitutes one for another): this codebase reports several
+        // mathematically DIFFERENT covariance objects, distinguished here by
+        // row_type, each documented separately:
+        //   - "covariance" (elsewhere in this function): LOCAL SPLINE-TIME
+        //     PHYSICAL marginal covariance at a normalized fraction of the
+        //     CURRENT scan's own window [t0,t1] -- head+eta+cross, POSTERIOR
+        //     (post-LiDAR), via poseControlPhysicalCovariance().
+        //   - "covariance_block"/"P_p_pred"/"P_p_post" (logCovTraceStage):
+        //     the TAIL state (t1) covariance, PRIOR (pred, before this
+        //     scan's LiDAR update) and POSTERIOR (post) respectively, trace/
+        //     eigenvalue summary only (not full matrix entries).
+        //   - "x1_covariance": the x1 (first free knot after the fixed head)
+        //     interior-time covariance, POSTERIOR only, full matrix entries.
+        //   - "position_covariance_full" (this row): the TAIL/CURRENT-STATE
+        //     position covariance -- i.e. IDENTICAL in state/time to
+        //     "P_p_post" above, but with full matrix entries (not just
+        //     trace/eigenvalues) so it is usable for NEES. This is a LOCAL,
+        //     INSTANTANEOUS, POSTERIOR quantity describing this ONE scan's
+        //     own uncertainty about its current position -- it does NOT
+        //     represent, and must never be interpreted as, an ACCUMULATED
+        //     or GLOBAL trajectory-drift uncertainty over the run's whole
+        //     history (no such accumulated quantity is computed anywhere in
+        //     this codebase; a GT-referenced long-horizon position error
+        //     compared against THIS covariance is therefore comparing two
+        //     different notions of uncertainty -- see the analysis report's
+        //     explicit treatment of this distinction).
+        // GT is NOT read here (matched post-hoc against t_abs, mirroring
+        // the x1_covariance row's own convention). t_abs is the spline's own
+        // t1 -- confirmed to be the scan's real absolute (bag-epoch)
+        // timestamp, the SAME clock ImuSample.t and GT timestamps use (NOT
+        // emitFullDiagRow's own "timestamp" column, which records wall-clock
+        // write time).
+        // ====================================================================
         {
           const Eigen::Matrix3d P_p_tail = P_T.block<3, 3>(StateGroup::idxP(), StateGroup::idxP());
           const V3D p_final = state_->pos();
