@@ -152,7 +152,8 @@ static const std::vector<std::string>& fullDiagColumns()
     "trajectory_parameterization","velocity_mode","jacobian_time_mode","N_control_points",
     "total_optimization_dimension","free_spline_dimension","tail_free_state_dimension",
     "lidar_enable","process_enable","imu_var_acc_x","imu_var_acc_y","imu_var_acc_z",
-    "imu_var_gyr_x","imu_var_gyr_y","imu_var_gyr_z","covariance_pseudoinverse_threshold","p0_scale_config",
+    "imu_var_gyr_x","imu_var_gyr_y","imu_var_gyr_z","covariance_pseudoinverse_threshold",
+    "mean_pseudoinverse_threshold","p0_scale_config",
     // scan_summary
     "E_lidar","E_total","num_lidar_points","num_imu_samples","gn_iterations",
     "final_delta_eta_norm","final_delta_bg_norm","final_delta_ba_norm","final_delta_g_norm",
@@ -374,6 +375,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
                  copts_.spline_mode, "raw_imu", {"raw_imu", "pose", "pose_control"});
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/n_control_points", copts_.pose_control_n, 13);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/q_pinv_rel_thresh", copts_.pose_control_q_pinv_rel_thresh, 1e-12);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/mean_pinv_rel_thresh", copts_.pose_control_mean_pinv_rel_thresh, 1e-12);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/lidar_enable", copts_.pose_control_lidar_enable, true);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/p0_scale", copts_.pose_control_p0_scale, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/curvature_weight_pos", copts_.pose_control_curvature_weight_pos, 0.0);
@@ -1061,13 +1063,23 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           // optimum -- exactly matching how every other factor in this
           // estimator is linearized once per scan and refined across GN
           // iterations by the OUTER loop, not by iterating the prior itself.
-          // Reuses the SAME q_pinv_rel_thresh-based generalPseudoInverse
-          // (not a fresh ad hoc threshold) for the structural-vs-numerical
-          // nullspace distinction test_pose_control_prior_math.cpp already
-          // validates (item 41).
+          // Uses its OWN mean_pinv_rel_thresh -- deliberately SEPARATE from
+          // q_pinv_rel_thresh (which governs every covariance/Mahalanobis
+          // pinv call above and below). This is the ONE pseudo-inverse call
+          // in this file that determines the fixed-head-conditional MEAN
+          // correction (delta_z_prior/coupled_pose_control_z_imu_, which
+          // becomes both this scan's prior mean AND the information the
+          // main GN loop adds via Lambda_prior_z) -- tightening the
+          // covariance threshold for correctness (see the representation-
+          // capacity-invariance regression test) does not by itself imply
+          // the mean solve should retain the SAME weak/ill-conditioned
+          // directions; that is a separate question, ablated synthetically
+          // in test_pose_control_mean_pinv_ablation.cpp. Same structural-
+          // vs-numerical nullspace semantics as generalPseudoInverse()
+          // itself, just a different (documented, defensible) threshold value.
           // ====================================================================
           const Eigen::VectorXd xi_z_priorS = Ps.transpose() * b_process_scanstart_shared;
-          const Eigen::MatrixXd A_ff_priorS_pinv = generalPseudoInverse(A_ff_priorS, copts_.pose_control_q_pinv_rel_thresh);
+          const Eigen::MatrixXd A_ff_priorS_pinv = generalPseudoInverse(A_ff_priorS, copts_.pose_control_mean_pinv_rel_thresh);
           const Eigen::VectorXd delta_z_prior = A_ff_priorS_pinv * xi_z_priorS;
           coupled_pose_control_z_imu_ = Eigen::VectorXd::Zero(dimZS);
           coupled_pose_control_z_imu_.head(dEtaS) = coupled_pose_control_eta_ + delta_z_prior.head(dEtaS);
@@ -1258,6 +1270,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           {"imu_var_gyr_y", std::to_string(state_->varGyr().y())},
           {"imu_var_gyr_z", std::to_string(state_->varGyr().z())},
           {"covariance_pseudoinverse_threshold", std::to_string(copts_.pose_control_q_pinv_rel_thresh)},
+          {"mean_pseudoinverse_threshold", std::to_string(copts_.pose_control_mean_pinv_rel_thresh)},
           {"p0_scale_config", std::to_string(copts_.pose_control_p0_scale)},
         };
         emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "run_summary", voxel_map_->frame_idx_, -1, kv);

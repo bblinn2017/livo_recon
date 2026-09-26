@@ -73,6 +73,20 @@ struct LioProcCoupledOptions
   // capacity-invariance test for the concrete numerical margin this
   // threshold must satisfy. Config key: estimator/coupled/pose_control/q_pinv_rel_thresh.
   double pose_control_q_pinv_rel_thresh = 1e-12;
+  // Phase 10 (pose_control_mechanism_validation_campaign): the pseudo-
+  // inverse threshold used ONLY by the fixed-head-conditional MEAN solve
+  // (A_ff_priorS_pinv -> delta_z_prior -> coupled_pose_control_z_imu_),
+  // deliberately separated from pose_control_q_pinv_rel_thresh above,
+  // which governs every covariance/Mahalanobis pinv call and must stay at
+  // the corrected value regardless of what the mean solve does. Necessary
+  // (not an arbitrary tuning knob) because this is the one call site
+  // demonstrably affecting the mean trajectory rather than only reported
+  // covariance -- see test_pose_control_mean_pinv_ablation.cpp for the
+  // synthetic justification of the default value. Defaults to the same
+  // corrected value as pose_control_q_pinv_rel_thresh (behavior-preserving
+  // unless deliberately ablated). Config key:
+  // estimator/coupled/pose_control/mean_pinv_rel_thresh.
+  double pose_control_mean_pinv_rel_thresh = 1e-12;
   // Diagnostic-only knobs for the 2026-09-22 correction's required
   // scan-1 test suite (items 16/18) -- both default to shipping behavior
   // (LiDAR on, P0 unscaled). Config keys:
