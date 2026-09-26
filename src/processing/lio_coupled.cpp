@@ -179,6 +179,13 @@ static const std::vector<std::string>& fullDiagColumns()
     "q_used_acc","q_used_gyr","q_candidate_acc","q_candidate_gyr","q_next_acc","q_next_gyr",
     "residual_var_acc","residual_var_gyr","acf1_acc","acf1_gyr","acf2_acc","acf2_gyr","acf5_acc","acf5_gyr",
     "q_update_accepted","q_adaptation_reason","bias_var_acc_proxy","bias_var_gyr_proxy",
+    // pose_control_uncertainty_completion task item 3: truthful effective-R
+    // logging (r_nominal/r_effective_used/r_estimated_next/r_candidate are
+    // the CORRECTED names; q_used_*/q_candidate_*/q_next_* kept above as
+    // back-compat aliases for previous-campaign CSV consumers).
+    "acf1_max_effective","r_candidate_acc","r_candidate_gyr","r_nominal_acc","r_nominal_gyr",
+    "r_effective_used_acc","r_effective_used_gyr","r_estimated_next_acc","r_estimated_next_gyr",
+    "physical_q_note","trace_P_ba_bias_cov","trace_P_bg_bias_cov","clamped_floor_ceiling",
     // directional_redundancy (items 26-30)
     "raw_residual_count","reduced_state_dimension","effective_rank","condition_number",
     "dominant_eigenvalue","weak_eigenvalue","cumulative_information_fraction_at_rank5",
@@ -960,6 +967,12 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         // IMU-only objective, not merely "whatever eta currently is".
         Eigen::VectorXd b_process_scanstart_shared = Eigen::VectorXd::Zero(dimRawScanstart);
         PoseControlPriorHeadBlock head_block_scanstart;
+        // Captured HERE (before this scan's own adaptive-Q update() call
+        // runs, later in this same scan) so the "effective R used" live
+        // diagnostic reports exactly what built THIS scan's prior -- see
+        // coupled_pose_control_effective_var_{acc,gyr}_used_'s own comment.
+        coupled_pose_control_effective_var_acc_used_ = poseControlEffectiveVarAcc().mean();
+        coupled_pose_control_effective_var_gyr_used_ = poseControlEffectiveVarGyr().mean();
         buildPoseControlContinuousImuPrior(spline, coupled_pose_control_layout_, mg.imu_samples_raw,
             coupled_pose_control_ba_trial_, coupled_pose_control_bg_trial_, coupled_pose_control_g_trial_,
             poseControlEffectiveVarAcc(), poseControlEffectiveVarGyr(),
@@ -2385,11 +2398,18 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           // (Sigma_full_post, already computed above).
           {
             Eigen::MatrixXd J_acc_eta, J_gyr_eta;
+            Eigen::Matrix<double, 3, 9> J_acc_head, J_gyr_head;
             computePoseControlImuResidualStateJacobian(
                 spline, layout, hns, 0.5 * (spline.t0() + spline.t1()), state_->gravity(),
-                J_acc_eta, J_gyr_eta);
-            const Eigen::MatrixXd P_eta = Sigma_full_post.block(9, 9, dEta, dEta);
-            applyPoseControlAdaptiveQTrajectoryStateCorrection(pcq_st, J_acc_eta, J_gyr_eta, P_eta);
+                J_acc_eta, J_gyr_eta, J_acc_head, J_gyr_head);
+            // Full head+eta block (INCLUDING head/eta cross-covariance) --
+            // NOT eta-only. See pose_control_adaptive_q.h's 2026-09-26
+            // header comment for why bias/gravity are correctly excluded
+            // here (handled separately, above, from a different covariance
+            // source) rather than double-counted.
+            const Eigen::MatrixXd Sigma_head_eta = Sigma_full_post.topLeftCorner(9 + dEta, 9 + dEta);
+            applyPoseControlAdaptiveQTrajectoryStateCorrection(
+                pcq_st, J_acc_eta, J_gyr_eta, J_acc_head, J_gyr_head, Sigma_head_eta);
           }
           if (copts_.psd_audit_en) {
             std::map<std::string, std::string> qbkv = {
@@ -2406,18 +2426,47 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           coupled_pose_control_adaptive_q_.update(pcq_st);
           coupled_pose_control_adaptive_q_primed_ = true;
           if (copts_.psd_audit_en) {
+            // pose_control_uncertainty_completion task, item 3: terminology
+            // audit -- this mechanism measures the spline-vs-IMU
+            // COLLOCATION/MEASUREMENT residual spread (an R-like quantity,
+            // see pose_control_adaptive_q.h's SEMANTICS block), which is
+            // fed back in as this estimator's process-noise input ONLY
+            // under the "each IMU sample directly observes the process's
+            // own driving noise" model choice -- it is NOT a separately
+            // identified physical process noise Q. Field names below are
+            // R_*, never Q_*, to avoid re-introducing that conflation; no
+            // separately-identified physical Q exists in this estimator to
+            // report (physical_q_note states this explicitly rather than
+            // silently omitting the concept).
             std::map<std::string, std::string> qkv = {
               {"residual_var_acc", std::to_string(pcq_st.cov_acc)},
               {"residual_var_gyr", std::to_string(pcq_st.cov_gyr)},
               {"acf1_acc", std::to_string(pcq_st.acf1_acc)}, {"acf1_gyr", std::to_string(pcq_st.acf1_gyr)},
               {"acf2_acc", std::to_string(pcq_st.acf2_acc)}, {"acf2_gyr", std::to_string(pcq_st.acf2_gyr)},
               {"acf5_acc", std::to_string(pcq_st.acf5_acc)}, {"acf5_gyr", std::to_string(pcq_st.acf5_gyr)},
-              {"q_candidate_acc", std::to_string(pcq_st.cov_acc)}, {"q_candidate_gyr", std::to_string(pcq_st.cov_gyr)},
-              {"q_used_acc", std::to_string(state_->varAcc().mean())}, {"q_used_gyr", std::to_string(state_->varGyr().mean())},
-              {"q_next_acc", std::to_string(coupled_pose_control_adaptive_q_.varAcc())},
-              {"q_next_gyr", std::to_string(coupled_pose_control_adaptive_q_.varGyr())},
+              {"acf1_max_effective", std::to_string(coupled_pose_control_adaptive_q_.opts().acf1_max)},
+              {"r_candidate_acc", std::to_string(pcq_st.cov_acc)}, {"r_candidate_gyr", std::to_string(pcq_st.cov_gyr)},
+              {"r_nominal_acc", std::to_string(state_->varAcc().mean())}, {"r_nominal_gyr", std::to_string(state_->varGyr().mean())},
+              {"r_effective_used_acc", std::to_string(coupled_pose_control_effective_var_acc_used_)},
+              {"r_effective_used_gyr", std::to_string(coupled_pose_control_effective_var_gyr_used_)},
+              {"r_estimated_next_acc", std::to_string(coupled_pose_control_adaptive_q_.varAcc())},
+              {"r_estimated_next_gyr", std::to_string(coupled_pose_control_adaptive_q_.varGyr())},
+              {"physical_q_note", "no_separately_identified_physical_Q_in_this_estimator"},
+              {"trace_P_ba_bias_cov", std::to_string(P_ba.trace())},
+              {"trace_P_bg_bias_cov", std::to_string(P_bg.trace())},
+              {"clamped_floor_ceiling", std::to_string(coupled_pose_control_adaptive_q_.clamped())},
               {"q_update_accepted", std::to_string(coupled_pose_control_adaptive_q_.activeThisFrame())},
               {"q_adaptation_reason", coupled_pose_control_adaptive_q_.lastStatus()},
+              // Back-compat aliases (old names, previous campaign's CSV
+              // consumers) -- q_used_* now correctly reports the EFFECTIVE
+              // value actually used to build this scan's own prior (the
+              // bug this task's item 3 fixes), not state_->varAcc()/varGyr()
+              // (the raw, un-adapted nominal, now reported as r_nominal_*).
+              {"q_used_acc", std::to_string(coupled_pose_control_effective_var_acc_used_)},
+              {"q_used_gyr", std::to_string(coupled_pose_control_effective_var_gyr_used_)},
+              {"q_candidate_acc", std::to_string(pcq_st.cov_acc)}, {"q_candidate_gyr", std::to_string(pcq_st.cov_gyr)},
+              {"q_next_acc", std::to_string(coupled_pose_control_adaptive_q_.varAcc())},
+              {"q_next_gyr", std::to_string(coupled_pose_control_adaptive_q_.varGyr())},
             };
             emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "q_estimation", voxel_map_->frame_idx_, -1, qkv);
           }

@@ -846,6 +846,14 @@ private:
   // setNominal/setFloor has run yet (once, first valid scan).
   AdaptiveQ coupled_pose_control_adaptive_q_;
   bool coupled_pose_control_adaptive_q_primed_ = false;
+  // pose_control_uncertainty_completion task, item 3: captured at THIS
+  // scan's own prior-construction call site (poseControlEffectiveVarAcc()/
+  // VarGyr(), read BEFORE this scan's own adaptive-Q update() call below
+  // runs), so the "effective R used" diagnostic reports what actually built
+  // this scan's prior -- NOT a value re-read after update() has already
+  // advanced the held estimate for scan k+1.
+  double coupled_pose_control_effective_var_acc_used_ = 0.0;
+  double coupled_pose_control_effective_var_gyr_used_ = 0.0;
   // item 18: the ONE authoritative Q read site pose_control's own factor
   // construction/diagnostics go through -- returns the adaptive value
   // (already one-scan-causal by construction) when enabled and primed,

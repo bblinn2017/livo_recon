@@ -261,7 +261,8 @@ static void testStateJacobianFiniteDifference()
   const double t = 0.05;
   const V3D gravity(0, 0, -9.81);
   Eigen::MatrixXd J_acc_eta, J_gyr_eta;
-  computePoseControlImuResidualStateJacobian(spline, layout, hns, t, gravity, J_acc_eta, J_gyr_eta);
+  Eigen::Matrix<double, 3, 9> J_acc_head, J_gyr_head;
+  computePoseControlImuResidualStateJacobian(spline, layout, hns, t, gravity, J_acc_eta, J_gyr_eta, J_acc_head, J_gyr_head);
 
   auto evalAcc = [&](const PoseControlSpline& s) -> V3D {
     return s.rotAt(t).transpose() * (s.accAt(t) - gravity);
@@ -390,19 +391,187 @@ static void testImuMeasurementInformationSanity()
 }
 
 // A8: trajectory-state correction, sanity + zero-uncertainty degenerate
-// case (P_eta=0 must leave the residual untouched -- no spurious
+// case (Sigma_head_eta=0 must leave the residual untouched -- no spurious
 // subtraction when there IS no trajectory uncertainty).
 static void testTrajectoryStateCorrectionZeroUncertainty()
 {
-  Eigen::MatrixXd J_acc = Eigen::MatrixXd::Random(3, 10);
-  Eigen::MatrixXd J_gyr = Eigen::MatrixXd::Random(3, 10);
-  Eigen::MatrixXd P_eta = Eigen::MatrixXd::Zero(10, 10);
+  Eigen::MatrixXd J_acc_eta = Eigen::MatrixXd::Random(3, 10);
+  Eigen::MatrixXd J_gyr_eta = Eigen::MatrixXd::Random(3, 10);
+  Eigen::Matrix<double, 3, 9> J_acc_head = Eigen::Matrix<double, 3, 9>::Random();
+  Eigen::Matrix<double, 3, 9> J_gyr_head = Eigen::Matrix<double, 3, 9>::Zero();
+  Eigen::MatrixXd Sigma_head_eta = Eigen::MatrixXd::Zero(19, 19);
   SplineImuResidualStats st;
   st.n = 50; st.cov_acc = 0.0005; st.cov_gyr = 0.00002;
   const double before_acc = st.cov_acc, before_gyr = st.cov_gyr;
-  applyPoseControlAdaptiveQTrajectoryStateCorrection(st, J_acc, J_gyr, P_eta);
-  checkNear(st.cov_acc, before_acc, 1e-15, "trajectory-correction: P_eta=0 leaves cov_acc untouched");
+  applyPoseControlAdaptiveQTrajectoryStateCorrection(st, J_acc_eta, J_gyr_eta, J_acc_head, J_gyr_head, Sigma_head_eta);
+  checkNear(st.cov_acc, before_acc, 1e-15, "trajectory-correction: Sigma_head_eta=0 leaves cov_acc untouched");
   checkNear(st.cov_gyr, before_gyr, 1e-15, "trajectory-correction: P_eta=0 leaves cov_gyr untouched");
+}
+
+// pose_control_uncertainty_completion task, item 2: regression tests for
+// the full head+eta trajectory-state uncertainty correction (previously
+// eta-only). All five required properties, using a small synthetic
+// dEta=4 (dimension 9+4=13 total) problem with hand-built J/Sigma so the
+// correct answer is known exactly, independent of any real spline.
+static void testFullStateTrajectoryUncertaintyCorrection()
+{
+  const int dEta = 4;
+  std::mt19937 rng(2026);
+  std::uniform_real_distribution<double> u(-1.0, 1.0);
+
+  Eigen::Matrix<double, 3, 9> J_acc_head;
+  for (int i = 0; i < 3; ++i) for (int j = 0; j < 9; ++j) J_acc_head(i, j) = u(rng);
+  Eigen::MatrixXd J_acc_eta(3, dEta);
+  for (int i = 0; i < 3; ++i) for (int j = 0; j < dEta; ++j) J_acc_eta(i, j) = u(rng);
+  const Eigen::Matrix<double, 3, 9> J_gyr_head = Eigen::Matrix<double, 3, 9>::Zero();
+  Eigen::MatrixXd J_gyr_eta(3, dEta);
+  for (int i = 0; i < 3; ++i) for (int j = 0; j < dEta; ++j) J_gyr_eta(i, j) = u(rng);
+
+  // Build a random PSD Sigma_head_eta (9+dEta square) via A*A^T so it's a
+  // genuine, non-block-diagonal covariance with real head/eta cross terms.
+  const int n = 9 + dEta;
+  Eigen::MatrixXd A(n, n);
+  for (int i = 0; i < n; ++i) for (int j = 0; j < n; ++j) A(i, j) = u(rng);
+  // Scaled small enough that C_pred = J*Sigma*J^T stays well below the
+  // empirical cov_acc/cov_gyr (0.01/0.001) at baseline -- otherwise the
+  // clampedTraceOver3(C_emp - C_pred) PSD clamp saturates both the
+  // "small" and "large" cases to exactly 0, masking any real difference
+  // (a test-setup pitfall, not a production issue -- caught by the (1)/(2)
+  // checks below both initially reading a spurious 0.0 delta).
+  const Eigen::MatrixXd Sigma_full = A * A.transpose() * 1e-5;
+
+  auto makeSt = [&]() { SplineImuResidualStats st; st.n = 50; st.cov_acc = 0.01; st.cov_gyr = 0.001; return st; };
+
+  // (1) Changing head uncertainty changes adaptive residual uncertainty
+  // when the residual depends on the head (J_acc_head is nonzero here).
+  {
+    SplineImuResidualStats st_small = makeSt(), st_large = makeSt();
+    Eigen::MatrixXd Sigma_small = Sigma_full, Sigma_large = Sigma_full;
+    Sigma_large.topLeftCorner(9, 9) *= 20.0;   // head uncertainty only, eta/cross untouched below
+    Sigma_large.topRightCorner(9, dEta) *= 4.0; Sigma_large.bottomLeftCorner(dEta, 9) *= 4.0;
+    applyPoseControlAdaptiveQTrajectoryStateCorrection(st_small, J_acc_eta, J_gyr_eta, J_acc_head, J_gyr_head, Sigma_small);
+    applyPoseControlAdaptiveQTrajectoryStateCorrection(st_large, J_acc_eta, J_gyr_eta, J_acc_head, J_gyr_head, Sigma_large);
+    check(std::abs(st_large.cov_acc - st_small.cov_acc) > 1e-6,
+          "(1) inflating head (+ head/eta cross) uncertainty measurably changes adaptive cov_acc",
+          st_large.cov_acc - st_small.cov_acc);
+  }
+
+  // (2) Head/eta cross-covariance contributes correctly: zeroing ONLY the
+  // off-diagonal cross blocks (keeping head and eta diagonal blocks fixed)
+  // must change the result whenever J_acc_head and J_acc_eta are both
+  // nonzero (the cross term 2*J_head*Sigma_cross*J_eta^T is then removed).
+  {
+    SplineImuResidualStats st_with_cross = makeSt(), st_no_cross = makeSt();
+    Eigen::MatrixXd Sigma_no_cross = Sigma_full;
+    Sigma_no_cross.topRightCorner(9, dEta).setZero();
+    Sigma_no_cross.bottomLeftCorner(dEta, 9).setZero();
+    applyPoseControlAdaptiveQTrajectoryStateCorrection(st_with_cross, J_acc_eta, J_gyr_eta, J_acc_head, J_gyr_head, Sigma_full);
+    applyPoseControlAdaptiveQTrajectoryStateCorrection(st_no_cross, J_acc_eta, J_gyr_eta, J_acc_head, J_gyr_head, Sigma_no_cross);
+    check(std::abs(st_with_cross.cov_acc - st_no_cross.cov_acc) > 1e-6,
+          "(2) head/eta cross-covariance measurably contributes to adaptive cov_acc",
+          st_with_cross.cov_acc - st_no_cross.cov_acc);
+    // Independent dense reference: C_state = J_full * Sigma * J_full^T,
+    // computed here with plain matrix algebra (NOT calling production's
+    // own helper), must match production's own subtraction exactly.
+    Eigen::MatrixXd J_full_acc(3, n); J_full_acc << J_acc_head, J_acc_eta;
+    const Eigen::Matrix3d C_ref = J_full_acc * Sigma_full * J_full_acc.transpose();
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es(0.5 * (C_ref + C_ref.transpose()));
+    const double ref_trace_over_3 = es.eigenvalues().cwiseMax(0.0).sum() / 3.0;
+    const double expected_cov_acc = std::max(0.0, 0.01 - ref_trace_over_3);  // st.cov_acc started at 0.01, PSD-clamped
+    // clampedTraceOver3 clamps (C_emp - C_pred) to the PSD cone as a WHOLE,
+    // not C_pred alone, so compare via the same whole-matrix clamp instead
+    // of the naive scalar subtraction above when they disagree.
+    const Eigen::Matrix3d C_emp = Eigen::Matrix3d::Identity() * 0.01;
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es2(0.5 * ((C_emp - C_ref) + (C_emp - C_ref).transpose()));
+    const double expected_exact = es2.eigenvalues().cwiseMax(0.0).sum() / 3.0;
+    (void)expected_cov_acc;
+    checkNear(st_with_cross.cov_acc, expected_exact, 1e-9,
+              "(4) independent dense reference J_full*Sigma*J_full^T matches production exactly");
+  }
+
+  // (3) Zeroing head uncertainty (and cross) entirely recovers the
+  // eta-only special case -- i.e. matches what the PREVIOUS (eta-only)
+  // implementation would have computed with P_eta alone.
+  {
+    SplineImuResidualStats st_full = makeSt();
+    Eigen::MatrixXd Sigma_head_zeroed = Sigma_full;
+    Sigma_head_zeroed.topLeftCorner(9, 9).setZero();
+    Sigma_head_zeroed.topRightCorner(9, dEta).setZero();
+    Sigma_head_zeroed.bottomLeftCorner(dEta, 9).setZero();
+    applyPoseControlAdaptiveQTrajectoryStateCorrection(st_full, J_acc_eta, J_gyr_eta, J_acc_head, J_gyr_head, Sigma_head_zeroed);
+    const Eigen::MatrixXd P_eta = Sigma_full.bottomRightCorner(dEta, dEta);
+    const Eigen::Matrix3d C_eta_only = J_acc_eta * P_eta * J_acc_eta.transpose();
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es3(0.5 * ((Eigen::Matrix3d::Identity() * 0.01 - C_eta_only) + (Eigen::Matrix3d::Identity() * 0.01 - C_eta_only).transpose()));
+    const double expected_eta_only = es3.eigenvalues().cwiseMax(0.0).sum() / 3.0;
+    checkNear(st_full.cov_acc, expected_eta_only, 1e-9,
+              "(3) zeroing head uncertainty (+ cross) recovers the eta-only special case exactly");
+  }
+
+  // (5) Irrelevant state blocks do not affect the result: J_gyr_head is
+  // exactly zero (e_gyr's real head sensitivity), so inflating head
+  // uncertainty must leave cov_gyr COMPLETELY unchanged.
+  {
+    SplineImuResidualStats st_small = makeSt(), st_large = makeSt();
+    Eigen::MatrixXd Sigma_large = Sigma_full;
+    Sigma_large.topLeftCorner(9, 9) *= 1000.0;
+    applyPoseControlAdaptiveQTrajectoryStateCorrection(st_small, J_acc_eta, J_gyr_eta, J_acc_head, J_gyr_head, Sigma_full);
+    applyPoseControlAdaptiveQTrajectoryStateCorrection(st_large, J_acc_eta, J_gyr_eta, J_acc_head, J_gyr_head, Sigma_large);
+    checkNear(st_large.cov_gyr, st_small.cov_gyr, 1e-15,
+              "(5) irrelevant state block (head, for J_gyr_head=0) does not affect cov_gyr");
+  }
+}
+
+// pose_control_uncertainty_completion task, item 4: ACF/whiteness
+// configuration-plumbing proof. Confirms (a) an explicitly-configured
+// acf1_max reaches AdaptiveQ::update()'s actual gating decision (not just
+// that the field reads back correctly -- a BEHAVIORAL proof), (b) a
+// default-constructed AdaptiveQOptions produces the documented default
+// (1.00, per adaptive_q.h), and (c) the effective value is queryable via
+// opts() for live logging (acf1_max_effective, added to q_estimation rows).
+static void testAcf1MaxConfigurationPlumbing()
+{
+  SplineImuResidualStats st;
+  st.n = 50; st.cov_acc = 0.01; st.cov_gyr = 0.001;
+  st.acf1_acc = 0.5; st.acf1_gyr = 0.05;   // acc: white under 1.0, NOT white under 0.35
+
+  // (a) explicit 0.35: acf1_acc=0.5 exceeds it -> acc channel rejected.
+  {
+    AdaptiveQOptions opts;
+    opts.enable = true;
+    opts.acf1_max = 0.35;
+    opts.use_noise_floor = false;
+    opts.warmup_frames = 0;
+    AdaptiveQ q;
+    q.configure(opts);
+    checkNear(q.opts().acf1_max, 0.35, 1e-15, "(a) explicitly-configured acf1_max=0.35 is held exactly by opts()");
+    q.setNominal(0.01, 0.001);
+    q.update(st);
+    check(!q.whiteAcc(), "(a) acf1_acc=0.5 is correctly flagged NOT white under an effective threshold of 0.35", q.zAcc());
+  }
+
+  // (b) missing/default-constructed: documented default is 1.00, and the
+  // SAME st (acf1_acc=0.5) is then accepted as white.
+  {
+    AdaptiveQOptions opts;   // default-constructed, acf1_max left untouched
+    opts.enable = true;
+    opts.use_noise_floor = false;
+    opts.warmup_frames = 0;
+    checkNear(opts.acf1_max, 1.00, 1e-15, "(b) a missing/default-constructed acf1_max is the documented default (1.00)");
+    AdaptiveQ q;
+    q.configure(opts);
+    q.setNominal(0.01, 0.001);
+    q.update(st);
+    check(q.whiteAcc(), "(b) the SAME acf1_acc=0.5 is correctly flagged white under the 1.00 default", q.zAcc());
+  }
+
+  // (c) effective runtime value is queryable via opts() for live logging
+  // (this is exactly what lio_coupled.cpp's q_estimation row's
+  // acf1_max_effective field reads).
+  {
+    AdaptiveQOptions opts; opts.acf1_max = 0.62;
+    AdaptiveQ q; q.configure(opts);
+    checkNear(q.opts().acf1_max, 0.62, 1e-15, "(c) effective runtime acf1_max is queryable via opts() for live logging");
+  }
 }
 
 // ============================================================================
@@ -780,6 +949,8 @@ int main()
   testImuMeasurementJacobianFiniteDifference();
   testImuMeasurementInformationSanity();
   testTrajectoryStateCorrectionZeroUncertainty();
+  testFullStateTrajectoryUncertaintyCorrection();
+  testAcf1MaxConfigurationPlumbing();
   testRepeatedDirectionRankOne();
   testIndependentDirectionsMatchSvdReference();
   testKnownWeakDirectionExcludedFromRank();

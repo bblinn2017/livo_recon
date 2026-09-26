@@ -100,7 +100,8 @@ inline M3D skew3v(const V3D& v)
 void computePoseControlImuResidualStateJacobian(
     const PoseControlSpline& spline, const PoseControlFreeLayout& layout,
     const PoseControlHeadNullspace& hns, double t, const V3D& gravity,
-    Eigen::MatrixXd& J_acc_eta, Eigen::MatrixXd& J_gyr_eta)
+    Eigen::MatrixXd& J_acc_eta, Eigen::MatrixXd& J_gyr_eta,
+    Eigen::Matrix<double, 3, 9>& J_acc_head, Eigen::Matrix<double, 3, 9>& J_gyr_head)
 {
   const int rawDim = hns.rawDim();
   Eigen::MatrixXd J_acc_raw = Eigen::MatrixXd::Zero(3, rawDim);
@@ -119,6 +120,7 @@ void computePoseControlImuResidualStateJacobian(
   const V3D Rtv = R.transpose() * v;
   const M3D d_acc_d_theta = skew3v(Rtv);
 
+  bool touches_head_pos = false;
   for (int k = 0; k < 4; ++k)
   {
     const int abs_k = jac.s + k;
@@ -132,25 +134,57 @@ void computePoseControlImuResidualStateJacobian(
       J_acc_raw.block<3, 3>(0, colph) = d_acc_d_theta * dtheta_dcphi;
       J_gyr_raw.block<3, 3>(0, colph) = spline.dOmegaDcphi(jac, k, t);
     }
+    if (abs_k < 3) touches_head_pos = true;
   }
 
   J_acc_eta = J_acc_raw * hns.Z;
   J_gyr_eta = J_gyr_raw * hns.Z;
+
+  // Head columns [theta0(0:3); p0(3:6); v0(6:9)] -- SAME layout as
+  // Sigma_full_post's topLeftCorner(9,9) and pose_control_imu_prior_
+  // builder.cpp's own Jhead. e_gyr's head sensitivity is exactly zero
+  // (see this file's header comment) -- left as the zero matrix, not
+  // assumed away silently.
+  J_acc_head.setZero();
+  J_gyr_head.setZero();
+  J_acc_head.block<3, 3>(0, 0) = d_acc_d_theta * poseControlHeadRotJacobian(spline, t);
+  if (touches_head_pos)
+  {
+    const PoseControlHeadPosSensitivity hs = poseControlHeadPosSensitivity(spline);
+    M3D da_dp0 = M3D::Zero(), da_dv0 = M3D::Zero();
+    for (int k = 0; k < 4; ++k)
+    {
+      const int abs_k = jac.s + k;
+      if (abs_k >= 3) continue;
+      const double m0 = hs.Minv(abs_k, 0), m1 = hs.Minv(abs_k, 1);
+      da_dp0 += m0 * PoseControlSpline::dAccDcp(jac, k);
+      da_dv0 += m1 * PoseControlSpline::dAccDcp(jac, k);
+    }
+    J_acc_head.block<3, 3>(0, 3) = R.transpose() * da_dp0;
+    J_acc_head.block<3, 3>(0, 6) = R.transpose() * da_dv0;
+  }
 }
 
 void applyPoseControlAdaptiveQTrajectoryStateCorrection(
     SplineImuResidualStats& st,
     const Eigen::MatrixXd& J_acc_eta, const Eigen::MatrixXd& J_gyr_eta,
-    const Eigen::MatrixXd& P_eta)
+    const Eigen::Matrix<double, 3, 9>& J_acc_head, const Eigen::Matrix<double, 3, 9>& J_gyr_head,
+    const Eigen::MatrixXd& Sigma_head_eta)
 {
   if (st.n <= 0) return;
-  if (J_acc_eta.cols() != P_eta.rows() || J_gyr_eta.cols() != P_eta.rows()) return;
+  const int dEta = static_cast<int>(J_acc_eta.cols());
+  if (J_gyr_eta.cols() != dEta) return;
+  if (Sigma_head_eta.rows() != 9 + dEta || Sigma_head_eta.cols() != 9 + dEta) return;
 
-  const Eigen::Matrix3d C_pred_traj_acc = J_acc_eta * P_eta * J_acc_eta.transpose();
+  Eigen::MatrixXd J_full_acc(3, 9 + dEta), J_full_gyr(3, 9 + dEta);
+  J_full_acc << J_acc_head, J_acc_eta;
+  J_full_gyr << J_gyr_head, J_gyr_eta;
+
+  const Eigen::Matrix3d C_pred_traj_acc = J_full_acc * Sigma_head_eta * J_full_acc.transpose();
   const Eigen::Matrix3d C_emp_acc = Eigen::Matrix3d::Identity() * st.cov_acc;
   st.cov_acc = clampedTraceOver3(C_emp_acc - C_pred_traj_acc);
 
-  const Eigen::Matrix3d C_pred_traj_gyr = J_gyr_eta * P_eta * J_gyr_eta.transpose();
+  const Eigen::Matrix3d C_pred_traj_gyr = J_full_gyr * Sigma_head_eta * J_full_gyr.transpose();
   const Eigen::Matrix3d C_emp_gyr = Eigen::Matrix3d::Identity() * st.cov_gyr;
   st.cov_gyr = clampedTraceOver3(C_emp_gyr - C_pred_traj_gyr);
 }

@@ -57,6 +57,46 @@
 // LiDAR factor's own dr_dcp_phi is; the sign/convention is verified by a
 // finite-difference check in the registered test (not asserted from
 // derivation alone).
+//
+// 2026-09-26 (pose_control_uncertainty_completion task, item 2): the
+// trajectory-state term above previously sandwiched ONLY P_eta (the
+// free-spline block), silently ignoring the HEAD state's own uncertainty
+// (theta0/p0/v0, Sigma_full_post's topLeftCorner(9,9)) and the head/eta
+// CROSS covariance -- both of which the joint pose-control posterior
+// Sigma_full_post already carries. This was a real gap: e_acc depends on
+// the head exactly the way pose_control_imu_prior_builder.cpp's own
+// Jhead block already derives and uses for a different purpose (building
+// this scan's IMU-only information matrix) -- d(e_acc)/d(theta0) =
+// skew(a_spline_body) * poseControlHeadRotJacobian(spline,t), and
+// d(e_acc)/d(p0)/d(v0) via poseControlHeadPosSensitivity's Minv chained
+// through dAccDcp for the first 3 control points (abs_k<3), EXACTLY
+// mirroring that file's derivation (not re-derived independently, to
+// avoid the two diverging). e_gyr's head sensitivity is EXACTLY zero --
+// omegaBodyAt(t) is built purely from cp_phi, whose particular
+// (head-driven) component is fixed at phi(t0)=0 regardless of
+// theta0/p0/v0 in this parameterization (see buildPoseControlHeadNullspace
+// in pose_control_spline.cpp) -- confirmed both by direct inspection of
+// that construction and by a finite-difference regression test here.
+//
+// computePoseControlImuResidualStateJacobian() now ALSO returns
+// J_acc_head/J_gyr_head (each 3x9, columns [theta0(3);p0(3);v0(3)] --
+// the SAME head-state layout Sigma_full_post's topLeftCorner(9,9) and
+// pose_control_imu_prior_builder.cpp's Jhead already use), and
+// applyPoseControlAdaptiveQTrajectoryStateCorrection() now sandwiches the
+// FULL [J_head, J_eta] (3 x (9+dEta)) through Sigma_full_post's
+// topLeftCorner(9+dEta, 9+dEta) (the SAME Sigma_head_eta_post block
+// lio_coupled.cpp already computes for its own head-propagation
+// diagnostics), which naturally includes head covariance, eta covariance,
+// AND head/eta cross-covariance in one sandwich -- C_state = J_full *
+// Sigma_head_eta * J_full^T. Bias and gravity uncertainty are
+// DELIBERATELY EXCLUDED from this sandwich -- they are already subtracted
+// by applyPoseControlAdaptiveQBiasGravityCorrection() above, using
+// state_'s own EKF covariance block (P_T via idxBA()/idxBG()/idxG()), a
+// SEPARATE covariance object from Sigma_full_post. Including them again
+// here via Sigma_full_post's tail-state (sT) block would double-count the
+// same physical uncertainty through two different covariance
+// representations -- exactly the double-counting this task's own
+// instructions warn against.
 // ============================================================================
 
 namespace livo_recon
@@ -83,32 +123,45 @@ void applyPoseControlAdaptiveQBiasGravityCorrection(
     const Eigen::Matrix3d& P_ba, const Eigen::Matrix3d& P_bg,
     const Eigen::Matrix3d& P_g, const Eigen::Matrix3d& P_ba_g_cross);
 
-// d(e_acc)/d(eta) and d(e_gyr)/d(eta) (each 3 x hns.freeDim()) at time t,
-// via the SAME production Jacobian primitives (dAccDcp/dOmegaDcphi/
-// dThetaDcphi) addPoseControlLidarFactor() uses for its own per-point
-// rows, chained through the SAME head-nullspace basis Z the mean solve
-// projects onto. e_acc = R(t)^T*(accAt(t)-gravity)+bias_acc - a_measured,
-// e_gyr = omegaBodyAt(t)+bias_gyr - omega_measured -- only the accAt(t)/
-// rotAt(t)/omegaBodyAt(t) terms depend on the trajectory (eta); bias/
-// gravity/measurement terms are constants w.r.t. eta and contribute
-// nothing here (handled separately, see
+// d(e_acc)/d(eta), d(e_gyr)/d(eta) (each 3 x hns.freeDim()), AND
+// d(e_acc)/d(head), d(e_gyr)/d(head) (each 3x9, head columns
+// [theta0(3);p0(3);v0(3)] -- Sigma_full_post's topLeftCorner(9,9) layout)
+// at time t, via the SAME production Jacobian primitives (dAccDcp/
+// dOmegaDcphi/dThetaDcphi/poseControlHeadRotJacobian/
+// poseControlHeadPosSensitivity) both addPoseControlLidarFactor() and
+// pose_control_imu_prior_builder.cpp already use for their own per-point/
+// per-sample rows -- the head-block derivation here is the SAME one that
+// file already implements for building this scan's IMU-only information
+// matrix, not re-derived independently. e_acc = R(t)^T*(accAt(t)-gravity)
+// +bias_acc - a_measured, e_gyr = omegaBodyAt(t)+bias_gyr - omega_measured
+// -- e_gyr's head sensitivity (J_gyr_head) is EXACTLY zero (omegaBodyAt(t)
+// depends only on cp_phi, whose head-driven particular component is fixed
+// at phi(t0)=0 regardless of head state in this parameterization); bias/
+// gravity/measurement terms are constants w.r.t. both eta and head and
+// contribute nothing here (handled separately, see
 // applyPoseControlAdaptiveQBiasGravityCorrection above).
 void computePoseControlImuResidualStateJacobian(
     const PoseControlSpline& spline, const PoseControlFreeLayout& layout,
     const PoseControlHeadNullspace& hns, double t, const V3D& gravity,
-    Eigen::MatrixXd& J_acc_eta, Eigen::MatrixXd& J_gyr_eta);
+    Eigen::MatrixXd& J_acc_eta, Eigen::MatrixXd& J_gyr_eta,
+    Eigen::Matrix<double, 3, 9>& J_acc_head, Eigen::Matrix<double, 3, 9>& J_gyr_head);
 
-// Sandwiches J_acc_eta/J_gyr_eta (from the function above) through P_eta
-// (the eta-block of the posterior/prior covariance -- dEta x dEta) and
-// folds the result into st.cov_acc/st.cov_gyr the same way
+// Sandwiches the FULL [J_*_head, J_*_eta] (3 x (9+dEta)) through
+// Sigma_head_eta (the head+eta block of the posterior/prior covariance --
+// (9+dEta) x (9+dEta), e.g. Sigma_full_post.topLeftCorner(9+dEta,9+dEta))
+// and folds the result into st.cov_acc/st.cov_gyr the same way
 // applyPoseControlAdaptiveQBiasGravityCorrection() folds in bias/gravity
 // -- call this AFTER that function (both subtract from the SAME running
 // st.cov_acc/st.cov_gyr, each independently PSD-projected before being
 // subtracted, matching item 6's "project C_extra onto the PSD cone" for
-// each contribution as it is removed).
+// each contribution as it is removed). This naturally includes head
+// covariance, eta covariance, AND head/eta cross-covariance in one
+// sandwich -- see this file's header comment for why bias/gravity are
+// deliberately excluded here (already handled, separately, above).
 void applyPoseControlAdaptiveQTrajectoryStateCorrection(
     SplineImuResidualStats& st,
     const Eigen::MatrixXd& J_acc_eta, const Eigen::MatrixXd& J_gyr_eta,
-    const Eigen::MatrixXd& P_eta);
+    const Eigen::Matrix<double, 3, 9>& J_acc_head, const Eigen::Matrix<double, 3, 9>& J_gyr_head,
+    const Eigen::MatrixXd& Sigma_head_eta);
 
 }  // namespace livo_recon
