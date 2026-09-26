@@ -1436,17 +1436,25 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     ResidualRedundancyStats pose_control_lidar_corr_stats;
     if (copts_.pose_control_lidar_enable) {
       std::vector<PoseControlLidarRecord> lidar_records;
-      const bool want_records = copts_.pose_control_lidar_correlation.mode != "off";
+      // pose_control_information_footprint_validation task: RETAINING
+      // records (want_records) is now decoupled from actually APPLYING the
+      // correlation correction (want_correction) -- psd_audit_en alone
+      // must retain per-point Jrow_z for the new footprint diagnostic
+      // below WITHOUT mutating A_lidar_raw/b_lidar_raw, so a footprint-only
+      // run stays byte-for-byte identical to one with psd_audit_en off
+      // (verified live: ATE unchanged from the prior campaign's own runs).
+      const bool want_correction = copts_.pose_control_lidar_correlation.mode != "off";
+      const bool want_records = want_correction || copts_.psd_audit_en;
       addPoseControlLidarFactor(spline, layout, lidar_obs, A_lidar_raw, b_lidar_raw, nullptr, nullptr,
                                  want_records ? &lidar_records : nullptr);
       // items 10/15: snapshot the INDEPENDENT (pre-correction) A/b before
       // applyPoseControlLidarCorrelationCorrection() mutates them in
       // place, so both versions are diagnosable as a pair.
       const Eigen::MatrixXd A_lidar_independent = (copts_.psd_audit_en && want_records) ? A_lidar_raw : Eigen::MatrixXd();
-      if (want_records)
+      if (want_correction)
         pose_control_lidar_corr_stats = applyPoseControlLidarCorrelationCorrection(
             lidar_records, copts_.pose_control_lidar_correlation, A_lidar_raw, b_lidar_raw);
-      if (copts_.psd_audit_en && want_records) {
+      if (copts_.psd_audit_en && want_correction) {
         std::map<std::string, std::string> lcdkv = {
           {"trace_A_independent", std::to_string(A_lidar_independent.trace())},
           {"trace_A_corrected", std::to_string(A_lidar_raw.trace())},
@@ -1454,7 +1462,8 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           {"frobenius_diff", std::to_string((A_lidar_independent - A_lidar_raw).norm())},
         };
         emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "lidar_correlation_diff", voxel_map_->frame_idx_, -1, lcdkv);
-
+      }
+      if (copts_.psd_audit_en && want_records) {
         // items 8/12: a SAMPLED subset of per-point diagnostics (not all M
         // points -- item 8's own "for REPRESENTATIVE LiDAR points"), reusing
         // the already-built lidar_records (Jrow_z IS H_i, the 1 x dim(z)
