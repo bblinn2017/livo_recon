@@ -245,8 +245,10 @@ static const std::vector<std::string>& fullDiagColumns()
     "a_meas_x","a_meas_y","a_meas_z","a_spline_body_x","a_spline_body_y","a_spline_body_z",
     "omega_meas_x","omega_meas_y","omega_meas_z","omega_spline_x","omega_spline_y","omega_spline_z",
     "bg_x","bg_y","bg_z","ba_x","ba_y","ba_z","g_x","g_y","g_z",
-    // x1_covariance item 24 addition: full P_p_x1 3x3
-    "Pp_xx","Pp_yy","Pp_zz","Pp_xy","Pp_xz","Pp_yz",
+    // x1_covariance item 24 addition: full P_p_x1 3x3; also reused by
+    // position_covariance_full (the TAIL/current-state position covariance,
+    // for real-data NEES against GT interpolated to t_abs).
+    "Pp_xx","Pp_yy","Pp_zz","Pp_xy","Pp_xz","Pp_yz","trace_Pp",
     // spline_physical_sample (item 8/29): p/v/a/omega at a labeled
     // representative time (x1 or tail), independent of LiDAR.
     "sample_label","phys_t","phys_p_x","phys_p_y","phys_p_z",
@@ -1783,6 +1785,29 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_R_post", P_T.block<3, 3>(StateGroup::idxR(), StateGroup::idxR()));
         logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_p_post", P_T.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()));
         logCovTraceStage(voxel_map_->frame_idx_, copts_.pose_control_test_id, "P_v_post", P_T.block<3, 3>(StateGroup::idxV(), StateGroup::idxV()));
+
+        // Real-data covariance-calibration diagnostic (GT is NOT read here
+        // -- matched post-hoc against t_abs, mirroring the x1_covariance
+        // row's own documented convention): the corrected physical position
+        // covariance actually reported for the CURRENT state (state_->pos(),
+        // what odometry.txt/ATE scoring uses), full 3x3 entries (not just
+        // trace) so position NEES can be computed against interpolated GT.
+        // t_abs is the spline's own t1 -- confirmed to be the scan's real
+        // absolute (bag-epoch) timestamp, the SAME clock ImuSample.t and GT
+        // timestamps use (NOT emitFullDiagRow's own "timestamp" column,
+        // which records wall-clock write time).
+        {
+          const Eigen::Matrix3d P_p_tail = P_T.block<3, 3>(StateGroup::idxP(), StateGroup::idxP());
+          const V3D p_final = state_->pos();
+          std::map<std::string, std::string> pcvkv = {
+            {"t_abs", std::to_string(t1)},
+            {"p_x", std::to_string(p_final.x())}, {"p_y", std::to_string(p_final.y())}, {"p_z", std::to_string(p_final.z())},
+            {"Pp_xx", std::to_string(P_p_tail(0, 0))}, {"Pp_yy", std::to_string(P_p_tail(1, 1))}, {"Pp_zz", std::to_string(P_p_tail(2, 2))},
+            {"Pp_xy", std::to_string(P_p_tail(0, 1))}, {"Pp_xz", std::to_string(P_p_tail(0, 2))}, {"Pp_yz", std::to_string(P_p_tail(1, 2))},
+            {"trace_Pp", std::to_string(P_p_tail.trace())},
+          };
+          emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "position_covariance_full", voxel_map_->frame_idx_, -1, pcvkv);
+        }
       }
 
       // ====================================================================
