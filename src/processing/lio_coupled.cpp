@@ -1617,19 +1617,38 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "weak_mode", voxel_map_->frame_idx_, m, wkv);
         }
 
-        // Normalized-spline-time covariance (0/0.25/0.5/0.75/1.0), mapping
-        // the SAME P_eta_post block (already computed above) through the
-        // physical Jacobians at each fraction.
-        const Eigen::MatrixXd P_eta_post_for_cov = Sigma_full_post.block(9, 9, dEta, dEta);
+        // Normalized-spline-time covariance (0/0.25/0.5/0.75/1.0). ITEM 3
+        // FIX (2026-09-25): the physical state at any t depends on BOTH the
+        // fixed-head STATE x0 (uncertain in the joint prior, even though
+        // its MEAN is held fixed by the conditional solve -- see this
+        // file's own "conditional mean vs marginal covariance" derivation
+        // comment near coupled_pose_control_sigma_full_prior_'s definition)
+        // and the free eta coordinates. The previous version of this block
+        // used ONLY dQ_deta * P_eta * dQ_deta^T, which silently dropped the
+        // head's own covariance and the head/eta cross-covariance --
+        // wrong in general, and maximally wrong at t==t0 (frac==0.0), where
+        // dQ_deta is exactly zero by construction (the head is fixed there)
+        // so the old code reported P_position(t0)=0 regardless of how
+        // uncertain x0 actually is. Sigma_full_post's leading (9+dEta) x
+        // (9+dEta) block already carries x0's own marginal covariance and
+        // its cross-covariance with eta (it is the SAME joint posterior
+        // Sigma_full_post used for the tail-state M_full mapping above) --
+        // poseControlPhysicalCovariance() applies the corresponding
+        // J_full=[dQ_dhead,dQ_deta] mapping so ALL uncertain contributors
+        // are included, exactly mirroring the tail-state recipe.
+        const Eigen::MatrixXd Sigma_head_eta_post = Sigma_full_post.topLeftCorner(9 + dEta, 9 + dEta);
         for (const double frac : {0.0, 0.25, 0.5, 0.75, 1.0}) {
           const double t_s = spline.t0() + frac * (spline.t1() - spline.t0());
           const auto ps = evaluatePoseControlPhysicalSample(spline, layout, hns, t_s, coupled_pose_control_g_trial_);
-          const Eigen::Matrix3d P_p_s = ps.dp_deta * P_eta_post_for_cov * ps.dp_deta.transpose();
-          const Eigen::Matrix3d P_v_s = ps.dv_deta * P_eta_post_for_cov * ps.dv_deta.transpose();
-          const Eigen::Matrix3d P_a_s = ps.da_deta * P_eta_post_for_cov * ps.da_deta.transpose();
-          const Eigen::Matrix3d P_theta_s = ps.dtheta_deta * P_eta_post_for_cov * ps.dtheta_deta.transpose();
-          const Eigen::Matrix3d P_omega_s = ps.domega_deta * P_eta_post_for_cov * ps.domega_deta.transpose();
-          const Eigen::Matrix3d P_pv_cross_s = ps.dp_deta * P_eta_post_for_cov * ps.dv_deta.transpose();
+          const Eigen::Matrix3d P_p_s = poseControlPhysicalCovariance(ps.dp_dhead, ps.dp_deta, Sigma_head_eta_post);
+          const Eigen::Matrix3d P_v_s = poseControlPhysicalCovariance(ps.dv_dhead, ps.dv_deta, Sigma_head_eta_post);
+          const Eigen::Matrix3d P_a_s = poseControlPhysicalCovariance(ps.da_dhead, ps.da_deta, Sigma_head_eta_post);
+          const Eigen::Matrix3d P_theta_s = poseControlPhysicalCovariance(ps.dtheta_dhead, ps.dtheta_deta, Sigma_head_eta_post);
+          const Eigen::Matrix3d P_omega_s = poseControlPhysicalCovariance(ps.domega_dhead, ps.domega_deta, Sigma_head_eta_post);
+          Eigen::MatrixXd J_p_full(3, 9 + dEta), J_v_full(3, 9 + dEta);
+          J_p_full << ps.dp_dhead, ps.dp_deta;
+          J_v_full << ps.dv_dhead, ps.dv_deta;
+          const Eigen::Matrix3d P_pv_cross_s = J_p_full * Sigma_head_eta_post * J_v_full.transpose();
           Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es_p_s(P_p_s);
           std::map<std::string, std::string> ckv = {
             {"normalized_t", std::to_string(frac)}, {"t_rel", std::to_string(t_s)},

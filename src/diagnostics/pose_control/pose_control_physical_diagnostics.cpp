@@ -64,7 +64,63 @@ PoseControlPhysicalSample evaluatePoseControlPhysicalSample(
   out.domega_deta = domega_raw * hns.Z;
   out.dtheta_deta = dtheta_raw * hns.Z;
   (void)gravity;  // a(t) here is the WORLD-frame spline acceleration itself (gravity not subtracted) -- see e_acc's own convention for the specific-force version.
+
+  // Head-state (x0=[dtheta0,dp0,dv0]) Jacobians -- see the header comment
+  // on dQ_dhead for which quantities are/aren't sensitive to which part of
+  // x0. Reuses the SAME head-sensitivity primitives already used by
+  // pose_control_imu_prior_builder.cpp's Jhead and lio_coupled.cpp's
+  // J_h_tail, so this is not a new derivation -- just the same primitives
+  // applied to p/v/a/theta/omega instead of to an IMU residual or the
+  // tail state.
+  out.dp_dhead = Eigen::MatrixXd::Zero(3, 9);
+  out.dv_dhead = Eigen::MatrixXd::Zero(3, 9);
+  out.da_dhead = Eigen::MatrixXd::Zero(3, 9);
+  out.domega_dhead = Eigen::MatrixXd::Zero(3, 9);
+  out.dtheta_dhead = Eigen::MatrixXd::Zero(3, 9);
+
+  out.dtheta_dhead.block<3, 3>(0, 0) = poseControlHeadRotJacobian(spline, t);
+
+  {
+    const PoseControlHeadPosSensitivity hs = poseControlHeadPosSensitivity(spline);
+    M3D dp_dp0, dp_dv0, dv_dp0, dv_dv0;
+    poseControlHeadPosJacobians(spline, hs, t, dp_dp0, dp_dv0, dv_dp0, dv_dv0);
+    out.dp_dhead.block<3, 3>(0, 3) = dp_dp0;
+    out.dp_dhead.block<3, 3>(0, 6) = dp_dv0;
+    out.dv_dhead.block<3, 3>(0, 3) = dv_dp0;
+    out.dv_dhead.block<3, 3>(0, 6) = dv_dv0;
+
+    // da_world/dp0, da_world/dv0: same Minv/locality structure as p(t)/
+    // v(t) above (only cp[0..2] carry any p0/v0 sensitivity at all), one
+    // more derivative -- dAccDcp instead of dPosDcp/dVelDcp. World frame,
+    // no R^T factor (unlike the IMU prior builder's e_acc, which is a
+    // BODY-frame residual) since a(t) itself is reported in world frame,
+    // matching out.a's own convention above.
+    M3D da_dp0 = M3D::Zero(), da_dv0 = M3D::Zero();
+    for (int k = 0; k < 4; ++k) {
+      const int abs_k = jac.s + k;
+      if (abs_k >= 3) continue;
+      const double m0 = hs.Minv(abs_k, 0), m1 = hs.Minv(abs_k, 1);
+      da_dp0 += m0 * PoseControlSpline::dAccDcp(jac, k);
+      da_dv0 += m1 * PoseControlSpline::dAccDcp(jac, k);
+    }
+    out.da_dhead.block<3, 3>(0, 3) = da_dp0;
+    out.da_dhead.block<3, 3>(0, 6) = da_dv0;
+  }
+  // domega_dhead stays exactly zero -- see the header comment.
+
   return out;
+}
+
+Eigen::Matrix3d poseControlPhysicalCovariance(
+    const Eigen::MatrixXd& dQ_dhead, const Eigen::MatrixXd& dQ_deta,
+    const Eigen::MatrixXd& Sigma_head_eta)
+{
+  const int dEta = dQ_deta.cols();
+  Eigen::MatrixXd J_full(3, 9 + dEta);
+  J_full.leftCols(9) = dQ_dhead;
+  J_full.rightCols(dEta) = dQ_deta;
+  const Eigen::Matrix3d P = J_full * Sigma_head_eta * J_full.transpose();
+  return 0.5 * (P + P.transpose());
 }
 
 namespace

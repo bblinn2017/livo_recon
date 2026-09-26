@@ -70,18 +70,4 @@ Eigen::MatrixXd generalPseudoInverse(const Eigen::MatrixXd& M, double rel_thresh
   return out;
 }
 
-bool schurComplementFreeCovariance(
-    const Eigen::MatrixXd& A_hh, const Eigen::MatrixXd& A_hf,
-    const Eigen::MatrixXd& A_ff, Eigen::MatrixXd& P_free,
-    double rel_thresh)
-{
-  const Eigen::MatrixXd A_hh_pinv = generalPseudoInverse(A_hh, rel_thresh);
-  const Eigen::MatrixXd A_hh_inv_A_hf = A_hh_pinv * A_hf;
-  if (!A_hh_inv_A_hf.allFinite()) return false;
-
-  const Eigen::MatrixXd A_ff_schur = A_ff - A_hf.transpose() * A_hh_inv_A_hf;
-  P_free = generalPseudoInverse(A_ff_schur, rel_thresh);
-  return P_free.allFinite();
-}
-
 }  // namespace livo_recon

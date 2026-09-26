@@ -53,11 +53,50 @@ struct PoseControlPhysicalSample
   // others (distinct from domega_deta, which is the angular-RATE
   // sensitivity); attitude covariance at t is J_theta*P_eta*J_theta^T.
   Eigen::MatrixXd dp_deta, dv_deta, da_deta, domega_deta, dtheta_deta;
+
+  // 2026-09-25 covariance-reformulation fix (item 3 of the campaign-2
+  // audit): each dQ_dhead is 3x9, w.r.t. the fixed-head STATE x0=
+  // [dtheta0(3),dp0(3),dv0(3)] used elsewhere in this file's own
+  // head_block/M_full machinery (see pose_control_imu_prior_builder.cpp's
+  // Jhead and lio_coupled.cpp's J_h_tail). The mean solve holds x0 at its
+  // fixed value (conditional mean, eta is the only free variable), but x0
+  // itself is UNCERTAIN in the joint prior Sigma_full=[x0;eta;sT] -- any
+  // physical quantity y(t) that depends on x0 therefore needs THIS
+  // Jacobian too when mapping Sigma_full (not just Sigma_eta) into
+  // physical covariance, or the propagated uncertainty silently omits the
+  // head's own contribution (most visibly wrong at t==t0, where dQ_deta is
+  // exactly zero by construction -- the head is fixed there -- so omitting
+  // dQ_dhead there wrongly reports P_y(t0)=0 regardless of how uncertain
+  // x0 actually is).
+  //
+  // Translation (p/v/a) depends on p0/v0 but NOT theta0 (the position and
+  // attitude splines are independently parameterized); rotation (theta)
+  // depends on theta0 but NOT p0/v0; angular velocity omega(t) is exactly
+  // INVARIANT to theta0 (a global left-rotation of the whole attitude
+  // trajectory does not change its own body-frame rate) and has no p0/v0
+  // dependence either -- domega_dhead is therefore always identically
+  // zero, kept as an explicit zero matrix (not omitted) so callers never
+  // have to special-case its absence.
+  Eigen::MatrixXd dp_dhead, dv_dhead, da_dhead, domega_dhead, dtheta_dhead;
 };
 
 PoseControlPhysicalSample evaluatePoseControlPhysicalSample(
     const PoseControlSpline& spline, const PoseControlFreeLayout& layout,
     const PoseControlHeadNullspace& hns, double t, const V3D& gravity);
+
+// Item 3: full physical covariance P_y(t) = J_full * Sigma_full_9plus *
+// J_full^T, where J_full = [dQ_dhead (3x9), dQ_deta (3xdEta)] and
+// Sigma_full_9plus is the LEADING (9+dEta) x (9+dEta) block of the joint
+// [x0;eta;sT] covariance (x0/eta only -- sT's contribution to a purely
+// kinematic quantity like p/v/a/theta/omega is zero, since these physical
+// quantities have no direct bg/ba/g dependence; a quantity that DOES
+// depend on bias/gravity, e.g. the IMU residual itself, needs its own
+// wider Jacobian and is handled separately, not through this helper).
+// dQ_deta/dQ_dhead must already be the two blocks for the SAME physical
+// quantity Q (e.g. both position, or both velocity).
+Eigen::Matrix3d poseControlPhysicalCovariance(
+    const Eigen::MatrixXd& dQ_dhead, const Eigen::MatrixXd& dQ_deta,
+    const Eigen::MatrixXd& Sigma_head_eta);
 
 // One IMU sample's full residual breakdown against the converged spline --
 // mirrors computePoseControlImuResidual()'s per-sample loop body but

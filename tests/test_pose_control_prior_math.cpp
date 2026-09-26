@@ -425,6 +425,62 @@ static void testStructuralVsNumericalNullspace(std::mt19937& rng) {
   }
 }
 
+// ============================================================================
+// Item 13 (remaining gap): generalPseudoInverse() must be STABLE under
+// uniform scaling of the information matrix -- scaling M by a positive
+// constant c scales every eigenvalue (and the relative threshold, which is
+// itself lambda_max-relative) by c identically, so the retained/discarded
+// eigen-direction SET must be unchanged and the output must scale by
+// exactly 1/c (the textbook pseudo-inverse scaling law). Also spans
+// eigenvalues across several orders of magnitude in one matrix (1e-6 to
+// 1e6) to confirm the relative threshold classifies each correctly
+// regardless of the matrix's own overall scale.
+// ============================================================================
+static void testPseudoInverseUniformScalingInvariance(std::mt19937& rng) {
+  printf("\n-- item 13: generalPseudoInverse stability under uniform information-matrix scaling --\n");
+  const int n = 6;
+  Eigen::MatrixXd V = randomSpd(n, rng, 1.0);
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es_basis(V);
+  const Eigen::MatrixXd Q = es_basis.eigenvectors();
+  // Deliberately kept well clear of the rel_thresh=1e-9 boundary (relative
+  // to lambda_max=1e6, the absolute cutoff is 1e-3) in BOTH directions --
+  // 1e-8 and 1e-5 are unambiguously below it, 1e-1 through 1e6 unambiguously
+  // above -- so classification is not sensitive to eigendecomposition
+  // floating-point noise at the boundary itself (a value planted exactly
+  // at the cutoff would make classification -- and hence this scaling-
+  // invariance check -- spuriously flip between runs, which is a test
+  // hazard, not a production behavior worth asserting on).
+  Eigen::VectorXd eigs(n);
+  eigs << 1e-8, 1e-5, 1e-1, 1.0, 1e3, 1e6;
+  const Eigen::MatrixXd M = Q * eigs.asDiagonal() * Q.transpose();
+
+  const Eigen::MatrixXd P_base = generalPseudoInverse(M, 1e-9);
+  for (double c : {1e-6, 1e-3, 1.0, 1e3, 1e9}) {
+    const Eigen::MatrixXd P_scaled = generalPseudoInverse(c * M, 1e-9);
+    const Eigen::MatrixXd P_expected = P_base / c;
+    const double rel = (P_scaled - P_expected).norm() / std::max(1e-300, P_expected.norm());
+    check(rel < 1e-8, "generalPseudoInverse(c*M) == generalPseudoInverse(M)/c for a wide range of c", rel);
+  }
+
+  // Every one of the 6 planted eigenvalues here is well above ANY reasonable
+  // relative threshold (1e-9 * 1e6 = 1e-3, and the smallest planted
+  // eigenvalue is 1e-6 < 1e-3 -- so eigs(0)=1e-6 IS expected to be
+  // discarded at this threshold, exercising the boundary directly) --
+  // confirm each retained direction gets exactly 1/lambda and the one
+  // below threshold gets exactly zero, all in the SAME matrix.
+  for (int k = 0; k < n; ++k) {
+    const Eigen::VectorXd v = Q.col(k);
+    const double cov_k = (v.transpose() * P_base * v)(0);
+    const bool should_retain = eigs(k) > 1e-9 * eigs.maxCoeff();
+    if (should_retain) {
+      const double rel = std::abs(cov_k - 1.0 / eigs(k)) / (1.0 / eigs(k));
+      check(rel < 1e-6, "retained eigen-direction gets exactly 1/lambda", rel);
+    } else {
+      check(cov_k < 1e-6, "discarded eigen-direction (below relative threshold) gets exactly zero", cov_k);
+    }
+  }
+}
+
 int main() {
   printf("pose_control production prior/covariance/LiDAR-correlation math validation\n");
   std::mt19937 rng(271828);
@@ -433,6 +489,7 @@ int main() {
   testEkfInformationEquivalence(rng);
   testCorrelatedLidarConsistency(rng);
   testStructuralVsNumericalNullspace(rng);
+  testPseudoInverseUniformScalingInvariance(rng);
   printf("\n%s (%d failure%s)\n", g_fail == 0 ? "ALL PASS" : "SOME FAILED",
          g_fail, g_fail == 1 ? "" : "s");
   return g_fail == 0 ? 0 : 1;

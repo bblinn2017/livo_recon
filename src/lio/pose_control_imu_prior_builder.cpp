@@ -55,6 +55,12 @@ PoseControlContinuousImuPriorStats buildPoseControlContinuousImuPrior(
   stats.n_samples = n;
   if (n == 0) return stats;
 
+  // R-vs-Q semantics (item 10, see LioProcCoupledOptions::pose_imu_var_acc's
+  // own header comment): var_acc/var_gyr here are used as a MEASUREMENT
+  // variance R (Wdiag=1/R below), not a propagated Q -- they coincide with
+  // the continuous process-noise density (Q_density = R*dt_imu) only
+  // because this model treats each accelerometer/gyro sample as a direct
+  // noisy observation of the process's own driving noise term.
   const Eigen::Matrix<double, 6, 1> Wdiag = (Eigen::Matrix<double, 6, 1>() <<
       1.0 / std::max(var_acc.x(), 1e-12), 1.0 / std::max(var_acc.y(), 1e-12), 1.0 / std::max(var_acc.z(), 1e-12),
       1.0 / std::max(var_gyr.x(), 1e-12), 1.0 / std::max(var_gyr.y(), 1e-12), 1.0 / std::max(var_gyr.z(), 1e-12)).finished();

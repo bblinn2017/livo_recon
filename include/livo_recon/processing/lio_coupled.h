@@ -163,6 +163,31 @@ struct LioProcCoupledOptions
   // state.cpp reads -- this is a second, independent read of the same
   // param server entry, not a new key). Default 1e-4/1e-4 matches
   // state.cpp's own paramWarn() default exactly.
+  // 2026-09-25 R-vs-Q SEMANTICS (item 10 of the covariance-reformulation
+  // audit): these two are, LITERALLY in the code, an IMU MEASUREMENT
+  // variance R -- buildPoseControlContinuousImuPrior() uses them exactly as
+  // Wdiag=1/var_{acc,gyr}, the weight on the residual r=a_spline_body(t)-
+  // a_meas(t) (a "collocation" residual comparing the spline's own modeled
+  // acceleration/angular-rate against each raw IMU sample), NOT as a
+  // propagated process-noise covariance Q integrated forward through a
+  // transition matrix. Renaming these fields was avoided (config
+  // compatibility -- state/cov/acc, state/cov/gyr are shared, long-lived
+  // keys read elsewhere too), so the semantic clarification lives here
+  // instead: because the accelerometer/gyro sample IS treated as a direct
+  // noisy observation of the process's own continuous driving noise term
+  // (this is the "white-noise-acceleration" model docs/tests elsewhere in
+  // this file use, e.g. testFullNoiseDensityRefinement/
+  // physical_trajectory_reference.h), R and Q are mathematically THE SAME
+  // quantity here up to the sample-spacing conversion Q_density = R * dt_imu
+  // (continuous spectral density = discrete per-sample variance / sample
+  // rate) -- NOT because R and Q are being conflated by mistake, but
+  // because this specific model's measurement noise and its process noise
+  // are one and the same physical quantity (the true accelerometer/gyro
+  // noise). Scaling this value therefore genuinely scales the physical
+  // process noise density seen by the trajectory prior (this is exactly
+  // what the first real-data campaign's Q_scale=0.5/2.0 runs did, and why
+  // that was a meaningful process-noise sweep, not merely a residual-weight
+  // sweep with no bearing on reported covariance).
   double pose_imu_var_acc = 1e-4;
   double pose_imu_var_gyr = 1e-4;
 

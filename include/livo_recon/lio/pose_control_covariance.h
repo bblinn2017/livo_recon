@@ -92,13 +92,4 @@ bool covarianceInformationUpdate(
 // does).
 Eigen::MatrixXd generalPseudoInverse(const Eigen::MatrixXd& M, double rel_thresh);
 
-// Superseded by covarianceInformationUpdate() above -- kept only because
-// pose_control_covariance's own unit test (test_pose_control_covariance.cpp)
-// still exercises it as a cross-check of the OLD mechanism's own ground-
-// truth property; not called anywhere in the live estimator any more.
-bool schurComplementFreeCovariance(
-    const Eigen::MatrixXd& A_hh, const Eigen::MatrixXd& A_hf,
-    const Eigen::MatrixXd& A_ff, Eigen::MatrixXd& P_free,
-    double rel_thresh = 1e-9);
-
 }  // namespace livo_recon
