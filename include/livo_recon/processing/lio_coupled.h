@@ -770,6 +770,17 @@ private:
   PoseControlFreeLayout coupled_pose_control_layout_;
   PoseControlHeadNullspace coupled_pose_control_hns_;
   Eigen::VectorXd coupled_pose_control_eta_;
+  // pose_control_tail_weak_mode_validation task, Phase 1: this scan's own
+  // eta at scan-start (frozen right after the seed projection, BEFORE the
+  // GN loop runs), so the weak-mode diagnostics below can compute this
+  // scan's REALIZED cumulative correction (coupled_pose_control_eta_ at
+  // convergence, minus this) and project it onto each weak eigenmode --
+  // "how many sigma did the mean solver actually move along this
+  // direction," as distinct from the theoretical single-step g_i/lambda_i
+  // (which the existing g_lidar/g_imu diagnostics evaluate only AT
+  // convergence, where they trivially cancel by first-order optimality --
+  // see the mode_gradient block's own comment).
+  Eigen::VectorXd coupled_pose_control_eta_scan_start_;
   // Tail trial state (item 3/4 of the correction): tail_trial is the ONE
   // coherent current non-trajectory tail state, updated by INCREMENT
   // (delta_bg/ba/g solved by the GN step) every iteration -- never treated

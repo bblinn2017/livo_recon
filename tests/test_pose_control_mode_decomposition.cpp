@@ -143,12 +143,53 @@ void testFactorGradientDisagreementScenarios()
   }
 }
 
+// pose_control_tail_weak_mode_validation task, Phase 1: sigma-normalized
+// realized-update computation, verified with a KNOWN synthetic weak-mode
+// setup (diagonal total information, standard-basis eigenvectors) so the
+// correct sigma/update_sigma are known exactly.
+void testSigmaNormalizedUpdateSynthetic()
+{
+  // Mode 0 is the WEAK direction (eigenvalue 1e-4); modes 1-3 well-conditioned.
+  const double lambda_weak = 1e-4;
+  Eigen::VectorXd delta = Eigen::VectorXd::Zero(4);
+  delta(0) = 0.5;   // a large realized step along the weak direction
+  delta(1) = 1e-6;  // negligible step along a well-conditioned direction
+
+  auto sigma_of = [](double lambda) { return 1.0 / std::sqrt(lambda); };
+  auto update_sigma_of = [](double delta_i, double lambda) { return std::abs(delta_i) * std::sqrt(lambda); };
+
+  const double sigma_weak = sigma_of(lambda_weak);
+  const double update_sigma_weak = update_sigma_of(delta(0), lambda_weak);
+  check(std::abs(sigma_weak - 100.0) < 1e-9, "sigma_i = 1/sqrt(lambda_i) matches exact value for lambda=1e-4 (sigma=100)", sigma_weak, 100.0);
+  // update_sigma = |delta|*sqrt(lambda) = 0.5*sqrt(1e-4) = 0.5*0.01 = 0.005 --
+  // i.e. a physically LARGE raw delta (0.5) along a very weak mode (sigma=100)
+  // is actually a SMALL number of standard deviations (0.005 sigma): the
+  // large raw step is well within what the mode's own huge uncertainty
+  // already allows, NOT evidence of an enormous/anomalous correction.
+  check(std::abs(update_sigma_weak - 0.005) < 1e-9, "(key sanity) a 'large' raw delta=0.5 along a weak mode (sigma=100) is only 0.005 sigma -- NOT anomalous by itself", update_sigma_weak);
+
+  // Now the same lambda but with the update itself ALSO scaled up so it
+  // genuinely exceeds several sigma -- confirms update_sigma correctly
+  // flags a genuinely large move too, not just always reporting "small".
+  const double delta_large = 300.0;   // 3x the mode's own sigma (100)
+  const double update_sigma_large = update_sigma_of(delta_large, lambda_weak);
+  check(update_sigma_large > 2.9 && update_sigma_large < 3.1, "a delta of 3*sigma correctly reports update_sigma ~= 3.0", update_sigma_large, 3.0);
+
+  // Irrelevant-mode check: mode 1's delta (1e-6) is negligible relative to
+  // its own (well-conditioned, sigma~1) uncertainty.
+  const double sigma_1 = sigma_of(1.0);
+  const double update_sigma_1 = update_sigma_of(delta(1), 1.0);
+  check(update_sigma_1 < 1e-5, "a well-conditioned mode's negligible realized delta reports a negligible update_sigma", update_sigma_1);
+  (void)sigma_1;
+}
+
 }  // namespace
 
 int main()
 {
   std::printf("Pose-control weak-mode information/gradient decomposition synthetic validation suite\n");
   testInformationDecompositionIdentity();
+  testSigmaNormalizedUpdateSynthetic();
   testPureLidarAndPureImuModesClassifiedCorrectly();
   testWeakInBothFactors();
   testFactorGradientDisagreementScenarios();

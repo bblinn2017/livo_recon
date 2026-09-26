@@ -155,7 +155,7 @@ static const std::vector<std::string>& fullDiagColumns()
     "imu_var_gyr_x","imu_var_gyr_y","imu_var_gyr_z","covariance_pseudoinverse_threshold",
     "mean_pseudoinverse_threshold","p0_scale_config",
     // scan_summary
-    "E_lidar","E_total","num_lidar_points","num_imu_samples","gn_iterations",
+    "E_lidar","E_total","num_lidar_points","num_imu_samples","gn_iterations","total_delta_eta_norm",
     "final_delta_eta_norm","final_delta_bg_norm","final_delta_ba_norm","final_delta_g_norm",
     // gn_iteration
     "delta_eta_norm","delta_bg_norm","delta_ba_norm","delta_g_norm",
@@ -281,10 +281,14 @@ static const std::vector<std::string>& fullDiagColumns()
     "lambda_total","I_lidar","I_imu","I_other","I_sum_check","abs_err_vs_lambda_total","frac_lidar","frac_imu",
     // mode_gradient (Phase 9: per-mode factor-gradient disagreement)
     "g_lidar","g_imu","mag_lidar","mag_imu","same_sign","step_lidar","step_imu","disagreement_strength",
+    // mode_update (pose_control_tail_weak_mode_validation, Phase 1)
+    "lambda","sigma","delta","update_sigma",
     // covariance (normalized spline time)
     "normalized_t","t_rel","trace_P_position","trace_P_velocity","trace_P_acceleration",
     "trace_P_attitude","trace_P_angular_velocity","trace_P_position_velocity_cross",
     "min_eig_P_position","max_eig_P_position",
+    // tail-authority shape-vs-tail deltas (pose_control_tail_weak_mode_validation, Phase 3/4)
+    "delta_p_shape_norm","delta_theta_shape_norm","delta_v_shape_norm","delta_omega_shape_norm",
     // bias
     "trace_P_ba","trace_P_bg","trace_P_g","norm_P_eta_ba_cross","norm_P_eta_bg_cross",
   };
@@ -922,6 +926,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       coupled_pose_control_eta_ =
           coupled_pose_control_hns_.Z.transpose() * (c_initial - coupled_pose_control_hns_.c_particular);
       coupled_pose_control_eta_imu_ = coupled_pose_control_eta_;  // item 16: frozen scan-start seed
+      coupled_pose_control_eta_scan_start_ = coupled_pose_control_eta_;  // Phase 1: for the realized-update-per-mode diagnostic below
       // Rebuild the spline from the PROJECTED eta (not the raw guess) so
       // the head constraints hold exactly from iteration 0, not just
       // approximately from the initial guess.
@@ -1634,6 +1639,17 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         const double t_probe_mode = 0.5 * (spline.t0() + spline.t1());
         const auto phys_mode = evaluatePoseControlPhysicalSample(spline, layout, hns, t_probe_mode, coupled_pose_control_g_trial_);
         const int n_weak = std::min(5, static_cast<int>(ev_total.size()));
+        // Phase 1 (pose_control_tail_weak_mode_validation): this scan's
+        // REALIZED cumulative eta correction (converged minus scan-start
+        // seed), zero-padded into the full z=[eta;sT] space -- sT's own
+        // realized delta is not included here (a documented simplification;
+        // the weak modes this diagnostic targets are heavily eta/trajectory-
+        // shape-dominated, per their own position/velocity/acceleration/
+        // attitude/angular_velocity contribution fields above, with near-zero
+        // bias_gravity_contribution -- see the report for the concrete
+        // per-mode numbers that justify this).
+        Eigen::VectorXd delta_z_realized_this_scan = Eigen::VectorXd::Zero(dimZ);
+        delta_z_realized_this_scan.head(dEta) = coupled_pose_control_eta_ - coupled_pose_control_eta_scan_start_;
         for (int m = 0; m < n_weak; ++m) {
           const Eigen::VectorXd v_eta = es_total.eigenvectors().col(m).head(dEta);
           const double bias_gravity_contribution = (dST > 0)
@@ -1737,6 +1753,32 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
             };
             emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "mode_gradient", voxel_map_->frame_idx_, m, mgkv);
           }
+
+          // ==================================================================
+          // Phase 1 (pose_control_tail_weak_mode_validation): sigma-normalized
+          // REALIZED update along this weak mode. sigma_i=1/sqrt(lambda_i) is
+          // this mode's own posterior standard deviation; delta_i is the
+          // ACTUAL cumulative GN correction this scan produced, projected onto
+          // v_i (NOT the theoretical single-step g_i/lambda_i using the
+          // AT-CONVERGENCE gradient above, which trivially satisfies
+          // g_lidar+g_imu~=0 by first-order optimality and so cannot itself
+          // explain a large realized step -- see mode_gradient's own comment).
+          // update_sigma_i = |delta_i|/sigma_i = |delta_i|*sqrt(lambda_i) is
+          // how many posterior standard deviations this scan actually moved
+          // along this direction.
+          // ==================================================================
+          {
+            const double lambda_i = ev_total(m);
+            const double sigma_i = (lambda_i > 1e-300) ? 1.0 / std::sqrt(lambda_i) : std::numeric_limits<double>::infinity();
+            const double delta_i = (v_full.transpose() * delta_z_realized_this_scan)(0);
+            const double update_sigma_i = std::abs(delta_i) * std::sqrt(std::max(lambda_i, 0.0));
+            std::map<std::string, std::string> mukv = {
+              {"mode_index", std::to_string(m)}, {"lambda", std::to_string(lambda_i)},
+              {"sigma", std::to_string(sigma_i)}, {"delta", std::to_string(delta_i)},
+              {"update_sigma", std::to_string(update_sigma_i)},
+            };
+            emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "mode_update", voxel_map_->frame_idx_, m, mukv);
+          }
         }
 
         // Normalized-spline-time covariance (0/0.25/0.5/0.75/1.0). ITEM 3
@@ -1759,6 +1801,12 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         // J_full=[dQ_dhead,dQ_deta] mapping so ALL uncertain contributors
         // are included, exactly mirroring the tail-state recipe.
         const Eigen::MatrixXd Sigma_head_eta_post = Sigma_full_post.topLeftCorner(9 + dEta, 9 + dEta);
+        // Phase 3/4 (pose_control_tail_weak_mode_validation): "tail
+        // authority" -- how much of this scan's REALIZED correction lands
+        // on the tail (frac=1.0) vs is spent reshaping the interior spline
+        // (frac<1.0). Physical state is affine in eta, so the delta at any
+        // t is exactly dp_deta(t)*delta_eta_realized -- no new solve needed.
+        const Eigen::VectorXd delta_eta_realized_for_shape = coupled_pose_control_eta_ - coupled_pose_control_eta_scan_start_;
         for (const double frac : {0.0, 0.25, 0.5, 0.75, 1.0}) {
           const double t_s = spline.t0() + frac * (spline.t1() - spline.t0());
           const auto ps = evaluatePoseControlPhysicalSample(spline, layout, hns, t_s, coupled_pose_control_g_trial_);
@@ -1772,6 +1820,10 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           J_v_full << ps.dv_dhead, ps.dv_deta;
           const Eigen::Matrix3d P_pv_cross_s = J_p_full * Sigma_head_eta_post * J_v_full.transpose();
           Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es_p_s(P_p_s);
+          const Eigen::Vector3d delta_p_shape = ps.dp_deta * delta_eta_realized_for_shape;
+          const Eigen::Vector3d delta_theta_shape = ps.dtheta_deta * delta_eta_realized_for_shape;
+          const Eigen::Vector3d delta_v_shape = ps.dv_deta * delta_eta_realized_for_shape;
+          const Eigen::Vector3d delta_omega_shape = ps.domega_deta * delta_eta_realized_for_shape;
           std::map<std::string, std::string> ckv = {
             {"normalized_t", std::to_string(frac)}, {"t_rel", std::to_string(t_s)},
             {"trace_P_position", std::to_string(P_p_s.trace())},
@@ -1782,6 +1834,10 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
             {"trace_P_position_velocity_cross", std::to_string(P_pv_cross_s.trace())},
             {"min_eig_P_position", std::to_string(es_p_s.eigenvalues().minCoeff())},
             {"max_eig_P_position", std::to_string(es_p_s.eigenvalues().maxCoeff())},
+            {"delta_p_shape_norm", std::to_string(delta_p_shape.norm())},
+            {"delta_theta_shape_norm", std::to_string(delta_theta_shape.norm())},
+            {"delta_v_shape_norm", std::to_string(delta_v_shape.norm())},
+            {"delta_omega_shape_norm", std::to_string(delta_omega_shape.norm())},
           };
           emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "covariance", voxel_map_->frame_idx_, -1, ckv);
         }
@@ -2475,9 +2531,16 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     }
 
     if (copts_.psd_audit_en) {
+      // Phase 1/3 (pose_control_tail_weak_mode_validation): this scan's
+      // total realized eta correction norm, for a quick per-scan summary
+      // alongside the per-mode "mode_update" rows' own delta/update_sigma.
+      const double total_delta_eta_norm_this_scan =
+          (coupled_pose_control_eta_.size() == coupled_pose_control_eta_scan_start_.size())
+          ? (coupled_pose_control_eta_ - coupled_pose_control_eta_scan_start_).norm() : -1.0;
       std::map<std::string, std::string> skv = {
         {"gn_iterations", std::to_string(iter)},
         {"num_lidar_points", std::to_string(residuals_.size())},
+        {"total_delta_eta_norm", std::to_string(total_delta_eta_norm_this_scan)},
       };
       emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id, "scan_summary", voxel_map_->frame_idx_, -1, skv);
     }
