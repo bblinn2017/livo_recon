@@ -367,7 +367,7 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/spline_mode",
                  copts_.spline_mode, "raw_imu", {"raw_imu", "pose", "pose_control"});
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/n_control_points", copts_.pose_control_n, 13);
-  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/q_pinv_rel_thresh", copts_.pose_control_q_pinv_rel_thresh, 1e-6);
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/q_pinv_rel_thresh", copts_.pose_control_q_pinv_rel_thresh, 1e-12);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/lidar_enable", copts_.pose_control_lidar_enable, true);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/p0_scale", copts_.pose_control_p0_scale, 1.0);
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/curvature_weight_pos", copts_.pose_control_curvature_weight_pos, 0.0);
@@ -1026,7 +1026,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
           // testStructuralVsNumericalNullspace() for the general version of
           // this exact structural-vs-numerical distinction, validated on a
           // synthetic analogue of this same pinv call.
-          coupled_pose_control_sigma_full_prior_ = generalPseudoInverse(Lambda_full_priorS, 1e-9);
+          coupled_pose_control_sigma_full_prior_ = generalPseudoInverse(Lambda_full_priorS, copts_.pose_control_q_pinv_rel_thresh);
           const Eigen::MatrixXd P_z_priorS = coupled_pose_control_sigma_full_prior_.bottomRightCorner(dimZS, dimZS);
           coupled_pose_control_lambda_prior_z_ =
               generalPseudoInverse(P_z_priorS, copts_.pose_control_q_pinv_rel_thresh);

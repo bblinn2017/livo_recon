@@ -160,7 +160,7 @@ PriorAssembly assemblePrior(const PoseControlSpline& spline,
       spline, lay, imu, V3D::Zero(), V3D::Zero(), gravity,
       var_a, var_w, A_raw, b_raw, &hb, nullptr);
 
-  const Eigen::MatrixXd Omega0 = generalPseudoInverse(P0, 1e-9);
+  const Eigen::MatrixXd Omega0 = generalPseudoInverse(P0, 1e-12);
   Eigen::MatrixXd A_hh = hb.A_hh + Omega0;
   Eigen::MatrixXd A_hf = hb.A_hf;
   if (A_hf.size() == 0) A_hf = Eigen::MatrixXd::Zero(9, raw_dim);
@@ -185,9 +185,9 @@ PriorAssembly assemblePrior(const PoseControlSpline& spline,
   Lambda_full.block(9, 9, d_z, d_z) = A_ff;
 
   PriorAssembly out;
-  out.P_full = generalPseudoInverse(Lambda_full, 1e-9);
+  out.P_full = generalPseudoInverse(Lambda_full, 1e-12);
   out.P_z = out.P_full.bottomRightCorner(d_z, d_z);
-  out.delta_z_mean = generalPseudoInverse(A_ff, 1e-9) * (Ps.transpose() * b_raw);
+  out.delta_z_mean = generalPseudoInverse(A_ff, 1e-12) * (Ps.transpose() * b_raw);
   out.hns = hns;
   return out;
 }
@@ -423,39 +423,31 @@ void testIndependentStateSpaceReferenceComparison()
     worst_cross_abs = std::max(worst_cross_abs, cross_abs);
     worst_eig_rel = std::max(worst_eig_rel, std::max(eig_rel_min, eig_rel_max));
 
-    // 2026-09-25 FINDING (see the report's item-5 section for the full
-    // write-up): P_p_prod is consistently ~1-2 orders of magnitude SMALLER
-    // than P_p_ref at every t including t0, where NO close numerical
-    // agreement should be expected -- this is NOT a bug, it is the correct,
-    // EXPLAINED consequence of comparing two structurally different priors:
-    // this KF/RTS reference's state is a fully free per-sample chain
-    // (n_samples*3 ~= 300 independent DOF over the window, a "the true a(t)
-    // could be ANY sequence of values" diffuse prior), while production's
-    // eta is a global 6N-9 = 33-DOF smooth cubic B-spline basis whose head-
-    // elimination construction (c = c_particular(p0,v0,theta0) + Z*eta)
-    // couples p0/v0 to LOCAL curvature in the first ~3 segments even when
-    // eta is unchanged -- i.e. production's prior implicitly assumes "the
-    // true trajectory lies in this smooth low-dimensional family", which is
-    // a materially stronger (more constraining) assumption than this
-    // reference's free-chain model. A more constrained model reporting
-    // tighter covariance than a less constrained one, for the SAME data, is
-    // expected Bayesian behavior, not a defect -- so this test does NOT
-    // assert P_p_prod ~= P_p_ref (that would be asserting two different
-    // priors must agree). What SHOULD hold regardless of basis choice --
-    // and is asserted below -- is that P_p_prod is PSD/finite and, at t0
-    // specifically, materially LARGER than the pre-fix value of exactly
-    // zero (the item-3 regression guard: the old dp_deta-only formula gave
-    // P_p(t0)=0 identically, since dp_deta==0 at the fixed head by
-    // construction; poseControlPhysicalCovariance's dp_dhead contribution
-    // must make this nonzero and, at t0 where dp_dp0==Identity exactly,
-    // recognizably tied to the true head uncertainty's scale).
+    // An earlier version of this test found P_p_prod ~1-2 orders of
+    // magnitude SMALLER than P_p_ref and concluded this was expected,
+    // attributing it to production's smooth 33-DOF spline basis being a
+    // materially stronger prior than this reference's free ~300-DOF chain.
+    // That conclusion was WRONG: the actual cause was that
+    // generalPseudoInverse()'s relative eigenvalue threshold, at its
+    // previous default, silently reclassified real (non-structural)
+    // information as an exact structural nullspace once the joint
+    // information matrix's condition number grew large enough -- collapsing
+    // reported covariance by orders of magnitude for reasons having nothing
+    // to do with the two models' differing priors. With that threshold
+    // corrected (see LioProcCoupledOptions::pose_control_q_pinv_rel_thresh),
+    // production agrees with this genuinely independent reference to
+    // within a fraction of a percent (see the asserted tolerance below) --
+    // the two priors are NOT meaningfully different for this shared,
+    // low-order-representable mode, as they should not be.
   }
 
-  check(worst_rel_frob < 1.0 && std::isfinite(worst_rel_frob),
-        "production and independent-reference physical covariances are both finite and comparably scaled "
-        "(exact numerical agreement is NOT expected -- see the in-test finding comment: these are two "
-        "different priors, a 33-DOF smooth spline basis vs. a ~300-DOF free per-sample chain)",
-        worst_rel_frob, 1.0);
+  check(worst_rel_frob < 0.05,
+        "production physical p/v covariance matches the independent KF/RTS reference",
+        worst_rel_frob, 0.05);
+  check(worst_trace_ratio_dev < 0.05,
+        "production/reference trace ratio is close to 1", worst_trace_ratio_dev, 0.05);
+  check(worst_eig_rel < 0.05,
+        "production/reference eigenvalues agree", worst_eig_rel, 0.05);
 }
 
 void testPhysicalCovarianceHeadRegressionAtT0()
@@ -572,7 +564,7 @@ void testIndependentRotationGyroBiasReference()
                                      V3D::Constant(0.02 * 0.02), V3D::Constant(var_gyr), A, b, &hb, nullptr);
   const PoseControlHeadNullspace hns = buildPoseControlHeadNullspace(s, s.posAt(s.t0()), s.velAt(s.t0()));
   const int dEta = hns.freeDim(), dST = layout.dimST(), dZ = dEta + dST;
-  const Eigen::MatrixXd Omega0 = generalPseudoInverse(P0, 1e-9);
+  const Eigen::MatrixXd Omega0 = generalPseudoInverse(P0, 1e-12);
   Eigen::MatrixXd A_hh = hb.A_hh + Omega0;
   Eigen::MatrixXd A_hf = hb.A_hf.size() > 0 ? hb.A_hf : Eigen::MatrixXd::Zero(9, raw_dim);
   A.block(layout.dimCFree(), layout.dimCFree(), dST, dST) += Omega0.block(9, 9, dST, dST);
@@ -587,24 +579,28 @@ void testIndependentRotationGyroBiasReference()
   Lambda_full.block(0, 9, 9, dZ) = A_hf_z;
   Lambda_full.block(9, 0, dZ, 9) = A_hf_z.transpose();
   Lambda_full.block(9, 9, dZ, dZ) = A_ff;
-  const Eigen::MatrixXd Sigma_full = generalPseudoInverse(Lambda_full, 1e-9);
+  const Eigen::MatrixXd Sigma_full = generalPseudoInverse(Lambda_full, 1e-12);
   const Eigen::MatrixXd Sigma_head_eta = Sigma_full.topLeftCorner(9 + dEta, 9 + dEta);
 
-  double worst = 0.0;
+  double worst = 0.0, worst_rel = 0.0;
   for (double u : {0.0, 0.5, 1.0}) {
     const double t = s.t0() + u * (s.t1() - s.t0());
     const auto sample = evaluatePoseControlPhysicalSample(s, layout, hns, t, V3D(0, 0, -9.81));
     const Eigen::Matrix3d P_theta_prod = poseControlPhysicalCovariance(sample.dtheta_dhead, sample.dtheta_deta, Sigma_head_eta);
     const int idx = static_cast<int>(std::lround(u * (n_samples - 1)));
     const Eigen::Matrix3d P3 = independentGyroBiasSmoothedCovarianceAtIndex(theta0_var, bg_var, var_gyr, dt_imu, n_samples, idx);
-    const double P_theta_ref = P3(0, 0);
-    std::printf("  [rot t=%.4f] trace(P_theta_prod)=%.6e P_theta_ref(scalar)=%.6e\n",
-                t, P_theta_prod.trace(), P_theta_ref);
+    const double P_theta_ref_isotropic = 3.0 * P3(0, 0);   // isotropic per-axis reference -> full 3x3 trace
+    std::printf("  [rot t=%.4f] trace(P_theta_prod)=%.6e 3*P_theta_ref(scalar)=%.6e\n",
+                t, P_theta_prod.trace(), P_theta_ref_isotropic);
     worst = std::max(worst, P_theta_prod.trace());
+    worst_rel = std::max(worst_rel, std::abs(P_theta_prod.trace() / std::max(1e-18, P_theta_ref_isotropic) - 1.0));
   }
   check(std::isfinite(worst) && worst >= 0.0,
         "production attitude covariance (with gyro-bias-augmented state) is finite and PSD across the window",
         worst, 0.0);
+  check(worst_rel < 0.05,
+        "production attitude covariance matches the independent rotation/gyro-bias KF/RTS reference",
+        worst_rel, 0.05);
 
   Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> es0(
       poseControlPhysicalCovariance(

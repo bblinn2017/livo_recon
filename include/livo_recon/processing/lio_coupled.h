@@ -55,8 +55,24 @@ struct LioProcCoupledOptions
   bool poseControlSplineBasis() const { return spline_mode == "pose_control"; }
   // Config key: estimator/coupled/pose_control/n_control_points.
   int pose_control_n = 13;
-  // Config key: estimator/coupled/pose_control/q_pinv_rel_thresh.
-  double pose_control_q_pinv_rel_thresh = 1e-6;
+  // Relative eigenvalue floor for every generalPseudoInverse() call in the
+  // pose-control estimator (joint head/eta/bias information, its
+  // marginals, and every physical-covariance Mahalanobis normalization):
+  // an eigenvalue at or below rel_thresh*lambda_max is treated as an exact
+  // structural nullspace (contributes exactly zero to the resulting
+  // covariance); above it, it is retained as a large-but-finite
+  // contribution. 1e-12 sits two orders of magnitude above IEEE double
+  // precision's own resolvable relative range for a symmetric
+  // eigendecomposition of an O(10-100)-dimensional matrix
+  // (~dim*machine_eps, machine_eps~2.2e-16), while staying far enough
+  // below any real (non-structural) information eigenvalue this estimator
+  // produces -- including as the joint information matrix's own condition
+  // number grows with representation size N -- to keep such directions
+  // classified as retained rather than discarded. See
+  // test_pose_control_full_covariance_invariance.cpp's representation-
+  // capacity-invariance test for the concrete numerical margin this
+  // threshold must satisfy. Config key: estimator/coupled/pose_control/q_pinv_rel_thresh.
+  double pose_control_q_pinv_rel_thresh = 1e-12;
   // Diagnostic-only knobs for the 2026-09-22 correction's required
   // scan-1 test suite (items 16/18) -- both default to shipping behavior
   // (LiDAR on, P0 unscaled). Config keys:
