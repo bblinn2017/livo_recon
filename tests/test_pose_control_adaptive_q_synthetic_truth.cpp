@@ -201,6 +201,232 @@ void testAdaptiveQReactsToModelErrorAtConstantTrueQ()
         mean_acf1_error, 0.3);
 }
 
+// ============================================================================
+// Lifecycle tests (item list: persistence across scans; setNominal() is not
+// an implicit per-scan reset; current scan's Q/R is unaffected by future
+// residuals; Q_estimated(k+1) affects scan k+1 not scan k; an explicit
+// reset restores nominal). Causality is already covered by
+// testAdaptiveQTracksKnownRegimeTransitions() above; the rest are new.
+// ============================================================================
+void testAdaptiveStatePersistsAcrossRepeatedSetNominalCalls()
+{
+  std::mt19937 rng(7777);
+  const double q_true = 0.02 * 0.02;
+  AdaptiveQ aq;
+  AdaptiveQOptions opts;
+  opts.enable = true; opts.beta_acc = 1.2; opts.z_rate_limit = 1.0;
+  opts.acf1_max = 1.0; opts.use_noise_floor = false; opts.warmup_frames = 5; opts.ema = 0.7;
+  aq.configure(opts);
+  aq.setNominal(q_true, 0.1 * q_true);
+
+  // Drive it to a clearly-adapted state at a DIFFERENT true Q.
+  const double q_drive = 4.0 * q_true;
+  for (int i = 0; i < 40; ++i) {
+    const auto st = syntheticWhiteResidualStats(std::sqrt(q_drive), std::sqrt(0.1 * q_drive), 50, rng);
+    aq.update(st);
+  }
+  const double adapted_before = aq.varAcc();
+  check(adapted_before > 1.5 * q_true, "adaptive state genuinely moved away from nominal before the repeated-setNominal test", adapted_before, 1.5 * q_true);
+
+  // Call setNominal() with the SAME value repeatedly (exactly what
+  // production does every scan) -- this must NOT reset the adapted state.
+  for (int i = 0; i < 10; ++i) aq.setNominal(q_true, 0.1 * q_true);
+  const double after_repeated_calls = aq.varAcc();
+  check(std::abs(after_repeated_calls - adapted_before) < 1e-12,
+        "item 1/2: repeated setNominal() calls with an UNCHANGED nominal do not reset the adapted state "
+        "(this is the confirmed-and-fixed lifecycle defect: production calls setNominal() before every "
+        "update(), which previously reset applied_acc_/applied_gyr_ to nominal unconditionally)",
+        std::abs(after_repeated_calls - adapted_before), 1e-12);
+
+  // A scan whose residual FAILS validity (e.g. non-finite/invalid) must
+  // hold the LAST GOOD adapted value, not silently revert to nominal --
+  // this is exactly the scenario the old unconditional setNominal()-then-
+  // update() call sequence broke (setNominal() would reset applied_acc_,
+  // and the invalid-residual update() call would never recompute it).
+  aq.setNominal(q_true, 0.1 * q_true);   // production's own per-scan call, now a no-op
+  SplineImuResidualStats bad_st;   // default-constructed: n=0, invalid()==false
+  const bool changed = aq.update(bad_st);
+  check(!changed, "an invalid residual is correctly refused (update() returns false)", changed ? 1.0 : 0.0);
+  check(std::abs(aq.varAcc() - after_repeated_calls) < 1e-12,
+        "item 3: an invalid/refused scan's residual does not retroactively alter the CURRENT applied value "
+        "(the adapted state from before the bad scan is held, not reset to nominal)",
+        std::abs(aq.varAcc() - after_repeated_calls), 1e-12);
+}
+
+void testExplicitResetRestoresNominal()
+{
+  std::mt19937 rng(8888);
+  const double q_true = 0.02 * 0.02;
+  AdaptiveQ aq;
+  AdaptiveQOptions opts;
+  opts.enable = true; opts.beta_acc = 1.2; opts.z_rate_limit = 1.0;
+  opts.acf1_max = 1.0; opts.use_noise_floor = false; opts.warmup_frames = 5; opts.ema = 0.7;
+  aq.configure(opts);
+  aq.setNominal(q_true, 0.1 * q_true);
+  for (int i = 0; i < 40; ++i) {
+    const auto st = syntheticWhiteResidualStats(std::sqrt(4.0 * q_true), std::sqrt(0.4 * q_true), 50, rng);
+    aq.update(st);
+  }
+  check(std::abs(aq.varAcc() - q_true) > 0.5 * q_true, "adapted away from nominal before reset", aq.varAcc());
+
+  // item 5: an EXPLICIT reset (resetToNominal(), or setNominal() with a
+  // GENUINELY different value) restores the intended nominal state.
+  aq.resetToNominal(q_true, 0.1 * q_true);
+  check(std::abs(aq.varAcc() - q_true) < 1e-12, "item 5: explicit resetToNominal() restores applied_acc_ to nominal exactly",
+        std::abs(aq.varAcc() - q_true));
+  // active() is a documented one-way latch ("has ever activated since
+  // startup", adaptive_q.h's own header comment) -- a reset intentionally
+  // does NOT clear it, since the filter genuinely HAS activated before;
+  // only applied_{acc,gyr}_/frames_/the EMA/rate-limited state reset.
+
+  // Re-driving after reset should behave exactly as a fresh instance would
+  // (frames_/warmup restart), confirming the reset is a genuine restart,
+  // not merely a value overwrite.
+  for (int i = 0; i < 4; ++i) {
+    const auto st = syntheticWhiteResidualStats(std::sqrt(4.0 * q_true), std::sqrt(0.4 * q_true), 50, rng);
+    aq.update(st);
+  }
+  check(std::abs(aq.varAcc() - q_true) < 1e-9, "still in warm-up immediately after reset (frames_ restarted, not carried over)", aq.varAcc());
+}
+
+// ============================================================================
+// Phase 3 items C/D: measurement-noise (R) change and bias error, both with
+// TRUE PHYSICAL PROCESS NOISE held constant -- completing the A (Q change,
+// already covered above) / B (model error, already covered above) / C / D
+// battery this task requires.
+// ============================================================================
+
+// C: since this estimator's own measured quantity IS the IMU
+// collocation/measurement variance R (see Phase 2's semantic finding --
+// AdaptiveQ has no separate channel for "R" vs "Q", they are the SAME
+// measured spline-vs-IMU residual spread), a pure R change is
+// mathematically indistinguishable, from this estimator's point of view,
+// from a Q change of the same magnitude -- this test exists to make that
+// equivalence explicit and evidenced, not to find a different response.
+void testAdaptiveQRespondsIdenticallyToRChangeAsToQChange()
+{
+  std::mt19937 rng(9999);
+  const double q_true = 0.02 * 0.02, r_high = 4.0 * q_true;
+  // "R change": interpreted here as the ACCELEROMETER's OWN measurement
+  // noise increasing (e.g. a sensor/thermal effect) while the true
+  // PHYSICAL motion's process noise is unchanged -- synthesized IDENTICALLY
+  // to the Q-change case, because in THIS estimator's residual-based
+  // formulation there is no way to inject "R increased, Q did not" as a
+  // mathematically distinct signal from raw residual samples alone (both
+  // manifest as larger spread in a-priori-white e_acc samples).
+  AdaptiveQ aq;
+  AdaptiveQOptions opts;
+  opts.enable = true; opts.beta_acc = 1.2; opts.z_rate_limit = 1.0;
+  opts.acf1_max = 1.0; opts.use_noise_floor = false; opts.warmup_frames = 5; opts.ema = 0.7;
+  aq.configure(opts);
+  aq.setNominal(q_true, 0.1 * q_true);
+  double final_q = 0.0;
+  for (int i = 0; i < 80; ++i) {
+    const auto st = syntheticWhiteResidualStats(std::sqrt(r_high), std::sqrt(0.1 * r_high), 50, rng);
+    aq.update(st);
+    final_q = aq.varAcc();
+  }
+  const double rel_err = std::abs(final_q - r_high) / r_high;
+  std::printf("  R-change fixture: true=%.6e final_applied=%.6e rel_err=%.4f\n", r_high, final_q, rel_err);
+  check(rel_err < 0.3,
+        "Phase 3C: a pure measurement-noise (R) change is tracked with the SAME accuracy as a Q change "
+        "(expected: this estimator cannot distinguish R from Q, they are the same measured quantity here)",
+        rel_err, 0.3);
+}
+
+// D: a CONSTANT (not time-varying) bias offset. reduceImuResidualSamples()
+// computes cov_acc as the SPREAD of residuals around their OWN empirical
+// MEAN (documented in spline.h -- "not the deviation from raw itself"),
+// so a purely constant offset shifts the mean but should leave the spread,
+// and therefore the adaptive estimate, UNCHANGED -- the opposite finding
+// from model error (Phase 3B), which was deliberately TIME-VARYING
+// (correlated) and therefore genuinely inflated the spread.
+void testAdaptiveQIsBlindToPureConstantBiasOffset()
+{
+  std::mt19937 rng(11111);
+  const double q_true = 0.02 * 0.02;
+  AdaptiveQ aq;
+  AdaptiveQOptions opts;
+  opts.enable = true; opts.beta_acc = 1.2; opts.z_rate_limit = 1.0;
+  opts.acf1_max = 1.0; opts.use_noise_floor = false; opts.warmup_frames = 5; opts.ema = 0.7;
+  aq.configure(opts);
+  aq.setNominal(q_true, 0.1 * q_true);
+
+  std::vector<double> q_est_clean, q_est_biased;
+  std::normal_distribution<double> na(0.0, std::sqrt(q_true)), ng(0.0, std::sqrt(0.1 * q_true));
+  for (int phase = 0; phase < 2; ++phase) {
+    const double bias = (phase == 1) ? 20.0 * std::sqrt(q_true) : 0.0;   // large CONSTANT offset, not time-varying
+    for (int i = 0; i < 60; ++i) {
+      std::vector<V3D> ra(50), rw(50);
+      for (int j = 0; j < 50; ++j) { ra[j] = V3D(na(rng) + bias, na(rng) + bias, na(rng) + bias); rw[j] = V3D(ng(rng), ng(rng), ng(rng)); }
+      const auto st = reduceImuResidualSamples(ra, rw);
+      aq.update(st);
+      (phase == 0 ? q_est_clean : q_est_biased).push_back(aq.varAcc());
+    }
+  }
+  double mean_clean = 0, mean_biased = 0;
+  for (int i = 10; i < 60; ++i) mean_clean += q_est_clean[i];
+  mean_clean /= 50;
+  for (int i = 10; i < 60; ++i) mean_biased += q_est_biased[i];
+  mean_biased /= 50;
+  const double rel_diff = std::abs(mean_biased - mean_clean) / mean_clean;
+  std::printf("  constant-bias fixture: mean_applied_Q clean=%.6e biased=%.6e rel_diff=%.4f (true Q constant at %.6e throughout)\n",
+              mean_clean, mean_biased, rel_diff, q_true);
+  check(rel_diff < 0.3,
+        "Phase 3D: adaptive Q is BLIND to a pure constant bias offset (mean-centered residual spread is "
+        "unaffected by a shift in the mean) -- distinct from model error (Phase 3B), which is time-VARYING "
+        "and therefore genuinely inflates the spread",
+        rel_diff, 0.3);
+}
+
+// ============================================================================
+// Phase 4: whiteness (acf1) characterization across all four synthetic
+// regimes, to determine whether it discriminates model error from the
+// other three (genuine Q change, R change, constant bias).
+// ============================================================================
+void testWhitenessCharacterizationAcrossRegimes()
+{
+  std::mt19937 rng(22222);
+  const double q_true = 0.02 * 0.02;
+  auto meanAcf1 = [&](auto&& sampler) {
+    double sum = 0;
+    const int n = 40;
+    for (int i = 0; i < n; ++i) sum += std::abs(sampler().acf1_acc);
+    return sum / n;
+  };
+  const double acf1_clean = meanAcf1([&] { return syntheticWhiteResidualStats(std::sqrt(q_true), std::sqrt(0.1 * q_true), 50, rng); });
+  const double acf1_qchange = meanAcf1([&] { return syntheticWhiteResidualStats(std::sqrt(4 * q_true), std::sqrt(0.4 * q_true), 50, rng); });
+  const double acf1_modelerror = meanAcf1([&] { return syntheticModelErrorResidualStats(std::sqrt(q_true), std::sqrt(0.1 * q_true), 8.0 * std::sqrt(q_true), 50, rng); });
+  std::normal_distribution<double> na(0.0, std::sqrt(q_true)), ng(0.0, std::sqrt(0.1 * q_true));
+  const double acf1_bias = meanAcf1([&] {
+    std::vector<V3D> ra(50), rw(50);
+    for (int j = 0; j < 50; ++j) { ra[j] = V3D(na(rng) + 20.0 * std::sqrt(q_true), na(rng) + 20.0 * std::sqrt(q_true), na(rng) + 20.0 * std::sqrt(q_true)); rw[j] = V3D(ng(rng), ng(rng), ng(rng)); }
+    return reduceImuResidualSamples(ra, rw);
+  });
+
+  std::printf("  mean |acf1_acc|: clean=%.4f  Q-change=%.4f  model-error=%.4f  constant-bias=%.4f\n",
+              acf1_clean, acf1_qchange, acf1_modelerror, acf1_bias);
+  std::printf("  FINDING (Phase 4): in this IDEALIZED synthetic setting, |acf1| cleanly separates model error "
+              "(strongly autocorrelated, ~%.2f) from the other three regimes (all near-white, <0.2). HOWEVER this "
+              "codebase's own PRIOR real-data finding (adaptive_q.h's header comment, TQ-27, eee_01/eee_02) measured "
+              "median |acf1_acc|~0.664 (p10~0.600) on REAL, otherwise-healthy accelerometer residuals -- i.e. real "
+              "sensor residuals are inherently far more autocorrelated than this idealized synthetic 'clean' case, "
+              "for reasons unrelated to gross model error (likely genuine high-frequency dynamics/vibration beyond "
+              "the spline's own representational capacity). A FIXED absolute acf1 threshold therefore CANNOT be both "
+              "tight enough to catch synthetic model error and loose enough to avoid rejecting healthy real data -- "
+              "this is evidence FOR, not against, the production acf1_max=1.0 default, and this task's own "
+              "instruction not to lower it arbitrarily is followed: no change made to the gate's default here. A "
+              "genuinely more defensible mechanism (e.g. a SELF-REFERENCING/rolling-baseline whiteness test, rather "
+              "than a fixed absolute threshold) is recommended for future work but not implemented in this task "
+              "without real live-run acf1 evidence to validate it against (see the final report's live run6 "
+              "(adaptive-Q ON) analysis for what real acf1 values this campaign actually observed).\n",
+              acf1_modelerror);
+  check(acf1_modelerror > 3.0 * std::max(acf1_clean, std::max(acf1_qchange, acf1_bias)),
+        "in the idealized synthetic setting, model error's autocorrelation is clearly separable from the other "
+        "three regimes (a necessary, though on this evidence alone not sufficient, condition for a whiteness gate "
+        "to be useful)", acf1_modelerror, 3.0 * std::max(acf1_clean, std::max(acf1_qchange, acf1_bias)));
+}
+
 }  // namespace
 
 int main()
@@ -208,6 +434,11 @@ int main()
   std::printf("Pose-control adaptive-Q synthetic known-truth validation suite\n");
   testAdaptiveQTracksKnownRegimeTransitions();
   testAdaptiveQReactsToModelErrorAtConstantTrueQ();
+  testAdaptiveStatePersistsAcrossRepeatedSetNominalCalls();
+  testExplicitResetRestoresNominal();
+  testAdaptiveQRespondsIdenticallyToRChangeAsToQChange();
+  testAdaptiveQIsBlindToPureConstantBiasOffset();
+  testWhitenessCharacterizationAcrossRegimes();
   std::printf("%d failure(s)\n", failures);
   return failures ? 1 : 0;
 }

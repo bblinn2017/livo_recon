@@ -188,6 +188,44 @@ struct AdaptiveQOptions
   bool log_en = false;
 };
 
+// ============================================================================
+// SEMANTICS, made explicit (external config keys unchanged for
+// compatibility -- state/cov/{acc,gyr} still name the quantity this feeds):
+//
+// AdaptiveQ estimates the SPREAD of the spline-vs-IMU collocation residual
+// e_acc(t)=R(t)^T(a_spline(t)-g)+bias_acc-a_measured(t) (resp. e_gyr) around
+// its OWN empirical mean over one scan's window. This is a MEASUREMENT of
+// the IMU collocation/residual covariance R -- the weight this codebase's
+// own IMU factor applies to that residual (Wdiag=1/R) -- not a direct
+// inference of the physical process noise density Q, and not the
+// filter's own residual/innovation covariance in the classical EKF sense
+// (there is no filter gain or predicted-vs-actual state comparison here,
+// only a batch spread statistic over one window's raw samples). It
+// coincides with a genuine continuous-time Q only under the "each IMU
+// sample is a direct noisy observation of the process's own driving noise
+// term" model this codebase uses elsewhere (see
+// LioProcCoupledOptions::pose_imu_var_acc's own header comment) -- i.e. R
+// and Q are the same physical quantity BY MODEL CHOICE, not by definition.
+//
+// Empirically (test_pose_control_adaptive_q_synthetic_truth.cpp): this
+// spread statistic responds to (a) a genuine change in the true physical
+// process noise, (b) a change in the sensor's own measurement noise
+// (mathematically indistinguishable from (a) in this formulation), and
+// (c) correlated MODEL ERROR (unmodeled motion) at UNCHANGED true noise --
+// item (c) inflates the estimate by the same mechanism as (a)/(b), since
+// all three simply increase the residual's spread. It does NOT respond to
+// (d) a purely constant bias offset (mean-centered, so a constant shift
+// does not change the spread around the mean). The name "AdaptiveQ" is
+// retained (it is this project's established terminology and appears in
+// external tooling/logs), but should be read as "adaptive residual-
+// spread-based inflation of the IMU factor's weight," not "adaptive
+// physical process-noise estimator" -- the latter would require
+// independent evidence the estimator cannot currently produce (whiteness
+// gating being the one mechanism that COULD, in principle, separate
+// model error from genuine noise, is characterized -- and found
+// currently ineffective on real accelerometer data -- in the same test
+// file, see testWhitenessCharacterizationAcrossRegimes()).
+// ============================================================================
 class AdaptiveQ
 {
 public:
@@ -198,7 +236,26 @@ public:
   // starts (the YAML's state/cov/{acc,gyr}).  Floor = the calibration
   // window's measured variance.  Both isotropic scalars, matching the
   // trace/3 reduction used everywhere else.
+  //
+  // IDEMPOTENT: safe to call every scan (as production does, to track a
+  // caller-side nominal that could in principle change) without resetting
+  // adaptive state -- resets applied_{acc,gyr}_/the EMA/the rate-limited
+  // excursion state (z_{acc,gyr}_) ONLY the first call, or any call whose
+  // var_acc_nom/var_gyr_nom differs from the currently-held nominal by more
+  // than a relative floating-point tolerance (i.e. a GENUINE reconfiguration
+  // of the reference point, not a repeated assertion of the same value).
+  // This is the fix for a confirmed lifecycle defect: calling this
+  // unconditionally before every update() previously reset applied_acc_/
+  // applied_gyr_ to nominal on every scan whose OWN update() call then
+  // early-returned before recomputing them (bad/non-white/below-floor
+  // residual, or warmup) -- silently discarding the adapted state for that
+  // scan instead of holding the last good adapted value, exactly the
+  // "reset before every update" failure mode this comment now prevents.
   void setNominal(double var_acc_nom, double var_gyr_nom);
+  // Unconditional reset to a freshly-provided nominal -- the explicit,
+  // caller-requested reset path setNominal() itself no longer performs
+  // implicitly on an unchanged value.
+  void resetToNominal(double var_acc_nom, double var_gyr_nom);
   void setFloor(double var_acc_floor, double var_gyr_floor);
 
   // Fold in one scan's residual statistics.  Returns true if the applied
@@ -261,6 +318,7 @@ private:
   AdaptiveQOptions opts_;
 
   double nom_acc_ = 0.0, nom_gyr_ = 0.0;
+  bool   nominal_set_ = false;   // setNominal()'s idempotency guard
   double floor_acc_ = 0.0, floor_gyr_ = 0.0;
   double meas_acc_ = 0.0, meas_gyr_ = 0.0;    // EMA of the measurement
   double z_acc_ = 0.0, z_gyr_ = 0.0;

@@ -9,12 +9,36 @@
 namespace livo_recon
 {
 
+namespace {
+inline bool nearlyEqual(double a, double b) {
+  return std::abs(a - b) <= 1e-12 * std::max({1.0, std::abs(a), std::abs(b)});
+}
+}  // namespace
+
 void AdaptiveQ::setNominal(double var_acc_nom, double var_gyr_nom)
+{
+  // Idempotent: only reset on the FIRST call or a GENUINE change to the
+  // nominal reference -- see the header comment for the lifecycle defect
+  // this replaces (repeated calls with the SAME value used to silently
+  // wipe applied_{acc,gyr}_/the adaptive state back to nominal on every
+  // scan whose own update() call didn't reach the recomputation).
+  if (nominal_set_ && nearlyEqual(nom_acc_, var_acc_nom) && nearlyEqual(nom_gyr_, var_gyr_nom)) return;
+  resetToNominal(var_acc_nom, var_gyr_nom);
+}
+
+void AdaptiveQ::resetToNominal(double var_acc_nom, double var_gyr_nom)
 {
   nom_acc_ = var_acc_nom;
   nom_gyr_ = var_gyr_nom;
   applied_acc_ = nom_acc_;
   applied_gyr_ = nom_gyr_;
+  meas_acc_ = nom_acc_;
+  meas_gyr_ = nom_gyr_;
+  z_acc_ = 0.0;
+  z_gyr_ = 0.0;
+  primed_ = false;
+  frames_ = 0;
+  nominal_set_ = true;
 }
 
 void AdaptiveQ::setFloor(double var_acc_floor, double var_gyr_floor)
