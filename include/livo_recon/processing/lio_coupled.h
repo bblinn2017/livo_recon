@@ -63,6 +63,9 @@ struct LioProcCoupledOptions
   // spline. covariance_all_knots uses the scan-start joint covariance to
   // propagate that same physical correction into the full z=[eta;sT] state.
   std::string pose_control_lidar_update_mode = "local_spline";
+  // Experimental physical-RPV coupled modes preserve the established modes
+  // as controls while solving LiDAR in joint [theta,p,v] coordinates and then
+  // realizing that physical correction through the spline.
   // Optional process uncertainty for the covariance-mediated latent
   // physical pose. Zero recovers the deterministic covariance coupling; a
   // positive value models additional pose uncertainty between the spline
@@ -254,6 +257,9 @@ private:
   Eigen::VectorXd coupled_pose_control_eta_imu_;
   Eigen::Matrix<double, 6, 1> coupled_pose_control_last_physical_lidar_delta_ = Eigen::Matrix<double, 6, 1>::Zero();
   Eigen::MatrixXd coupled_pose_control_sigma_full_prior_;
+  // Covariance of the free spline/tail coordinates conditioned on the fixed
+  // scan-entry physical head; used by physical-RPV spline realization.
+  Eigen::MatrixXd coupled_pose_control_P_z_cond_;
   // Lambda_prior_z = pinv(Sigma_full_prior_'s z=[eta;sT] marginal block) --
   // the information the mean solve adds every iteration. z_imu_ is the
   // z-space value ([eta_imu;0,0,0], sT's prior deviation is zero at scan
