@@ -19,39 +19,14 @@
 namespace livo_recon
 {
 
-// CQ-49: options exclusive to the coupled estimator, under estimator/coupled/*
-// -- a decoupled config never instantiates this class, so these keys are
-// simply never claimed there, and checkAllParamsConsumed() throws naming any
-// such key left in a decoupled config (item 3d(iii): object identity IS the
-// nesting enforcement).
 struct LioProcCoupledOptions
 {
-  // n_c control points for the correction basis (item 2: NOT
   // control_point_hz -- a separate resolution knob for a different spline).
   int n_c = 4;
 
-  // CQ-82 Phase 2: which basis the n_c control points parameterize.
-  //   "raw_imu" (DEFAULT): control points are corrections to the
-  //     accelerometer/gyro signal (the basis this whole file already
-  //     implements -- unchanged).
-  //   "pose": control points are POSITION and ATTITUDE, evaluated via
-  //     ScanSpline's own basis (spline.h) -- the LiDAR term is then linear
-  //     in c_p directly (no chain through the IMU state), and the IMU
-  //     enters as a measurement FACTOR (spline-implied accel/omega vs raw
-  //     IMU), not a prior. See buildPoseSplineSystem().
-  //   "pose_control": the pose-control-point-only trajectory state (see
-  //     below) -- the current, supported joint-prior formulation.
-  //
-  // Config key: estimator/coupled/spline_mode.
   std::string spline_mode = "raw_imu";
   static constexpr const char* SPLINE_MODES[] = { "raw_imu", "pose", "pose_control" };
   bool poseBasis() const { return spline_mode == "pose"; }
-  // 2026-09-22: the pose-CONTROL-POINT-only trajectory state -- z=[c_free;
-  // sT], no independent velocity/angular-velocity DOF, head mean fixed
-  // (not a GN variable), tail free (spline-derived R/p/v + free bg/ba/g).
-  // See pose_control_spline.h/pose_control_imu_prior_builder.h/
-  // pose_control_lidar_factor.h/pose_control_covariance.h and
-  // estimateCoupledPoseControlSpline()'s own doc comment for the mechanism.
   bool poseControlSplineBasis() const { return spline_mode == "pose_control"; }
   // Config key: estimator/coupled/pose_control/n_control_points.
   int pose_control_n = 13;
@@ -73,193 +48,47 @@ struct LioProcCoupledOptions
   // capacity-invariance test for the concrete numerical margin this
   // threshold must satisfy. Config key: estimator/coupled/pose_control/q_pinv_rel_thresh.
   double pose_control_q_pinv_rel_thresh = 1e-12;
-  // Phase 10 (pose_control_mechanism_validation_campaign): the pseudo-
-  // inverse threshold used ONLY by the fixed-head-conditional MEAN solve
-  // (A_ff_priorS_pinv -> delta_z_prior -> coupled_pose_control_z_imu_),
-  // deliberately separated from pose_control_q_pinv_rel_thresh above,
-  // which governs every covariance/Mahalanobis pinv call and must stay at
-  // the corrected value regardless of what the mean solve does. Necessary
-  // (not an arbitrary tuning knob) because this is the one call site
-  // demonstrably affecting the mean trajectory rather than only reported
-  // covariance -- see test_pose_control_mean_pinv_ablation.cpp for the
-  // synthetic justification of the default value. Defaults to the same
-  // corrected value as pose_control_q_pinv_rel_thresh (behavior-preserving
-  // unless deliberately ablated). Config key:
-  // estimator/coupled/pose_control/mean_pinv_rel_thresh.
   double pose_control_mean_pinv_rel_thresh = 1e-12;
-  // Diagnostic-only knobs for the 2026-09-22 correction's required
-  // scan-1 test suite (items 16/18) -- both default to shipping behavior
-  // (LiDAR on, P0 unscaled). Config keys:
-  // estimator/coupled/pose_control/{lidar_enable,p0_scale}.
   bool pose_control_lidar_enable = true;
   double pose_control_p0_scale = 1.0;
-  // pose_control_process_weight (an arbitrary empirical LiDAR-vs-process
-  // weighting scalar) was removed; production's process/prior influence
-  // comes entirely from Q -> P_prior -> P_prior^-1 with no scalar
-  // multiplier. An old config.yaml setting this key now correctly trips
-  // the unclaimed-override abort. See git history for the prior mechanism.
-  // 2026-09-23 stationary-campaign item 22: curvature regularization FOR
-  // pose_control specifically -- pose_curvature_weight_pos/rot (above) is
-  // confirmed NOT wired into pose_control at all (only the old "pose"
-  // basis arm reads it). These are new, pose_control-specific knobs rather
-  // than misusing the unwired ones. Penalizes the second difference
-  // cp[k+1]-2*cp[k]+cp[k-1] (position) / cp_phi likewise (rotation) for
-  // every interior free control point, added directly into the raw normal
-  // equations alongside the IMU prior.
   double pose_control_curvature_weight_pos = 0.0;
   double pose_control_curvature_weight_rot = 0.0;
-  // 2026-09-23: free-text test label, written into pose_control_full_
-  // diagnostics.csv's test_id column so multiple diagnostic runs (ablation
-  // A/B/C, weight sweep, P0-scale sweep) can be told apart in the one
-  // shared CSV. Purely a label, no effect on estimator behavior.
   std::string pose_control_test_id = "unlabeled";
-  // There is exactly one
-  // production pose-control prior representation (coupled_pose_control_
-  // sigma_full_prior_/lambda_prior_z_/z_imu_, built once at scan-start,
-  // shared verbatim by the mean solve and the covariance computation) and
-  // no runtime switch to any retired formulation. See git history for
-  // their algebra if ever needed as an independent test reference.
-  // process-prior-REFORMULATION phase, items 13-19/39-40: pose_control's
-  // OWN adaptive process-noise estimator (a SEPARATE AdaptiveQ instance from
-  // the decoupled arm's, since pose_control has no ScanSpline and its own
-  // residual source is the process-segment residual, not
-  // computeSplineImuResidual()). Off by default -- pose_control's varAcc/
-  // varGyr stay exactly state_->varAcc()/varGyr() (today's behavior)
-  // unless enabled. When enabled, applied CAUSALLY: this scan's prior uses
-  // the value estimated from the PREVIOUS scan's converged residual, never
-  // this scan's own (item 40, no same-frame feedback).
+  bool pose_control_freeze_geometry = false;
+  bool pose_control_deskew_log_en = false;
+  bool pose_control_covariance_cross_time_log_en = false;
+  // Selects how LiDAR information enters pose-control mode. The default
+  // local_spline path preserves the existing estimator. single_tail solves
+  // one shared 6-DOF physical tail correction and projects it into the
+  // spline. covariance_all_knots uses the scan-start joint covariance to
+  // propagate that same physical correction into the full z=[eta;sT] state.
+  std::string pose_control_lidar_update_mode = "local_spline";
+  // Optional process uncertainty for the covariance-mediated latent
+  // physical pose. Zero recovers the deterministic covariance coupling; a
+  // positive value models additional pose uncertainty between the spline
+  // trajectory and the LiDAR-time physical state.
+  double pose_control_lidar_latent_pose_q_pos_m2 = 0.0;
+  double pose_control_lidar_latent_pose_q_rot_rad2 = 0.0;
   AdaptiveQOptions pose_control_adaptive_q;
-  // items 24/25: correlated-noise (Woodbury) correction for pose_control's
   // LiDAR information -- reuses ResidualRedundancyOptions (generic struct,
   // not decoupled-specific). Off by default (mode=="off").
   ResidualRedundancyOptions pose_control_lidar_correlation;
 
-  // CQ-82 Phase 2: pose-basis-only weights. Meaningless under raw_imu (the
-  // refusal wiring never checks these -- they simply aren't read unless
-  // poseBasis() is true). Config keys: estimator/coupled/pose_imu_weight_{acc,gyr},
-  // estimator/coupled/pose_curvature_weight_{pos,rot}.
   double pose_imu_weight_acc = 1.0;
   double pose_imu_weight_gyr = 1.0;
   double pose_curvature_weight_pos = 0.0;
   double pose_curvature_weight_rot = 0.0;
-  // CQ-86 item 1: the WEAKER anchor the card's own fallback authorized --
-  // "IF COUPLING s TO c IS MORE THAN THIS ROUND CAN CARRY... instead FREEZE
-  // the head control points to the raw-chain values". Freezes the first
-  // `pose_head_freeze_cp` control points' correction (both c_p and c_phi
-  // blocks) to EXACTLY ZERO by eliminating those columns from the linear
-  // solve entirely (not a soft/large-weight prior) -- the spline's HEAD
-  // stays at wherever this scan's ScanSpline::fit() (the IMU-propagated
-  // raw chain) put it, for as many control points as this covers.
-  // MEASURED NEGATIVE (CQ-86 item 3): freezing made stability WORSE than no
-  // anchor at all (last_scan 62 vs 69) -- a hard elimination removes solve
-  // freedom and adds no information. STAYS as a separate, named, opt-in
-  // arm (default 0/off, md5-inert) -- CQ-87 item 1 did NOT delete it, per
-  // Bryce's own instruction, since it is a measured result this register
-  // cites. THE REAL head-tie (p(t0)=p_start+delta_p0 via the clamped-
-  // B-spline identity, WITH a genuine Omega prior on delta_phi0/delta_pos0)
-  // is now the DEFAULT pose-arm behavior whenever this is 0 -- see
-  // reducePoseSplineHeadCoupling() and estimateCoupledCorrectionPoseBasis().
-  // When this is > 0, that real coupling is SKIPPED and the older
-  // hard-elimination arm runs instead, reproducing CQ-86's own measured
-  // cells exactly. Config key: estimator/coupled/pose_head_freeze_cp.
   int pose_head_freeze_cp = 0;
 
-  // CQ-87 item 5, Bryce asked for this directly: POSE_SPLINE_TIKHONOV_EPS
-  // (pose_spline_system.h) is no longer a compile-time-only constant --
-  // this is the live value threaded through buildPoseSplineCBlock() as an
-  // explicit parameter. Default 1e-6 is EXACTLY that constant's own value,
-  // so this key is md5-inert at its default. Config key:
-  // estimator/coupled/pose_tikhonov_eps.
   double pose_tikhonov_eps = 1e-6;
 
-  // POST-CQ-87-REVIEW FIX (item 4, user follow-up 2026-09-21): the pose
-  // arm's IMU-factor weighting must use the SHIPPED config values
-  // directly -- state/cov/acc, state/cov/gyr (state.cpp's own
-  // paramWarn<double>(pnh, "state/cov/acc", ...), which seeds
-  // state_->var_acc_/var_gyr_ -- VARIANCE, (m/s^2)^2 / (rad/s)^2, same
-  // units/name as state.cpp's own local `var_acc`/`var_gyr`) -- rather
-  // than reading them indirectly through state_->varAcc()/varGyr(). Under
-  // the DEFAULT operating setup (CalibProcOptions::use_calib_var == false,
-  // the shipped default) those two happen to be numerically identical,
-  // since state_'s own members are seeded from these SAME two keys at
-  // startup and never mutated by this arm -- but state_'s copy CAN
-  // silently diverge from the config the moment use_calib_var=true (the
-  // calibration pass overwrites it) or the decoupled arm's own AdaptiveQ
-  // path runs (lio_decoupled.cpp:860, a DIFFERENT class's own mechanism
-  // that also calls state_->setNoiseParams()). Reading these two config
-  // keys directly, here, makes the pose arm's own weighting immune to
-  // either -- exactly "use the config directly," not "usually equals the
-  // config." Config keys: state/cov/acc, state/cov/gyr (the SAME keys
-  // state.cpp reads -- this is a second, independent read of the same
-  // param server entry, not a new key). Default 1e-4/1e-4 matches
-  // state.cpp's own paramWarn() default exactly.
-  // 2026-09-25 R-vs-Q SEMANTICS (item 10 of the covariance-reformulation
-  // audit): these two are, LITERALLY in the code, an IMU MEASUREMENT
-  // variance R -- buildPoseControlContinuousImuPrior() uses them exactly as
-  // Wdiag=1/var_{acc,gyr}, the weight on the residual r=a_spline_body(t)-
-  // a_meas(t) (a "collocation" residual comparing the spline's own modeled
-  // acceleration/angular-rate against each raw IMU sample), NOT as a
-  // propagated process-noise covariance Q integrated forward through a
-  // transition matrix. Renaming these fields was avoided (config
-  // compatibility -- state/cov/acc, state/cov/gyr are shared, long-lived
-  // keys read elsewhere too), so the semantic clarification lives here
-  // instead: because the accelerometer/gyro sample IS treated as a direct
-  // noisy observation of the process's own continuous driving noise term
-  // (this is the "white-noise-acceleration" model docs/tests elsewhere in
-  // this file use, e.g. testFullNoiseDensityRefinement/
-  // physical_trajectory_reference.h), R and Q are mathematically THE SAME
-  // quantity here up to the sample-spacing conversion Q_density = R * dt_imu
-  // (continuous spectral density = discrete per-sample variance / sample
-  // rate) -- NOT because R and Q are being conflated by mistake, but
-  // because this specific model's measurement noise and its process noise
-  // are one and the same physical quantity (the true accelerometer/gyro
-  // noise). Scaling this value therefore genuinely scales the physical
-  // process noise density seen by the trajectory prior (this is exactly
-  // what the first real-data campaign's Q_scale=0.5/2.0 runs did, and why
-  // that was a meaningful process-noise sweep, not merely a residual-weight
-  // sweep with no bearing on reported covariance).
   double pose_imu_var_acc = 1e-4;
   double pose_imu_var_gyr = 1e-4;
 
-  // User instruction 2026-09-21, item 15 ("fix the remaining numerical
-  // stability issue... the observed ScanSpline::fit() crashes are
-  // consistent with an upstream unstable pose-spline update"). Diagnosed
-  // live (psd_audit_en instrumentation, ntu_viral/eee_01/n_c=13): the GN
-  // solve diverges EXPONENTIALLY starting scan 1 iteration 1
-  // (||delta_c_pos|| on the FREE control points: 0.036m -> 324m -> 3.1e6m
-  // across 3 iterations, in every IMU/curvature weight configuration
-  // tested) -- an unconstrained Gauss-Newton step with no line search or
-  // trust region, exactly the gap item 15 names. This is a simple
-  // dogleg-style safeguard: if the worst free-control-point step this
-  // iteration exceeds the bound, the ENTIRE solved delta vector (both
-  // pos and rot sub-blocks, plus the head prior's own delta) is scaled
-  // down by one scalar so the direction is preserved and only the length
-  // is capped -- cheaper than a real trust region (no re-solve), but
-  // directly stops the geometric blowup at its source rather than only
-  // detecting it after the fact (ldlt.info()/allFinite() checks above).
-  // 0.0 = off (md5-inert at 0.0, matching every other numerics knob in
-  // this file). Non-zero defaults below are a FIRST proposed value (the
-  // sane iteration-0 step measured live was ~0.036m/2e-4rad -- these caps
-  // sit roughly an order of magnitude above that), not a validated
-  // choice -- report the actual number this produces before trusting it.
   double pose_gn_max_step_pos_m = 0.5;
   double pose_gn_max_step_rot_rad = 0.2;
 
-  // CQ-85 item 1: rule 58f's exact failure mode -- CQ-72's own 96-cell grid
-  // produced a cell reporting completed=yes with ATE=396,499,288.300 mm (a
-  // FAILED run that looked like a successful one; imu_deviation_weight=0,
-  // point_time, n_c=8, eee_02). Loud, ABORT-style guard on the raw_imu
-  // arm's own per-scan displacement (measured against the IMU-propagated
-  // prediction, coupled_prop_.pos1, the same quantity a healthy scan's
-  // correction should stay close to) -- NOT a fix for the underlying
-  // failure, only a refusal to let it masquerade as a completed run, same
-  // spirit as the residual-starvation guard (CQ-61 item 4) right above its
-  // insertion site. <= 0.0 DISABLES the check entirely (the shipped
-  // default -- a numerics default is Bryce's call, rule 26; this card
-  // only PROPOSES turning it on). Config key:
-  // estimator/coupled/max_scan_displacement_m.
   double max_scan_displacement_m = 0.0;
-  // Item 3d(ii): the DC-component/bias split is exactly rank-deficient by 6
   // (a constant delta_a and a constant -delta_ba are indistinguishable over
   // one scan, same for delta_omega/delta_bg) and solvable only via the
   // Lambda-vs-bias-prior ratio unless this is set. When true, constrains
@@ -272,226 +101,36 @@ struct LioProcCoupledOptions
   // (a single rigid per-scan gyro-bias correction) as the only rotation
   // correction mechanism. Default false.
   bool disable_cgyr = false;
-  // CQ-50/CQ-52 addendum: H's rotation-Jacobian column and Phix_pt/Phic_pt
-  // (the state/coefficient sensitivity) must be evaluated at the SAME time
-  // for H_k*Phi(t_k) to be a valid chain rule -- CQ-50's original diagnosis
-  // was exactly this mismatch (H built once from the deskewed point + the
-  // scan-end state_->rot() in lio_base.cpp's buildResiduals(), chained
-  // against Phi interpolated at each residual's own capture time res.t;
-  // valid only by coincidence at rest). phi_at_scan_end and h_at_point_time
-  // used to be two INDEPENDENT booleans, which made all four combinations
-  // reachable even though only two are ever meaningful -- both false is the
-  // original mismatch (H@t1, Phi@t_k) and both true is an equally invalid,
-  // never-used mirror-image mismatch (H@t_k, Phi@t1). Collapsed into one
-  // mode, following the project's own standing rule (CQ-44 item 4c: "mutually
-  // exclusive options are one mode, never two flags that can express a
-  // meaningless combination"):
-  //   "legacy_mismatched" (DEFAULT, unchanged from the prior bool defaults'
-  //     shipped behavior -- H@t1, Phi@t_k -- kept as the default so this
-  //     refactor changes no one's numerics without Bryce's say-so, rule 26
-  //     item 1) -- the ORIGINAL bug CQ-50 diagnosed.
-  //   "end_time" (was phi_at_scan_end=true): both H and Phi forced to the
-  //     scan-end time t1 -- restores a valid chain rule, but every residual
-  //     now shares the identical Phi, so all within-scan resolution is
-  //     destroyed. CQ-52 item 1 found this INERT (correction magnitudes
-  //     near-zero relative to sensor noise) -- consistent, but useless.
-  //   "point_time" (was h_at_point_time=true): both H and Phi evaluated at
-  //     each residual's own capture time t_k -- H via raw_body_point.cross(
-  //     worldRotAt(t_k)^T * normal) instead of point_cross_normal (built
-  //     once at t1). Valid chain rule AND genuine within-scan resolution
-  //     preserved -- architecturally the correct fix, verified against
-  //     CQ-49's md5 pairs.
   std::string jacobian_time_mode = "legacy_mismatched";
-  // CQ-53 item 1: disabled-by-default pivot floor on the joint matrix's own
-  // LDLT decomposition -- mirrors SplineOptions::PIVOT_MIN_FLOOR's shipped
-  // no-op default (-1.0, below any real pivot this system produces) exactly.
-  // No threshold has been validated for this system yet (rule 26: a real
-  // numerics default is Bryce's call, not this session's) -- this exists so
-  // the refusal PATH is exercised/testable, not to actually gate anything
-  // at its shipped value.
   static constexpr double JOINT_PIVOT_MIN_FLOOR = -1.0;
-  // CQ-53 item 6: commits the second throwaway debug harness this session
-  // used (an env-var-gated print comparing each residual's delta_phi0/
-  // delta_p0 Jacobian-column magnitude against its own capture-time
-  // fraction within the scan) as a real, opt-in diagnostic instead of
-  // leaving it deleted. Off by default -- per-residual, so real cost when
-  // on. See jrow_leverage.txt's own write site for the exact columns.
   bool log_jrow_leverage_en = false;
-  // CQ-52 item 2, the decisive test: when true, inflates delta_bg's own
-  // prior-precision diagonal in Pi_ss to near-infinite, holding the gyro
-  // bias fixed (the accumulator) while leaving c_gyr/c_acc's within-scan
-  // correction (the forcing) fully active -- isolates whether h_at_point_
-  // time's incomplete fix is the forcing's form or the accumulator
-  // compounding a persistent one-sided error into a walk. Default false.
   bool freeze_bg = false;
-  // CQ-54 item 1, the fix: sigma_a/sigma_g (which set Lambda's prior
-  // stiffness, item 0c) are read ONCE from the pre-flight calibration
-  // window and never revised -- during a vibration transient (e.g. drone
-  // motor spin-up) the true IMU noise runs 15-55x that floor, so Lambda is
-  // ~225-3000x too stiff exactly when the within-scan correction most needs
-  // to absorb the inflated residuals, and the (exactly degenerate, item 0d)
-  // signal is routed entirely into the persistent gyro bias instead. When
-  // true, sigma_a/sigma_g are re-estimated per scan from a rolling window of
-  // mg.imu_samples_raw (see ImuProc::loadParameters()'s keep_raw_samples
-  // extension), floored at the calibration value (can only inflate, never
-  // shrink below the sensor's own floor -- ImuProc's own calibration is
-  // still trusted as the noise-floor lower bound). Default false, no-op
-  // (md5-inert at defaults).
   bool adaptive_sigma = false;
-  // CQ-54 item 3, the cheaper guard: when true, applies the SAME Pi_ss
-  // inflation freeze_bg uses (see :523 in the .cpp), but only for scans
-  // where the rolling-window IMU noise exceeds its calibration floor by
-  // more than bias_freeze_vibration_factor -- released once the noise
-  // settles, rather than held for the whole run the way freeze_bg is.
-  // Physically: a gyro bias is a slow thermal drift with no reason to
-  // update during a brief vibration transient, which is exactly the window
-  // where the data cannot distinguish bias from noise (item 0d's
-  // degeneracy). Default false.
   bool bias_freeze_on_vibration = false;
   // Threshold for bias_freeze_on_vibration, disabled-by-default in effect
   // since the guard itself defaults off -- no validated threshold exists
   // yet (rule 26: a real numerics default is Bryce's call), mirrors
   // JOINT_PIVOT_MIN_FLOOR's own shipped-inert-until-validated pattern.
   static constexpr double BIAS_FREEZE_VIBRATION_FACTOR_DEFAULT = 3.0;
-  // CQ-55 item 3: runtime-overridable threshold (was previously a hardcoded
-  // constexpr, blocking a sweep over its value) -- defaults to the same
-  // BIAS_FREEZE_VIBRATION_FACTOR_DEFAULT, so this is md5-inert unless
-  // explicitly overridden via estimator/coupled/bias_freeze_vibration_factor.
   double bias_freeze_vibration_factor = BIAS_FREEZE_VIBRATION_FACTOR_DEFAULT;
-  // CQ-54 item 6: penalises the TOTAL departure of the gyro bias from its
-  // calibration value (state_->biasGyr() + coupled_delta_bg_ -
-  // coupled_bg_calib_), separately from Pi_ss's own per-scan-increment
-  // prior, which never prices the accumulated total (the ratchet item 6
-  // names). Default false, no-op at defaults.
   bool bias_anchor = false;
   // Provisional precision for bias_anchor, disabled-by-default in effect
   // since the flag itself defaults off -- no validated in-run bias-drift
   // bound exists yet (rule 26). Set generously above the quoted MEMS
   // in-run stability (~10 deg/hr = 0.0028 deg/s) at 0.05 deg/s (=
-  // 8.72665e-4 rad/s) as a starting point for item 6's own run to react
   // against, not a validated physical spec.
   static constexpr double BIAS_ANCHOR_SIGMA_RAD_S_DEFAULT = 8.72665e-4;
-  // CQ-59 item 1: second-difference curvature penalty weight on the
-  // correction coefficients, added to Lambda alongside (not instead of)
-  // the existing basis-Gram value term. SPLIT (was one raw
-  // curvature_weight, CQ-55 item 6) and NORMALIZED by the same sigma^2 the
-  // value term uses -- the old raw knob landed against a gyro base prior
-  // ~4657x stiffer than the accelerometer's (sigma_a=0.00434,
-  // sigma_g=6.36e-05 on eee_01/02: (sigma_a/sigma_g)^2 ~ 4657), so one raw
-  // number could not mean the same thing on both blocks. Dimensionless now
-  // ("this shape penalty is worth w times the value penalty" on THIS
-  // block) -- 1.0 is a meaningful default, not an arbitrary number. Both
-  // default 0.0 -- md5-inert. The old single curvature_weight knob is
-  // REMOVED, not kept as a deprecated alias: it was never set in any
-  // checked-in config (grepped config/, scripts/ -- zero hits) and always
-  // defaulted to 0.0, so nothing depends on it continuing to exist, and a
-  // permanent alias for a knob nothing ever used is pure upkeep cost.
-  //
-  // CQ-72 item 0a: renamed from curvature_weight_acc/curvature_weight_gyr
-  // to smoothness_weight_acc/smoothness_weight_gyr (config key moves from
-  // estimator/coupled/curvature_weight_{acc,gyr} to estimator/coupled/
-  // prior/smoothness_weight_{acc,gyr}) -- states the BELIEF this term
-  // encodes ("the correction should not wiggle") rather than the math
-  // operator (D^T D) that implements it. Same type, same default, same
-  // arithmetic -- a pure rename, not a new knob.
   double smoothness_weight_acc = 0.0;
   double smoothness_weight_gyr = 0.0;
-  // CQ-69: "the trajectory change caused by the correction should be
-  // small" as a THIRD prior band, distinct from gram (mid-band, IID-noise-
-  // correct value prior) and curvature (high-band, second-difference shape
-  // penalty). Lambda_traj = sum_k phi_head[k]^T W phi_head[k], W picking
-  // out the POSITION rows only (rows 3-5 of phi_head[k]'s 9 rows) -- phi_head
-  // already bakes in the basis weights, the world-frame rotation, and the
-  // double integration (see estimateCoupledCorrection()'s own construction),
-  // so this is an EXACT low-band trajectory-deviation penalty, not an
-  // approximation built from a hand-rolled integration operator (which
-  // would integrate the correction in the wrong frame). Normalized by
-  // (t1-t0)^2 inside the construction -- the term's own DC weighting scales
-  // as T^2, so an un-normalized knob would silently mean something different
-  // at every scan duration/LiDAR rate. Default 0.0 -- md5-inert (adds
-  // nothing to Lambda at that default). A regularization weight, not a
-  // variance -- never described as one in a filing.
-  //
-  // CQ-72 item 0a: renamed from lambda_traj_pos to traj_deviation_weight
-  // (estimator/coupled/lambda_traj_pos -> estimator/coupled/prior/
-  // traj_deviation_weight) -- same reason as above, pure rename.
   double traj_deviation_weight = 0.0;
-  // CQ-55 item 11(b): the principled, threshold-free alternative to
-  // freeze_bg/bias_freeze_on_vibration -- see estimateCoupledCorrection()'s
-  // own comment at the accumulation site for the full mechanism. Default
-  // false.
   bool bias_observable_only = false;
-  // CQ-72 items 0a/0b: REPLACES curvature_only (bool, default false --
-  // "IMU prior off" and "mean prior on" were the SAME switch, the exact
-  // thing this card exists to fix) with a plain multiplier on the existing
-  // gram(i,j) value term: value_imu = imu_deviation_weight * gram(i,j).
-  // Config key estimator/coupled/curvature_only -> estimator/coupled/
-  // prior/imu_deviation_weight. Default 1.0 (== "the IMU prior is fully
-  // on", i.e. today's curvature_only=false behavior, since 1.0*gram(i,j)
-  // == gram(i,j)); 0.0 means fully off (== today's curvature_only=true's
-  // effect on this one term, MINUS the mean-prior coupling -- see
-  // mean_weight below, now independent). NOT a bool any more: rule 61/
-  // CQ-72's own on/off grid only ever sets it to {0.0, 1.0}, but the type
-  // is a double so a later card can ask a magnitude question without a
-  // second rename.
   double imu_deviation_weight = 1.0;
-  // CQ-72 items 0a/0b: REPLACES dc_weight (double, default 0.0, only ever
-  // READ when curvature_only was true -- gated behind the SAME switch that
-  // turned the IMU prior off, so "IMU prior off" and "mean prior on" could
-  // never be set independently). Config key estimator/coupled/dc_weight ->
-  // estimator/coupled/prior/mean_weight. Precision (relative to 1/sigma^2,
-  // same scale the gram term uses) of an explicit DC/mean-direction-only
-  // prior: mean_acc = mean_weight / sigma_a^2, mean_gyr = mean_weight /
-  // sigma_g^2 -- now applied UNCONDITIONALLY (no longer gated on
-  // imu_deviation_weight being 0), so the two beliefs ("corrections should
-  // be small" and "corrections should not carry a constant offset") are
-  // independently switchable, which is the whole point of this rename.
-  // Default 0.0 -- md5-inert at that default (identical arithmetic to
-  // today's curvature_only=false/dc_weight=0.0 case, since dc_acc/dc_gyr
-  // were already always 0 then).
   double mean_weight = 0.0;
-  // CQ-72 item 3: "how much does the trajectory the correction implies
-  // actually move, per iteration and per frame" -- the literal thing the
-  // card asks for and which delta_c_norm/delta_c_acc_norm/delta_c_gyr_norm
-  // (CQ-53 item 3, coefficient-space) do not answer, since coefficient
-  // space and trajectory space are different objects with different units.
-  // Default false, md5-inert (pure logging, touches no solve/state path).
   bool log_traj_dev_en = false;
-  // CQ-59 item 4: builds the Lambda VALUE term's 3x3 blocks as a diagonal
-  // from the calibration's real per-axis noise floor (state_->varAccFloor()/
-  // varGyrFloor(), now genuinely anisotropic -- see calib_processing.cpp)
-  // instead of the scalar sigma^2 * Identity every other term still uses.
-  // "Anisotropy with an unimpeachable source -- the sensor's own measured
-  // noise" (the card's own words), independent of the residual-derived
-  // anisotropy CQ-58 reports and deliberately does NOT feed back in (see
-  // estimateCoupledCorrection()'s own comment on why that route is
-  // wrong). Default false -- md5-inert.
   bool prior_per_axis_sigma = false;
-  // CQ-61 arm (b): outlier-robust IRLS weighting on each residual's own
-  // normalized value -- "none" (default, md5-inert), "huber", or "cauchy".
-  // See estimateCoupledCorrection()'s own accumulation-loop comment for
-  // the formula and why this treats the symptom (bad correspondences
-  // dominating A), not Bug A's own mechanism (that's arm (a),
-  // pose_cov_in_sigma, a pre-existing shared-code flag -- see voxelplane.cpp).
   std::string robust_loss = "none";
-  // CQ-62 item 0b/1: staged PSD audit -- see the diagnostic block at
-  // posterior18's own computation site in lio_coupled.cpp for what this
-  // logs (psd_audit.txt). Default false, md5-inert (report-only, no
-  // state mutation).
   bool psd_audit_en = false;
-  // CQ-55 item 11(a): report-only, free -- log each scan's bg-block
-  // posterior covariance eigenvalues (degenerate vs. well-observed
-  // directions), independent of whether bias_observable_only itself is
-  // engaged. Default false (the extra ncol x ncol inverse this requires is
-  // not free enough to run unconditionally).
   bool log_bg_projection_en = false;
-  // CQ-57 item 2: report-only, default false. Re-propagates a SECOND
-  // covariance (R,P,V 9x9 only) alongside the corrected trajectory's own
-  // Phi/Phix, WITH proper process-noise reinjection at each step (unlike
-  // Phix's own bare propagation) -- answers "how far apart are the raw
-  // (imu_processing.cpp) and corrected covariance propagations." Never
-  // written into state_->covMut(). See coupled_estimator.h's propagateCoupled()
-  // doc comment for the actual math.
   bool log_cov_repropagation_en = false;
   // Same imu/* keys imu_processing.cpp itself reads (imu/q_alpha_gyr,
   // imu/q_alpha_acc, imu/second_order) -- read again here (not shared)
@@ -499,123 +138,26 @@ struct LioProcCoupledOptions
   // Only used when log_cov_repropagation_en is true.
   double repro_q_alpha_gyr = 1.0, repro_q_alpha_acc = 1.0;
   bool repro_second_order = true;
-  // CQ-57 item 3a: report-only... no, THIS one changes behaviour (adds
-  // process noise to the written posterior) -- default false, md5-inert.
-  // The joint solve carries ONE bias correction at t0; M*A^-1*M^T reports
-  // the bias at t1 as exactly as well known as at t0, with no random-walk
-  // growth over the scan's own duration. Adds q_alpha_bias*covBiasGyr()*dt
-  // / q_alpha_bias*covBiasAcc()*dt (dt = the WHOLE scan duration, t1-t0 --
-  // the gap this item names) to posterior18's own bg/ba diagonal blocks
-  // before it is written, using the SAME imu/q_alpha_bias rate
-  // imu_processing.cpp's own cov_w already uses (state.cpp:259-269's own
-  // comment on why a per-axis RATE, not the initial-covariance value, is
-  // the right quantity here).
   bool q_bias_rw_en = false;
   double q_alpha_bias = 1.0;  // imu/q_alpha_bias, same key imu_processing.cpp reads.
-  // CQ-57 item 3b: default false/0.0, md5-inert. The correction spline can
-  // represent corrections up to roughly n_c/(2*T_scan) Hz; IMU noise power
-  // ABOVE that band contributes no column to A (hence no variance to
-  // A^-1/posterior18) while being real error in the integrated
-  // trajectory. Report-computed fractions (measured directly from the
-  // bag's own raw IMU spectrum, NOT from a model -- see the card's own
-  // "REPORT, DO NOT TUNE" instruction): eee_01, fs=197.55Hz (NOT the
-  // 385Hz the card assumed -- corrected here), band_edge=20.0Hz at n_c=4/
-  // 65.0Hz at n_c=13. Gyro out-of-band fraction is negligible at both
-  // (0.05-1.8%); accel out-of-band fraction is LARGE at n_c=4 (31-69% per
-  // axis) and small at n_c=13 (2.4-4.0%). These two fields are
-  // config-SUPPLIED (not live-FFT-computed in this build -- that is
-  // future work, out of this item's own scope) so a caller can inject the
-  // already-measured fraction; default 0.0 (inert) leaves the shipped
-  // behaviour unchanged regardless of q_out_of_band_en.
   bool q_out_of_band_en = false;
   double q_out_of_band_scale = 1.0;
   double q_out_of_band_fraction_acc = 0.0, q_out_of_band_fraction_gyr = 0.0;
-  // CQ-58: report-only, free -- per-control-point 6-dof constraint report
-  // (cp_constraint.csv). Reuses the SAME A^-1 inversion bias_observable_only/
-  // log_bg_projection_en already pay for when either is also on; computes
-  // its own if neither is (see estimateCoupledCorrection()'s shared-inversion
-  // comment). One line per control point per scan -- n_c*n_scans lines,
-  // buffered rather than flushed per line (same convention
-  // log_jrow_leverage_en uses). Default false.
   bool log_cp_constraint_en = false;
-  // CQ-75: re-deskew/re-propagate against the FINAL accepted GN step
-  // (previously the published pose's own map-deskew input, mg.points,
-  // and the covariance/A construction all reflected the PENULTIMATE
-  // iteration's trajectory -- see this option's own use site for the
-  // precise, verified structural finding). final_relinearize_cov requires
-  // final_redeskew (enforced at load time).
   bool final_redeskew = false;
   bool final_relinearize_cov = false;
-  // CQ-76 T2.1: when true, Pi_ss is built from the pre-propagation P
-  // snapshot (imuProcQhatPeekPBefore(), "P(t0)" in the OTHER sense --
-  // before THIS scan's own IMU propagation, i.e. the previous scan's own
-  // posterior) instead of state_->cov() (the post-propagation prior,
-  // confirmed correct by CQ-76 T0.1's own call-chain proof). A
-  // deliberate sensitivity probe, not a claim this alternative is more
-  // correct -- requires imu/log_qhat_en=true (enforced at load time).
   bool prior_at_scan_start = false;
-  // CQ-76-R3: the principled pairing T2.1 alone did not test. Adds the
-  // frame-local Q_scan (T1.0's own g_qhat_accum_cov_w, already captured
-  // every scan by imuProcQhatRead()) to the rot/pos/vel 9x9 block of the
-  // 18x18 posterior AFTER the normal M*A^-1*M^T write -- requires
-  // imu/log_qhat_en=true (enforced at load time), md5-inert at false.
   bool add_q_scan_to_posterior = false;
-  // CQ-75-R2: arm (e), isolating the map channel. final_redeskew still
-  // runs (governs the solve-side report/residual rebuild as before) --
-  // this flag ADDITIONALLY reverts mg.points to its pre-final-redeskew
-  // value right before returning, so updateMap() (called by the caller
-  // after this function returns) sees the ORIGINAL points rather than
-  // the final-redeskewed ones. Requires final_redeskew=true (enforced at
-  // load time, same pattern as final_relinearize_cov). md5-inert at false.
   bool final_redeskew_map_uses_pre = false;
-  // CQ-79: report-only, log-only, reads quantities the accumulation loop
-  // already holds (struct Residual's own r/t/plane_id/sigma_squared) --
-  // no new computation, never touches the solve. Default false,
-  // md5-inert. hist_start_scan/hist_n_scans name the one 20-scan window
-  // Artifact 2's full per-bin detail is written for (Artifact 1's own
-  // per-scan line fit is written for every scan, unconditionally, once
-  // the flag is on).
   bool log_point_plane_en = false;
   int  log_point_plane_hist_start_scan = 0;
   int  log_point_plane_hist_n_scans = 20;
 };
 
-// CQ-49: the coupled estimator, reimplemented as its own class -- see
-// lio_base.h's own doc comment for why (bug 4 on the old interleaved branch:
-// the spline still ran under coupled mode because nothing PREVENTED it from
-// running, only a flag that happened not to be set correctly). This class
-// has NO ScanSpline member and NO spline call site anywhere -- the
-// structural guarantee that bug 4's class of defect cannot recur here, not
-// merely a fixed instance of it.
-//
-// ONE update, ONE set of variables, no endpoint discrepancy by construction:
-// the LiDAR points correct an IMU measurement correction defined over the
-// scan (coupled_estimator.h); that correction is re-propagated to produce
-// the trajectory; the endpoint of that trajectory IS the state. There is no
-// second correction applied afterwards and therefore no endpoint to
-// reconcile.
-//
-// STATUS (2026-09-19): items 3c/3d/5's joint [delta_x(t0) 18, c] solve is
-// implemented, with the three real bugs CQ-44 item 3f found (Fx never
-// seeded with the identity; M missing the pose columns entirely; the
-// gravity0/gravity stripping mismatch) already fixed from the start in this
-// reimplementation -- see coupled_estimator.cpp. The motion-onset
-// divergence TQ-40 found (coupled diverges to >100km once real dynamics
-// begin, while the static window is healthy) is NOT yet root-caused and is
-// NOT fixed here -- this class reproduces the same estimateCoupledCorrection()
-// math, just with bug 4's contamination structurally removed. No G0/G1/G2
-// gate has been passed. Default estimator/mode stays "decoupled"; nothing
-// here is reachable unless a config explicitly sets estimator/mode: coupled.
 class LioProcCoupled : public LioProcBase
 {
 public:
   explicit LioProcCoupled(NodeContext& ctx);
-  // CQ-55 "effective-config report" standing requirement (CQ-54 item 8):
-  // prints engagementReport() at shutdown and writes it to
-  // debugLogPath("engagement.txt"), mirroring LioProcDecoupled's own
-  // destructor exactly (see lio_decoupled.cpp) -- previously declared
-  // =default here, so this class's own engagementReport() string was dead
-  // code, never actually printed anywhere.
   ~LioProcCoupled() override;
 
   std::string loadParameters(ros::NodeHandle& pnh) override;
@@ -623,45 +165,9 @@ public:
   void deskewAndDownsample(MeasureGroup& mg) override;
   std::string processLIO(MeasureGroup& mg) override;
 
-  // CQ-44: ONE Gauss-Newton step of the coupled estimator. Re-propagates
-  // mg.poses with the current coefficient AND delta_s(t0) estimate
-  // (coupled_estimator.h), re-deskews mg.points against that corrected
-  // trajectory, rebuilds residuals (buildResiduals() -- the SAME shared
-  // method the decoupled path uses), solves the joint normal equations, and
-  // applies the step. Does NOT touch estimateStateCorrection() at all.
-  //
-  // CQ-82 Phase 1: this is now a DISPATCHER. Everything before the
-  // coefficient-block prior/residual-loop (propagate, re-deskew+downsample,
-  // buildResiduals, the state-prior Pi_ss) is basis-independent and stays
-  // here; the coefficient-block prior + the normal-equations residual loop
-  // (previously inline) moved verbatim into buildImuCorrectionSystem() --
-  // "moved", not rewritten: every accumulator/diagnostic it used to fill is
-  // still filled, just via the returned CoupledSystemBuild rather than a
-  // bare local. Everything from the LDLT solve onward (rank diagnostics,
-  // the solve itself, the delta application, bg-projection, re-propagation)
-  // is unchanged and still lives here, since none of it depends on which
-  // basis built A/b -- only their CONTENTS do.
   double estimateCoupledCorrection(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out);
 
 private:
-  // CQ-82 Phase 2, Artifact 1: the pose basis's own GN-iteration path.
-  // Branched to from estimateCoupledCorrection()'s very top when
-  // copts_.poseBasis() -- kept SEPARATE from the raw_imu dispatcher rather
-  // than threaded through it, since the raw_imu path's own downstream
-  // bookkeeping (bg-projection, delta_bg/delta_ba/delta_v/delta_g
-  // accumulation, coupled_c_acc_/coupled_c_gyr_'s own semantics) does not
-  // apply to a basis whose c-block is position/attitude, not accel/gyro
-  // corrections -- a single top-level branch is easier to verify never
-  // affects the raw_imu path than threading pose-specific conditionals
-  // through ~600 lines of shared code. Deskews against the current trial
-  // spline (coupled_pose_spline_ + coupled_c_pos_/coupled_c_rot_) via the
-  // EXISTING, already-shared deskewPointsSpline() (lio/deskew.h, also used
-  // by the decoupled spline path), reuses buildResiduals() (also shared,
-  // non-virtual), builds the c-block system via buildPoseSplineCBlock(),
-  // solves, applies the correction, and writes the resulting trajectory's
-  // tail pose into state_ directly (no propagateCoupled()-equivalent
-  // needed -- the pose basis's own trajectory already IS an absolute
-  // pose, not a correction requiring re-propagation).
   double estimateCoupledCorrectionPoseBasis(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out);
   // One GN iteration of the pose-control-point-only estimator
   // (spline_mode=pose_control). Rebuilds LiDAR + IMU prior normal
@@ -675,18 +181,6 @@ private:
   // once after convergence) -- see processLIO()'s own
   // copts_.poseControlSplineBasis() early-return block for that.
   double estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& dtheta_out, V3D& dt_out);
-  // CQ-82 Phase 1: everything buildImuCorrectionSystem() (and, in Phase 2,
-  // its pose-basis sibling) hands back to the dispatcher besides A/b itself
-  // -- every sum/accumulator the residual loop used to leave in a bare local
-  // for the bookkeeping below it to read. A struct, not a longer parameter
-  // list of out-params, so the builder's own signature stays "the inputs it
-  // needs" and nothing about its RETURN shape leaks into the call site
-  // beyond one name. Deliberately NOT M -- solveCovarianceFromA()/the
-  // covMut write are not called from inside estimateCoupledCorrection() at
-  // all (they live in processLIO(), reading coupled_last_A_ after the GN
-  // loop converges), so there is no "M" to thread through here; the card's
-  // own dispatcher skeleton names it as an aspiration this function does not
-  // actually need to satisfy.
   struct CoupledSystemBuild
   {
     Eigen::MatrixXd A;
@@ -701,25 +195,12 @@ private:
     Eigen::MatrixXd phic_spread_sum;
     double phic_spread_sumsq = 0.0;
     int phic_spread_n = 0;
-    // CQ-83: per-residual nu^2/S and nu^2/(S-s_prior_pose), accumulated
-    // alongside sum_floor_S et al (same acceptance condition: floor_term/
-    // sigma_diag_squared/s_prior_pose all >= 0.0) so LioFrameDiag's nis/
-    // nis_est columns have a genuine coupled source instead of sitting at
-    // their -1.0 sentinel forever.
     double sum_nis = 0.0;
     int n_nis = 0;
     double sum_nis_est = 0.0;
     int n_nis_est = 0;
   };
 
-  // CQ-82 Phase 1: the shipped arm ("raw_imu"/"imu_correction"), MOVED
-  // verbatim from estimateCoupledCorrection() -- the coefficient-block prior
-  // (gram/Curv/Lambda, item 3b/4/CQ-55/CQ-59/CQ-69) and the normal-equations
-  // residual loop (H/Phix_pt/Phic_pt/Jrow, item 3c, CQ-50/CQ-53/CQ-61/CQ-66),
-  // including the bias_anchor block and coupled_last_A_/coupled_last_Lambda_
-  // writes. No new math anywhere in this function; only the split itself is
-  // new. Pi_ss/s_vec (the state-block prior) are built by the caller and
-  // passed in, since they do not depend on the coefficient-block basis.
   CoupledSystemBuild buildImuCorrectionSystem(
       MeasureGroup& mg, double t0, double t1, int n_c, int ncol, int ncol_s, int ncol_c,
       double sigma_a, double sigma_g, double sigma_a_floor, double sigma_g_floor,
@@ -729,72 +210,24 @@ private:
 
   // Persisted across this scan's own GN iterations (reset at the top of
   // processLIO() each frame); NOT carried scan-to-scan -- c_prior = 0 every
-  // scan (item 4).
   std::vector<V3D> coupled_c_acc_, coupled_c_gyr_;
-  // CQ-82 Phase 2, Artifact 1: the pose-basis analogue. coupled_pose_spline_
-  // is fit ONCE per scan (first GN iteration only, via ScanSpline::fit() on
-  // the IMU-propagated mg.poses -- "the matching initial condition to the
-  // other arm's c=0", per the card) and never re-fit within the scan;
-  // coupled_c_pos_/coupled_c_rot_ are the accumulated corrections ON TOP of
-  // that fixed fit's own control points, persisted across this scan's GN
-  // iterations the same way coupled_c_acc_/coupled_c_gyr_ are, reset to
-  // zero (and the spline re-fit) at the top of every new scan. Only
-  // meaningful when copts_.poseBasis() -- untouched, unread, on the raw_imu
-  // path.
   ScanSpline coupled_pose_spline_;
   bool coupled_pose_spline_valid_ = false;
   std::vector<V3D> coupled_c_pos_, coupled_c_rot_;
-  // CQ-87 item 3: the pose arm's own posterior for [delta_phi0;delta_pos0]
-  // (SAME layout as raw_imu's s_vec.segment<3>(0)/segment<3>(3)) -- the
-  // marginal covariance of reducePoseSplineHeadCoupling()'s own reduced
-  // system, recomputed every GN iteration (so the LAST one, used for the
-  // post-loop state_->covMut() write, reflects the CONVERGED solve --
-  // this is what makes final_relinearize_cov genuinely true on this arm,
-  // see item 4). Valid only when poseBasis() && pose_head_freeze_cp==0
-  // (the real-coupling path); untouched, unread otherwise.
   Eigen::Matrix<double, 6, 6> coupled_pose_head_cov_ = Eigen::Matrix<double, 6, 6>::Zero();
 
-  // The pose-control-point trajectory state -- only meaningful when
-  // copts_.poseControlSplineBasis().
-  //
-  // 2026-09-22 correction: the head is a TRUE NULLSPACE ELIMINATION
-  // (coupled_pose_control_hns_, built ONCE at scan start from p0/v0/R0 --
-  // see buildPoseControlHeadNullspace()) over the RAW 6N control-point
-  // space, not a fixed-control-point scheme. The actual GN mean variable
-  // is coupled_pose_control_eta_ (6N-9 dim); the spline's cp_p/cp_phi are
-  // a DERIVED view (c = c_particular + Z*eta), recomputed via
-  // poseControlUnflatten() every time eta changes -- cp_p/cp_phi are
-  // never treated as the optimization variable directly.
   PoseControlSpline coupled_pose_control_spline_;
   bool coupled_pose_control_valid_ = false;
   PoseControlFreeLayout coupled_pose_control_layout_;
   PoseControlHeadNullspace coupled_pose_control_hns_;
   Eigen::VectorXd coupled_pose_control_eta_;
-  // pose_control_tail_weak_mode_validation task, Phase 1: this scan's own
-  // eta at scan-start (frozen right after the seed projection, BEFORE the
-  // GN loop runs), so the weak-mode diagnostics below can compute this
-  // scan's REALIZED cumulative correction (coupled_pose_control_eta_ at
-  // convergence, minus this) and project it onto each weak eigenmode --
-  // "how many sigma did the mean solver actually move along this
-  // direction," as distinct from the theoretical single-step g_i/lambda_i
-  // (which the existing g_lidar/g_imu diagnostics evaluate only AT
-  // convergence, where they trivially cancel by first-order optimality --
-  // see the mode_gradient block's own comment).
   Eigen::VectorXd coupled_pose_control_eta_scan_start_;
-  // pose_control_lidar_information_footprint_validation task, Phase 3/4: a
-  // full COPY of the spline at scan-start (seed, before the GN loop
-  // mutates cp_p/cp_phi in place), so E_lidar/E_imu can be evaluated at
-  // the SAME residual set both before and after this scan's GN loop --
-  // "same accepted residual set, cost before vs after," per this task's
-  // own explicit instruction.
   PoseControlSpline coupled_pose_control_spline_scan_start_;
-  // Tail trial state (item 3/4 of the correction): tail_trial is the ONE
   // coherent current non-trajectory tail state, updated by INCREMENT
   // (delta_bg/ba/g solved by the GN step) every iteration -- never treated
   // as itself the optimization variable (the variable is the increment).
   // tail_prior is the FIXED scan-entry value the increment is measured
   // against (mean prior residual = tail_trial - tail_prior, consistent
-  // with the covariance prior's own Omega_ss block -- item 10).
   V3D coupled_pose_control_bg_trial_ = V3D::Zero(), coupled_pose_control_ba_trial_ = V3D::Zero(),
       coupled_pose_control_g_trial_ = V3D::Zero();
   V3D coupled_pose_control_bg_prior_ = V3D::Zero(), coupled_pose_control_ba_prior_ = V3D::Zero(),
@@ -802,7 +235,6 @@ private:
   // Per-sample e_acc/e_gyr residuals against the SCAN-START (pre-LiDAR)
   // spline, produced as a byproduct of buildPoseControlContinuousImuPrior()
   // -- the ONE evaluation of the continuous-time IMU prior's own residual,
-  // reused directly for diagnostics (item 27/37) instead of a second,
   // redundant computePoseControlImuSplineResidualSamples() call. Distinct
   // from (and NOT a substitute for) adaptive-Q's own residual, which is
   // deliberately evaluated against the CONVERGED post-LiDAR spline (see
@@ -815,35 +247,12 @@ private:
   // inside the per-iteration solve -- spec: mean every iteration,
   // covariance once after convergence).
   Eigen::MatrixXd coupled_pose_control_P_z_post_;
-  // item 12/21: curvature block's own trace contribution to A_raw, cached
   // by estimateCoupledPoseControlSpline() (mean solve) for the post-loop
   // covariance block to log alongside Lambda_lidar/Lambda_prior traces.
   double coupled_pose_control_last_lambda_curvature_trace_ = 0.0;
-  // 2026-09-23 x1/head-propagation campaign: the LAST GN iteration's own
-  // delta_z (mean-solve step, z=[eta;delta_sT]) -- captured so the
-  // post-loop covariance block (item 7's EKF-reference check) can compare
-  // it against an independently-constructed information-form reference
-  // update AT THE SAME (converged) linearization point.
-  // eta_imu: the scan-start (post-head-projection, pre-GN) eta value the
-  // production prior's residual is measured against, and the always-on
-  // x1/knot init-state diagnostics reference.
+  Eigen::MatrixXd coupled_pose_control_last_A_lidar_reduced_;
   Eigen::VectorXd coupled_pose_control_eta_imu_;
-  // ==========================================================================
-  // PRODUCTION joint IMU/bias Gaussian prior (process-prior-REFORMULATION
-  // phase). Computed ONCE per scan, at scan-start, from the SAME joint
-  // [x0;z] marginalize-then-invert construction as before -- but now this
-  // is the estimator's ONE authoritative prior, shared verbatim between the
-  // mean solve (every GN iteration adds the SAME coupled_pose_control_
-  // lambda_prior_z_/z_imu_) and the post-loop covariance computation (which
-  // reuses coupled_pose_control_sigma_full_prior_ directly instead of
-  // re-deriving a fresh prior from the converged trial) -- this is what
-  // makes the "mean update information == covariance update information"
-  // invariant (item 29) hold BY CONSTRUCTION, not by convention.
-  // ==========================================================================
-  // The joint (9+dimZ) x (9+dimZ) covariance over [x0;eta;sT], BEFORE any
-  // LiDAR update -- needed (not just its z-marginal) for the covariance
-  // block's M_full=[J_h,M_T] tail/x1 mapping, which requires x0's DIRECT
-  // sensitivity path as well as its indirect (via z) one.
+  Eigen::Matrix<double, 6, 1> coupled_pose_control_last_physical_lidar_delta_ = Eigen::Matrix<double, 6, 1>::Zero();
   Eigen::MatrixXd coupled_pose_control_sigma_full_prior_;
   // Lambda_prior_z = pinv(Sigma_full_prior_'s z=[eta;sT] marginal block) --
   // the information the mean solve adds every iteration. z_imu_ is the
@@ -851,50 +260,33 @@ private:
   // start by construction) the residual is measured against.
   Eigen::MatrixXd coupled_pose_control_lambda_prior_z_;
   Eigen::VectorXd coupled_pose_control_z_imu_;
-  // item 10/51's corrected EKF-reference test: the reference step computed
   // mid-iteration (using THAT iteration's own LiDAR linearization + the
   // fixed prior), held here until the actual delta_z for the SAME
   // iteration is available a few lines later in the same function.
   Eigen::VectorXd coupled_pose_control_ekf_ref_pending_;
   bool coupled_pose_control_ekf_ref_pending_valid_ = false;
-  // items 13-19/39-40: pose_control's own causal adaptive-Q estimator
   // (reuses the existing AdaptiveQ class -- its math is fully generic
   // despite SplineImuResidualStats' name; populated here from process-
   // segment residuals, not a ScanSpline). primed_ tracks whether
   // setNominal/setFloor has run yet (once, first valid scan).
   AdaptiveQ coupled_pose_control_adaptive_q_;
   bool coupled_pose_control_adaptive_q_primed_ = false;
-  // pose_control_uncertainty_completion task, item 3: captured at THIS
-  // scan's own prior-construction call site (poseControlEffectiveVarAcc()/
-  // VarGyr(), read BEFORE this scan's own adaptive-Q update() call below
-  // runs), so the "effective R used" diagnostic reports what actually built
-  // this scan's prior -- NOT a value re-read after update() has already
-  // advanced the held estimate for scan k+1.
   double coupled_pose_control_effective_var_acc_used_ = 0.0;
   double coupled_pose_control_effective_var_gyr_used_ = 0.0;
-  // item 18: the ONE authoritative Q read site pose_control's own factor
   // construction/diagnostics go through -- returns the adaptive value
   // (already one-scan-causal by construction) when enabled and primed,
   // else state_->varAcc()/varGyr() exactly as before (identity when off).
   V3D poseControlEffectiveVarAcc() const;
   V3D poseControlEffectiveVarGyr() const;
-  // Rolling cross-scan history of the (bias-corrected) segment residual
-  // mean, used ONLY to compute a genuine multi-scan lag-1 autocorrelation
+  // mean, used only to compute a multi-scan lag-1 autocorrelation
   // (item 17) -- a single scan's handful of segments is too few samples on
   // its own. Bounded ring buffer (see .cpp for the cap).
   std::deque<V3D> coupled_pose_control_acc_resid_hist_;
   std::deque<V3D> coupled_pose_control_gyr_resid_hist_;
-  // CQ-79: this scan's PREVIOUS iteration's own set of matched-plane
-  // hashes, for carry_frac -- reset to empty at scan start (alongside
-  // coupled_iters_'s own reset), updated after every iteration's own
-  // point-plane logging pass.
   std::unordered_set<std::size_t> coupled_prev_iter_planes_;
-  // CQ-44 items 3c/3d: this scan's own ACCUMULATED delta_s(t0) =
-  // [delta_v, delta_bg, delta_ba, delta_g] across GN iterations -- added ON
-  // TOP OF state_'s own pre-scan v/bg/ba/g (captured once at scan start).
+  std::vector<PoseControlLidarObs> coupled_pose_control_frozen_lidar_obs_;
   V3D coupled_delta_v_ = V3D::Zero(), coupled_delta_bg_ = V3D::Zero(),
       coupled_delta_ba_ = V3D::Zero(), coupled_delta_g_ = V3D::Zero();
-  // Item 3e(v)/3f bug 2: the full 18-dim joint solve -- delta_phi(t0)/
   // delta_p(t0) are solved for too, not held at zero. This is a one-scan
   // fixed-lag smoother: the previous scan's published pose is genuinely
   // revised by the converged value of these two (the map already built from
@@ -905,49 +297,21 @@ private:
   double coupled_solve_ms_ = -1.0;
   int    coupled_iters_ = 0;
 
-  // Item 3d(i): this scan's own DC-component/bias-split diagnostics, filled
   // by the final GN iteration.
   double coupled_c_acc_dc_over_sigma_ = -1.0, coupled_c_gyr_dc_over_sigma_ = -1.0;
   double coupled_dba_over_sigma_ = -1.0, coupled_dbg_over_sigma_ = -1.0;
   double coupled_c_acc_over_sigma_ = -1.0, coupled_c_gyr_over_sigma_ = -1.0;
-  // CQ-56 (spline-magnitude diagnostics): the SAME RMS-per-coefficient
-  // accumulated c_acc/c_gyr magnitude as the _over_sigma pair above, but in
-  // RAW physical units (m/s^2 for c_acc, rad/s for c_gyr) rather than
-  // sigma-normalized -- lets the "how much curvature_weight suppresses the
-  // spline" comparison be read directly, without needing sigma_a/sigma_g
-  // from the same run to de-normalize it back out.
   double coupled_c_acc_total_norm_ = -1.0, coupled_c_gyr_total_norm_ = -1.0;
-  // CQ-55 item 12: S = floor_term + sigma_diag_squared + plane_var_term +
-  // s_prior_pose per residual, summed over this scan's accepted residuals
-  // -- the absolute-units denominator the floor/sdiag/pvar/prior_pose
-  // SHARES (elsewhere, decoupled-only so far) have always been reported as
-  // fractions of, with the absolute magnitude itself never logged before
-  // now, on EITHER path.
   double coupled_sum_S_ = -1.0;
-  // CQ-55 item 11(a): this scan's bg-block posterior covariance (P_bg =
-  // A^-1's 9:12,9:12 block), split into its "degenerate" (largest
-  // eigenvalue, least-observed) and "well-observed" (smallest eigenvalue)
-  // directions -- report-only, computed independent of
-  // bias_observable_only's own confidence-weighted correction.
   double coupled_bg_var_degenerate_ = -1.0, coupled_bg_var_observed_ = -1.0;
-  // CQ-60 item 5, Tier 1: constructed with copts_.nees_tier1_window_scans
-  // once loadParameters() has run (see the constructor) -- one-shot,
-  // inert after the bag's own stationary prefix has been consumed.
   Tier1NeesBuffer coupled_tier1_nees_{0};
   double coupled_delta_v_norm_ = -1.0, coupled_delta_g_norm_ = -1.0;
-  // Item G1(a)/(c): velocity- and gravity-block posterior trace.
   double coupled_trP_vel_ = -1.0, coupled_trP_grav_ = -1.0;
   // The LAST GN iteration's own joint A matrix, kept so the item-5
   // covariance term can be applied ONCE after the loop converges.
   Eigen::MatrixXd coupled_last_A_;
-  // CQ-58 item 2a: the c-block's PRIOR alone (Lambda, as added to A before
-  // any residual accumulates into it) -- kept so the residual-only
-  // information block I_j = A.block(j,j) - Lambda.block(j,j) can be
-  // recovered without a second accumulation pass. Only meaningful when
-  // log_cp_constraint_en is on; left default-empty otherwise.
   Eigen::MatrixXd coupled_last_Lambda_;
 
-  // TQ-40 item 3: the coupled-arm equivalent of the decoupled path's own
   // ask/got/refusal discriminator, restricted to the [delta_phi0, delta_p0]
   // 6-dim sub-block of the FINAL GN iteration's pure-LiDAR-info
   // accumulation -- a NAMED APPROXIMATION (not marginalised over
@@ -955,29 +319,9 @@ private:
   // phi0/p0 alone by whatever those directions correlate away).
   double coupled_ask_ = -1.0, coupled_got_ = -1.0, coupled_refusal_ = std::numeric_limits<double>::quiet_NaN();
   int    coupled_n_residuals_ = -1;
-  // CQ-61 item 4: previous scan's own n_residuals, so residual-starvation
-  // (a sudden drop, not just an absolute floor) can be detected -- see the
-  // abort site in processLIO() for the full rationale. -1 means "no prior
-  // scan yet" (never triggers the drop check on the very first scan).
   int    coupled_prev_n_residuals_ = -1;
   double coupled_sum_weight_ = -1.0;
   double coupled_h_pp_min_eig_ = -1.0, coupled_h_rr_min_eig_ = -1.0;
-  // CQ-83: the remaining LioFrameDiag columns with a genuine coupled
-  // analogue, routed here from quantities the dispatcher/builder already
-  // compute (HtH_pose_lidar/Htz_pose_lidar, the sum_*_S components, ask/
-  // got already wired above). h_pp_max_eig mirrors h_pp_min_eig's own
-  // eigensolve (just the top eigenvalue instead of the bottom); h_rr_trace/
-  // htth_pos_trace are plain traces of the same HtH_pose_lidar blocks;
-  // htz_*_norm read Htz_pose_lidar the same way decoupled reads ekf_.Htz;
-  // kappa_eff/kappa_gev* reuse decoupled's own formulas (kappa_eff =
-  // sqrt(ask/got)-1; kappa_gev* = GeneralizedSelfAdjointEigenSolver(HtH,P)
-  // eigenvalues) against coupled's own HtH_pose_lidar/prior_cov_ 6x6 block;
-  // floor_share/sdiag_share/pvar_share/prior_pose_share are each sum_*_S
-  // component's fraction of sum_S; nis/nis_est are the per-residual mean
-  // nu^2/S and nu^2/(S-s_prior_pose), accumulated alongside sum_floor_S et
-  // al in buildImuCorrectionSystem()'s own residual loop; dx_rot_deg/
-  // dx_pos_mm read the SAME total_dtheta/total_dt this scan already
-  // accumulates for its own engagement reporting.
   double coupled_h_pp_max_eig_ = -1.0;
   double coupled_h_rr_trace_ = -1.0, coupled_htth_pos_trace_ = -1.0;
   double coupled_htz_rot_norm_ = -1.0, coupled_htz_pos_norm_ = -1.0;
@@ -989,17 +333,6 @@ private:
   double coupled_nis_ = -1.0, coupled_nis_est_ = -1.0;
   double coupled_dx_rot_deg_ = 0.0, coupled_dx_pos_mm_ = 0.0;
 
-  // CQ-53 item 1: joint matrix's own LDLT pivot floor/ceiling (vectorD()
-  // min/max), plus the SAME diagnostic restricted to the state sub-block
-  // (A.block(0,0,ncol_s,ncol_s), a SEPARATE LDLT of that block alone, not a
-  // read of the joint LDLT's permuted D -- mirrors spline.cpp's own
-  // "separate LDLT of AtA alone" pattern, see its doc comment on why: the
-  // KKT/joint matrix's own permutation doesn't preserve block identity) and
-  // the coefficient sub-block (A.block(ncol_s,ncol_s,ncol_c,ncol_c)).
-  // Computed on every GN iteration's own A, overwritten each time so the
-  // FINAL (converged) iteration's values are what survives to nees_diag.txt
-  // -- same convention as the item-3d diagnostics above. -1.0 sentinel
-  // (never a real pivot) if the diagnostic LDLT itself fails.
   double coupled_joint_dmin_ = -1.0, coupled_joint_dmax_ = -1.0;
   double coupled_state_dmin_ = -1.0, coupled_state_dmax_ = -1.0;
   double coupled_coeff_dmin_ = -1.0, coupled_coeff_dmax_ = -1.0;
@@ -1008,121 +341,36 @@ private:
   // present and testable ahead of an actual validated threshold.
   bool   coupled_pivot_guard_ = false;
 
-  // CQ-53 item 2: relative difference between point_cross_normal (H built
-  // at t1) and the "point_time" formula (H built at each residual's own
-  // t_k), computed for EVERY residual regardless of which jacobian_time_mode
-  // is actually active (this column is diagnostic-only, read by none of the
-  // modes), so every mode stays directly comparable on this number. This
-  // REPLACES the
-  // ad hoc, since-deleted debug print this session used to produce the
-  // "1-3%" figure the CQ-50 filing cited -- that number no longer existed
-  // on disk anywhere once the print was reverted; this makes it a
-  // permanent, re-derivable column instead. p10/p50/p90/max over this
-  // iteration's own residual set, overwritten each iteration (final
-  // iteration survives).
   double coupled_hcol_reldiff_p10_ = -1.0, coupled_hcol_reldiff_p50_ = -1.0;
   double coupled_hcol_reldiff_p90_ = -1.0, coupled_hcol_reldiff_max_ = -1.0;
 
-  // CQ-53 item 3: this GN iteration's own STEP norms (not the scan's
-  // accumulated total, which coupled_delta_phi0_ etc. already track) --
-  // |delta_s| (the 18-dim state step) and |delta_c| (the 6*n_c coefficient
-  // step) from the joint solve, set at the end of estimateCoupledCorrection()
-  // each call and read by processLIO()'s own iter_error.txt write (which
-  // runs once per GN iteration already, right after the call).
   double coupled_last_delta_s_norm_ = -1.0, coupled_last_delta_c_norm_ = -1.0;
-  // CQ-53 item (B): the s-block's own six 3-dim sub-blocks (same
-  // [delta_phi0, delta_p0, delta_v, delta_bg, delta_ba, delta_g] order
-  // s_vec/delta_s use throughout this file), split out from the single
-  // combined delta_s_norm above -- needed to tell "phi0/p0 are still
-  // moving but bg has converged" apart from "everything is shrinking
-  // together", which the combined norm alone cannot.
   double coupled_last_delta_phi0_norm_ = -1.0, coupled_last_delta_p0_norm_ = -1.0,
          coupled_last_delta_v_norm_step_ = -1.0, coupled_last_delta_bg_norm_step_ = -1.0,
          coupled_last_delta_ba_norm_step_ = -1.0, coupled_last_delta_g_norm_step_ = -1.0;
-  // CQ-56: the SAME per-iteration step, split into its c_acc (position
-  // spline) and c_gyr (rotation spline) halves -- delta_c_norm above is
-  // their combined norm, which can't distinguish "acc coefficients moved a
-  // lot, gyr didn't" from the reverse.
   double coupled_last_delta_c_acc_norm_ = -1.0, coupled_last_delta_c_gyr_norm_ = -1.0;
-  // CQ-58 item 3: the FULL per-iteration delta_c vector (not just its norm
-  // above) -- layout [c_acc(3*n_c), c_gyr(3*n_c)], same as coupled_c_acc_/
-  // coupled_c_gyr_'s own accumulation. Only meaningful when
-  // log_cp_constraint_en is on; overwritten every GN iteration so the
-  // post-loop cp_constraint.csv write (processLIO(), after the loop) sees
-  // the FINAL iteration's own step.
   Eigen::VectorXd coupled_last_delta_c_;
 
-  // CQ-72 item 3: the PREVIOUS GN iteration's own P_N*c VECTOR (P_N = the
-  // last IMU step's phi_head position rows) -- traj_dev_step_m is defined
-  // as ||P_N c_this_iter - P_N c_prev_iter||, a vector difference, not a
-  // difference of norms, so the vector itself (not just its magnitude) has
-  // to be kept. coupled_prev_traj_dev_valid_ = false at scan start
-  // (alongside coupled_iters_'s own reset) means "no previous iteration
-  // this scan", so the first iteration's own step is never reported
-  // against a stale value from the prior scan.
   V3D coupled_prev_traj_dev_end_vec_ = V3D::Zero();
   bool coupled_prev_traj_dev_valid_ = false;
 
-  // CQ-53 item 4: per-scan RMS (not mean-absolute -- sum_abs_r/error above
-  // is already mean-|r|) residual, in meters, over the FINAL GN iteration's
-  // own residual set -- the coupled-path analogue decoupled's own residual
-  // RMS record has and coupled never had. sqrt(mean(r^2)), same units/scale
-  // as a point-to-plane residual everywhere else in this codebase.
   double coupled_res_rms_ = -1.0;
-  // CQ-60 item 0a: arithmetic mean of res.sigma_squared over this scan's
-  // final-iteration residual set -- same definition lio_decoupled.cpp's own
-  // mean_sigma_squared uses (sum_sigma_squared/n), so the two paths are
-  // directly, identically comparable. sum_weight (already logged) is
-  // sum(1/sigma_squared) -- its reciprocal-scaled harmonic mean is NOT the
-  // same quantity and does not substitute for this one.
   double coupled_mean_sigma_squared_ = -1.0;
 
-  // CQ-53 item 5: gravity-leak falsifier -- world-frame integrated
-  // acceleration magnitude (|acc_avr_world|, averaged over this scan's own
-  // segments, truth is ~9.81 m/s^2 at rest and under pure translation) and
-  // the angle between the CURRENT posterior gravity estimate and this
-  // scan's own dominant measured-acceleration direction (a stationary-
-  // window proxy for "how much has gravity's direction rotated away from
-  // vertical in this estimator's own frame"). Set once per scan (not per
-  // iteration) from the FINAL converged coupled_prop_.
   double coupled_acc_world_mag_ = -1.0, coupled_gravity_dir_err_deg_ = -1.0;
 
-  // CQ-44 G0: forced to exactly 0.0 every scan -- there is no separate
-  // spline t0 to compare against (this scan's own propagation start IS the
-  // previous scan's own coupled endpoint, by construction).
   double boundary_dpos_ = 0.0;
   double boundary_drot_deg_ = 0.0;
 
-  // CQ-54 item 1: the sigma actually used this scan (== the calibration
-  // floor unless adaptive_sigma inflated it) and its ratio to that floor --
-  // the instrument item (1) asks for, ~1 while quiet, 15-55 through a
-  // vibration transient.
   double coupled_sigma_a_used_ = -1.0, coupled_sigma_g_used_ = -1.0;
   double coupled_sigma_a_ratio_ = -1.0, coupled_sigma_g_ratio_ = -1.0;
-  // CQ-54 item 3: whether bias_freeze_on_vibration's guard was active THIS
-  // scan, and the running fraction of scans it has been active over the
-  // process's life (active_count_/scan_count_, both accumulated here since
-  // this options struct is not otherwise per-scan-reset).
   bool coupled_bias_freeze_active_ = false;
   long coupled_bias_freeze_active_count_ = 0, coupled_bias_freeze_scan_count_ = 0;
-  // CQ-54 item 5: the within-scan correction's and the bias's own
-  // contributions to angular rate (angvel_avr = seg.gyr - delta_bg +
-  // delta_w), logged as norms in deg/s, plus their net -- overwritten every
-  // GN iteration so the final converged call's values survive.
   double coupled_w_from_c_deg_s_ = -1.0, coupled_w_from_bg_deg_s_ = -1.0, coupled_w_net_deg_s_ = -1.0;
 
-  // CQ-54 item 6: the gyro bias's calibration-time value, snapshotted once
-  // (lazily, on the first scan bias_anchor is active) and never revised --
-  // the anchor target for the whole run.
   V3D coupled_bg_calib_ = V3D::Zero();
   bool coupled_bg_calib_set_ = false;
 
-  // CQ-54 item 4: reduced chi-square this scan -- mean(w_k * r_k^2) over the
-  // final GN iteration's residual set, i.e. how big the residuals actually
-  // are relative to how big the filter's own (possibly IMU-noise-blind,
-  // item 0e) measurement-noise model says they should be. ~1 means the
-  // model is honest; item 4 predicts a rise toward ~4 through a vibration
-  // transient the weights never see.
   double coupled_reduced_chi2_ = -1.0;
 };
 

@@ -52,7 +52,7 @@ int main()
     // incorrect; computePoseControlCorrectionMetrics()'s own formula is
     // unchanged and independently verified to satisfy this identity, matching
     // the same orthogonal-case check already established in
-    // test_pose_control_correction_diagnostics.cpp ("orthogonal correction
+    // standalone correction-direction reference ("orthogonal correction
     // increases GT distance").
     check(m.gt_error_reduction < 0.0 && std::abs(m.gt_error_reduction - (1.0 - std::sqrt(2.0))) < 1e-12,
           "orthogonal correction increases GT distance by the Pythagorean amount",

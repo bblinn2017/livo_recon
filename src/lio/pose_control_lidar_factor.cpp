@@ -4,6 +4,43 @@
 namespace livo_recon
 {
 
+PoseControlPhysicalLidarInformation buildPoseControlPhysicalLidarInformation(
+    const std::vector<Residual>& residuals)
+{
+  PoseControlPhysicalLidarInformation out;
+  for (const Residual& res : residuals)
+  {
+    const double w = 1.0 / std::max(res.sigma_squared, 1e-12);
+    Eigen::Matrix<double, 6, 1> J;
+    J.head<3>() = res.point_cross_normal;
+    J.tail<3>() = res.normal;
+    out.Lambda.noalias() += w * (J * J.transpose());
+    out.b.noalias() += -w * res.r * J;
+    out.energy += 0.5 * w * res.r * res.r;
+  }
+  const Eigen::Matrix<double, 6, 6> S = 0.5 * (out.Lambda + out.Lambda.transpose());
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es(S);
+  if (es.info() == Eigen::Success)
+  {
+    out.lambda_min = es.eigenvalues()(0);
+    out.lambda_max = es.eigenvalues()(5);
+    const double threshold = 1e-12 * std::max(std::abs(out.lambda_max), 1e-300);
+    for (int i = 0; i < 6; ++i)
+      if (es.eigenvalues()(i) > threshold) ++out.effective_rank;
+  }
+  return out;
+}
+
+Eigen::Matrix<double, 6, 1> poseControlPhysicalLidarJacobianAtTime(
+    const PoseControlSpline& spline, const Residual& residual)
+{
+  const M3D R_t = spline.rotAt(residual.t);
+  Eigen::Matrix<double, 6, 1> J;
+  J.head<3>() = residual.raw_body_point.cross(R_t.transpose() * residual.normal);
+  J.tail<3>() = residual.normal;
+  return J;
+}
+
 // Per-thread accumulator for the parallel LiDAR-residual loop below -- item
 // 30-35 of the implementation spec ("parallel loop -> thread-local
 // accumulator -> merge... no per-residual/per-sample locks"). One instance
@@ -32,17 +69,6 @@ void addPoseControlLidarFactor(
   const int n = static_cast<int>(obs.size());
   if (out_records) out_records->reserve(out_records->size() + obs.size());
 
-  // 2026-09-23: this loop was previously strictly serial (every residual
-  // accumulated directly into the caller's shared A/b) -- items 30-36 ask
-  // for the SAME parallel-loop/thread-local-buffer/merge pattern already
-  // used elsewhere in this codebase (see LioProcBase::buildResiduals(),
-  // src/processing/lio_base.cpp) applied here, since a scan's LiDAR
-  // residual count (thousands of points) is exactly this pattern's
-  // intended scale, unlike computePoseControlImuResidual()'s per-scan IMU
-  // sample loop (tens of samples -- not worth threading, no change made
-  // there). O(n) work, O(n) accumulation, O(threads*dimZ^2) merge -- no
-  // O(M^2) work and no M x M matrix is created anywhere in this file
-  // (item 32).
   const int threads = std::max(1, std::min(cappedOmpThreads(), std::max(1, n)));
   std::vector<PoseControlLidarThreadAccum> acc(threads);
   for (auto& t : acc) {

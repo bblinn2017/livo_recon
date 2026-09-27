@@ -27,6 +27,8 @@ PoseControlContinuousImuPriorStats buildPoseControlContinuousImuPrior(
     const V3D& var_acc, const V3D& var_gyr,
     Eigen::MatrixXd& A, Eigen::VectorXd& b,
     PoseControlPriorHeadBlock* head_block,
-    std::vector<ImuSplineResidualSample>* out_samples = nullptr);
+    std::vector<ImuSplineResidualSample>* out_samples = nullptr,
+    std::vector<Eigen::MatrixXd>* out_jacobians = nullptr,
+    std::vector<Eigen::Matrix<double, 6, 1>>* out_wdiag = nullptr);
 
 }  // namespace livo_recon

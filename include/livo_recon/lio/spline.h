@@ -513,6 +513,13 @@ public:
   int  nControlPoints() const { return n_cp_; }
   double t0() const { return t0_; }
   double t1() const { return t1_; }
+  // FIX (found this round): the supplied patch's new first-frame diagnostic
+  // code assumed ScanSpline exposes a public delta() the same way
+  // PoseControlSpline does -- it did not (delta_ was private, no accessor).
+  // Added here mirroring PoseControlSpline::delta() exactly: a plain read of
+  // the already-computed private member (fit()'s own
+  // delta_ = (t1_-t0_)/n_seg_), not a new derivation.
+  double delta() const { return delta_; }
   // n_cp as REQUESTED vs as actually used.  A cubic fit needs strictly more
   // pose samples than control points, so the fit silently shrinks n_cp to
   // n_samples-1.  At a 10 Hz scan and a 200 Hz IMU that ceiling is ~19,
@@ -665,6 +672,7 @@ public:
 
   Eigen::Matrix<double, 3, Eigen::Dynamic>& cpPosMut() { return cp_p_; }
   const Eigen::Matrix<double, 3, Eigen::Dynamic>& cpPos() const { return cp_p_; }
+  const Eigen::Matrix<double, 3, Eigen::Dynamic>& cpPhi() const { return cp_phi_; }
 
   // Diagnostics from the last fit / refinement.
   double fitResidualPos() const { return fit_res_pos_; }   // RMS, m

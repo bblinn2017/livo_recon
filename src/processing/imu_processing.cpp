@@ -70,6 +70,18 @@ bool imuProcQhatPeekPBefore(Eigen::MatrixXd& p_before)
   return true;
 }
 
+bool imuProcQhatPeekAll(Eigen::MatrixXd& p_before, Eigen::MatrixXd& phi_p_phit,
+                        Eigen::MatrixXd& q_eff, Eigen::MatrixXd& p_after)
+{
+  std::lock_guard<std::mutex> lock(g_qhat_mtx);
+  if (!g_qhat_enabled || !g_qhat_primed) return false;
+  p_before = g_qhat_p_before;
+  q_eff = g_qhat_accum_cov_w;
+  p_after = g_qhat_p_after;
+  phi_p_phit = p_after - q_eff;
+  return true;
+}
+
 ImuProc::ImuProc(NodeContext& ctx)
   : state_(ctx.state), profiler_(ctx.profiler), data_queues_(ctx.data_queues)
 {}

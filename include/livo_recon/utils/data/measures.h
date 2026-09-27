@@ -55,15 +55,22 @@ struct MeasureGroup
   std::vector<PointXYZT> dry_run_lidar_points;
   std::vector<PointXYZCov> dry_run_points;
 
-  // State Snapshots -- pos()/rot() captured right after each of
-  // LivoReconNode::estimateState()'s three refinement stages, so EvoProc
-  // can compare ATE/ARE per stage (IMU propagation alone, then LIO's
-  // correction, then VIO's correction) instead of only the final result --
-  // see EvoProc::processEvo()'s per-stage debug logging.
+  // State snapshots used by EvoProc and first-frame solve diagnostics.
+  V3D pos_before_imu = V3D::Zero();
+  M3D rot_before_imu = M3D::Identity();
+  V3D vel_before_imu = V3D::Zero();
   V3D pos_after_imu = V3D::Zero();
   M3D rot_after_imu = M3D::Identity();
+  V3D vel_after_imu = V3D::Zero();
   V3D pos_after_lio = V3D::Zero();
   M3D rot_after_lio = M3D::Identity();
+  V3D vel_after_lio = V3D::Zero();
+
+  // Covariance snapshots captured at the state-estimation stage.
+  Eigen::MatrixXd cov_before_imu;
+  Eigen::MatrixXd cov_after_imu;
+  Eigen::MatrixXd cov_after_lio;
+
   V3D pos_after_vio = V3D::Zero();
   M3D rot_after_vio = M3D::Identity();
 

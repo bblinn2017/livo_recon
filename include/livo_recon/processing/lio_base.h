@@ -324,6 +324,13 @@ public:
     V3D &dt,
     bool allow_consistency_log = true);
 
+  void setDiagnosticGnIteration(int iter) { diagnostic_gn_iteration_ = iter; }
+
+protected:
+  virtual const char* firstFrameArchitectureName() const { return "unknown"; }
+
+public:
+
   // History (270-279): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-270
   bool accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, double& avg_res);
 
@@ -419,6 +426,7 @@ protected:
   StateGroup state_propagat_;
 
   bool cuda_enable_ = false;
+  int diagnostic_gn_iteration_ = -1;
   mutable LioCudaBuffers cuda_buf_;
 
   // CQ-28: this frame's residual-redundancy-correction engagement/magnitude

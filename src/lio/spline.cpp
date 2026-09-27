@@ -351,7 +351,6 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
 
   Eigen::MatrixXd Xp, Xr;
   // kkt_ldlt_p_/kkt_ldlt_r_/kkt_k_p_/kkt_k_r_ are class members -- cached
-  // here for moveTailClamp()'s later constraint-increment reuse (item 3c).
   kkt_k_p_ = static_cast<int>(C_p.rows());
   kkt_k_r_ = static_cast<int>(C_r.rows());
   const bool ok_p = solveKkt(AtA, Atb_p, C_p, D_p, kkt_ldlt_p_, Xp);
@@ -359,7 +358,6 @@ bool ScanSpline::fit(const std::vector<Pose6D>& poses, double t0, double t1,
   if (!ok_p || !ok_r)
   { fail_cause_ = FitFailCause::kNonFinite; return false; }
   kkt_C_p_ = C_p;   // cached raw (unfactored) for refineWithLidar()'s
-                     // block-expanded null-space constraint (item 6)
 
   cp_p_.resize(3, n_cp_);
   cp_phi_.resize(3, n_cp_);
@@ -1151,7 +1149,6 @@ SplineImuResidualStats reduceImuResidualSamples(
   // Lag-k autocorrelation (k=1,2,5): sum_i (r_i-mean).(r_{i-k}-mean) /
   // sum_i (r_i-mean).(r_i-mean). Only k=1 gates AdaptiveQ::update() (see
   // its own doc comment); k=2,5 are recorded for the whiteness diagnostic
-  // (item 19/27) but not part of the acceptance rule -- a process with
   // strong lag-1 correlation is already rejected before lag-2/5 matter,
   // and demanding ALL THREE be small is a strictly stricter (and
   // unvalidated) gate this change does not introduce silently.

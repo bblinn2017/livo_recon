@@ -43,7 +43,9 @@ PoseControlContinuousImuPriorStats buildPoseControlContinuousImuPrior(
     const V3D& var_acc, const V3D& var_gyr,
     Eigen::MatrixXd& A, Eigen::VectorXd& b,
     PoseControlPriorHeadBlock* head_block,
-    std::vector<ImuSplineResidualSample>* out_samples)
+    std::vector<ImuSplineResidualSample>* out_samples,
+    std::vector<Eigen::MatrixXd>* out_jacobians,
+    std::vector<Eigen::Matrix<double, 6, 1>>* out_wdiag)
 {
   PoseControlContinuousImuPriorStats stats;
   const int dimZ = layout.dim();
@@ -66,6 +68,8 @@ PoseControlContinuousImuPriorStats buildPoseControlContinuousImuPrior(
       1.0 / std::max(var_gyr.x(), 1e-12), 1.0 / std::max(var_gyr.y(), 1e-12), 1.0 / std::max(var_gyr.z(), 1e-12)).finished();
 
   if (out_samples) out_samples->resize(n);
+  if (out_jacobians) out_jacobians->resize(n);
+  if (out_wdiag) out_wdiag->resize(n);
 
   const int threads = std::max(1, std::min(cappedOmpThreads(), std::max(1, n)));
   std::vector<ContinuousImuThreadAccum> acc(threads);
@@ -154,6 +158,9 @@ PoseControlContinuousImuPriorStats buildPoseControlContinuousImuPrior(
         acc_t.A_hh += Jhead.transpose() * Wdiag.asDiagonal() * Jhead;
         acc_t.A_hf += Jhead.transpose() * Wdiag.asDiagonal() * Jrow;
       }
+
+      if (out_jacobians) (*out_jacobians)[i] = Jrow;
+      if (out_wdiag) (*out_wdiag)[i] = Wdiag;
 
       acc_t.A += Jrow.transpose() * Wdiag.asDiagonal() * Jrow;
       acc_t.b += -Jrow.transpose() * Wdiag.asDiagonal() * r;

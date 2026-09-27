@@ -221,3 +221,4 @@ target_link_libraries(cache_tracker_output_livo_recon
 
 # Pose-control unit tests are maintained in tests/pose_control.
 add_subdirectory(tests/pose_control)
+add_subdirectory(tests/reference_math)

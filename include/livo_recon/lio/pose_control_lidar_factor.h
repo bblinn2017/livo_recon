@@ -3,10 +3,10 @@
 #include "livo_recon/lio/pose_control_spline.h"
 #include "livo_recon/lio/pose_control_layout.h"
 #include "livo_recon/lio/pose_control_imu_prior_builder.h"   // PoseControlPriorHeadBlock
+#include "livo_recon/utils/map/voxelmap_utils.h"
 
 // ============================================================================
 // LiDAR point-to-plane factor against PoseControlSpline, built directly in
-// the REDUCED [c_free;sT] layout (spec item 6). Analytic throughout -- the
 // rotation Jacobian reuses the SAME chain-through-Jr(phi) convention this
 // codebase's existing point_time residual already uses (matched, not
 // re-derived -- see pose_spline_system.h's own header comment, which
@@ -33,17 +33,10 @@ struct PoseControlLidarObs
   V3D    normal = V3D::Zero();
   double d = 0.0;                // plane offset
   double sigma2 = 1.0;
-  // process-prior-REFORMULATION phase, items 24/25: shared-uncertainty
-  // correlation source, copied straight from Residual::plane_id/
-  // plane_var_term -- see pose_control_lidar_correlation.h.
   const void* plane_id = nullptr;
   double plane_var_term = 0.0;
 };
 
-// process-prior-REFORMULATION phase, item 21: one point's reduced Jacobian
-// row (already projected into z-space), retained ONLY when
-// addPoseControlLidarFactor's out_records is non-null (default nullptr ->
-// zero extra cost, current behavior byte-for-byte unchanged).
 struct PoseControlLidarRecord
 {
   Eigen::VectorXd Jrow_z;
@@ -53,6 +46,30 @@ struct PoseControlLidarRecord
   double plane_var_term = 0.0;
   const void* plane_id = nullptr;
 };
+
+
+struct PoseControlPhysicalLidarInformation
+{
+  Eigen::Matrix<double, 6, 6> Lambda = Eigen::Matrix<double, 6, 6>::Zero();
+  Eigen::Matrix<double, 6, 1> b = Eigen::Matrix<double, 6, 1>::Zero();
+  double energy = 0.0;
+  int effective_rank = 0;
+  double lambda_min = 0.0;
+  double lambda_max = 0.0;
+};
+
+// Builds the scan-level physical LiDAR information in direct tail coordinates
+// [delta_theta; delta_p]. Each residual contributes the same 6-DOF physical
+// pose channel used by the decoupled estimator.
+PoseControlPhysicalLidarInformation buildPoseControlPhysicalLidarInformation(
+    const std::vector<Residual>& residuals);
+
+// Direct 6-DOF physical LiDAR Jacobian at a residual's OWN capture time.
+// The result is [d r / d theta(t); d r / d p(t)]^T for the point-to-plane
+// residual, using raw_body_point and R(t) rather than the scan-end
+// point_cross_normal field.
+Eigen::Matrix<double, 6, 1> poseControlPhysicalLidarJacobianAtTime(
+    const PoseControlSpline& spline, const Residual& residual);
 
 // Adds every observation's contribution to A/b (layout.dim() square/long).
 // Head-touching columns (k<3) are routed to head_block (nullptr to skip).

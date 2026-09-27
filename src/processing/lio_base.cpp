@@ -13,6 +13,9 @@
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
+#include <algorithm>
+#include <Eigen/Eigenvalues>
+#include <Eigen/Geometry>
 
 namespace livo_recon
 {
@@ -76,6 +79,111 @@ void logPairCorrPrior(int scan_id, const Eigen::Matrix<double, 6, 6>& prior_cov_
       ofs << ',' << prior_cov_rp(i, j);
   ofs << "\n";
   ofs.flush();
+}
+
+
+
+void writeFirstFrameSolveMatrix(std::ofstream& ofs, const char* name, const Eigen::MatrixXd& M)
+{
+  ofs << "matrix " << name << " rows=" << M.rows() << " cols=" << M.cols() << "\n";
+  ofs << std::setprecision(17);
+  for (int r = 0; r < M.rows(); ++r) {
+    for (int c = 0; c < M.cols(); ++c) {
+      if (c) ofs << ' ';
+      ofs << M(r, c);
+    }
+    ofs << '\n';
+  }
+}
+
+void writeFirstFrameSolveVector(std::ofstream& ofs, const char* name, const Eigen::VectorXd& v)
+{
+  ofs << "vector " << name << " size=" << v.size() << "\n";
+  ofs << std::setprecision(17);
+  for (int i = 0; i < v.size(); ++i) {
+    if (i) ofs << ' ';
+    ofs << v(i);
+  }
+  ofs << '\n';
+}
+
+void logFirstFrameDecoupledSolve(
+    int frame_idx, int scan_id, int iteration, double t_abs,
+    const char* architecture, const std::vector<PointXYZCov>& pts,
+    const std::vector<Residual>& residuals, const StateGroup& before,
+    const StateGroup& after, const StateGroup& propagat,
+    const Eigen::MatrixXd& prior_cov, const EkfUpdate& ekf,
+    const Eigen::Matrix<double,6,6>& HtH,
+    const Eigen::Matrix<double,6,1>& Htz)
+{
+  if (frame_idx != 1) return;
+  static PersistentLogStream csv_log("pose_control_first_frame_solve.csv");
+  bool first = false;
+  std::ofstream& csv = csv_log.stream(&first);
+  if (first) csv << "architecture,frame_idx,scan_id,iteration,t_abs,n_points,n_residuals,"
+                     "delta_px,delta_py,delta_pz,delta_pnorm,delta_rx,delta_ry,delta_rz,delta_rnorm,"
+                     "HtH_trace,Htz_norm,prior_cov_trace,A_trace,K1_norm,solution_norm\n";
+  const V3D dp = after.pos() - before.pos();
+  const V3D dtheta = Log(before.rot().transpose() * after.rot());
+  const Eigen::VectorXd& solution = ekf.lastSolution();
+  csv << std::setprecision(17)
+      << architecture << ',' << frame_idx << ',' << scan_id << ',' << iteration << ',' << t_abs << ','
+      << pts.size() << ',' << residuals.size() << ','
+      << dp.x() << ',' << dp.y() << ',' << dp.z() << ',' << dp.norm() << ','
+      << dtheta.x() << ',' << dtheta.y() << ',' << dtheta.z() << ',' << dtheta.norm() << ','
+      << HtH.trace() << ',' << Htz.norm() << ',' << prior_cov.trace() << ','
+      << (ekf.lastA().size() ? ekf.lastA().trace() : 0.0) << ','
+      << (ekf.lastK1().size() ? ekf.lastK1().norm() : 0.0) << ','
+      << (solution.size() ? solution.norm() : 0.0) << '\n';
+  csv.flush();
+  static PersistentLogStream dump_log("pose_control_first_frame_solve_matrices.txt");
+  std::ofstream& dump = dump_log.stream();
+  dump << "=== decoupled_solve_snapshot ===\n"
+       << "architecture=" << architecture << "\n"
+       << "frame_idx=" << frame_idx << "\n"
+       << "scan_id=" << scan_id << "\n"
+       << "iteration=" << iteration << "\n"
+       << "t_abs=" << std::setprecision(17) << t_abs << "\n"
+       << "n_points=" << pts.size() << "\n"
+       << "n_residuals=" << residuals.size() << "\n"
+       << "state_before_pos=" << before.pos().transpose() << "\n"
+       << "state_after_pos=" << after.pos().transpose() << "\n"
+       << "delta_pos=" << dp.transpose() << "\n"
+       << "delta_rot=" << dtheta.transpose() << "\n"
+       << "propagated_pos=" << propagat.pos().transpose() << "\n"
+       << "propagated_rot_log=" << Log(propagat.rot()).transpose() << "\n";
+  // FIX (found this round): the supplied patch replaced this diagnostic's
+  // write of `vec` with the exact production value (ekf.lastVec()), per its
+  // own explicit rationale that a hand-recomputed vec here (previously
+  // `before.boxminusFromPropagat(propagat)`, using the pre-iteration
+  // snapshot `before` rather than production's own live `state` pointer at
+  // the actual solve point) "could use a different state... and would
+  // defeat the audit" -- but left the now-dead local declaration and its
+  // redundant boxminus computation in place. Removed as dead code, exactly
+  // the kind of duplicate-computation this patch exists to eliminate.
+  writeFirstFrameSolveMatrix(dump, "prior_cov", prior_cov);
+  writeFirstFrameSolveMatrix(dump, "H_full", ekf.lastHFull());
+  writeFirstFrameSolveMatrix(dump, "A_exact", ekf.lastA());
+  writeFirstFrameSolveMatrix(dump, "K1_exact", ekf.lastK1());
+  writeFirstFrameSolveMatrix(dump, "HtH", Eigen::MatrixXd(HtH));
+  writeFirstFrameSolveVector(dump, "Htz", Eigen::VectorXd(Htz));
+  writeFirstFrameSolveVector(dump, "prior_boxminus_propagated", ekf.lastVec());
+  writeFirstFrameSolveVector(dump, "prior_boxminus_propagated_rp", ekf.lastVecRp());
+  writeFirstFrameSolveMatrix(dump, "G_exact", ekf.lastG());
+  writeFirstFrameSolveVector(dump, "measurement_term_exact", ekf.lastMeasurementTerm());
+  writeFirstFrameSolveVector(dump, "prior_term_exact", ekf.lastPriorTerm());
+  writeFirstFrameSolveVector(dump, "solution_exact", solution);
+  for (size_t i = 0; i < residuals.size(); ++i) {
+    const auto& r = residuals[i];
+    dump << "residual " << i << " t=" << r.t << " r=" << r.r
+         << " sigma_squared=" << r.sigma_squared << " plane_var_term=" << r.plane_var_term
+         << " plane_id=" << reinterpret_cast<uintptr_t>(r.plane_id)
+         << " h_rot=" << r.point_cross_normal.transpose() << " h_pos=" << r.normal.transpose()
+         << " world_point=" << r.world_point.transpose()
+         << " raw_body_point=" << r.raw_body_point.transpose() << '\n';
+  }
+  dump << "=== end_decoupled_solve_snapshot ===\n";
+  dump.flush();
 }
 
 }  // namespace
@@ -472,6 +580,11 @@ double LioProcBase::estimateStateCorrection(
     avg_res += std::abs(r.r);
   avg_res /= residuals_.size();
 
+  const V3D p_before_update = state_->pos();
+  const V3D v_before_update = state_->vel();
+  const M3D R_before_update = state_->rot();
+  StateGroup state_before_update;
+  state_before_update = *state_;
   {
     TimedScope ts(profiler_, "lio/ekf/solve");
     if (cuda_enable_)
@@ -480,6 +593,55 @@ double LioProcBase::estimateStateCorrection(
       solveSystem(residuals_);
     dtheta = ekf_.dtheta;
     dt     = ekf_.dt;
+  }
+
+  if (voxel_map_->frame_idx_ == 1 && diagnostic_gn_iteration_ >= 0) {
+    const double t_abs = pts.empty() ? data_queues_->start_time : pts.front().t + data_queues_->start_time;
+    logFirstFrameDecoupledSolve(
+        voxel_map_->frame_idx_, 0, diagnostic_gn_iteration_, t_abs,
+        firstFrameArchitectureName(), pts, residuals_, state_before_update, *state_,
+        state_propagat_, prior_cov_, ekf_, ekf_.HtH, ekf_.Htz);
+  }
+
+  if (opts_.log_debug_en && diagnostic_gn_iteration_ >= 0) {
+    static PersistentLogStream log("decoupled_factor_iteration.csv");
+    bool first_call;
+    std::ofstream& ofs = log.stream(&first_call);
+    if (first_call) {
+      ofs << "scan_id,iter,timestamp,p_before_x,p_before_y,p_before_z,p_after_x,p_after_y,p_after_z,"
+             "v_before_x,v_before_y,v_before_z,v_after_x,v_after_y,v_after_z,dp_x,dp_y,dp_z,dp_norm,"
+             "dtheta_x,dtheta_y,dtheta_z,dtheta_norm,rank,lambda_min,lambda_max";
+      for (int i = 0; i < 36; ++i) ofs << ",A" << i;
+      for (int i = 0; i < 6; ++i) ofs << ",b" << i;
+      ofs << "\n";
+    }
+    const M3D dR = R_before_update.transpose() * state_->rot();
+    Eigen::AngleAxisd aa(dR);
+    const V3D dtheta_phys = aa.angle() * aa.axis();
+    Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,6,6>> es(
+        0.5 * (ekf_.HtH + ekf_.HtH.transpose()));
+    int rank = 0;
+    double lmin = 0.0, lmax = 0.0;
+    if (es.info() == Eigen::Success && es.eigenvalues().size() > 0) {
+      lmin = es.eigenvalues()(0);
+      lmax = es.eigenvalues()(5);
+      const double thresh = 1e-12 * std::max(1.0, std::abs(lmax));
+      for (int i = 0; i < 6; ++i) if (es.eigenvalues()(i) > thresh) ++rank;
+    }
+    ofs << std::setprecision(12)
+        << voxel_map_->frame_idx_ << ',' << diagnostic_gn_iteration_ << ','
+        << (pts.empty() ? 0.0 : pts.front().t) << ','
+        << p_before_update.x() << ',' << p_before_update.y() << ',' << p_before_update.z() << ','
+        << state_->pos().x() << ',' << state_->pos().y() << ',' << state_->pos().z() << ','
+        << v_before_update.x() << ',' << v_before_update.y() << ',' << v_before_update.z() << ','
+        << state_->vel().x() << ',' << state_->vel().y() << ',' << state_->vel().z() << ','
+        << (state_->pos()-p_before_update).x() << ',' << (state_->pos()-p_before_update).y() << ','
+        << (state_->pos()-p_before_update).z() << ',' << (state_->pos()-p_before_update).norm() << ','
+        << dtheta_phys.x() << ',' << dtheta_phys.y() << ',' << dtheta_phys.z() << ','
+        << dtheta_phys.norm() << ',' << rank << ',' << lmin << ',' << lmax;
+    for (int r = 0; r < 6; ++r) for (int c = 0; c < 6; ++c) ofs << ',' << ekf_.HtH(r,c);
+    for (int i = 0; i < 6; ++i) ofs << ',' << ekf_.Htz(i);
+    ofs << "\n";
   }
 
   return avg_res;

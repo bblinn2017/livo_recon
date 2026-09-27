@@ -173,9 +173,16 @@ void LivoReconNode::loadParameters()
 void LivoReconNode::estimateState(MeasureGroup& mg) {
   TimedScope ts_total(ctx_.profiler, "state_estimation");
 
+  mg.pos_before_imu = ctx_.state->pos();
+  mg.rot_before_imu = ctx_.state->rot();
+  mg.vel_before_imu = ctx_.state->vel();
+  mg.cov_before_imu = ctx_.state->cov();
+
   { TimedScope ts(ctx_.profiler, "imu"); imu_proc_.processIMU(mg); }
   mg.pos_after_imu = ctx_.state->pos();
   mg.rot_after_imu = ctx_.state->rot();
+  mg.vel_after_imu = ctx_.state->vel();
+  mg.cov_after_imu = ctx_.state->cov();
 
   // Deskew + downsample (see LioProc::deskewAndDownsample()'s own doc
   // comment for why this is called unconditionally here, before the
@@ -210,6 +217,8 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
     { TimedScope ts(ctx_.profiler, "combined"); combined_log = combined_proc_.processCombined(mg, *lio_proc_, vio_proc_); }
     mg.pos_after_lio = mg.pos_after_vio = ctx_.state->pos();
     mg.rot_after_lio = mg.rot_after_vio = ctx_.state->rot();
+    mg.vel_after_lio = ctx_.state->vel();
+    mg.cov_after_lio = ctx_.state->cov();
     ctx_.printer->print(PrintCategory::LIO, combined_log);
     // CQ-10: the line above is a no-op project-wide (every dataset config ships
     // printer/lio/enable: false), so a REJECTED event -- the one thing on this
@@ -227,6 +236,8 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
     { TimedScope ts(ctx_.profiler, "lio"); lio_log = lio_proc_->processLIO(mg); }
     mg.pos_after_lio = ctx_.state->pos();
     mg.rot_after_lio = ctx_.state->rot();
+    mg.vel_after_lio = ctx_.state->vel();
+    mg.cov_after_lio = ctx_.state->cov();
 
     // Opt-in (common/insert_map_after_lio, default false): insert this
     // frame's points using LIO's own corrected pose, before VIO gets a

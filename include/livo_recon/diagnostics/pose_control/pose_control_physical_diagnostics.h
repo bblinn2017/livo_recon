@@ -73,11 +73,9 @@ PoseControlFactorStep solvePoseControlFactorStep(
 
 
 // ============================================================================
-// Item 8: physical trajectory sample + Jacobians w.r.t. the reduced control
 // state eta (dEta-wide, the SAME coordinate the mean solve's A/b uses).
 // Independent of LiDAR -- constructed purely from the spline + head-
 // nullspace basis. p/v/a/omega share ONE spline.jacobianAt(t) evaluation
-// (item 34: no duplicated computation).
 // ============================================================================
 struct PoseControlPhysicalSample
 {
@@ -120,7 +118,6 @@ PoseControlPhysicalSample evaluatePoseControlPhysicalSample(
     const PoseControlSpline& spline, const PoseControlFreeLayout& layout,
     const PoseControlHeadNullspace& hns, double t, const V3D& gravity);
 
-// Item 3: full physical covariance P_y(t) = J_full * Sigma_full_9plus *
 // J_full^T, where J_full = [dQ_dhead (3x9), dQ_deta (3xdEta)] and
 // Sigma_full_9plus is the LEADING (9+dEta) x (9+dEta) block of the joint
 // [x0;eta;sT] covariance (x0/eta only -- sT's contribution to a purely
@@ -134,9 +131,26 @@ Eigen::Matrix3d poseControlPhysicalCovariance(
     const Eigen::MatrixXd& dQ_dhead, const Eigen::MatrixXd& dQ_deta,
     const Eigen::MatrixXd& Sigma_head_eta);
 
+// Covariance reduction for one linear-Gaussian measurement z=H x+n.
+// Inputs are the prior state covariance P, measurement Jacobian H, and
+// measurement covariance R. The result is P-P^+.
+Eigen::MatrixXd poseControlCovarianceReduction(
+    const Eigen::MatrixXd& P, const Eigen::MatrixXd& H,
+    const Eigen::MatrixXd& R);
+
+// Conditional covariance of x_l given x_k from the joint covariance blocks.
+Eigen::MatrixXd poseControlConditionalCovariance(
+    const Eigen::MatrixXd& P_l, const Eigen::MatrixXd& P_k,
+    const Eigen::MatrixXd& P_lk);
+
+// Effective measurement covariance for observing H x_l when x_l is
+// conditionally distributed around a propagated state x_k.
+Eigen::MatrixXd poseControlEffectiveMeasurementCovariance(
+    const Eigen::MatrixXd& R, const Eigen::MatrixXd& H,
+    const Eigen::MatrixXd& P_l_given_k);
+
 // One IMU sample's full residual breakdown against the converged spline --
 // mirrors computePoseControlImuResidual()'s per-sample loop body but
-// returns every intermediate quantity (items 6-9/30's required CSV fields)
 // instead of only the reduced ra/rw used for adaptive-Q statistics.
 struct ImuSplineResidualSample
 {
@@ -149,7 +163,6 @@ struct ImuSplineResidualSample
   V3D e_gyr = V3D::Zero();           // omega_spline_body + bias_gyr - omega_meas
 };
 
-// Threaded (thread-local disjoint-index writes, no merge race -- item 27),
 // mirrors computePoseControlImuResidual()'s own windowing/threading
 // pattern exactly (spline.t0()/t1() bracket, schedule(static)).
 std::vector<ImuSplineResidualSample> computePoseControlImuSplineResidualSamples(
@@ -170,7 +183,6 @@ void computePoseControlImuMeasurementJacobianZ(
     int dimZ, int off_bg, int off_ba, int off_g,
     Eigen::MatrixXd& H_acc, Eigen::MatrixXd& H_gyr);
 
-// Batch information-diagnostic accumulation (item 13): treats H_acc/H_gyr
 // (evaluated ONCE at a representative time -- the residual window's
 // midpoint, the SAME simplification computePoseControlImuResidualStateJacobian
 // already documents for the trajectory-state term) as constant across the
@@ -179,7 +191,6 @@ void computePoseControlImuMeasurementJacobianZ(
 //   b_acc      = n_acc * H_acc^T R_acc^-1 * mean_e_acc
 // (and likewise for gyro), Lambda_imu_meas = Lambda_acc + Lambda_gyr,
 // b_imu_meas = b_acc + b_gyr. R_acc/R_gyr are the NOMINAL (non-adaptive)
-// per-axis sensor variances (state_->varAcc()/varGyr()) -- item 11's
 // "C_sensor" role, deliberately NOT the adaptive-Q-corrected variance,
 // since this is meant to represent the raw sensor noise spec, not a
 // process-consistency estimate.
@@ -196,7 +207,6 @@ ImuMeasurementInformation computePoseControlImuMeasurementInformation(
     const V3D& R_acc_diag, const V3D& R_gyr_diag,
     int n_acc, int n_gyr, const V3D& mean_e_acc, const V3D& mean_e_gyr);
 
-// Item 11's residual-to-Q accounting, computed WITHOUT mutating the input
 // stats (unlike pose_control_adaptive_q.cpp's apply*Correction functions,
 // which subtract in place for production consumption) -- this returns
 // every intermediate term so the diagnostic CSV can report exactly what

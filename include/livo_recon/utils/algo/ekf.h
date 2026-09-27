@@ -82,6 +82,7 @@ struct EkfUpdate
         last_H_full_.block(StateGroup::idxR(), StateGroup::idxR(), n, n) = HtH;
 
         Eigen::MatrixXd A = last_H_full_ + prior_cov.inverse();
+        last_A_ = A;
         ldlt_.compute(A);
         last_K1_ = ldlt_.solve(Eigen::MatrixXd::Identity(dim, dim));
 
@@ -103,8 +104,18 @@ struct EkfUpdate
         // doubling every iteration, diverging to meters within ~15
         // iterations) instead of converging. G/vec are unaffected (G comes
         // only from HtH, never from Htz/r's sign).
-        const Eigen::VectorXd solution = -K1_cols * Htz + vec - G_cols * vec.segment(StateGroup::idxR(), n);
+        const Eigen::VectorXd measurement_term = -K1_cols * Htz;
+        const Eigen::VectorXd prior_term = vec - G_cols * vec.segment(StateGroup::idxR(), n);
+        const Eigen::VectorXd solution = measurement_term + prior_term;
 
+        last_prior_cov_ = prior_cov;
+        last_vec_ = vec;
+        last_vec_rp_ = vec.segment(StateGroup::idxR(), n);
+        last_G_ = Eigen::MatrixXd::Zero(dim, dim);
+        last_G_.block(0, StateGroup::idxR(), dim, n) = G_cols;
+        last_measurement_term_ = measurement_term;
+        last_prior_term_ = prior_term;
+        last_solution_ = solution;
         state->applyDelta(solution);
 
         dtheta = solution.segment<3>(StateGroup::idxR());
@@ -169,6 +180,17 @@ struct EkfUpdate
     }
 
     // History (180-191): see docs/livo_recon_changelog.md#include-livo_recon-utils-algo-ekf.h-180
+    const Eigen::MatrixXd& lastHFull() const { return last_H_full_; }
+    const Eigen::MatrixXd& lastA() const { return last_A_; }
+    const Eigen::MatrixXd& lastK1() const { return last_K1_; }
+    const Eigen::VectorXd& lastSolution() const { return last_solution_; }
+    const Eigen::MatrixXd& lastPriorCov() const { return last_prior_cov_; }
+    const Eigen::VectorXd& lastVec() const { return last_vec_; }
+    const Eigen::VectorXd& lastVecRp() const { return last_vec_rp_; }
+    const Eigen::MatrixXd& lastG() const { return last_G_; }
+    const Eigen::VectorXd& lastMeasurementTerm() const { return last_measurement_term_; }
+    const Eigen::VectorXd& lastPriorTerm() const { return last_prior_term_; }
+
     double kalmanGainNorm() const {
       if (last_K1_.size() == 0) return std::numeric_limits<double>::quiet_NaN();
       const int n = static_cast<int>(HtH.rows());
@@ -187,7 +209,15 @@ struct EkfUpdate
 private:
     Eigen::LDLT<Eigen::MatrixXd> ldlt_;
     Eigen::MatrixXd last_H_full_;
+    Eigen::MatrixXd last_A_;
     Eigen::MatrixXd last_K1_;
+    Eigen::VectorXd last_solution_;
+    Eigen::MatrixXd last_prior_cov_;
+    Eigen::VectorXd last_vec_;
+    Eigen::VectorXd last_vec_rp_;
+    Eigen::MatrixXd last_G_;
+    Eigen::VectorXd last_measurement_term_;
+    Eigen::VectorXd last_prior_term_;
 };
 
 }  // namespace livo_recon

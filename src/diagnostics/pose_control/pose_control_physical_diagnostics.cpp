@@ -293,6 +293,49 @@ ImuMeasurementInformation computePoseControlImuMeasurementInformation(
   return out;
 }
 
+Eigen::MatrixXd poseControlCovarianceReduction(
+    const Eigen::MatrixXd& P, const Eigen::MatrixXd& H,
+    const Eigen::MatrixXd& R)
+{
+  if (P.rows() != P.cols() || H.cols() != P.rows() ||
+      R.rows() != R.cols() || R.rows() != H.rows())
+    return Eigen::MatrixXd::Zero(P.rows(), P.cols());
+  const Eigen::MatrixXd S = H * P * H.transpose() + R;
+  Eigen::LDLT<Eigen::MatrixXd> ldlt(S);
+  if (ldlt.info() != Eigen::Success)
+    return Eigen::MatrixXd::Zero(P.rows(), P.cols());
+  const Eigen::MatrixXd Kt = ldlt.solve(H * P);
+  const Eigen::MatrixXd reduction = P * H.transpose() * Kt;
+  return 0.5 * (reduction + reduction.transpose());
+}
+
+Eigen::MatrixXd poseControlConditionalCovariance(
+    const Eigen::MatrixXd& P_l, const Eigen::MatrixXd& P_k,
+    const Eigen::MatrixXd& P_lk)
+{
+  if (P_l.rows() != P_l.cols() || P_k.rows() != P_k.cols() ||
+      P_lk.rows() != P_l.rows() || P_lk.cols() != P_k.rows())
+    return Eigen::MatrixXd::Zero(P_l.rows(), P_l.cols());
+  Eigen::LDLT<Eigen::MatrixXd> ldlt(P_k);
+  if (ldlt.info() != Eigen::Success)
+    return Eigen::MatrixXd::Zero(P_l.rows(), P_l.cols());
+  const Eigen::MatrixXd solve = ldlt.solve(P_lk.transpose());
+  const Eigen::MatrixXd out = P_l - P_lk * solve;
+  return 0.5 * (out + out.transpose());
+}
+
+Eigen::MatrixXd poseControlEffectiveMeasurementCovariance(
+    const Eigen::MatrixXd& R, const Eigen::MatrixXd& H,
+    const Eigen::MatrixXd& P_l_given_k)
+{
+  if (R.rows() != R.cols() || H.rows() != R.rows() ||
+      H.cols() != P_l_given_k.rows() ||
+      P_l_given_k.rows() != P_l_given_k.cols())
+    return Eigen::MatrixXd::Zero(R.rows(), R.cols());
+  const Eigen::MatrixXd out = R + H * P_l_given_k * H.transpose();
+  return 0.5 * (out + out.transpose());
+}
+
 ResidualToQAccounting computePoseControlResidualToQAccounting(
     double cov_acc_empirical, double cov_gyr_empirical,
     const M3D& R_rep, const Eigen::Matrix3d& P_ba, const Eigen::Matrix3d& P_bg,

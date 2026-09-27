@@ -1,0 +1,8 @@
+add_executable(test_reference_temporal_lidar_covariance
+  test_reference_temporal_lidar_covariance.cpp
+)
+target_include_directories(test_reference_temporal_lidar_covariance PRIVATE
+  ${EIGEN3_INCLUDE_DIRS}
+)
+add_test(NAME test_reference_temporal_lidar_covariance
+  COMMAND test_reference_temporal_lidar_covariance)

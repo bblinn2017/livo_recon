@@ -481,10 +481,43 @@ static void testPseudoInverseUniformScalingInvariance(std::mt19937& rng) {
   }
 }
 
+static void testProcessNoiseInformationConsistency(std::mt19937& rng) {
+  printf("\n-- process-noise Q information/covariance consistency --\n");
+  const int n = 6;
+  Eigen::MatrixXd F = Eigen::MatrixXd::Random(n, n) * 0.1;
+  Eigen::MatrixXd P0 = randomSpd(n, rng, 0.5);
+  Eigen::MatrixXd Q = randomSpd(n, rng, 0.2);
+  const Eigen::MatrixXd P0inv = P0.inverse();
+  const Eigen::MatrixXd Qinv = Q.inverse();
+  Eigen::MatrixXd T = Eigen::MatrixXd::Zero(2*n, 2*n);
+  T.block(0,0,n,n).setIdentity();
+  T.block(n,0,n,n) = -F;
+  T.block(n,n,n,n).setIdentity();
+  Eigen::MatrixXd R = Eigen::MatrixXd::Zero(2*n,2*n);
+  R.block(0,0,n,n)=P0; R.block(n,n,n,n)=Q;
+  Eigen::MatrixXd A = T.transpose()*R.inverse()*T;
+  Eigen::MatrixXd Aref = Eigen::MatrixXd::Zero(2*n,2*n);
+  Aref.block(0,0,n,n)=P0inv+F.transpose()*Qinv*F;
+  Aref.block(0,n,n,n)=-F.transpose()*Qinv;
+  Aref.block(n,0,n,n)=-Qinv*F;
+  Aref.block(n,n,n,n)=Qinv;
+  const double aerr=(A-Aref).norm()/Aref.norm();
+  check(aerr < 1e-10, "Q-derived joint information matches factor construction", aerr);
+  const Eigen::MatrixXd Pjoint=A.inverse();
+  const Eigen::MatrixXd P1=F*P0*F.transpose()+Q;
+  const double m_err=(Pjoint.bottomRightCorner(n,n)-P1).norm()/P1.norm();
+  check(m_err < 1e-10, "marginal propagated covariance equals F P0 F^T + Q", m_err);
+  const double c_err=(A.block(n,n,n,n).inverse()-Q).norm()/Q.norm();
+  check(c_err < 1e-10, "conditional covariance P(x1|x0) equals Q", c_err);
+  const double separation=(P1-Q).norm()/P1.norm();
+  check(separation > 1e-3, "marginal and conditional covariance are distinguishable when F P0 F^T is nonzero", separation);
+}
+
 int main() {
   printf("pose_control production prior/covariance/LiDAR-correlation math validation\n");
   std::mt19937 rng(271828);
   testPriorMarginalizationVsConditional(rng);
+  testProcessNoiseInformationConsistency(rng);
   testIndirectBiasUpdate(rng);
   testEkfInformationEquivalence(rng);
   testCorrelatedLidarConsistency(rng);

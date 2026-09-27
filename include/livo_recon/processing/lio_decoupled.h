@@ -39,6 +39,9 @@ public:
   std::string engagementReport() const override;
   void deskewAndDownsample(MeasureGroup& mg) override;
   std::string processLIO(MeasureGroup& mg) override;
+  const char* firstFrameArchitectureName() const override {
+    return dopts_.spline.splineOn() ? "decoupled_spline" : "splineless";
+  }
 
   // Re-place this frame's kept points against the spline after the spline
   // has been re-anchored to the corrected state. Called at the top of

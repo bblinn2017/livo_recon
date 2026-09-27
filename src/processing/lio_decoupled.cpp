@@ -10,6 +10,7 @@
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/lio/voxelplane.h"   // voxelPlaneInformationFitCount()
 #include "livo_recon/lio/lio_accumulator.h"
+#include "livo_recon/lio/pose_control_covariance.h"
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <array>
@@ -20,12 +21,251 @@
 #include <iomanip>
 #include <limits>
 #include <mutex>
+#include <cstdint>
 
 namespace livo_recon
 {
 
 namespace
 {
+
+static uint64_t decoupledFirstFrameHashDouble(uint64_t h, double v)
+{
+  const auto* p = reinterpret_cast<const unsigned char*>(&v);
+  for (size_t i = 0; i < sizeof(v); ++i) { h ^= static_cast<uint64_t>(p[i]); h *= 1099511628211ULL; }
+  return h;
+}
+
+static uint64_t decoupledFirstFrameHashPoints(const std::vector<PointXYZCov>& pts)
+{
+  uint64_t h = 1469598103934665603ULL;
+  for (const auto& pt : pts) {
+    h = decoupledFirstFrameHashDouble(h, pt.point.x()); h = decoupledFirstFrameHashDouble(h, pt.point.y()); h = decoupledFirstFrameHashDouble(h, pt.point.z()); h = decoupledFirstFrameHashDouble(h, pt.t);
+    for (int r=0;r<3;++r) for (int c=0;c<3;++c) h=decoupledFirstFrameHashDouble(h,pt.sensor_cov(r,c));
+    for (int r=0;r<3;++r) for (int c=0;c<3;++c) h=decoupledFirstFrameHashDouble(h,pt.pos_cov(r,c));
+  }
+  return h;
+}
+
+static uint64_t decoupledFirstFrameHashResiduals(const std::vector<Residual>& residuals)
+{
+  uint64_t h = 1469598103934665603ULL;
+  for (const auto& r : residuals) {
+    h = decoupledFirstFrameHashDouble(h,r.r);
+    for(int i=0;i<3;++i) h=decoupledFirstFrameHashDouble(h,r.normal(i));
+    for(int i=0;i<3;++i) h=decoupledFirstFrameHashDouble(h,r.world_point(i));
+    h=decoupledFirstFrameHashDouble(h,r.t); h=decoupledFirstFrameHashDouble(h,r.sigma_squared);
+  }
+  return h;
+}
+
+static std::string decoupledFirstFrameHex(uint64_t h) { std::ostringstream oss; oss << std::hex << h; return oss.str(); }
+
+// ADDED (symbol/scope audit): the supplied patch's instructions explicitly
+// state "For the first map-backed frame, the coupled AND decoupled paths
+// now dump [the covariance budget]," but the patch itself only defined and
+// wired logFirstFrameCovarianceBudget() into lio_coupled.cpp -- it is
+// never mentioned in the patch's own file list for lio_decoupled.cpp. This
+// is a mirrored, byte-identical port of lio_coupled.cpp's own function
+// (same computation, same columns, no new derivation) so the decoupled
+// path (splineless/decoupled_spline) satisfies the instructions' explicit
+// requirement rather than silently omitting it.
+static double firstFrameCovMinEig(const Eigen::MatrixXd& X)
+{
+  if (X.rows() == 0 || X.cols() == 0 || X.rows() != X.cols()) return std::numeric_limits<double>::quiet_NaN();
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (X + X.transpose()));
+  return es.info() == Eigen::Success ? es.eigenvalues().minCoeff() : std::numeric_limits<double>::quiet_NaN();
+}
+static double firstFrameCovMaxEig(const Eigen::MatrixXd& X)
+{
+  if (X.rows() == 0 || X.cols() == 0 || X.rows() != X.cols()) return std::numeric_limits<double>::quiet_NaN();
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (X + X.transpose()));
+  return es.info() == Eigen::Success ? es.eigenvalues().maxCoeff() : std::numeric_limits<double>::quiet_NaN();
+}
+static void logFirstFrameCovarianceBudget(const char* architecture, const char* phase, int scan_id, int iteration,
+                                          const MeasureGroup& mg, const StateGroup& state, double t_abs)
+{
+  if (scan_id != 0) return;
+  static PersistentLogStream csv_log("pose_control_first_frame_covariance_budget.csv");
+  static PersistentLogStream dump_log("pose_control_first_frame_covariance_budget.txt");
+  bool first = false;
+  std::ofstream& csv = csv_log.stream(&first);
+  if (first) csv << "architecture,phase,scan_id,iteration,t_abs,t_rel,dim,p_before_trace,p_after_imu_trace,p_after_lio_trace,delta_p_trace_imu,delta_p_trace_lio,min_eig_before,max_eig_before,min_eig_after_imu,max_eig_after_imu,min_eig_after_lio,max_eig_after_lio,q_eff_trace,fpf_trace,q_reconstruction_rel_error,p_rp_norm,p_rv_norm,p_pv_norm\n";
+  const Eigen::MatrixXd& Pb = mg.cov_before_imu;
+  const Eigen::MatrixXd& Pi = mg.cov_after_imu;
+  const Eigen::MatrixXd Pl = mg.cov_after_lio.rows() ? mg.cov_after_lio : state.cov();
+  const Eigen::MatrixXd dPi = (Pb.rows()==Pi.rows() && Pb.cols()==Pi.cols()) ? Pi-Pb : Eigen::MatrixXd();
+  const Eigen::MatrixXd dPl = (Pi.rows()==Pl.rows() && Pi.cols()==Pl.cols()) ? Pl-Pi : Eigen::MatrixXd();
+  Eigen::MatrixXd p_before_q,fpf,qeff,p_after_q;
+  const bool have_q = (std::string(phase) == "pre_update") && imuProcQhatPeekAll(p_before_q,fpf,qeff,p_after_q);
+  const double qerr = have_q && p_after_q.rows()==Pi.rows() && p_after_q.cols()==Pi.cols()
+      ? (fpf+qeff-p_after_q).norm()/std::max(1e-300,p_after_q.norm()) : std::numeric_limits<double>::quiet_NaN();
+  double rp=std::numeric_limits<double>::quiet_NaN(), rr=rp, rv=rp, pv=rp;
+  if (Pi.rows() >= StateGroup::idxV()+3) {
+    const int ir=StateGroup::idxR(), ip=StateGroup::idxP(), iv=StateGroup::idxV();
+    rp=Pi.block<3,3>(ir,ip).norm(); rr=Pi.block<3,3>(ir,iv).norm(); rv=Pi.block<3,3>(ip,iv).norm(); pv=Pi.block<3,3>(ip,ir).norm();
+  }
+  csv << std::setprecision(17) << architecture << ',' << phase << ',' << scan_id << ',' << iteration << ',' << t_abs << ',' << mg.image.t << ','
+      << Pi.rows() << ',' << (Pb.size()?Pb.trace():0.0) << ',' << (Pi.size()?Pi.trace():0.0) << ',' << (Pl.size()?Pl.trace():0.0) << ','
+      << (dPi.size()?dPi.trace():0.0) << ',' << (dPl.size()?dPl.trace():0.0) << ','
+      << firstFrameCovMinEig(Pb) << ',' << firstFrameCovMaxEig(Pb) << ',' << firstFrameCovMinEig(Pi) << ',' << firstFrameCovMaxEig(Pi) << ','
+      << firstFrameCovMinEig(Pl) << ',' << firstFrameCovMaxEig(Pl) << ',' << (have_q?qeff.trace():std::numeric_limits<double>::quiet_NaN()) << ','
+      << (have_q?fpf.trace():std::numeric_limits<double>::quiet_NaN()) << ',' << qerr << ',' << rp << ',' << rr << ',' << rv << '\n';
+  csv.flush();
+  std::ofstream& dump=dump_log.stream();
+  dump << "=== covariance_budget " << architecture << " " << phase << " iter=" << iteration << " t_abs=" << t_abs << " ===\n";
+  dump << "P_before_IMU\n" << Pb << "\nP_after_IMU\n" << Pi << "\nP_after_LIO\n" << Pl << "\n";
+  dump << "delta_P_IMU\n" << dPi << "\ndelta_P_LIO\n" << dPl << "\n";
+  if (have_q) { Eigen::MatrixXd q_info = generalPseudoInverse(qeff, 1e-12); dump << "Q_eff\n" << qeff << "\nQ_eff_information_pinv\n" << q_info << "\nF_P_Ft\n" << fpf << "\nQhat_P_before\n" << p_before_q << "\nQhat_P_after\n" << p_after_q << "\n"; }
+  dump.flush();
+}
+
+static void logFirstFrameStateChain(const char* architecture, const char* phase, int scan_id, int iteration,
+                                    const MeasureGroup& mg, const StateGroup& lio_state, double t_abs)
+{
+  if (scan_id != 0) return;
+  static PersistentLogStream log("pose_control_first_frame_state_chain.csv");
+  bool first;
+  std::ofstream& ofs = log.stream(&first);
+  if (first) {
+    ofs << "architecture,phase,scan_id,iteration,t_abs,t_rel,"
+           "x0_px,x0_py,x0_pz,ximu_px,ximu_py,ximu_pz,xlio_px,xlio_py,xlio_pz,"
+           "x0_r_x,x0_r_y,x0_r_z,ximu_r_x,ximu_r_y,ximu_r_z,xlio_r_x,xlio_r_y,xlio_r_z,"
+           "x0_vx,x0_vy,x0_vz,ximu_vx,ximu_vy,ximu_vz,xlio_vx,xlio_vy,xlio_vz,"
+           "imu_dp_x,imu_dp_y,imu_dp_z,lio_dp_x,lio_dp_y,lio_dp_z,delta_lio_from_imu_x,delta_lio_from_imu_y,delta_lio_from_imu_z,"
+           "imu_dr_x,imu_dr_y,imu_dr_z,lio_dr_x,lio_dr_y,lio_dr_z,delta_lio_rot_x,delta_lio_rot_y,delta_lio_rot_z,"
+           "imu_dv_x,imu_dv_y,imu_dv_z,lio_dv_x,lio_dv_y,lio_dv_z,delta_lio_vel_x,delta_lio_vel_y,delta_lio_vel_z,"
+           "ideal_stationary_dp_x,ideal_stationary_dp_y,ideal_stationary_dp_z,"
+           "ideal_stationary_dr_x,ideal_stationary_dr_y,ideal_stationary_dr_z,"
+           "pos_residual_norm_after_lio,rot_residual_norm_after_lio,vel_residual_norm_after_lio,"
+           "pos_correction_norm,rot_correction_norm,vel_correction_norm,"
+           "pos_correction_alignment_to_ideal,rot_correction_alignment_to_ideal,"
+           "pos_correction_fraction_of_imu_error,rot_correction_fraction_of_imu_error\n";
+  }
+
+  const V3D x0p = mg.pos_before_imu;
+  const V3D ximp = mg.pos_after_imu;
+  const V3D xliop = lio_state.pos();
+  const V3D x0r = Log(mg.rot_before_imu);
+  const V3D ximr = Log(mg.rot_after_imu);
+  const V3D xlior = Log(lio_state.rot());
+  const V3D x0v = mg.vel_before_imu;
+  const V3D ximv = mg.vel_after_imu;
+  const V3D xliov = lio_state.vel();
+
+  const V3D imu_dp = ximp - x0p;
+  const V3D lio_dp = xliop - x0p;
+  const V3D delta_lio_dp = xliop - ximp;
+  const V3D imu_dr = Log(mg.rot_before_imu.transpose() * mg.rot_after_imu);
+  const V3D lio_dr = Log(mg.rot_before_imu.transpose() * lio_state.rot());
+  const V3D delta_lio_dr = Log(mg.rot_after_imu.transpose() * lio_state.rot());
+  const V3D imu_dv = ximv - x0v;
+  const V3D lio_dv = xliov - x0v;
+  const V3D delta_lio_dv = xliov - ximv;
+  const V3D ideal_dp = -imu_dp;
+  const V3D ideal_dr = -imu_dr;
+  const double eps = 1e-12;
+  const auto align = [&](const V3D& a, const V3D& b) -> double {
+    const double na = a.norm(), nb = b.norm();
+    return (na > eps && nb > eps) ? a.dot(b) / (na * nb) : 0.0;
+  };
+  const double pos_frac = (imu_dp.norm() > eps) ? delta_lio_dp.norm() / imu_dp.norm() : 0.0;
+  const double rot_frac = (imu_dr.norm() > eps) ? delta_lio_dr.norm() / imu_dr.norm() : 0.0;
+
+  ofs << architecture << ',' << phase << ',' << scan_id << ',' << iteration << ',' << std::setprecision(17) << t_abs << ',' << mg.image.t << ','
+      << x0p.x() << ',' << x0p.y() << ',' << x0p.z() << ','
+      << ximp.x() << ',' << ximp.y() << ',' << ximp.z() << ','
+      << xliop.x() << ',' << xliop.y() << ',' << xliop.z() << ','
+      << x0r.x() << ',' << x0r.y() << ',' << x0r.z() << ','
+      << ximr.x() << ',' << ximr.y() << ',' << ximr.z() << ','
+      << xlior.x() << ',' << xlior.y() << ',' << xlior.z() << ','
+      << x0v.x() << ',' << x0v.y() << ',' << x0v.z() << ','
+      << ximv.x() << ',' << ximv.y() << ',' << ximv.z() << ','
+      << xliov.x() << ',' << xliov.y() << ',' << xliov.z() << ','
+      << imu_dp.x() << ',' << imu_dp.y() << ',' << imu_dp.z() << ','
+      << lio_dp.x() << ',' << lio_dp.y() << ',' << lio_dp.z() << ','
+      << delta_lio_dp.x() << ',' << delta_lio_dp.y() << ',' << delta_lio_dp.z() << ','
+      << imu_dr.x() << ',' << imu_dr.y() << ',' << imu_dr.z() << ','
+      << lio_dr.x() << ',' << lio_dr.y() << ',' << lio_dr.z() << ','
+      << delta_lio_dr.x() << ',' << delta_lio_dr.y() << ',' << delta_lio_dr.z() << ','
+      << imu_dv.x() << ',' << imu_dv.y() << ',' << imu_dv.z() << ','
+      << lio_dv.x() << ',' << lio_dv.y() << ',' << lio_dv.z() << ','
+      << delta_lio_dv.x() << ',' << delta_lio_dv.y() << ',' << delta_lio_dv.z() << ','
+      << ideal_dp.x() << ',' << ideal_dp.y() << ',' << ideal_dp.z() << ','
+      << ideal_dr.x() << ',' << ideal_dr.y() << ',' << ideal_dr.z() << ','
+      << lio_dp.norm() << ',' << lio_dr.norm() << ',' << lio_dv.norm() << ','
+      << delta_lio_dp.norm() << ',' << delta_lio_dr.norm() << ',' << delta_lio_dv.norm() << ','
+      << align(delta_lio_dp, ideal_dp) << ',' << align(delta_lio_dr, ideal_dr) << ','
+      << pos_frac << ',' << rot_frac << '\n';
+  ofs.flush();
+}
+
+static void logDecoupledFirstFrame(const char* phase, int scan_id, int iteration, const MeasureGroup& mg,
+                                   const StateGroup& state, double t_abs, int n_residuals, uint64_t point_hash,
+                                   uint64_t residual_hash, int map_points, int active_voxels,
+                                   const V3D& reference_pos, const M3D& reference_rot)
+{
+  if (scan_id != 0) return;
+  static PersistentLogStream log("pose_control_first_frame.csv");
+  bool first; std::ofstream& ofs=log.stream(&first);
+  if(first) ofs<<"architecture,phase,scan_id,iteration,t_abs,t_rel,n_points,n_residuals,map_points,active_voxels,point_hash,residual_hash,p_x,p_y,p_z,rlog_x,rlog_y,rlog_z,v_x,v_y,v_z,position_norm,rotation_norm,reference_p_x,reference_p_y,reference_p_z,reference_rlog_x,reference_rlog_y,reference_rlog_z,relative_p_x,relative_p_y,relative_p_z,relative_rlog_x,relative_rlog_y,relative_rlog_z,x0_p_x,x0_p_y,x0_p_z,x0_rlog_x,x0_rlog_y,x0_rlog_z,x0_v_x,x0_v_y,x0_v_z,ximu_p_x,ximu_p_y,ximu_p_z,ximu_rlog_x,ximu_rlog_y,ximu_rlog_z,ximu_v_x,ximu_v_y,ximu_v_z\n";
+  const V3D rlog=Log(state.rot());
+  const V3D reference_rlog=Log(reference_rot);
+  const V3D relative_rlog=Log(reference_rot.transpose()*state.rot());
+  const V3D relative_pos=state.pos()-reference_pos;
+  const double t_rel=mg.image.t;
+  const V3D x0_rlog=Log(mg.rot_before_imu); const V3D ximu_rlog=Log(mg.rot_after_imu);
+  ofs<<"decoupled,"<<phase<<","<<scan_id<<","<<iteration<<","<<std::setprecision(12)<<t_abs<<","<<t_rel<<","<<mg.points.size()<<","<<n_residuals<<","<<map_points<<","<<active_voxels<<","<<decoupledFirstFrameHex(point_hash)<<","<<decoupledFirstFrameHex(residual_hash)<<","<<state.pos().x()<<","<<state.pos().y()<<","<<state.pos().z()<<","<<rlog.x()<<","<<rlog.y()<<","<<rlog.z()<<","<<state.vel().x()<<","<<state.vel().y()<<","<<state.vel().z()<<","<<state.pos().norm()<<","<<rlog.norm()<<","<<reference_pos.x()<<","<<reference_pos.y()<<","<<reference_pos.z()<<","<<reference_rlog.x()<<","<<reference_rlog.y()<<","<<reference_rlog.z()<<","<<relative_pos.x()<<","<<relative_pos.y()<<","<<relative_pos.z()<<","<<relative_rlog.x()<<","<<relative_rlog.y()<<","<<relative_rlog.z()<<","<<mg.pos_before_imu.x()<<","<<mg.pos_before_imu.y()<<","<<mg.pos_before_imu.z()<<","<<x0_rlog.x()<<","<<x0_rlog.y()<<","<<x0_rlog.z()<<","<<mg.vel_before_imu.x()<<","<<mg.vel_before_imu.y()<<","<<mg.vel_before_imu.z()<<","<<mg.pos_after_imu.x()<<","<<mg.pos_after_imu.y()<<","<<mg.pos_after_imu.z()<<","<<ximu_rlog.x()<<","<<ximu_rlog.y()<<","<<ximu_rlog.z()<<","<<mg.vel_after_imu.x()<<","<<mg.vel_after_imu.y()<<","<<mg.vel_after_imu.z()<<"\n";
+  ofs.flush();
+}
+
+static void logDecoupledFirstFrameSpline(const char* phase, int scan_id, int iteration, double t_abs_frame_end,
+                                         int control_index, double control_t, const V3D& p, const V3D& phi)
+{
+  if(scan_id!=0) return;
+  static PersistentLogStream log("pose_control_first_frame_spline.csv");
+  bool first; std::ofstream& ofs=log.stream(&first);
+  if(first) ofs<<"architecture,phase,scan_id,iteration,t_abs_frame_end,control_point_index,control_t_abs,p_x,p_y,p_z,rlog_x,rlog_y,rlog_z\n";
+  ofs<<"decoupled,"<<phase<<","<<scan_id<<","<<iteration<<","<<std::setprecision(12)<<t_abs_frame_end<<","<<control_index<<","<<control_t<<","<<p.x()<<","<<p.y()<<","<<p.z()<<","<<phi.x()<<","<<phi.y()<<","<<phi.z()<<"\n"; ofs.flush();
+}
+
+// Round-17 common-time trajectory comparison (item 9): evaluates ANY spline
+// type exposing posAt/rotAt/velAt/omegaBodyAt (ScanSpline here,
+// PoseControlSpline in lio_coupled.cpp -- no shared base class exists, so
+// this is duplicated per-file rather than shared, matching this codebase's
+// existing convention for the first-frame hash helpers) at a fixed set of
+// FRACTIONS of [t0,t1], not raw control-point indices, so two runs with
+// different control-point layouts land on the same physical instants
+// whenever their scan boundaries (t0/t1, determined by the LiDAR driver,
+// not the estimator) agree -- verified downstream by comparing the logged
+// t_abs values across architectures' own CSVs, not assumed. Angular
+// velocity uses the spline's own analytic omegaBodyAt(), never a
+// finite-difference substitute.
+template <typename SplineT>
+static void logFirstFrameCommonTimeSpline(const char* architecture, int frame_idx, int scan_id,
+                                          int iteration, double start_time, const SplineT& spline)
+{
+  if (frame_idx != 1 || scan_id != 0) return;
+  static const std::array<double, 5> kFracs{0.0, 0.25, 0.5, 0.75, 1.0};
+  static PersistentLogStream log("pose_control_first_frame_common_time_spline.csv");
+  bool first;
+  std::ofstream& ofs = log.stream(&first);
+  if (first) ofs << "architecture,frame_idx,scan_id,iteration,frac,t_abs,p_x,p_y,p_z,rlog_x,rlog_y,rlog_z,"
+                    "v_x,v_y,v_z,omega_x,omega_y,omega_z\n";
+  const double t0 = spline.t0(), t1 = spline.t1();
+  for (double frac : kFracs) {
+    const double t = t0 + frac * (t1 - t0);
+    const V3D p = spline.posAt(t);
+    const V3D rlog = Log(spline.rotAt(t));
+    const V3D v = spline.velAt(t);
+    const V3D omega = spline.omegaBodyAt(t);
+    ofs << architecture << ',' << frame_idx << ',' << scan_id << ',' << iteration << ',' << frac << ','
+        << std::setprecision(17) << (t + start_time) << ',' << p.x() << ',' << p.y() << ',' << p.z() << ','
+        << rlog.x() << ',' << rlog.y() << ',' << rlog.z() << ',' << v.x() << ',' << v.y() << ',' << v.z() << ','
+        << omega.x() << ',' << omega.y() << ',' << omega.z() << '\n';
+  }
+  ofs.flush();
+}
 
 // Debug trace of LIO's per-measure-group state correction and covariance,
 // for diagnosing where trajectory divergence originates (see imu_processing
@@ -1293,6 +1533,23 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
   mg.prior_rot = state_->rot();
   mg.prior_vel = state_->vel();
 
+  // FIX (found this round, mirrors the same fix in lio_coupled.cpp): frame_idx_
+  // increments INSIDE updateMap(), so frame_idx_==0 is always the empty-map
+  // bootstrap scan, never a map-backed frame -- verified directly (isEmpty()
+  // true, 0 residuals). frame_idx_==1 is the true first non-empty map-backed
+  // frame the instructions ask for; logged as scan_id=0 (relabeled) to match
+  // the CSV vocabulary the instructions use throughout.
+  // FIX (found during round-19's real-data run, dangling-if without
+  // braces): the patch's second statement here was NOT inside the
+  // `if (frame_idx_==1)` guard -- logFirstFrameStateChain fired on EVERY
+  // frame, confirmed by the live run's own CSV (pre_update rows spanning
+  // the whole bag, not just the first frame). Braced both calls together.
+  if (voxel_map_->frame_idx_ == 1) {
+    logDecoupledFirstFrame("pre_update", 0, -1, mg, *state_, mg.image.t + data_queues_->start_time, 0, decoupledFirstFrameHashPoints(mg.points), 1469598103934665603ULL, voxel_map_->last_n_map_pts_, voxel_map_->last_n_active_voxels_, state_->pos(), state_->rot());
+    logFirstFrameStateChain("decoupled", "pre_update", 0, -1, mg, *state_, mg.image.t + data_queues_->start_time);
+    logFirstFrameCovarianceBudget(firstFrameArchitectureName(), "pre_update", 0, -1, mg, *state_, mg.image.t + data_queues_->start_time);
+  }
+
   if (voxel_map_->isEmpty()) return {};
 
   if (voxel_map_->isEmpty()) return {};
@@ -1323,6 +1580,7 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
     // the SAME opts_.log_debug_en gate as cq43_tailmove_log immediately
     // above -- diagnostic-only, zero cost when off, no new config key.
     static PersistentLogStream gn_iter_log("decoupled_gn_iteration.csv");
+    static PersistentLogStream knot_update_log("decoupled_knot_update.csv");
 
     // Fixed IEKF prior for this frame's ENTIRE inner loop -- see ekf.h's
     // applyMeanUpdate() doc comment. Set once here, read (never rewritten)
@@ -1349,8 +1607,36 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
     mg.prior_rot = state_propagat_.rot();
     mg.prior_vel = state_propagat_.vel();
     bool any_solved = false;
+    if (voxel_map_->frame_idx_ == 1 && spline_ok_ && dopts_.spline.splineOn()) {  // see the frame_idx_ fix comment above
+      const auto& cp = spline_.cpPos(); const auto& phi = spline_.cpPhi();
+      for (int kk = 0; kk < cp.cols(); ++kk)
+        logDecoupledFirstFrameSpline("initial", 0, -1, mg.image.t + data_queues_->start_time, kk, spline_.t0() + kk * spline_.delta() + data_queues_->start_time, cp.col(kk), phi.col(kk));
+    }
+    std::vector<V3D> frame_cp_pos_start, frame_cp_phi_start;
+    const bool log_frame_knot_updates = opts_.log_debug_en && spline_ok_ && dopts_.spline.splineOn();
+    if (log_frame_knot_updates) {
+      const auto& cp = spline_.cpPos();
+      const auto& phi = spline_.cpPhi();
+      frame_cp_pos_start.reserve(cp.cols());
+      frame_cp_phi_start.reserve(phi.cols());
+      for (int kk = 0; kk < cp.cols(); ++kk) {
+        frame_cp_pos_start.push_back(cp.col(kk));
+        frame_cp_phi_start.push_back(phi.col(kk));
+      }
+    }
 
     for (; iter < opts_.max_iterations; iter++) {
+      std::vector<V3D> cp_pos_before, cp_phi_before;
+      const bool log_knot_updates = opts_.log_debug_en && spline_ok_ && dopts_.spline.splineOn();
+      if (log_knot_updates) {
+        const auto& cp = spline_.cpPos();
+        const auto& phi = spline_.cpPhi();
+        cp_pos_before.reserve(cp.cols()); cp_phi_before.reserve(phi.cols());
+        for (int kk = 0; kk < cp.cols(); ++kk) {
+          cp_pos_before.push_back(cp.col(kk));
+          cp_phi_before.push_back(phi.col(kk));
+        }
+      }
       // Re-place every kept point against the spline, re-anchored to
       // whatever the previous iteration corrected the state to.  Skipped on
       // iteration 0 (mg.points is already the freshly-deskewed set) and a
@@ -1394,7 +1680,16 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
       // innovation only -- later iterations relinearize at an
       // already-partially-corrected state, which is not the quantity NIS
       // is defined over.
+      setDiagnosticGnIteration(iter);
       double error = estimateStateCorrection(mg.points, dtheta, dt, /*allow_consistency_log=*/iter == 0);
+      if (voxel_map_->frame_idx_ == 1) {  // see the frame_idx_ fix comment above
+        logDecoupledFirstFrame("post_iteration", 0, iter, mg, *state_, mg.image.t + data_queues_->start_time, static_cast<int>(residuals_.size()), decoupledFirstFrameHashPoints(mg.points), decoupledFirstFrameHashResiduals(residuals_), voxel_map_->last_n_map_pts_, voxel_map_->last_n_active_voxels_, mg.prior_pos, mg.prior_rot);
+        logFirstFrameStateChain("decoupled", "post_iteration", 0, iter, mg, *state_, mg.image.t + data_queues_->start_time);
+        logFirstFrameCovarianceBudget(firstFrameArchitectureName(), "post_iteration", 0, iter, mg, *state_, mg.image.t + data_queues_->start_time);
+        if (spline_ok_)
+          logFirstFrameCommonTimeSpline(dopts_.spline.splineOn() ? "decoupled_spline" : "splineless",
+                                        voxel_map_->frame_idx_, 0, iter, data_queues_->start_time, spline_);
+      }
 
       if (log_iter) {
         const V3D p_tail_after = state_->pos();
@@ -1420,7 +1715,7 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
                           "dp_tail_x,dp_tail_y,dp_tail_z,dp_tail_norm,"
                           "dtheta_tail_x,dtheta_tail_y,dtheta_tail_z,dtheta_tail_norm,"
                           "dv_tail_x,dv_tail_y,dv_tail_z,dv_tail_norm,"
-                          "predicted_delta_E_lidar,avg_abs_residual\n";
+                          "predicted_delta_E_lidar,avg_abs_residual,lidar_tail_lambda_min,lidar_tail_lambda_max,lidar_tail_rank,lidar_tail_condition\n";
         const double t_abs_iter = mg.image.t + data_queues_->start_time;
         // scan_timestamp duplicates t_abs_iter under the column name the
         // factor-isolation patch's offline analysis scripts and the pose-control
@@ -1428,6 +1723,13 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
         // rename so existing t_abs_iter-keyed consumers (analyze_tail_correction_gt.py,
         // the prior task's build_final_csv.py) are unaffected.
         const V3D dv_tail_vec = v_tail_after - v_tail_before;
+        const Eigen::Matrix<double,6,6> H6 = ekf_.HtH;
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,6,6>> es6(0.5 * (H6 + H6.transpose()));
+        const Eigen::VectorXd ev6 = es6.eigenvalues();
+        const double thresh6 = 1e-12 * std::max(std::abs(ev6(5)), 1e-300);
+        int rank6 = 0;
+        for (int i6 = 0; i6 < 6; ++i6) if (ev6(i6) > thresh6) ++rank6;
+        const double cond6 = ev6(0) > thresh6 ? ev6(5) / ev6(0) : std::numeric_limits<double>::infinity();
         ofs << voxel_map_->frame_idx_ << "," << iter << "," << residuals_.size() << ","
             << std::setprecision(12) << t_abs_iter << "," << t_abs_iter << std::setprecision(6) << ","
             << p_tail_before.x() << "," << p_tail_before.y() << "," << p_tail_before.z() << ","
@@ -1437,7 +1739,8 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
             << dp_tail.x() << "," << dp_tail.y() << "," << dp_tail.z() << "," << dp_tail.norm() << ","
             << dtheta_tail.x() << "," << dtheta_tail.y() << "," << dtheta_tail.z() << "," << dtheta_tail.norm() << ","
             << dv_tail_vec.x() << "," << dv_tail_vec.y() << "," << dv_tail_vec.z() << "," << dv_tail.norm() << ","
-            << predicted_delta_E_lidar << "," << error << "\n";
+            << predicted_delta_E_lidar << "," << error << ","
+            << ev6(0) << "," << ev6(5) << "," << rank6 << "," << cond6 << "\n";
         ofs.flush();
       }
       // SHAPE, from the SAME residuals that solve just used.  Refinement and
@@ -1446,6 +1749,23 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
       // iteration (Bryce, 2026-09-06).
       refineSplineFromResiduals(mg);
       if (!residuals_.empty()) any_solved = true;
+      if (log_knot_updates) {
+        bool first_knot = false;
+        std::ofstream& ofs = knot_update_log.stream(&first_knot);
+        if (first_knot) ofs << "scan_id,t_abs_frame_end,iteration,scope,architecture,control_point_index,delta_cp_x,delta_cp_y,delta_cp_z,delta_cp_norm,delta_cp_phi_x,delta_cp_phi_y,delta_cp_phi_z,delta_cp_phi_norm,delta_tail_physical_norm\n";
+        const auto& cp = spline_.cpPos();
+        const auto& phi = spline_.cpPhi();
+        for (int kk = 0; kk < cp.cols(); ++kk) {
+          const V3D dp = cp.col(kk) - cp_pos_before[kk];
+          const V3D dphi = phi.col(kk) - cp_phi_before[kk];
+          const double t_abs_frame_end = mg.image.t + data_queues_->start_time;
+          ofs << voxel_map_->frame_idx_ << "," << t_abs_frame_end << "," << iter << ",iteration,decoupled," << kk << ","
+              << dp.x() << "," << dp.y() << "," << dp.z() << "," << dp.norm() << ","
+              << dphi.x() << "," << dphi.y() << "," << dphi.z() << "," << dphi.norm() << ","
+              << std::sqrt(dtheta.squaredNorm() + dt.squaredNorm()) << "\n";
+        }
+        ofs.flush();
+      }
       total_dtheta += dtheta;
       total_dt     += dt;
 
@@ -1497,6 +1817,24 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
       }
       if ((prev - error) / std::max(prev, 1e-6) < opts_.min_diff_error)
         { stop = "rel_diff"; break; }
+    }
+
+    if (log_frame_knot_updates) {
+      bool first_knot = false;
+      std::ofstream& ofs = knot_update_log.stream(&first_knot);
+      if (first_knot) ofs << "scan_id,t_abs_frame_end,iteration,scope,architecture,control_point_index,delta_cp_x,delta_cp_y,delta_cp_z,delta_cp_norm,delta_cp_phi_x,delta_cp_phi_y,delta_cp_phi_z,delta_cp_phi_norm,delta_tail_physical_norm\n";
+      const auto& cp = spline_.cpPos();
+      const auto& phi = spline_.cpPhi();
+      for (int kk = 0; kk < cp.cols(); ++kk) {
+        const V3D dp = cp.col(kk) - frame_cp_pos_start[kk];
+        const V3D dphi = phi.col(kk) - frame_cp_phi_start[kk];
+        const double t_abs_frame_end = mg.image.t + data_queues_->start_time;
+        ofs << voxel_map_->frame_idx_ << "," << t_abs_frame_end << "," << (iter > 0 ? iter - 1 : 0) << ",frame_cumulative,decoupled," << kk << ","
+            << dp.x() << "," << dp.y() << "," << dp.z() << "," << dp.norm() << ","
+            << dphi.x() << "," << dphi.y() << "," << dphi.z() << "," << dphi.norm() << ","
+            << std::sqrt(total_dtheta.squaredNorm() + total_dt.squaredNorm()) << "\n";
+      }
+      ofs.flush();
     }
 
     // Posterior covariance write happens exactly ONCE here, using the SAME
@@ -1577,7 +1915,6 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
       buildResiduals(mg.points, residuals_, /*allow_consistency_log=*/false);
       refineSplineFromResiduals(mg);
       redeskewFromSpline(mg);
-      // Item (2)'s own pass condition: assert, don't just hope.
       const double moved_mm = (state_->pos() - pos_before).norm() * 1000.0;
       if (opts_.log_debug_en) {
         static PersistentLogStream log("cq43_finalpass_assert.txt");

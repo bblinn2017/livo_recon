@@ -1,5 +1,4 @@
 // Pure numerical validation of covarianceInformationUpdate() -- items
-// 14/15/16/17 of the 2026-09-22 covariance correction. No LIO/estimator
 // code involved; this tests the Woodbury-form update algebra in isolation.
 #include "livo_recon/lio/pose_control_covariance.h"
 #include <cstdio>
@@ -123,11 +122,32 @@ static void test17() {
   check(var_post_dir_final < 1e-4, "observed direction variance -> ~0 at very strong weight", var_post_dir_final);
 }
 
+static void testDirectInformationPosterior() {
+  printf("Direct information-form posterior covariance identity\n");
+  std::mt19937 rng(23);
+  const int n = 9, m = 6;
+  for (int trial = 0; trial < 5; ++trial) {
+    const Eigen::MatrixXd P_prior = randomSpd(n, rng, 1.0);
+    const Eigen::MatrixXd H = Eigen::MatrixXd::Random(m, n);
+    const Eigen::MatrixXd Lambda = randomSpd(m, rng, 0.7);
+    const Eigen::MatrixXd S = Eigen::MatrixXd::Identity(m, m) + Lambda * H * P_prior * H.transpose();
+    const Eigen::MatrixXd K = P_prior * H.transpose() * S.inverse() * Lambda;
+    const Eigen::MatrixXd P_raw = P_prior - K * H * P_prior;
+    const Eigen::MatrixXd P_post = 0.5 * (P_raw + P_raw.transpose());
+    const Eigen::MatrixXd P_ref = (P_prior.inverse() + H.transpose() * Lambda * H).inverse();
+    const double rel = (P_post - P_ref).norm() / std::max(P_ref.norm(), 1e-12);
+    check(rel < 1e-8, "direct information covariance matches posterior inverse", rel);
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (P_post + P_post.transpose()));
+    check(es.info() == Eigen::Success && es.eigenvalues().minCoeff() > 0.0, "direct information posterior is positive definite", es.info() == Eigen::Success ? es.eigenvalues().minCoeff() : -1.0);
+  }
+}
+
 int main() {
   test14();
   test15();
   test16();
   test17();
+  testDirectInformationPosterior();
   printf("\n%s (%d failure%s)\n", g_fail == 0 ? "ALL PASS" : "SOME FAILED",
          g_fail, g_fail == 1 ? "" : "s");
   return g_fail == 0 ? 0 : 1;

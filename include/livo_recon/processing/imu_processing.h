@@ -63,6 +63,9 @@ bool imuProcQhatRead(Eigen::MatrixXd& phi_p_phit, Eigen::MatrixXd& accum_cov_w,
 // the read above (returns false, p_before left untouched, if not primed).
 bool imuProcQhatPeekPBefore(Eigen::MatrixXd& p_before);
 
+bool imuProcQhatPeekAll(Eigen::MatrixXd& p_before, Eigen::MatrixXd& phi_p_phit,
+                        Eigen::MatrixXd& q_eff, Eigen::MatrixXd& p_after);
+
 class ImuProc
 {
 public:
