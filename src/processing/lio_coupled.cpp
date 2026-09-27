@@ -8,7 +8,9 @@
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/lio/pose_control_adaptive_q.h"
 #include "livo_recon/diagnostics/pose_control/pose_control_physical_diagnostics.h"
+#include "livo_recon/diagnostics/pose_control/pose_control_diagnostic_writer.h"
 #include "livo_recon/lio/pose_control_directional_redundancy.h"
+#include "livo_recon/processing/pose_control_coupled_modes.h"
 
 #include <algorithm>
 #include <chrono>
@@ -29,128 +31,13 @@ namespace livo_recon
 {
 
 
-namespace
-{
-struct PhysicalRpvUpdate
-{
-  Eigen::Matrix<double,9,9> P_prior = Eigen::Matrix<double,9,9>::Zero();
-  Eigen::Matrix<double,9,9> P_post = Eigen::Matrix<double,9,9>::Zero();
-  Eigen::Matrix<double,9,9> H_full = Eigen::Matrix<double,9,9>::Zero();
-  Eigen::Matrix<double,9,9> P_prior_inverse = Eigen::Matrix<double,9,9>::Zero();
-  Eigen::Matrix<double,9,9> A = Eigen::Matrix<double,9,9>::Zero();
-  Eigen::Matrix<double,9,9> K1 = Eigen::Matrix<double,9,9>::Zero();
-  Eigen::Matrix<double,9,6> K1_pose = Eigen::Matrix<double,9,6>::Zero();
-  Eigen::Matrix<double,9,6> G = Eigen::Matrix<double,9,6>::Zero();
-  Eigen::Matrix<double,9,1> vec = Eigen::Matrix<double,9,1>::Zero();
-  Eigen::Matrix<double,9,1> measurement_term = Eigen::Matrix<double,9,1>::Zero();
-  Eigen::Matrix<double,9,1> prior_term = Eigen::Matrix<double,9,1>::Zero();
-  Eigen::Matrix<double,9,1> solution = Eigen::Matrix<double,9,1>::Zero();
-  Eigen::Matrix<double,6,1> desired_pose = Eigen::Matrix<double,6,1>::Zero();
-};
-static bool solvePhysicalRpvUpdate(const StateGroup& current,
-                                   const StateGroup& propagat,
-                                   const Eigen::MatrixXd& prior_cov_full,
-                                   const PoseControlPhysicalLidarInformation& lidar,
-                                   PhysicalRpvUpdate& out)
-{
-  const int ir=StateGroup::idxR(), ip=StateGroup::idxP(), iv=StateGroup::idxV();
-  if (prior_cov_full.rows()<iv+3 || prior_cov_full.cols()<iv+3 || !prior_cov_full.allFinite() ||
-      !lidar.Lambda.allFinite() || !lidar.b.allFinite()) return false;
-  out.P_prior.block<3,3>(0,0)=prior_cov_full.block<3,3>(ir,ir);
-  out.P_prior.block<3,3>(0,3)=prior_cov_full.block<3,3>(ir,ip);
-  out.P_prior.block<3,3>(0,6)=prior_cov_full.block<3,3>(ir,iv);
-  out.P_prior.block<3,3>(3,0)=out.P_prior.block<3,3>(0,3).transpose();
-  out.P_prior.block<3,3>(3,3)=prior_cov_full.block<3,3>(ip,ip);
-  out.P_prior.block<3,3>(3,6)=prior_cov_full.block<3,3>(ip,iv);
-  out.P_prior.block<3,3>(6,0)=out.P_prior.block<3,3>(0,6).transpose();
-  out.P_prior.block<3,3>(6,3)=out.P_prior.block<3,3>(3,6).transpose();
-  out.P_prior.block<3,3>(6,6)=prior_cov_full.block<3,3>(iv,iv);
-  out.P_prior=0.5*(out.P_prior+out.P_prior.transpose());
-  Eigen::LDLT<Eigen::Matrix<double,9,9>> lp(out.P_prior);
-  if (lp.info()!=Eigen::Success) return false;
-  out.P_prior_inverse=lp.solve(Eigen::Matrix<double,9,9>::Identity());
-  if (!out.P_prior_inverse.allFinite()) return false;
-  out.H_full.setZero();
-  out.H_full.block<6,6>(0,0)=0.5*(lidar.Lambda+lidar.Lambda.transpose());
-  out.A=0.5*(out.H_full+out.H_full.transpose())+out.P_prior_inverse;
-  out.A=0.5*(out.A+out.A.transpose());
-  Eigen::LDLT<Eigen::Matrix<double,9,9>> la(out.A);
-  if (la.info()!=Eigen::Success) return false;
-  const Eigen::Matrix<double,9,9> K1_raw=la.solve(Eigen::Matrix<double,9,9>::Identity());
-  out.K1=0.5*(K1_raw+K1_raw.transpose());
-  if (!out.K1.allFinite()) return false;
-  out.K1_pose=out.K1.leftCols<6>();
-  out.G=out.K1_pose*out.H_full.block<6,6>(0,0);
-  out.vec.head<3>()=Log(current.rot().transpose()*propagat.rot());
-  out.vec.segment<3>(3)=propagat.pos()-current.pos();
-  out.vec.tail<3>()=propagat.vel()-current.vel();
-  out.measurement_term=out.K1_pose*lidar.b;
-  out.prior_term=out.vec-out.G*out.vec.head<6>();
-  out.solution=out.measurement_term+out.prior_term;
-  Eigen::LDLT<Eigen::Matrix<double,6,6>> ll(0.5*(lidar.Lambda+lidar.Lambda.transpose()));
-  if (ll.info()==Eigen::Success) out.desired_pose=ll.solve(lidar.b);
-  out.P_post=solveCovarianceFromA(out.A);
-  return out.solution.allFinite() && out.P_post.allFinite();
-}
-static bool realizePhysicalRpvInSpline(const PoseControlSpline& spline,
-                                       const PoseControlFreeLayout& layout,
-                                       const PoseControlHeadNullspace& hns,
-                                       const Eigen::MatrixXd& Pz_cond,
-                                       const Eigen::Matrix<double,9,1>& physical_delta,
-                                       bool tail_only,
-                                       Eigen::VectorXd& delta_z,
-                                       Eigen::Matrix<double,9,Eigen::Dynamic>& J_y_z,
-                                       Eigen::Matrix<double,9,1>& realized,
-                                       Eigen::Matrix<double,9,1>& error)
-{
-  const int dEta=hns.freeDim(), dimZ=dEta+layout.dimST();
-  if(Pz_cond.rows()!=dimZ || Pz_cond.cols()!=dimZ || !Pz_cond.allFinite()) return false;
-  const auto phys=evaluatePoseControlPhysicalSample(spline,layout,hns,spline.t1(),V3D::Zero());
-  J_y_z=Eigen::Matrix<double,9,Eigen::Dynamic>::Zero(9,dimZ);
-  J_y_z.block(0,0,3,dEta)=phys.dtheta_deta;
-  J_y_z.block(3,0,3,dEta)=phys.dp_deta;
-  J_y_z.block(6,0,3,dEta)=phys.dv_deta;
-  const Eigen::MatrixXd Pz=0.5*(Pz_cond+Pz_cond.transpose());
-  if(!tail_only)
-  {
-    const Eigen::MatrixXd Py=0.5*(J_y_z*Pz*J_y_z.transpose()+(J_y_z*Pz*J_y_z.transpose()).transpose());
-    delta_z=Pz*J_y_z.transpose()*generalPseudoInverse(Py,1e-12)*physical_delta;
-  }
-  else
-  {
-    const int cp=layout.N-1,pos_col=layout.colPos(cp),phi_col=layout.colPhi(cp);
-    if(pos_col<0 || phi_col<0) return false;
-    Eigen::MatrixXd E=Eigen::MatrixXd::Zero(hns.rawDim(),6);
-    E.block<3,3>(pos_col,0).setIdentity(); E.block<3,3>(phi_col,3).setIdentity();
-    const Eigen::MatrixXd Pc=hns.Z*Pz.topLeftCorner(dEta,dEta)*hns.Z.transpose();
-    const auto jac=spline.jacobianAt(spline.t1());
-    Eigen::Matrix<double,9,6> Jt=Eigen::Matrix<double,9,6>::Zero();
-    Jt.block(0,3,3,3)=spline.dThetaDcphi(jac,3,spline.t1());
-    Jt.block(3,0,3,3)=PoseControlSpline::dPosDcp(jac,3);
-    Jt.block(6,0,3,3)=PoseControlSpline::dVelDcp(jac,3);
-    const Eigen::MatrixXd Pt=E.transpose()*Pc*E;
-    const Eigen::MatrixXd Py=0.5*(Jt*Pt*Jt.transpose()+(Jt*Pt*Jt.transpose()).transpose());
-    const Eigen::VectorXd dt=Pt*Jt.transpose()*generalPseudoInverse(Py,1e-12)*physical_delta;
-    delta_z.setZero(dimZ); delta_z.head(dEta)=hns.Z.transpose()*E*dt;
-  }
-  if(!delta_z.allFinite()) return false;
-  realized=J_y_z*delta_z; error=realized-physical_delta;
-  return realized.allFinite();
-}
-} // namespace
-
 static void writeFirstFrameCoupledMatrix(std::ofstream& ofs, const char* name, const Eigen::MatrixXd& M)
 {
-  ofs << "matrix " << name << " rows=" << M.rows() << " cols=" << M.cols() << "\n";
-  ofs << std::setprecision(17);
-  for (int r = 0; r < M.rows(); ++r) { for (int c = 0; c < M.cols(); ++c) { if (c) ofs << ' '; ofs << M(r,c); } ofs << '\n'; }
+  PoseControlDiagnosticWriter::writeMatrix(ofs,name,M);
 }
 static void writeFirstFrameCoupledVector(std::ofstream& ofs, const char* name, const Eigen::VectorXd& v)
 {
-  ofs << "vector " << name << " size=" << v.size() << "\n";
-  ofs << std::setprecision(17);
-  for (int i = 0; i < v.size(); ++i) { if (i) ofs << ' '; ofs << v(i); }
-  ofs << '\n';
+  PoseControlDiagnosticWriter::writeVector(ofs,name,v);
 }
 static void writeFirstFrameCoupledEquation(std::ofstream& ofs, const Eigen::MatrixXd& A, const Eigen::VectorXd& rhs,
                                                     const Eigen::VectorXd& solution, const Eigen::VectorXd& lidar_term,
@@ -1099,6 +986,8 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/pose_control/lidar_update_mode",
                  copts_.pose_control_lidar_update_mode, "local_spline",
                  {"local_spline", "single_tail", "covariance_all_knots", "direct_lidar_imu",
+                  "physical_rpv_local_spline", "physical_rpv_single_tail",
+                  "physical_rpv_direct_lidar_imu", "physical_rpv_covariance_all_knots",
                   "physical_rpv_tail", "physical_rpv_all_knots"});
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/pose_control/lidar_latent_pose_q_pos_m2",
                     copts_.pose_control_lidar_latent_pose_q_pos_m2, 0.0);
@@ -5288,19 +5177,6 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
     Eigen::MatrixXd P_pose, H_state;
     Eigen::VectorXd accumulated_full = Eigen::VectorXd::Zero(dimFull);
 
-    if (copts_.pose_control_lidar_update_mode == "single_tail")
-    {
-      S_update =
-          Eigen::Matrix<double, 6, 6>::Identity() + lidar_physical.Lambda * P_tail;
-      Eigen::FullPivLU<Eigen::Matrix<double, 6, 6>> lu_update(S_update);
-      if (!lu_update.isInvertible())
-        throw std::runtime_error("single_tail physical LiDAR update produced a singular 6x6 innovation transform");
-      const Eigen::Matrix<double, 6, 1> b_from_prior =
-          lidar_physical.b + lidar_physical.Lambda * dx_current_prior;
-      innovation_dual = lu_update.solve(b_from_prior);
-      if (!innovation_dual.allFinite()) return 0.0;
-    }
-
     Eigen::VectorXd delta_z = Eigen::VectorXd::Zero(dimZ);
     Eigen::MatrixXd Sigma_post = Sigma_prior;
     Eigen::MatrixXd first_physical_gain;
@@ -5311,19 +5187,8 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
     Eigen::Matrix<double,9,Eigen::Dynamic> physical_rpv_Jy;
     Eigen::VectorXd physical_rpv_delta_z_requested;
     Eigen::Matrix<double,9,1> physical_rpv_requested_error = Eigen::Matrix<double,9,1>::Zero();
-    // FIX (found this round via live smoke-test evidence): the supplied
-    // patch declared TWO separate `static PersistentLogStream` instances
-    // for the exact same filename ("pose_control_first_frame_physical_rpv_
-    // matrices.txt") -- one at its "requested" dump site, one at its
-    // "applied" dump site -- each with its own independent std::ofstream/
-    // file-position tracking to the same underlying path. This is exactly
-    // the anti-pattern this codebase has hit and fixed before (round 18's
-    // knot-map header collision): two file handles truncate-opening and
-    // writing to the same path independently interleave/race, and here it
-    // was confirmed as actual NUL-byte file corruption (5841 NUL bytes out
-    // of 24935, first appearing mid-file) in the live smoke run's own
-    // output, not just a cosmetic header mismatch. Fixed by hoisting a
-    // SINGLE shared PersistentLogStream here, used by both dump sites.
+    Eigen::VectorXd physical_rpv_full_state_delta;
+    bool physical_rpv_full_state_delta_pending = false;
     static PersistentLogStream physical_rpv_dump("pose_control_first_frame_physical_rpv_matrices.txt");
     const PoseControlSpline spline_before_physical_update = spline;
     Eigen::MatrixXd A_lidar_direct_z = Eigen::MatrixXd::Zero(dimZ, dimZ);
@@ -5331,96 +5196,38 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
 
     if (copts_.pose_control_lidar_update_mode == "single_tail")
     {
-      const Eigen::Matrix<double, 6, 1> dx_post = P_tail * innovation_dual;
-      const Eigen::Matrix<double, 6, 1> dx_increment = dx_post - dx_current_prior;
-      first_physical_dx_increment = dx_increment;
-      first_physical_gain = P_tail * S_update.inverse() * lidar_physical.Lambda;
-
-      // Literal single-knot architecture: realize the physical correction by
-      // changing ONLY the final control point. At t1 its translation basis
-      // weight is nonzero and the rotational first-order map is the existing
-      // dThetaDcphi() block, so no pseudoinverse can spread the update across
-      // interior controls.
-      const auto jac_tail = spline.jacobianAt(t1);
-      Eigen::VectorXd delta_c = Eigen::VectorXd::Zero(hns.rawDim());
-      const int tail_cp = layout.N - 1;
-      const int tail_pos = layout.colPos(tail_cp);
-      const int tail_phi = layout.colPhi(tail_cp);
-      if (tail_pos >= 0 && std::abs(jac_tail.b[3]) > 1e-12)
-        delta_c.segment<3>(tail_pos) = dx_increment.tail<3>() / jac_tail.b[3];
-      if (tail_phi >= 0)
-      {
-        const M3D dtheta_dcp = spline.dThetaDcphi(jac_tail, 3, t1);
-        Eigen::FullPivLU<M3D> lu_theta(dtheta_dcp);
-        if (!lu_theta.isInvertible())
-          throw std::runtime_error("single_tail final-control-point rotation map is singular");
-        delta_c.segment<3>(tail_phi) = lu_theta.solve(dx_increment.head<3>());
-      }
-      delta_z.head(dEta) = hns.Z.transpose() * delta_c;
-      if (dST > 0) delta_z.tail(dST).setZero();
-
-      const Eigen::MatrixXd J_tail_z = J_tail_full.block(0, 9, 6, dimZ);
-      A_lidar_direct_z.noalias() = J_tail_z.transpose() * lidar_physical.Lambda * J_tail_z;
-      b_lidar_direct_z.noalias() = J_tail_z.transpose() * lidar_physical.b;
+      CoupledModeStepResult mode;
+      if(!solveSingleTailControl(spline,layout,hns,Sigma_prior,J_tail_full,P_tail,
+                                 dx_current_prior,lidar_physical,mode))
+        throw std::runtime_error("single_tail family solve failed");
+      delta_z=mode.delta_z; Sigma_post=mode.sigma_post;
+      S_update=mode.innovation_transform; innovation_dual=mode.innovation_dual;
+      first_physical_dx_increment=mode.physical_increment;
+      first_physical_gain=mode.physical_gain;
+      A_lidar_direct_z=mode.lidar_information_z; b_lidar_direct_z=mode.lidar_rhs_z;
     }
     else if (copts_.pose_control_lidar_update_mode == "covariance_all_knots")
     {
-      // Each accepted LiDAR residual observes the physical pose at ITS OWN
-      // capture time. Treat that physical pose as x_l = J_l z + w_l and use a
-      // sequential scalar Kalman update of the joint [x0;z] covariance. This
-      // is the covariance-mediated all-knot architecture: the LiDAR Jacobian
-      // is still only 6-DOF at x_l, while dense P_{z,x_l} spreads its update
-      // through statistically correlated trajectory coordinates.
-      accumulated_full.setZero();
-      double nis_sum = 0.0, nis_sq_sum = 0.0, nis_max = 0.0;
-      std::size_t nis_count = 0, nis_gt_3p84 = 0, nis_gt_6p63 = 0;
       const double q_pos = std::max(0.0, copts_.pose_control_lidar_latent_pose_q_pos_m2);
       const double q_rot = std::max(0.0, copts_.pose_control_lidar_latent_pose_q_rot_rad2);
-      for (size_t residual_index = 0; residual_index < residuals_.size(); ++residual_index)
-      {
-        const Residual& res = residuals_[residual_index];
-        const auto physical = evaluatePoseControlPhysicalSample(
-            spline, layout, hns, res.t, coupled_pose_control_g_trial_);
-        Eigen::MatrixXd J_phys = Eigen::MatrixXd::Zero(6, dimFull);
-        J_phys.block(0, 0, 3, 9) = physical.dtheta_dhead;
-        J_phys.block(0, 9, 3, dEta) = physical.dtheta_deta;
-        J_phys.block(3, 0, 3, 9) = physical.dp_dhead;
-        J_phys.block(3, 9, 3, dEta) = physical.dp_deta;
-        const Eigen::Matrix<double, 6, 1> h6 = poseControlPhysicalLidarJacobianAtTime(spline, res);
-        const Eigen::RowVectorXd H = h6.transpose() * J_phys;
-        const double q_meas = q_rot * h6.head<3>().squaredNorm() + q_pos * h6.tail<3>().squaredNorm();
-        const double R_meas = std::max(res.sigma_squared, 1e-12) + q_meas;
-        const double innovation = res.r + (H * accumulated_full)(0);
-        const double S = (H * Sigma_post * H.transpose())(0) + R_meas;
-        if (!std::isfinite(S) || S <= 1e-15) continue;
-        const double nis = innovation * innovation / S;
-        if (std::isfinite(nis)) {
-          nis_sum += nis;
-          nis_sq_sum += nis * nis;
-          nis_max = std::max(nis_max, nis);
-          ++nis_count;
-          if (nis > 3.841458820694124) ++nis_gt_3p84;
-          if (nis > 6.6348966010212145) ++nis_gt_6p63;
-        }
-        const Eigen::VectorXd K = Sigma_post * H.transpose() / S;
-        if (voxel_map_->frame_idx_ == 1 && diagnostic_gn_iteration_ >= 0)
-          logFirstFramePhysicalResidual(voxel_map_->frame_idx_, 0, coupled_iters_, residual_index, res, J_phys, H, h6, R_meas, innovation, S, nis, K, accumulated_full);
-        accumulated_full += -K * innovation;
-        accumulated_full.head(9).setZero();
-        const Eigen::MatrixXd Sigma_new = Sigma_post - K * H * Sigma_post;
-        Sigma_post = 0.5 * (Sigma_new + Sigma_new.transpose());
-        if (!Sigma_post.allFinite()) return 0.0;
-
-        const Eigen::RowVectorXd H_z = H.segment(9, dimZ);
-        A_lidar_direct_z.noalias() += (1.0 / std::max(res.sigma_squared, 1e-12)) * H_z.transpose() * H_z;
-        b_lidar_direct_z.noalias() += -(1.0 / std::max(res.sigma_squared, 1e-12)) * H_z.transpose() * res.r;
-      }
-      delta_z = accumulated_full.tail(dimZ);
-      if (copts_.psd_audit_en && nis_count > 0) {
+      CoupledModeStepResult mode; CovarianceAllKnotsStatistics stats;
+      std::vector<CovarianceAllKnotsResidualTrace> traces;
+      if(!solveCovarianceAllKnotsControl(spline,layout,hns,coupled_pose_control_g_trial_,
+            residuals_,Sigma_prior,q_pos,q_rot,mode,stats,
+            (voxel_map_->frame_idx_==1 && diagnostic_gn_iteration_>=0)?&traces:nullptr))
+        throw std::runtime_error("covariance_all_knots family solve failed");
+      delta_z=mode.delta_z; Sigma_post=mode.sigma_post;
+      A_lidar_direct_z=mode.lidar_information_z; b_lidar_direct_z=mode.lidar_rhs_z;
+      accumulated_full.setZero(); accumulated_full.tail(dimZ)=delta_z;
+      for(const auto& trace:traces)
+        logFirstFramePhysicalResidual(voxel_map_->frame_idx_,0,coupled_iters_,trace.residual_index,
+          residuals_[trace.residual_index],trace.J_phys,trace.H,trace.h6,trace.measurement_variance,
+          trace.innovation,trace.innovation_variance,trace.nis,trace.gain,trace.accumulated_before);
+      if (copts_.psd_audit_en && stats.count > 0) {
         const Eigen::MatrixXd Pz_prior = Sigma_prior.block(9, 9, dimZ, dimZ);
         const Eigen::MatrixXd Pz_post = Sigma_post.block(9, 9, dimZ, dimZ);
-        const double nis_mean = nis_sum / static_cast<double>(nis_count);
-        const double nis_var = std::max(0.0, nis_sq_sum / static_cast<double>(nis_count) - nis_mean * nis_mean);
+        const double nis_mean = stats.sum / static_cast<double>(stats.count);
+        const double nis_var = std::max(0.0, stats.square_sum / static_cast<double>(stats.count) - nis_mean * nis_mean);
         const auto es_pz = Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd>(0.5 * (Pz_post + Pz_post.transpose()));
         const double min_post = es_pz.info() == Eigen::Success ? es_pz.eigenvalues().minCoeff() : 0.0;
         const double trace_prior = Pz_prior.trace();
@@ -5428,12 +5235,12 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
         std::map<std::string, std::string> ccv = {
           {"update_mode", copts_.pose_control_lidar_update_mode},
           {"measurement_model", "sequential_scalar"},
-          {"nis_count", std::to_string(nis_count)},
+          {"nis_count", std::to_string(stats.count)},
           {"nis_mean", std::to_string(nis_mean)},
           {"nis_std", std::to_string(std::sqrt(nis_var))},
-          {"nis_max", std::to_string(nis_max)},
-          {"nis_gt_3p84_fraction", std::to_string(static_cast<double>(nis_gt_3p84) / static_cast<double>(nis_count))},
-          {"nis_gt_6p63_fraction", std::to_string(static_cast<double>(nis_gt_6p63) / static_cast<double>(nis_count))},
+          {"nis_max", std::to_string(stats.maximum)},
+          {"nis_gt_3p84_fraction", std::to_string(static_cast<double>(stats.above_3p84) / static_cast<double>(stats.count))},
+          {"nis_gt_6p63_fraction", std::to_string(static_cast<double>(stats.above_6p63) / static_cast<double>(stats.count))},
           {"trace_Pz_prior", std::to_string(trace_prior)},
           {"trace_Pz_post", std::to_string(trace_post)},
           {"trace_Pz_reduction_fraction", std::to_string(trace_prior > 1e-300 ? 1.0 - trace_post / trace_prior : 0.0)},
@@ -5448,83 +5255,25 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
     }
     else if (copts_.pose_control_lidar_update_mode == "direct_lidar_imu")
     {
-      const Eigen::MatrixXd P_state_prior = state_->cov();
-      if (P_state_prior.rows() != state_->dimState() || P_state_prior.cols() != state_->dimState())
-        throw std::runtime_error("direct_lidar_imu requires a valid StateGroup covariance");
-      H_state = Eigen::MatrixXd::Zero(6, state_->dimState());
-      H_state.block<3, 3>(0, StateGroup::idxR()) = M3D::Identity();
-      H_state.block<3, 3>(3, StateGroup::idxP()) = M3D::Identity();
-      P_pose =
-          0.5 * (H_state * P_state_prior * H_state.transpose() +
-                 (H_state * P_state_prior * H_state.transpose()).transpose());
-      const Eigen::Matrix<double, 6, 6> S_direct =
-          Eigen::Matrix<double, 6, 6>::Identity() + lidar_physical.Lambda * P_pose;
-      S_update = S_direct;
-      Eigen::FullPivLU<Eigen::Matrix<double, 6, 6>> lu_direct(S_direct);
-      if (!lu_direct.isInvertible())
-        throw std::runtime_error("direct_lidar_imu physical LiDAR innovation transform is singular");
-      const Eigen::Matrix<double, 6, 1> dx_direct =
-          P_pose * lu_direct.solve(lidar_physical.b);
-      first_physical_gain = P_state_prior * H_state.transpose() * lu_direct.solve(Eigen::Matrix<double,6,6>::Identity()) * lidar_physical.Lambda;
-      first_physical_dx_increment = dx_direct;
-      if (!dx_direct.allFinite()) return 0.0;
+      CoupledModeStepResult mode;
+      if(!solveDirectLidarImuControl(spline,layout,hns,*state_,J_tail_full,lidar_physical,mode))
+        throw std::runtime_error("direct_lidar_imu family solve failed");
+      delta_z=mode.delta_z; S_update=mode.innovation_transform;
+      first_physical_gain=mode.physical_gain;
+      first_physical_dx_increment=mode.physical_increment;
+      P_pose=mode.physical_covariance; H_state=mode.physical_jacobian;
+      A_lidar_direct_z=mode.lidar_information_z; b_lidar_direct_z=mode.lidar_rhs_z;
+      state_->applyDelta(mode.full_state_delta);
+      state_->covMut()=mode.full_state_covariance;
+      const Eigen::Matrix<double,6,1> dx_direct=mode.physical_increment;
+      const Eigen::MatrixXd P_state_post=mode.full_state_covariance;
 
-      Eigen::VectorXd dx_state = Eigen::VectorXd::Zero(state_->dimState());
-      dx_state.segment<3>(StateGroup::idxR()) = dx_direct.head<3>();
-      dx_state.segment<3>(StateGroup::idxP()) = dx_direct.tail<3>();
-      state_->applyDelta(dx_state);
-      const Eigen::Matrix<double, 6, 6> S_direct_inv =
-          lu_direct.solve(Eigen::Matrix<double, 6, 6>::Identity());
-      const Eigen::MatrixXd K_info =
-          P_state_prior * H_state.transpose() * S_direct_inv * lidar_physical.Lambda;
-      const Eigen::MatrixXd P_state_post_raw =
-          P_state_prior - K_info * H_state * P_state_prior;
-      const Eigen::MatrixXd P_state_post =
-          0.5 * (P_state_post_raw + P_state_post_raw.transpose());
-      if (!P_state_post.allFinite()) return 0.0;
-      state_->covMut() = P_state_post;
-
-      // FIX (symbol audit): the patch as supplied called a nonexistent
-      // `PoseControlSpline::moveTailClamp` (that method exists only on
-      // ScanSpline, per pose_control_lidar_physical_update_final_agent.md's
-      // own symbol-audit list, which names it explicitly as
-      // ScanSpline::moveTailClamp -- confirmed via direct grep of spline.h:
-      // ScanSpline declares it at line 510, PoseControlSpline has no such
-      // member). PoseControlSpline realizes a tail-only physical correction
-      // via the SAME tail-Jacobian-inversion mechanism single_tail already
-      // uses just above (jacobianAt/dThetaDcphi), not a moveTailClamp call --
-      // reused verbatim here, driven by dx_direct instead of dx_increment,
-      // 5) without inventing a second mechanism for the same operation.
-      const auto jac_tail_direct = spline.jacobianAt(t1);
-      Eigen::VectorXd delta_c_direct = Eigen::VectorXd::Zero(hns.rawDim());
-      const int tail_cp_direct = layout.N - 1;
-      const int tail_pos_direct = layout.colPos(tail_cp_direct);
-      const int tail_phi_direct = layout.colPhi(tail_cp_direct);
-      if (tail_pos_direct >= 0 && std::abs(jac_tail_direct.b[3]) > 1e-12)
-        delta_c_direct.segment<3>(tail_pos_direct) = dx_direct.tail<3>() / jac_tail_direct.b[3];
-      if (tail_phi_direct >= 0)
-      {
-        const M3D dtheta_dcp_direct = spline.dThetaDcphi(jac_tail_direct, 3, t1);
-        Eigen::FullPivLU<M3D> lu_theta_direct(dtheta_dcp_direct);
-        if (!lu_theta_direct.isInvertible())
-          throw std::runtime_error("direct_lidar_imu tail rotation map is singular");
-        delta_c_direct.segment<3>(tail_phi_direct) = lu_theta_direct.solve(dx_direct.head<3>());
-      }
-      delta_z.head(dEta) = hns.Z.transpose() * delta_c_direct;
-      if (dST > 0) delta_z.tail(dST).setZero();
-      // Recompute the reduced coordinates from the resulting spline without
-      // here, inline, since direct_mean_already_applied below suppresses the
-      // shared post-branch eta+=/poseControlUnflatten() this mode would
-      // otherwise double-apply.
+      // The family solver owns the state update and tail-only coefficient
+      // realization. Apply its already-computed reduced step exactly once.
       coupled_pose_control_eta_ += delta_z.head(dEta);
       poseControlUnflatten(hns.c_particular + hns.Z * coupled_pose_control_eta_, spline);
       direct_mean_already_applied = true;
       coupled_last_A_.resize(0, 0);
-      A_lidar_direct_z.noalias() =
-          J_tail_full.block(0, 9, 6, dimZ).transpose() * lidar_physical.Lambda *
-          J_tail_full.block(0, 9, 6, dimZ);
-      b_lidar_direct_z.noalias() =
-          J_tail_full.block(0, 9, 6, dimZ).transpose() * lidar_physical.b;
 
       std::map<std::string, std::string> dkv = {
         {"update_mode", "direct_lidar_imu"},
@@ -5537,21 +5286,54 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
       emitFullDiagRow(fullDiagRunId(), copts_.pose_control_test_id,
                       "lidar_physical_architecture", voxel_map_->frame_idx_, -1, dkv);
     }
-    else if (copts_.pose_control_lidar_update_mode == "physical_rpv_tail" ||
-             copts_.pose_control_lidar_update_mode == "physical_rpv_all_knots")
+    else if (copts_.pose_control_lidar_update_mode.rfind("physical_rpv_", 0) == 0)
     {
+      CoupledModeSelection selected;
+      if (!parseCoupledMode(copts_.pose_control_lidar_update_mode, selected) || !selected.physical_rpv)
+        throw std::runtime_error("unknown physical RPV coupled mode");
+      // Immutable scan-entry post-IMU reference.  Do not use coupled_prop_
+      // here: in pose-control mode that object is not the authoritative
+      // scan-entry snapshot and can still contain identity/zero defaults,
+      // which previously injected the ~3.05-rad gravity-aligned absolute
+      // attitude (and -p/-v) into the restoring term.
       StateGroup propagat=*state_;
-      propagat.setPropagatedState(coupled_prop_.rot1,coupled_prop_.pos1,coupled_prop_.vel1);
+      propagat.setPropagatedState(mg.rot_after_imu,mg.pos_after_imu,mg.vel_after_imu);
       const Eigen::MatrixXd Psource=(mg.cov_after_imu.rows()==state_->dimState() && mg.cov_after_imu.cols()==state_->dimState()) ? mg.cov_after_imu : state_->cov();
       PhysicalRpvUpdate rpv;
-      if(!solvePhysicalRpvUpdate(*state_,propagat,Psource,lidar_physical,rpv))
+      if(!solveDirectLidarImuPhysicalRpv(*state_,propagat,Psource,lidar_physical,rpv))
         throw std::runtime_error("physical_rpv failed to solve [theta,p,v] physical update");
-      const bool tail_only=(copts_.pose_control_lidar_update_mode=="physical_rpv_tail");
+      if(coupled_iters_==0 && rpv.vec.norm()>1e-8)
+      {
+        std::ostringstream oss;
+        oss << "physical_rpv scan-entry invariant failed: current state and immutable post-IMU reference differ by "
+            << rpv.vec.norm() << " in [theta,p,v]; refusing to use a stale/frame-incompatible restoring reference";
+        throw std::runtime_error(oss.str());
+      }
       const Eigen::MatrixXd Pzcond=(coupled_pose_control_P_z_cond_.rows()==dimZ && coupled_pose_control_P_z_cond_.cols()==dimZ) ? coupled_pose_control_P_z_cond_ : Sigma_prior.block(9,9,dimZ,dimZ);
       Eigen::Matrix<double,9,Eigen::Dynamic> Jy;
       Eigen::Matrix<double,9,1> realized=Eigen::Matrix<double,9,1>::Zero(), realization_error=Eigen::Matrix<double,9,1>::Zero();
-      if(!realizePhysicalRpvInSpline(spline,layout,hns,Pzcond,rpv.solution,tail_only,delta_z,Jy,realized,realization_error))
+      bool realized_ok = false;
+      switch (selected.family) {
+        case CoupledModeFamily::LocalSpline:
+          realized_ok=realizeLocalSplinePhysicalRpv(spline,layout,hns,Pzcond,rpv.solution,delta_z,Jy,realized,realization_error); break;
+        case CoupledModeFamily::SingleTail:
+          realized_ok=realizeSingleTailPhysicalRpv(spline,layout,hns,Pzcond,rpv.solution,delta_z,Jy,realized,realization_error); break;
+        case CoupledModeFamily::DirectLidarImu:
+          realized_ok=realizeDirectLidarImuPhysicalRpv(spline,layout,hns,Pzcond,rpv.solution,delta_z,Jy,realized,realization_error); break;
+        case CoupledModeFamily::CovarianceAllKnots:
+          realized_ok=realizeCovarianceAllKnotsPhysicalRpv(spline,layout,hns,Pzcond,rpv.solution,delta_z,Jy,realized,realization_error); break;
+      }
+      if(!realized_ok)
         throw std::runtime_error("physical_rpv failed to realize [theta,p,v] through spline");
+      if(selected.family==CoupledModeFamily::DirectLidarImu)
+      {
+        if(rpv.state_delta.size()!=state_->dimState() ||
+           rpv.P_full_post.rows()!=state_->dimState() ||
+           rpv.P_full_post.cols()!=state_->dimState())
+          throw std::runtime_error("physical_rpv_direct_lidar_imu missing full-state conditional update");
+        physical_rpv_full_state_delta=rpv.state_delta;
+        physical_rpv_full_state_delta_pending=true;
+      }
       physical_rpv_active=true;
       physical_rpv_diag=rpv;
       physical_rpv_Jy=Jy;
@@ -5579,28 +5361,32 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
       const Eigen::MatrixXd Lmeas=Hposefull.transpose()*lidar_physical.Lambda*Hposefull;
       CovarianceUpdateDiagnostics cdiag; Eigen::MatrixXd covpost;
       Sigma_post=covarianceInformationUpdate(Sigma_prior,Lmeas,covpost,cdiag) ? covpost : Sigma_prior;
-      Eigen::MatrixXd Pstatepost=Psource;
-      if(Pstatepost.rows()>=9 && Pstatepost.cols()>=9) Pstatepost.topLeftCorner<9,9>()=rpv.P_post;
+      // Preserve every full-state cross block.  Replacing only topLeft(9,9)
+      // left an internally inconsistent covariance for bias/gravity states.
+      Eigen::MatrixXd Pstatepost=rpv.P_full_post;
       state_->covMut()=0.5*(Pstatepost+Pstatepost.transpose());
       if(voxel_map_->frame_idx_==1 && diagnostic_gn_iteration_>=0)
       {
-        std::map<std::string,std::string> kv={{"update_mode",copts_.pose_control_lidar_update_mode},{"target_vel_norm",std::to_string(rpv.solution.tail<3>().norm())},{"realized_vel_norm",std::to_string(realized.tail<3>().norm())},{"velocity_alignment",std::to_string((rpv.solution.tail<3>().norm()*realized.tail<3>().norm()>1e-18)?rpv.solution.tail<3>().dot(realized.tail<3>())/(rpv.solution.tail<3>().norm()*realized.tail<3>().norm()):0.0)},{"realization_error_norm",std::to_string(realization_error.norm())},{"delta_z_norm",std::to_string(delta_z.norm())}};
+        const V3D absolute_current_attitude=Log(state_->rot());
+        const V3D absolute_propagated_attitude=Log(propagat.rot());
+        std::map<std::string,std::string> kv={{"update_mode",copts_.pose_control_lidar_update_mode},{"mode_family",coupledModeFamilyName(selected.family)},{"target_vel_norm",std::to_string(rpv.solution.tail<3>().norm())},{"realized_vel_norm",std::to_string(realized.tail<3>().norm())},{"velocity_alignment",std::to_string((rpv.solution.tail<3>().norm()*realized.tail<3>().norm()>1e-18)?rpv.solution.tail<3>().dot(realized.tail<3>())/(rpv.solution.tail<3>().norm()*realized.tail<3>().norm()):0.0)},{"realization_error_norm",std::to_string(realization_error.norm())},{"delta_z_norm",std::to_string(delta_z.norm())},{"attitude_reference","Log(R_current^T*R_propagated)"},{"relative_attitude_norm",std::to_string(rpv.vec.head<3>().norm())},{"absolute_current_attitude_norm",std::to_string(absolute_current_attitude.norm())},{"absolute_propagated_attitude_norm",std::to_string(absolute_propagated_attitude.norm())},{"position_reference","p_propagated-p_current"},{"velocity_reference","v_propagated-v_current"}};
+        kv["propagated_reference_source"]="MeasureGroup::{rot,pos,vel}_after_imu";
+        kv["propagated_reference_frame"]="world_from_imu_at_scan_end";
+        kv["relative_attitude_frame"]="current_body_tangent";
+        kv["iteration_zero_reference_rpv_norm"]=std::to_string(rpv.vec.norm());
         emitFullDiagRow(fullDiagRunId(),copts_.pose_control_test_id,"physical_rpv_realization",voxel_map_->frame_idx_,coupled_iters_,kv);
-        bool f=false; std::ofstream& d=physical_rpv_dump.stream(&f);
+        bool f=false;
+        std::ofstream& d=physical_rpv_dump.stream(&f);
+        writeFirstFrameCoupledMatrix(d,"physical_rpv_R_current_world_from_body",state_->rot());
+        writeFirstFrameCoupledMatrix(d,"physical_rpv_R_propagated_reference_world_from_body",propagat.rot());
+        writeFirstFrameCoupledVector(d,"physical_rpv_Log_R_current_absolute",absolute_current_attitude);
+        writeFirstFrameCoupledVector(d,"physical_rpv_Log_R_propagated_reference_absolute",absolute_propagated_attitude);
+        writeFirstFrameCoupledVector(d,"physical_rpv_p_current_world",state_->pos());
+        writeFirstFrameCoupledVector(d,"physical_rpv_p_propagated_reference_world",propagat.pos());
+        writeFirstFrameCoupledVector(d,"physical_rpv_v_current_world",state_->vel());
+        writeFirstFrameCoupledVector(d,"physical_rpv_v_propagated_reference_world",propagat.vel());
         writeFirstFrameCoupledMatrix(d,"physical_rpv_P_prior",rpv.P_prior); writeFirstFrameCoupledMatrix(d,"physical_rpv_P_prior_inverse",rpv.P_prior_inverse); writeFirstFrameCoupledMatrix(d,"physical_rpv_H_full",rpv.H_full); writeFirstFrameCoupledMatrix(d,"physical_rpv_A",rpv.A); writeFirstFrameCoupledMatrix(d,"physical_rpv_K1",rpv.K1); writeFirstFrameCoupledMatrix(d,"physical_rpv_G",rpv.G); writeFirstFrameCoupledMatrix(d,"physical_rpv_J_y_z",Jy); writeFirstFrameCoupledVector(d,"physical_rpv_vec",rpv.vec); writeFirstFrameCoupledVector(d,"physical_rpv_vec_RP",rpv.vec.head<6>()); writeFirstFrameCoupledVector(d,"physical_rpv_raw_lidar_desired_pose",rpv.desired_pose); writeFirstFrameCoupledVector(d,"physical_rpv_measurement_term",rpv.measurement_term); writeFirstFrameCoupledVector(d,"physical_rpv_prior_term",rpv.prior_term); writeFirstFrameCoupledVector(d,"physical_rpv_solution",rpv.solution); writeFirstFrameCoupledVector(d,"physical_rpv_delta_z_requested",delta_z); writeFirstFrameCoupledVector(d,"physical_rpv_requested_linear_realization",realized); writeFirstFrameCoupledVector(d,"physical_rpv_requested_linear_error",realization_error);
       }
-    }
-
-    if (copts_.pose_control_lidar_update_mode == "single_tail")
-    {
-      const Eigen::Matrix<double,6,6> S_update =
-          Eigen::Matrix<double,6,6>::Identity() + lidar_physical.Lambda * P_tail;
-      const Eigen::Matrix<double,6,6> S_inv = S_update.inverse();
-      const Eigen::MatrixXd reduction =
-          Sigma_prior * J_tail_full.transpose() * S_inv *
-          lidar_physical.Lambda * J_tail_full * Sigma_prior;
-      Sigma_post = 0.5 * (Sigma_prior - reduction +
-                          (Sigma_prior - reduction).transpose());
     }
 
     if (voxel_map_->frame_idx_ == 1 && diagnostic_gn_iteration_ >= 0) {
@@ -5963,6 +5749,17 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
     }
     if (step_scale < 1.0) delta_z *= step_scale;
 
+    if(physical_rpv_full_state_delta_pending)
+    {
+      // The full EKF state and spline must receive the same trust-region
+      // scaling.  Applying the undamped bias/gravity correction before the
+      // spline step was scaled would create an inconsistent hybrid state.
+      state_->applyDelta(step_scale*physical_rpv_full_state_delta);
+      if(layout.colBG()>=0) coupled_pose_control_bg_trial_=state_->biasGyr();
+      if(layout.colBA()>=0) coupled_pose_control_ba_trial_=state_->biasAcc();
+      if(layout.colG()>=0) coupled_pose_control_g_trial_=state_->gravity();
+    }
+
     if (!direct_mean_already_applied)
       coupled_pose_control_eta_ += delta_z.head(dEta);
     if (!direct_mean_already_applied &&
@@ -6304,7 +6101,7 @@ double LioProcCoupled::estimateCoupledPoseControlSpline(MeasureGroup& mg, V3D& d
   // update" true by construction: both read the same coupled_pose_control_
   // lambda_prior_z_/z_imu_ objects, never a separately-relinearized factor.
   if (copts_.pose_control_lidar_enable)
-    addPoseControlLidarFactor(spline, layout, lidar_obs, A_raw, b_raw, nullptr, &E_lidar);
+    assembleLocalSplineControl(spline, layout, lidar_obs, A_raw, b_raw, E_lidar);
 
   const Eigen::MatrixXd A_lidar_only_raw = A_raw;
   const Eigen::VectorXd b_lidar_only_raw = b_raw;

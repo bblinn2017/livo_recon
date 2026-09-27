@@ -131,6 +131,10 @@ add_executable(livo_recon_node
   src/processing/lio_base.cpp
   src/processing/lio_decoupled.cpp
   src/processing/lio_coupled.cpp
+  src/processing/lio_coupled_local_spline.cpp
+  src/processing/lio_coupled_single_tail.cpp
+  src/processing/lio_coupled_direct_lidar_imu.cpp
+  src/processing/lio_coupled_covariance_all_knots.cpp
   src/processing/combined_processing.cpp
   src/processing/evo_processing.cpp
   src/lio/voxelplane.cpp
@@ -145,6 +149,7 @@ add_executable(livo_recon_node
   src/lio/pose_spline_system.cpp
   src/lio/pose_control_adaptive_q.cpp
   src/diagnostics/pose_control/pose_control_physical_diagnostics.cpp
+  src/diagnostics/pose_control/pose_control_diagnostic_writer.cpp
   src/lio/pose_control_directional_redundancy.cpp
   src/lio/pose_control_spline.cpp
   src/lio/pose_control_imu_prior_builder.cpp

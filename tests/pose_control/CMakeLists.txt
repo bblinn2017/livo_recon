@@ -6,6 +6,7 @@ set(POSE_CONTROL_TEST_CORE_SOURCES
   ${PROJECT_SOURCE_DIR}/src/utils/state/state.cpp
   ${PROJECT_SOURCE_DIR}/src/diagnostics/log/debug_log_dir.cpp
   ${PROJECT_SOURCE_DIR}/src/diagnostics/pose_control/pose_control_physical_diagnostics.cpp
+  ${PROJECT_SOURCE_DIR}/src/diagnostics/pose_control/pose_control_diagnostic_writer.cpp
   ${PROJECT_SOURCE_DIR}/src/diagnostics/pose_control/pose_control_gt_diagnostics.cpp
   ${PROJECT_SOURCE_DIR}/src/diagnostics/gt_interp.cpp
   ${PROJECT_SOURCE_DIR}/src/lio/spline.cpp
@@ -17,6 +18,10 @@ set(POSE_CONTROL_TEST_CORE_SOURCES
   ${PROJECT_SOURCE_DIR}/src/lio/pose_control_covariance.cpp
   ${PROJECT_SOURCE_DIR}/src/lio/pose_control_lidar_factor.cpp
   ${PROJECT_SOURCE_DIR}/src/lio/pose_control_lidar_correlation.cpp
+  ${PROJECT_SOURCE_DIR}/src/processing/lio_coupled_local_spline.cpp
+  ${PROJECT_SOURCE_DIR}/src/processing/lio_coupled_single_tail.cpp
+  ${PROJECT_SOURCE_DIR}/src/processing/lio_coupled_direct_lidar_imu.cpp
+  ${PROJECT_SOURCE_DIR}/src/processing/lio_coupled_covariance_all_knots.cpp
 )
 
 add_library(pose_control_test_core STATIC
