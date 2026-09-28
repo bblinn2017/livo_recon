@@ -3,6 +3,7 @@
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/config_resolve.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/bootstrap_diagnostic_writer.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 
 #include <algorithm>
@@ -492,6 +493,16 @@ void VoxelMap::bootstrap(const std::vector<std::vector<PointXYZCov>>& observatio
   if (!isEmpty() || frame_idx_ != 0)
     throw std::logic_error("VoxelMap bootstrap requires a fresh map");
 
+  const int frame_idx_before = frame_idx_;
+  const StateGroup state_before = *state_;
+  size_t flattened_count = 0;
+  for (const auto& obs : observations) flattened_count += obs.size();
+  std::vector<PointXYZCov> flattened_for_hash;
+  flattened_for_hash.reserve(flattened_count);
+  for (const auto& obs : observations)
+    flattened_for_hash.insert(flattened_for_hash.end(), obs.begin(), obs.end());
+  const uint64_t flattened_hash = hashBootstrapPopulation(flattened_for_hash);
+
   if (bootstrap_mode_ == "aggregate") {
     // Aggregate is the ordinary one-shot map fit over the flattened prepared
     // population. Do not enable sequential-only anti-lock semantics here.
@@ -518,6 +529,9 @@ void VoxelMap::bootstrap(const std::vector<std::vector<PointXYZCov>>& observatio
   // LIO query uses frame_idx_ == 1.
   ++frame_idx_;
   if (opts_->snapshot_post_calibration) writePostCalibrationSnapshot();
+
+  writeBootstrapMapSeedDiagnostic(bootstrap_mode_, frame_idx_before, frame_idx_,
+                                   state_before, *state_, flattened_hash, flattened_count);
 }
 
 void VoxelMap::updateMapInternal(MeasureGroup& mg, bool advance_live_frame) {

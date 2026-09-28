@@ -6,6 +6,7 @@
 #include <stdexcept>
 #include <Eigen/Eigenvalues>
 #include "livo_recon/diagnostics/calibration_p0_writer.h"
+#include "livo_recon/diagnostics/bootstrap_diagnostic_writer.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/algo/hashing.h"
 #include "livo_recon/utils/state/state.h"
@@ -517,6 +518,8 @@ void CalibProc::prepareBootstrapObservations()
       bootstrap_observations_.push_back(std::move(downsampled));
     }
   }
+
+  writeBootstrapPreparationDiagnostic(calib_observations_raw_, bootstrap_observations_);
 }
 
 }  // namespace livo_recon
