@@ -396,6 +396,7 @@ std::string CalibProc::estimateFromBuffer()
   state_->setNoiseFloor(var_acc, var_gyr);
   if (opts_.p0_mode == "calibration_derived")
     applyCalibrationDerivedP0(acc_bias, R_init, acc_mean_cov, gyro_mean_cov);
+  state_->captureInitialCovariance(opts_.p0_mode);
   writeCalibrationP0Diagnostic(
       *state_, opts_.p0_mode, static_cast<int>(calib_imu_samples.size()),
       opts_.p0_autocov_lags, acc_mean_cov, gyro_mean_cov);

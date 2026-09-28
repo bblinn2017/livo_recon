@@ -51,6 +51,11 @@ public:
   // and AdaptiveQ treats a zero floor as "no floor available" rather than
   // as "floor of zero").
   void setNoiseFloor(const V3D& var_acc_floor, const V3D& var_gyr_floor);
+  void captureInitialCovariance(const std::string& mode)
+  {
+    initial_covariance_actual_ = cov_;
+    initial_covariance_mode_ = mode;
+  }
   void setPropagatedState(const M3D& rot, const V3D& pos, const V3D& vel);
   Eigen::MatrixXd& covMut() { return cov_; }
   void applyDelta(const Eigen::VectorXd& dx);
@@ -97,6 +102,14 @@ public:
   double initCovGravity() const { return init_cov_gravity_; }
   double initCovBg()      const { return init_cov_bg_; }
   double initCovBa()      const { return init_cov_ba_; }
+  const Eigen::MatrixXd& initialCovarianceActual() const
+  {
+    return initial_covariance_actual_;
+  }
+  const std::string& initialCovarianceMode() const
+  {
+    return initial_covariance_mode_;
+  }
 
   // ── R / t getters ─────────────────────────────────────────────────────────
 
@@ -181,6 +194,8 @@ private:
   double init_cov_gravity_ = 1e-5;
   double init_cov_bg_ = 1e-6;
   double init_cov_ba_ = 1e-6;
+  Eigen::MatrixXd initial_covariance_actual_;
+  std::string initial_covariance_mode_ = "uncaptured";
 
   // Extrinsics
   M3D R_li_, R_il_, R_lc_, R_ic_;

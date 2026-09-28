@@ -71,6 +71,8 @@ StateGroup& StateGroup::operator=(const StateGroup& o)
     init_cov_gravity_ = o.init_cov_gravity_;
     init_cov_bg_ = o.init_cov_bg_;
     init_cov_ba_ = o.init_cov_ba_;
+    initial_covariance_actual_ = o.initial_covariance_actual_;
+    initial_covariance_mode_ = o.initial_covariance_mode_;
     R_li_ = o.R_li_; t_li_ = o.t_li_;
     R_il_ = o.R_il_; t_il_ = o.t_il_;
     R_lc_ = o.R_lc_; t_lc_ = o.t_lc_;

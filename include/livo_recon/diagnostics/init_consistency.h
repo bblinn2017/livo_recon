@@ -67,8 +67,11 @@ InitConsistencyResult computeInitConsistency(
 // post_imu's, never described as a converged update.
 void writeInitializationConsistencyDiagnostics(
     const std::string& run_id, int scan_id, double t_abs,
-    double init_pos, double init_vel, double init_rot_tilt, double init_rot_yaw,
-    double init_gravity, double init_bg, double init_ba,
+    const std::string& p0_mode, const Eigen::MatrixXd& P0_actual,
+    double configured_init_pos, double configured_init_vel,
+    double configured_init_rot_tilt, double configured_init_rot_yaw,
+    double configured_init_gravity, double configured_init_bg,
+    double configured_init_ba,
     int residual_count, int completed_iterations,
     const M3D& R_ref, const V3D& p_ref, const V3D& v_ref,
     const M3D& R_post_imu, const V3D& p_post_imu, const V3D& v_post_imu,

@@ -8,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <stdexcept>
 
 namespace livo_recon
 {
@@ -190,17 +191,45 @@ InitConsistencyResult computeInitConsistency(
 namespace
 {
 
+struct P0Scalars
+{
+  double pos = 0.0, vel = 0.0, rot_tilt = 0.0, rot_yaw = 0.0;
+  double gravity = 0.0, bg = 0.0, ba = 0.0;
+};
+
+P0Scalars summarizeActualP0(const Eigen::MatrixXd& P0, const M3D& R_ref)
+{
+  if (P0.rows() < 18 || P0.cols() < 18)
+    throw std::invalid_argument("coupled initialization diagnostic requires captured 18x18 P0");
+  P0Scalars s;
+  const M3D Prr = P0.block<3,3>(0,0);
+  const V3D yaw_axis =
+      (R_ref.transpose() * V3D(0.0, 0.0, -1.0)).normalized();
+  s.rot_yaw = yaw_axis.dot(Prr * yaw_axis);
+  s.rot_tilt = 0.5 * ((M3D::Identity() - yaw_axis * yaw_axis.transpose()) * Prr).trace();
+  s.pos = P0.block<3,3>(3,3).trace() / 3.0;
+  s.vel = P0.block<3,3>(6,6).trace() / 3.0;
+  s.bg = P0.block<3,3>(9,9).trace() / 3.0;
+  s.ba = P0.block<3,3>(12,12).trace() / 3.0;
+  s.gravity = P0.block<3,3>(15,15).trace() / 3.0;
+  return s;
+}
+
 void writeRow(std::ofstream& out, const std::string& run_id, int scan_id, double t_abs,
-              const char* phase, double init_pos, double init_vel, double init_rot_tilt,
-              double init_rot_yaw, double init_gravity, double init_bg, double init_ba,
+              const char* phase, const std::string& p0_mode,
+              const P0Scalars& configured, const P0Scalars& actual,
               int residual_count, int completed_iterations,
               const InitConsistencyResult& r, const InitConsistencyResult* prev)
 {
   const auto b = [](bool v) { return v ? 1 : 0; };
   out << std::setprecision(17)
       << run_id << ',' << scan_id << ',' << t_abs << ',' << phase << ','
-      << init_pos << ',' << init_vel << ',' << init_rot_tilt << ',' << init_rot_yaw << ','
-      << init_gravity << ',' << init_bg << ',' << init_ba << ','
+      << p0_mode << ','
+      << configured.pos << ',' << configured.vel << ',' << configured.rot_tilt << ','
+      << configured.rot_yaw << ',' << configured.gravity << ',' << configured.bg << ','
+      << configured.ba << ','
+      << actual.pos << ',' << actual.vel << ',' << actual.rot_tilt << ','
+      << actual.rot_yaw << ',' << actual.gravity << ',' << actual.bg << ',' << actual.ba << ','
       << residual_count << ',' << completed_iterations << ','
       << r.eR.x() << ',' << r.eR.y() << ',' << r.eR.z() << ',' << r.eR_norm << ','
       << r.ep.x() << ',' << r.ep.y() << ',' << r.ep.z() << ',' << r.ep_norm << ','
@@ -252,8 +281,11 @@ void writeRow(std::ofstream& out, const std::string& run_id, int scan_id, double
 
 void writeInitializationConsistencyDiagnostics(
     const std::string& run_id, int scan_id, double t_abs,
-    double init_pos, double init_vel, double init_rot_tilt, double init_rot_yaw,
-    double init_gravity, double init_bg, double init_ba,
+    const std::string& p0_mode, const Eigen::MatrixXd& P0_actual,
+    double configured_init_pos, double configured_init_vel,
+    double configured_init_rot_tilt, double configured_init_rot_yaw,
+    double configured_init_gravity, double configured_init_bg,
+    double configured_init_ba,
     int residual_count, int completed_iterations,
     const M3D& R_ref, const V3D& p_ref, const V3D& v_ref,
     const M3D& R_post_imu, const V3D& p_post_imu, const V3D& v_post_imu,
@@ -266,6 +298,9 @@ void writeInitializationConsistencyDiagnostics(
   std::ofstream& out = log.stream(&first);
   if (first)
     out << "run_id,scan_id,t_abs,phase,"
+           "p0_mode,"
+           "configured_init_pos,configured_init_vel,configured_init_rot_tilt,"
+           "configured_init_rot_yaw,configured_init_gravity,configured_init_bg,configured_init_ba,"
            "init_pos,init_vel,init_rot_tilt,init_rot_yaw,init_gravity,init_bg,init_ba,"
            "residual_count,completed_iterations,"
            "er_x,er_y,er_z,er_norm,ep_x,ep_y,ep_z,ep_norm,ev_x,ev_y,ev_z,ev_norm,"
@@ -294,11 +329,14 @@ void writeInitializationConsistencyDiagnostics(
   const InitConsistencyResult post_lio = computeInitConsistency(
       R_ref, p_ref, v_ref, R_post_lio, p_post_lio, v_post_lio, P_RPV_post_lio);
 
-  writeRow(out, run_id, scan_id, t_abs, "post_imu", init_pos, init_vel, init_rot_tilt,
-           init_rot_yaw, init_gravity, init_bg, init_ba, residual_count,
+  const P0Scalars configured{configured_init_pos, configured_init_vel,
+      configured_init_rot_tilt, configured_init_rot_yaw,
+      configured_init_gravity, configured_init_bg, configured_init_ba};
+  const P0Scalars actual = summarizeActualP0(P0_actual, R_ref);
+
+  writeRow(out, run_id, scan_id, t_abs, "post_imu", p0_mode, configured, actual, residual_count,
            completed_iterations, post_imu, nullptr);
-  writeRow(out, run_id, scan_id, t_abs, "post_lio", init_pos, init_vel, init_rot_tilt,
-           init_rot_yaw, init_gravity, init_bg, init_ba, residual_count,
+  writeRow(out, run_id, scan_id, t_abs, "post_lio", p0_mode, configured, actual, residual_count,
            completed_iterations, post_lio, &post_imu);
   out.flush();
 }

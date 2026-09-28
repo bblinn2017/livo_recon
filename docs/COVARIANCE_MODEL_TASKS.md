@@ -31,6 +31,12 @@ and LiDAR information are identifiable in real-data experiments.
 - [ ] Real-data A/B: configured baseline versus calibration-derived P0 on
   eee_01, first post-calibration frame and 30 s stationary window.
 - [ ] Validate per-block NEES before IMU propagation, post-IMU, and post-LIO.
+- [x] Preserve the actual post-calibration P0 and its mode in StateGroup so
+  later diagnostics cannot mistake configured inputs for effective P0.
+- [x] Make `initialization_consistency_all_scans.csv` report both configured
+  inputs and actual effective P0 scalar projections.
+- [ ] Run the full-factorial R43 P0 sweep over known p/v variance, balanced
+  ambiguity scale, yaw variance, bias floors, and gating on/off.
 
 ## Stage 2 — motion-dependent Q_k
 

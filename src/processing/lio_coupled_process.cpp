@@ -166,6 +166,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   writeInitializationConsistencyDiagnostics(
       copts_.test_id, voxel_map_->frame_idx_,
       mg.image.t + data_queues_->start_time,
+      state_->initialCovarianceMode(), state_->initialCovarianceActual(),
       state_->initCovPos(), state_->initCovVel(), state_->initCovRotTilt(),
       state_->initCovRotYaw(), state_->initCovGravity(), state_->initCovBg(),
       state_->initCovBa(), static_cast<int>(residuals_.size()), completed,
