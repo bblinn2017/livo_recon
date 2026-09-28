@@ -75,6 +75,15 @@ struct Residual
   // added into sigma_squared by LioProc::buildResiduals().
   double plane_var_term = 0.0;
 
+  // Exact ingredients behind plane_var_term. For two residuals i,j matched
+  // to the same VoxelPlane, their shared plane-fit covariance is
+  //   J_i * plane_covariance * J_j^T,
+  // not sqrt(plane_var_term_i*plane_var_term_j). Keeping the signed
+  // three-parameter Jacobian and covariance permits the correlation-aware
+  // information solve to reproduce the actual VoxelPlane model.
+  V3D plane_jacobian = V3D::Zero();
+  M3D plane_covariance = M3D::Zero();
+
   // CQ-18 item (2): sigma_squared above is floor_term+sigma_diag_squared
   // already summed -- these two components are split out separately (and
   // s_prior_pose, the H P- H^T term never folded into sigma_squared/the
@@ -759,8 +768,8 @@ struct LioFrameDiag
   // matched residuals (nothing to correct is not an error condition).
   int    redund_groups     = 0;
   int    redund_n_raw      = 0;
-  int    redund_n_eff      = 0;
   double redund_info_ratio = 1.0;
+  int    information_increase_groups = 0;
 
   // CQ-34 item 4: a zero redund_groups conflates three distinct facts --
   // "no plane got >= 2 matched residuals", "some did but rho*plane_var_term
@@ -778,6 +787,11 @@ struct LioFrameDiag
   // populated (including mode=="off") -- see ResidualRedundancyStats.
   double naive_info_gain    = 0.0;
   double woodbury_info_gain = 0.0;
+  double gamma_correction_trace = 0.0;
+  double gamma_correction_frobenius = 0.0;
+  double gamma_correction_min_eigenvalue = 0.0;
+  double gamma_correction_max_eigenvalue = 0.0;
+  double b_correction_norm = 0.0;
 
   // CQ-31 item 8: reduced_chi2 = sum(r^2/sigma_squared)/n_residuals, ~1 for
   // a correctly-calibrated residual model. Computed twice already elsewhere

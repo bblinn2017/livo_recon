@@ -61,7 +61,7 @@ residual files, full knot-state files, or unrelated logs.
 
 `lidar_information.csv`, one row per iteration:
 
-`run_id,scan_id,iteration,t_abs,residual_time,gating_state_uncertainty,lidar_information_mode,residual_count,gamma_trace,gamma_frobenius,b_norm,redund_groups_seen,redund_groups,redund_groups_degenerate_pv,redund_groups_degenerate_var,redund_n_raw,redund_n_eff,redund_info_ratio,naive_info_gain,woodbury_info_gain`
+`run_id,scan_id,iteration,t_abs,residual_time,gating_state_uncertainty,lidar_information_mode,residual_count,gamma_trace,gamma_frobenius,b_norm,redund_groups_seen,redund_groups,redund_groups_degenerate_pv,redund_groups_degenerate_var,redund_n_raw,redund_info_ratio,information_increase_groups,naive_info_gain,woodbury_info_gain`
 
 The returned status report states build/test/run failures, missing cells,
 configuration actually engaged, row counts, and any source changes required

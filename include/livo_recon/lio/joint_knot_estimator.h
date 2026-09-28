@@ -133,6 +133,8 @@ struct JointLidarRow
   double sigma_squared = 0.0;
   double plane_var_term = 0.0;
   const void* plane_id = nullptr;
+  V3D plane_jacobian = V3D::Zero();
+  M3D plane_covariance = M3D::Zero();
 };
 
 struct JointLidarInformation

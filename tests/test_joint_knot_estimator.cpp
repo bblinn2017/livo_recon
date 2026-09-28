@@ -334,10 +334,14 @@ int main()
   H_dense << 1.0, 0.2, -0.3, 0.0, 0.5,
              0.4, -0.8, 0.1, 0.7, 0.0,
              -0.2, 0.3, 0.9, -0.4, 0.6;
+  const V3D uniform_plane_jacobian(1.0, 0.0, 0.0);
+  const M3D uniform_plane_covariance =
+      (V3D(shared, 0.0, 0.0)).asDiagonal();
   for (int i = 0; i < 3; ++i)
     rows.push_back(JointLidarRow{
         H_dense.row(i), residual_value[i], independent_var[i] + shared,
-        shared, plane_id});
+        shared, plane_id, uniform_plane_jacobian,
+        uniform_plane_covariance});
   ResidualRedundancyOptions independent_options;
   independent_options.mode = "off";
   const JointLidarInformation independent = accumulateJointLidarInformation(
@@ -356,7 +360,6 @@ int main()
   ResidualRedundancyOptions woodbury_options;
   woodbury_options.mode = "woodbury";
   woodbury_options.rho = 1.0;
-  woodbury_options.max_discount = 1.0;
   const JointLidarInformation woodbury = accumulateJointLidarInformation(
       rows, lidar_dim, woodbury_options);
   Eigen::Matrix3d C = Eigen::Matrix3d::Constant(shared);
@@ -375,64 +378,39 @@ int main()
   if (woodbury.redundancy_stats.redund_groups != 1 ||
       woodbury.redundancy_stats.redund_n_raw != 3)
     return fail("joint LiDAR redundancy engagement is reported");
-  if (woodbury.redundancy_stats.max_discount_bound_groups != 0)
-    return fail("max_discount_bound_groups is 0 when max_discount=1.0 never binds",
-        woodbury.redundancy_stats.max_discount_bound_groups, 0.0);
-
   // A group of duplicate (identical H, high shared-variance-fraction)
-  // measurements has a large TRUE discount (naively triple-counting one
-  // measurement as three independent ones) -- verified externally at
-  // discount ~= 0.643 for these exact numbers. A max_discount below that
-  // must actually clamp, and the clamped result must land exactly on the
-  // max_discount-scaled blend between naive and corrected, not merely
-  // differ from the unclamped correction.
+  // measurements must receive the exact covariance correction, without a
+  // trace-based blend that would no longer correspond to any stated noise
+  // model.
   std::vector<JointLidarRow> dup_rows;
   Eigen::RowVectorXd H_dup = Eigen::RowVectorXd::Zero(lidar_dim);
   H_dup(0) = 1.0;
   const double dup_shared = 0.09, dup_independent_var = 0.01;
   for (int i = 0; i < 3; ++i)
     dup_rows.push_back(JointLidarRow{
-        H_dup, 0.1, dup_independent_var + dup_shared, dup_shared, plane_id});
-  ResidualRedundancyOptions unclamped_dup_options;
-  unclamped_dup_options.mode = "woodbury";
-  unclamped_dup_options.rho = 1.0;
-  unclamped_dup_options.max_discount = 1.0;
-  const JointLidarInformation unclamped_dup = accumulateJointLidarInformation(
-      dup_rows, lidar_dim, unclamped_dup_options);
-  if (unclamped_dup.redundancy_stats.max_discount_bound_groups != 0)
-    return fail("max_discount=1.0 does not bind on the duplicate-measurement group",
-        unclamped_dup.redundancy_stats.max_discount_bound_groups, 0.0);
+        H_dup, 0.1, dup_independent_var + dup_shared, dup_shared, plane_id,
+        uniform_plane_jacobian,
+        (V3D(dup_shared, 0.0, 0.0)).asDiagonal()});
+  const JointLidarInformation duplicate = accumulateJointLidarInformation(
+      dup_rows, lidar_dim, woodbury_options);
+  Eigen::Matrix3d C_duplicate = Eigen::Matrix3d::Constant(dup_shared);
+  C_duplicate.diagonal().array() += dup_independent_var;
+  Eigen::Vector3d r_duplicate = Eigen::Vector3d::Constant(0.1);
+  const Eigen::MatrixXd expected_duplicate_gamma =
+      H_dup.transpose() * Eigen::RowVector3d::Ones() *
+      C_duplicate.inverse() * Eigen::Vector3d::Ones() * H_dup;
+  const Eigen::VectorXd expected_duplicate_b =
+      -H_dup.transpose() * Eigen::RowVector3d::Ones() *
+      C_duplicate.inverse() * r_duplicate;
+  if ((duplicate.Gamma - expected_duplicate_gamma).norm() >= 1e-9 ||
+      (duplicate.b - expected_duplicate_b).norm() >= 1e-9)
+    return fail("duplicate-measurement Woodbury matches dense C inverse");
 
-  ResidualRedundancyOptions clamped_options = unclamped_dup_options;
-  clamped_options.max_discount = 0.5;
-  const JointLidarInformation clamped = accumulateJointLidarInformation(
-      dup_rows, lidar_dim, clamped_options);
-  if (clamped.redundancy_stats.max_discount_bound_groups != 1)
-    return fail("max_discount=0.5 clamps the duplicate-measurement group and increments the bound counter",
-        clamped.redundancy_stats.max_discount_bound_groups, 1.0);
-
-  ResidualRedundancyOptions independent_dup_options;
-  independent_dup_options.mode = "off";
-  const JointLidarInformation naive_dup = accumulateJointLidarInformation(
-      dup_rows, lidar_dim, independent_dup_options);
-  const double scale = clamped_options.max_discount /
-      (1.0 - unclamped_dup.Gamma.trace() / naive_dup.Gamma.trace());
-  const Eigen::MatrixXd expected_clamped_gamma =
-      naive_dup.Gamma + scale * (unclamped_dup.Gamma - naive_dup.Gamma);
-  if ((clamped.Gamma - expected_clamped_gamma).norm() >= 1e-9)
-    return fail("clamped Gamma lands exactly on the max_discount-scaled naive/corrected blend",
-        (clamped.Gamma - expected_clamped_gamma).norm(), 0.0);
-
-  // R45 repair regression test: plane_var_term = J_nq*plane_var_*J_nq^T is
-  // evaluated per-POINT (voxelplane.cpp), so real matched-plane groups have
-  // DIFFERING plane_var_term across members -- the original patch asserted
-  // they must be equal and threw on every real coupled run. The fix treats
-  // each row's own plane_var_term as its personal loading onto one shared
-  // latent factor (general rank-1 C = D + v*v^T, v_i = sqrt(rho*pvt_i)) and
-  // must no longer throw, matching an explicit dense inverse exactly.
+  // Exact VoxelPlane oracle: different point Jacobians produce different
+  // diagonal plane variances and signed cross-covariances through one shared
+  // three-parameter plane state.
   const double nonuniform_rho = 0.7;
   const std::vector<double> nonuniform_independent_var{0.15, 0.22, 0.31, 0.18};
-  const std::vector<double> nonuniform_plane_var_term{0.05, 0.09, 0.02, 0.07};
   const std::vector<double> nonuniform_residual{0.08, -0.11, 0.05, 0.13};
   Eigen::MatrixXd H_nonuniform(4, lidar_dim);
   H_nonuniform << 0.6, -0.2, 0.4, 0.1, 0.0,
@@ -441,25 +419,39 @@ int main()
                   0.2, 0.1, 0.5, 0.3, -0.2;
   int nonuniform_plane_token = 0;
   const void* nonuniform_plane_id = &nonuniform_plane_token;
+  M3D nonuniform_plane_cov;
+  nonuniform_plane_cov << 0.05, 0.01, -0.004,
+                          0.01, 0.08,  0.006,
+                         -0.004, 0.006, 0.03;
+  Eigen::Matrix<double,4,3> J_plane;
+  J_plane << 1.0,  0.2, 1.0,
+             0.4, -0.8, 1.0,
+            -0.7,  0.5, 1.0,
+             0.2,  1.1, 1.0;
+  Eigen::Vector4d nonuniform_plane_var_term;
+  for (int i = 0; i < 4; ++i)
+    nonuniform_plane_var_term(i) =
+        (J_plane.row(i) * nonuniform_plane_cov *
+         J_plane.row(i).transpose()).value();
   std::vector<JointLidarRow> nonuniform_rows;
   for (int i = 0; i < 4; ++i)
     nonuniform_rows.push_back(JointLidarRow{
         H_nonuniform.row(i), nonuniform_residual[i],
-        nonuniform_independent_var[i] + nonuniform_rho * nonuniform_plane_var_term[i],
-        nonuniform_plane_var_term[i], nonuniform_plane_id});
+        nonuniform_independent_var[i] +
+            nonuniform_rho * nonuniform_plane_var_term(i),
+        nonuniform_plane_var_term(i), nonuniform_plane_id,
+        J_plane.row(i).transpose(), nonuniform_plane_cov});
   ResidualRedundancyOptions nonuniform_options;
   nonuniform_options.mode = "woodbury";
   nonuniform_options.rho = nonuniform_rho;
-  nonuniform_options.max_discount = 1.0;
   const JointLidarInformation nonuniform = accumulateJointLidarInformation(
       nonuniform_rows, lidar_dim, nonuniform_options);
-  Eigen::Vector4d v_nonuniform, sigma_nonuniform;
-  for (int i = 0; i < 4; ++i) {
-    v_nonuniform(i) = std::sqrt(nonuniform_rho * nonuniform_plane_var_term[i]);
-    sigma_nonuniform(i) = nonuniform_independent_var[i];
-  }
-  Eigen::Matrix4d C_nonuniform = v_nonuniform * v_nonuniform.transpose();
-  for (int i = 0; i < 4; ++i) C_nonuniform(i, i) += sigma_nonuniform(i);
+  Eigen::Matrix4d C_nonuniform = nonuniform_rho * J_plane *
+      nonuniform_plane_cov * J_plane.transpose();
+  for (int i = 0; i < 4; ++i)
+    C_nonuniform(i, i) += nonuniform_independent_var[i];
+  if (!(C_nonuniform(1, 2) < 0.0 && C_nonuniform(1, 3) < 0.0))
+    return fail("signed plane covariance oracle contains negative cross-covariances");
   const Eigen::Vector4d r_nonuniform(
       nonuniform_residual[0], nonuniform_residual[1],
       nonuniform_residual[2], nonuniform_residual[3]);
@@ -476,6 +468,66 @@ int main()
   if (nonuniform.redundancy_stats.redund_groups != 1)
     return fail("non-uniform plane_var_term group is admitted, not rejected as degenerate",
         nonuniform.redundancy_stats.redund_groups, 1.0);
+
+  // The legacy splineless/decoupled 6-DOF path must implement the identical
+  // covariance model and sign convention for Htz=+H^T C^-1 r.
+  std::vector<Residual> legacy_residuals(4);
+  Eigen::Matrix<double,4,6> H_legacy;
+  for (int i = 0; i < 4; ++i) {
+    H_legacy.row(i) << H_nonuniform(i, 0), H_nonuniform(i, 1),
+        H_nonuniform(i, 2), H_nonuniform(i, 3), H_nonuniform(i, 4),
+        0.15 * (i + 1);
+    Residual& row = legacy_residuals[i];
+    row.point_cross_normal = H_legacy.row(i).head<3>().transpose();
+    row.normal = H_legacy.row(i).tail<3>().transpose();
+    row.r = nonuniform_residual[i];
+    row.sigma_squared = nonuniform_independent_var[i] +
+        nonuniform_rho * nonuniform_plane_var_term(i);
+    row.plane_var_term = nonuniform_plane_var_term(i);
+    row.plane_id = nonuniform_plane_id;
+    row.plane_jacobian = J_plane.row(i).transpose();
+    row.plane_covariance = nonuniform_plane_cov;
+  }
+  EkfUpdate legacy_naive;
+  for (int i = 0; i < 4; ++i) {
+    const Eigen::Matrix<double,6,1> h = H_legacy.row(i).transpose();
+    const double w = 1.0 / legacy_residuals[i].sigma_squared;
+    legacy_naive.HtH.noalias() += w * h * h.transpose();
+    legacy_naive.Htz.noalias() += w * h * legacy_residuals[i].r;
+  }
+  EkfUpdate legacy_off = legacy_naive;
+  ResidualRedundancyOptions legacy_off_options;
+  legacy_off_options.mode = "off";
+  legacy_off_options.rho = nonuniform_rho;
+  const ResidualRedundancyStats legacy_off_stats =
+      applyResidualRedundancyCorrection(
+          legacy_residuals, legacy_off_options, legacy_off);
+  if ((legacy_off.HtH - legacy_naive.HtH).norm() != 0.0 ||
+      (legacy_off.Htz - legacy_naive.Htz).norm() != 0.0)
+    return fail("legacy mode=off leaves the independent accumulator unchanged");
+  if (legacy_off_stats.redund_groups != 1)
+    return fail("legacy mode=off still computes counterfactual exact diagnostics");
+
+  EkfUpdate legacy_corrected = legacy_naive;
+  ResidualRedundancyOptions legacy_options;
+  legacy_options.mode = "woodbury";
+  legacy_options.rho = nonuniform_rho;
+  const ResidualRedundancyStats legacy_stats =
+      applyResidualRedundancyCorrection(
+          legacy_residuals, legacy_options, legacy_corrected);
+  const Eigen::Matrix<double,6,6> expected_legacy_HtH =
+      H_legacy.transpose() * C_nonuniform.inverse() * H_legacy;
+  const Eigen::Matrix<double,6,1> expected_legacy_Htz =
+      H_legacy.transpose() * C_nonuniform.inverse() * r_nonuniform;
+  if ((legacy_corrected.HtH - expected_legacy_HtH).norm() >= 1e-9)
+    return fail("legacy Woodbury matches dense signed C inverse (HtH)",
+        (legacy_corrected.HtH - expected_legacy_HtH).norm(), 0.0);
+  if ((legacy_corrected.Htz - expected_legacy_Htz).norm() >= 1e-9)
+    return fail("legacy Woodbury matches dense signed C inverse (Htz)",
+        (legacy_corrected.Htz - expected_legacy_Htz).norm(), 0.0);
+  if (legacy_stats.redund_groups != 1)
+    return fail("legacy exact covariance group is admitted",
+        legacy_stats.redund_groups, 1.0);
 
   std::cout << "joint-knot estimator invariants passed\n";
   return 0;

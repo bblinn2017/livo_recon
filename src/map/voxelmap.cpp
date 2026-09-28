@@ -73,7 +73,7 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            ",q_status,q_white_acc,q_white_gyr,q_above_floor_acc,q_above_floor_gyr,q_active_frame"
            // CQ-28: residual-redundancy-correction engagement/magnitude --
            // see LioFrameDiag's own doc comment.
-           ",redund_groups,redund_n_raw,redund_n_eff,redund_info_ratio"
+           ",redund_groups,redund_n_raw,redund_info_ratio,information_increase_groups"
            // CQ-34 item 4: a zero redund_groups conflates three distinct
            // facts -- see LioFrameDiag's own doc comment.
            ",redund_groups_seen,redund_groups_degenerate_pv,redund_groups_degenerate_var"
@@ -84,7 +84,10 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            // CQ-31 item 7/8: naive vs Woodbury-corrected info gain (always
            // populated, including mode=="off") and reduced_chi2 (never
            // retained before this -- TQ-23 flagged its absence).
-           ",naive_info_gain,woodbury_info_gain,reduced_chi2"
+           ",naive_info_gain,woodbury_info_gain"
+           ",gamma_correction_trace,gamma_correction_frobenius"
+           ",gamma_correction_min_eigenvalue,gamma_correction_max_eigenvalue"
+           ",b_correction_norm,reduced_chi2"
            // HtH position information diagnostic.
            ",htth_pos_trace"
            // CQ-56 item 3: this frame's largest VoxelPlane::covariance_
@@ -146,15 +149,20 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << (lio.q_white_acc ? 1 : 0) << "," << (lio.q_white_gyr ? 1 : 0)
       << "," << (lio.q_above_floor_acc ? 1 : 0) << "," << (lio.q_above_floor_gyr ? 1 : 0)
       << "," << (lio.q_active_frame ? 1 : 0)
-      << "," << lio.redund_groups << "," << lio.redund_n_raw << "," << lio.redund_n_eff
-      << "," << lio.redund_info_ratio
+      << "," << lio.redund_groups << "," << lio.redund_n_raw
+      << "," << lio.redund_info_ratio << "," << lio.information_increase_groups
       << "," << lio.redund_groups_seen << "," << lio.redund_groups_degenerate_pv
       << "," << lio.redund_groups_degenerate_var
       << "," << lio.kappa_eff
       << "," << lio.kappa_gev0 << "," << lio.kappa_gev1 << "," << lio.kappa_gev2
       << "," << lio.kappa_gev3 << "," << lio.kappa_gev4 << "," << lio.kappa_gev5
       << "," << (lio.kappa_gev_ok ? 1 : 0)
-      << "," << lio.naive_info_gain << "," << lio.woodbury_info_gain << "," << lio.reduced_chi2
+      << "," << lio.naive_info_gain << "," << lio.woodbury_info_gain
+      << "," << lio.gamma_correction_trace
+      << "," << lio.gamma_correction_frobenius
+      << "," << lio.gamma_correction_min_eigenvalue
+      << "," << lio.gamma_correction_max_eigenvalue
+      << "," << lio.b_correction_norm << "," << lio.reduced_chi2
       << "," << lio.htth_pos_trace
       << "," << max_plane_covariance_trace
       << "," << lio.trP_pos_post << "," << lio.p_rot_trace_post

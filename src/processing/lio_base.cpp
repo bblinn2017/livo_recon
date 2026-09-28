@@ -232,8 +232,6 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   const bool rr = opts_.residual_redundancy.mode != "off";
   cfg.nested<double>(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/rho",
                      opts_.residual_redundancy.rho, 1.0);
-  cfg.nested<double>(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/max_discount",
-                     opts_.residual_redundancy.max_discount, 0.9);
 
   // CQ-31 item 5: three independently-switchable scalar P controls, all
   // default-identity.

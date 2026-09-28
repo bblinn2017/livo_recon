@@ -36,25 +36,49 @@ struct GroupCorrection
 };
 
 // Computes one plane group's naive (what accumulateLioResiduals() already
-// added for these indices) and Woodbury-corrected contributions, with the
-// per-group max_discount cap applied to the correction's information-trace.
-// Returns std::nullopt (via n_raw==0) if the group is degenerate (rho*pv
-// non-positive, or would make some residual's independent variance
-// non-positive) -- such a group is left uncorrected, not force-fit.
+// added for these indices) and exact Woodbury-corrected contributions.
+// Uses the exact three-parameter covariance carried by VoxelPlane. Returns
+// n_raw==0 if its metadata/covariance is invalid, leaving the group unchanged.
 GroupCorrection computeGroupCorrection(const std::vector<const Residual*>& group,
-                                        double rho, double max_discount)
+                                        double rho)
 {
   GroupCorrection out;
-  const double pv = group.front()->plane_var_term;
-  const double shared = rho * pv;
-  if (shared <= 0.0) {
+  if (rho <= 0.0 || std::none_of(group.begin(), group.end(),
+      [](const Residual* r) { return r->plane_var_term > 0.0; })) {
     out.degenerate = DegenerateReason::kPlaneVar;  // n_raw stays 0 -- caller skips
     return out;
   }
 
+  const M3D plane_cov = 0.5 * (group.front()->plane_covariance +
+                               group.front()->plane_covariance.transpose());
+  Eigen::SelfAdjointEigenSolver<M3D> plane_es(plane_cov);
+  if (plane_es.info() != Eigen::Success ||
+      plane_es.eigenvalues().minCoeff() <
+          -1e-10 * std::max(1.0, plane_es.eigenvalues().maxCoeff())) {
+    out.degenerate = DegenerateReason::kResidualVar;
+    return out;
+  }
+  const M3D plane_sqrt = plane_es.eigenvectors() *
+      plane_es.eigenvalues().cwiseMax(0.0).cwiseSqrt().asDiagonal();
+  Eigen::MatrixXd U(group.size(), 3);
+
   std::vector<double> w_indep;
   w_indep.reserve(group.size());
-  for (const Residual* r : group) {
+  for (size_t i = 0; i < group.size(); ++i) {
+    const Residual* r = group[i];
+    if ((r->plane_covariance - group.front()->plane_covariance).norm() >
+        1e-9 * std::max(1.0, plane_cov.norm())) {
+      out.degenerate = DegenerateReason::kResidualVar;
+      return out;
+    }
+    U.row(i) = std::sqrt(rho) *
+        r->plane_jacobian.transpose() * plane_sqrt;
+    const double shared = rho * r->plane_var_term;
+    if (std::abs(U.row(i).squaredNorm() - shared) >
+        1e-8 * std::max(1.0, std::abs(shared))) {
+      out.degenerate = DegenerateReason::kResidualVar;
+      return out;
+    }
     const double sigma_indep2 = r->sigma_squared - shared;
     if (!(sigma_indep2 > 0.0)) {
       out.degenerate = DegenerateReason::kResidualVar;  // shared term consumes the whole variance
@@ -63,8 +87,9 @@ GroupCorrection computeGroupCorrection(const std::vector<const Residual*>& group
     w_indep.push_back(1.0 / sigma_indep2);
   }
 
-  V6 sumJ = V6::Zero();
-  double sumWr = 0.0, sumW = 0.0;
+  Eigen::Matrix<double,6,3> weighted_j_u = Eigen::Matrix<double,6,3>::Zero();
+  V3D weighted_u_r = V3D::Zero();
+  M3D core = M3D::Identity();
   for (size_t i = 0; i < group.size(); ++i) {
     const Residual& r = *group[i];
     const V6 j = jacobianOf(r);
@@ -73,27 +98,20 @@ GroupCorrection computeGroupCorrection(const std::vector<const Residual*>& group
     out.naive_Htz.noalias() += (1.0 / r.sigma_squared) * r.r * j;
     out.corrected_HtH.noalias() += w * (j * j.transpose());
     out.corrected_Htz.noalias() += w * r.r * j;
-    sumJ.noalias() += w * j;
-    sumWr += w * r.r;
-    sumW += w;
+    const Eigen::RowVector3d ui = U.row(i);
+    weighted_j_u.noalias() += w * j * ui;
+    weighted_u_r.noalias() += w * ui.transpose() * r.r;
+    core.noalias() += w * ui.transpose() * ui;
   }
 
-  const double c = shared / (1.0 + shared * sumW);
-  out.corrected_HtH.noalias() -= c * (sumJ * sumJ.transpose());
-  out.corrected_Htz.noalias() -= c * sumWr * sumJ;
-
-  const double naive_trace = out.naive_HtH.trace();
-  if (naive_trace > 0.0) {
-    const double discount = 1.0 - out.corrected_HtH.trace() / naive_trace;
-    if (discount > max_discount) {
-      // Shrink the correction (not the naive baseline) so the realized
-      // discount is exactly max_discount -- a convex blend between the
-      // uncapped correction and the naive (zero-discount) baseline.
-      const double scale = max_discount / discount;
-      out.corrected_HtH = out.naive_HtH + scale * (out.corrected_HtH - out.naive_HtH);
-      out.corrected_Htz = out.naive_Htz + scale * (out.corrected_Htz - out.naive_Htz);
-    }
+  const Eigen::LDLT<M3D> core_ldlt(core);
+  if (core_ldlt.info() != Eigen::Success || !core_ldlt.isPositive()) {
+    out.degenerate = DegenerateReason::kResidualVar;
+    return out;
   }
+  out.corrected_HtH.noalias() -= weighted_j_u *
+      core_ldlt.solve(weighted_j_u.transpose());
+  out.corrected_Htz.noalias() -= weighted_j_u * core_ldlt.solve(weighted_u_r);
 
   out.n_raw = static_cast<int>(group.size());
   return out;
@@ -109,6 +127,9 @@ ResidualRedundancyStats applyResidualRedundancyCorrection(
   if (opts.mode != "off" && opts.mode != "woodbury")
     throw std::runtime_error(
         "lio/residual_redundancy/mode supports only off or woodbury");
+  if (opts.rho < 0.0 || opts.rho > 1.0)
+    throw std::runtime_error(
+        "lio/residual_redundancy/rho must be in [0,1]");
 
   ResidualRedundancyStats stats{};
 
@@ -135,7 +156,7 @@ ResidualRedundancyStats applyResidualRedundancyCorrection(
     if (group.size() < 2) continue;
     ++stats.redund_groups_seen;
 
-    const GroupCorrection gc = computeGroupCorrection(group, opts.rho, opts.max_discount);
+    const GroupCorrection gc = computeGroupCorrection(group, opts.rho);
     if (gc.n_raw == 0) {
       // degenerate group, left uncorrected -- CQ-34 item 4: tally WHICH
       // degeneracy fired, so a zero redund_groups can be told apart from
@@ -156,8 +177,8 @@ ResidualRedundancyStats applyResidualRedundancyCorrection(
     const double corrected_trace = gc.corrected_HtH.trace();
     naive_trace_total += naive_trace;
     corrected_trace_total += corrected_trace;
-    if (naive_trace > 0.0)
-      stats.redund_n_eff += static_cast<int>(std::ceil(gc.n_raw * (corrected_trace / naive_trace)));
+    if (corrected_trace > naive_trace * (1.0 + 1e-12))
+      ++stats.information_increase_groups;
 
     delta_HtH_total.noalias() += (gc.corrected_HtH - gc.naive_HtH);
     delta_Htz_total.noalias() += (gc.corrected_Htz - gc.naive_Htz);
@@ -168,6 +189,17 @@ ResidualRedundancyStats applyResidualRedundancyCorrection(
   // full matrix rather than a separately-tracked sub-accumulator.
   stats.naive_info_gain = naive_trace_total;
   stats.woodbury_info_gain = corrected_trace_total;
+  stats.gamma_correction_trace = delta_HtH_total.trace();
+  stats.gamma_correction_frobenius = delta_HtH_total.norm();
+  stats.b_correction_norm = delta_Htz_total.norm();
+  const Eigen::SelfAdjointEigenSolver<M66> correction_es(
+      0.5 * (delta_HtH_total + delta_HtH_total.transpose()));
+  if (correction_es.info() == Eigen::Success) {
+    stats.gamma_correction_min_eigenvalue =
+        correction_es.eigenvalues().minCoeff();
+    stats.gamma_correction_max_eigenvalue =
+        correction_es.eigenvalues().maxCoeff();
+  }
 
   if (stats.redund_groups == 0) return stats;  // nothing to apply; info_ratio/gains stay at defaults
 

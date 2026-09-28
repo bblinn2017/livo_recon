@@ -16,32 +16,28 @@
 // (reduced_chi2 ~0.45-0.52, i.e. over-conservative) -- see
 // refs/redundancy-prior-art in the register index for the full record.
 //
-// THE PROBLEM.  Residual::sigma_squared is floor_term + sigma_diag_squared
-// (per-point-specific) + plane_var_term (the SAME value for every residual
-// matched to one plane, since it comes from that plane's own fit
-// uncertainty). accumulateLioResiduals() weights every residual by
+// THE PROBLEM. Residual::sigma_squared is floor_term + sigma_diag_squared
+// (per-point-specific) + plane_var_term. Points matched to one plane share
+// the same three-parameter plane error, but have different J_nq projections
+// and therefore different plane_var_term values. accumulateLioResiduals()
+// weights every residual by
 // 1/sigma_squared independently, which is only correct if residuals sharing
 // a plane are conditionally independent given the plane's true parameters --
-// they are not: they share the SAME plane_var_term draw, so they are
+// they are not: they share the SAME plane-state draw, so they are
 // correlated, and summing them as independent double-counts that shared
 // uncertainty once per residual, understating the true joint variance (i.e.
 // overstating the information admitted) roughly in proportion to the
 // group's size.
 //
-// THE CORRECTION (mode == "woodbury").  Model one plane's k matched
-// residuals' joint noise as Sigma = D + rho*plane_var_term*ones(k,k), where
-// D = diag(sigma_indep_1^2, ..., sigma_indep_k^2) is the per-residual
-// INDEPENDENT-only variance (sigma_squared_i - rho*plane_var_term) and rho
-// in [0,1] is how correlated the shared component is assumed to be (rho=1:
-// the textbook fully-correlated case; rho=0: no correction, degenerates to
-// today's diagonal treatment). By the Sherman-Morrison identity,
-//   Sigma^-1 = D^-1 - c * (D^-1 1)(D^-1 1)^T,   c = rho*pv / (1 + rho*pv*sum(1/D_ii))
-// so the group's correct joint information contribution to HtH/Htz is
-//   J^T Sigma^-1 J = sum_i w_i J_i J_i^T - c * (sum_i w_i J_i)(sum_i w_i J_i)^T
-// with w_i = 1/D_ii, instead of the naive sum_i (1/sigma_squared_i) J_i J_i^T
-// accumulateLioResiduals() already computed for this group's residuals.
-// Singleton groups (k==1) are UNCHANGED by this correction -- the rank-1
-// term's Sherman-Morrison algebra collapses exactly back to
+// THE CORRECTION (mode == "woodbury"). Model one plane's k matched
+// residuals as C = D + rho*J_plane*P_plane*J_plane^T. Factoring
+// P_plane=L*L^T gives U=sqrt(rho)*J_plane*L and
+//   C^-1=D^-1-D^-1 U (I+U^T D^-1 U)^-1 U^T D^-1.
+// This rank-at-most-three update retains signed cross-covariances. Replacing
+// it with sqrt(var_i*var_j) would incorrectly force perfect positive scalar
+// correlation and is not the covariance represented by VoxelPlane.
+// Singleton groups (k==1) are UNCHANGED by this correction -- the Woodbury
+// algebra collapses exactly back to
 // 1/(sigma_indep^2+plane_var_term) when there is nothing to marginalize
 // against -- so this module only ever touches groups with >= 2 residuals,
 // leaving every frame's non-redundant majority untouched.
@@ -60,17 +56,12 @@ struct ResidualRedundancyOptions
   // the live correlated mode is the direct covariance model above.
   std::string mode = "off";
 
-  // Intra-plane correlation assumed for the shared plane_var_term component
+  // Fraction of the shared three-parameter plane covariance treated as
+  // correlated within a matched-plane group
   // (0 = no correction even when mode != "off"; 1 = the textbook fully-
   // correlated Woodbury identity, as derived above). CQ-28 item 4's sweep
   // knob #1 -- report the curve, do not pick a value here.
   double rho = 1.0;
-
-  // Per-group cap: the correction may not remove more than this fraction of
-  // a group's naive information-trace, a stability guard against a
-  // degenerate group (very large plane_var_term) making the group's
-  // contribution to HtH near-singular. CQ-28 item 4's sweep knob #2.
-  double max_discount = 0.9;
 
   bool on() const { return mode != "off"; }
 };
@@ -111,7 +102,6 @@ struct ResidualRedundancyStats
 {
   int redund_groups = 0;           // plane groups with >= 2 matched residuals this frame
   int redund_n_raw = 0;            // total residuals belonging to those groups
-  int redund_n_eff = 0;            // ceil(sum over groups of n_raw_g * corrected_trace_g/naive_trace_g)
   double redund_info_ratio = 1.0;  // admitted/naive information over grouped residuals only; 1.0 when redund_groups==0
 
   // CQ-34 item 4: redund_groups==0 conflates "no group had >= 2 matched
@@ -136,12 +126,21 @@ struct ResidualRedundancyStats
   double naive_info_gain = 0.0;
   double woodbury_info_gain = 0.0;
 
-  // R45: number of groups (of redund_groups admitted, non-degenerate) whose
-  // raw discount 1-corrected_trace/naive_trace exceeded max_discount and was
-  // therefore clamped back toward the naive (uncorrected) information for
-  // that group -- i.e. max_discount actually bound and changed the result,
-  // not just a configured ceiling that happened not to matter.
-  int max_discount_bound_groups = 0;
+  // Counterfactual exact correction (corrected minus independent) over all
+  // admitted groups. Populated even in mode==off so Phase-3 experiments can
+  // distinguish a scalar trace change from redistribution across state
+  // directions without enabling the correction.
+  double gamma_correction_trace = 0.0;
+  double gamma_correction_frobenius = 0.0;
+  double gamma_correction_min_eigenvalue = 0.0;
+  double gamma_correction_max_eigenvalue = 0.0;
+  double b_correction_norm = 0.0;
+
+  // Exact signed correlations can add information in residual-difference
+  // directions even when shared/common directions lose information. Count
+  // such groups explicitly instead of describing a trace ratio as an
+  // "effective residual count", which is not mathematically well defined.
+  int information_increase_groups = 0;
 };
 
 // Groups `residuals` by plane_id; for every group with >= 2 members, computes
@@ -152,8 +151,8 @@ struct ResidualRedundancyStats
 //
 // CQ-31 item 7: SAFE, AND INTENDED, TO CALL EVERY FRAME INCLUDING mode ==
 // "off" -- the diagnostic stats (naive_info_gain, woodbury_info_gain,
-// redund_groups/n_raw/n_eff/info_ratio) are always computed from `opts.rho`/
-// `opts.max_discount` regardless of `opts.mode`, so a filing can quote "the
+// redund_groups/n_raw/info_ratio) are always computed from `opts.rho`
+// regardless of `opts.mode`, so a filing can quote "the
 // correction would have removed X%" without switching it on. Only the
 // MUTATION of `ekf.HtH`/`ekf.Htz` is gated on `opts.mode != "off"` --
 // passing mode=="off" computes and returns stats but leaves ekf untouched,

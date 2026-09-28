@@ -3,6 +3,7 @@ set(JOINT_KNOT_TEST_CORE_SOURCES
   ${PROJECT_SOURCE_DIR}/src/utils/state/state.cpp
   ${PROJECT_SOURCE_DIR}/src/diagnostics/log/debug_log_dir.cpp
   ${PROJECT_SOURCE_DIR}/src/lio/joint_knot_estimator.cpp
+  ${PROJECT_SOURCE_DIR}/src/lio/residual_redundancy.cpp
   ${PROJECT_SOURCE_DIR}/src/utils/algo/chi_square.cpp
   ${PROJECT_SOURCE_DIR}/src/diagnostics/init_consistency.cpp
 )

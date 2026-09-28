@@ -1,6 +1,7 @@
 #include "livo_recon/lio/joint_knot_estimator.h"
 
 #include <Eigen/Cholesky>
+#include <Eigen/Eigenvalues>
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
@@ -315,10 +316,9 @@ JointLidarInformation accumulateJointLidarInformation(
     throw std::invalid_argument(
         "joint-knot LiDAR information supports only residual_redundancy "
         "modes off and woodbury");
-  if (options.rho < 0.0 || options.rho > 1.0 ||
-      options.max_discount < 0.0 || options.max_discount > 1.0)
+  if (options.rho < 0.0 || options.rho > 1.0)
     throw std::invalid_argument(
-        "joint-knot residual redundancy requires rho and max_discount in [0,1]");
+        "joint-knot residual redundancy requires rho in [0,1]");
   JointLidarInformation out;
   out.Gamma = Eigen::MatrixXd::Zero(state_dimension, state_dimension);
   out.b = Eigen::VectorXd::Zero(state_dimension);
@@ -352,17 +352,11 @@ JointLidarInformation accumulateJointLidarInformation(
   {
     if (group.size() < 2) continue;
     ++out.redundancy_stats.redund_groups_seen;
-    // R45 repair: plane_var_term = J_nq * plane_var_ * J_nq^T is evaluated
-    // at each POINT's own offset from the plane center (voxelplane.cpp's
-    // J_nq), so it is legitimately point-specific even within one matched
-    // plane -- requiring every member to share one scalar (the original
-    // patch's assumption) throws on ordinary real data. The true model is
-    // one shared latent plane-fit perturbation with a PER-ROW loading
-    // v_i = sqrt(rho * plane_var_term_i); Sherman-Morrison for a general
-    // rank-1 covariance C = D + v v^T (not requiring v_i constant) gives
-    // C^-1 = D^-1 - (D^-1 v)(D^-1 v)^T / (1 + v^T D^-1 v). This reduces
-    // EXACTLY to the original uniform-shared formula when every
-    // plane_var_term_i happens to be equal (verified in the isolated test).
+    // The shared plane error is the three-parameter perturbation used by
+    // VoxelPlane itself. Its residual-space covariance is U*U^T with
+    // U_i=sqrt(rho)*J_nq_i*sqrt(plane_covariance), rank at most three.
+    // A scalar sqrt(var_i*var_j) model loses signs and directions and is not
+    // the covariance represented by plane_var_term_i=J_i*P_plane*J_i^T.
     std::vector<double> shared_i(group.size());
     for (size_t i = 0; i < group.size(); ++i)
       shared_i[i] = options.rho * group[i]->plane_var_term;
@@ -370,6 +364,44 @@ JointLidarInformation accumulateJointLidarInformation(
                       [](double s) { return s > 0.0; }))
     {
       ++out.redundancy_stats.redund_groups_degenerate_pv;
+      continue;
+    }
+    const M3D plane_cov = 0.5 * (group.front()->plane_covariance +
+                                 group.front()->plane_covariance.transpose());
+    Eigen::SelfAdjointEigenSolver<M3D> plane_es(plane_cov);
+    if (plane_es.info() != Eigen::Success ||
+        plane_es.eigenvalues().minCoeff() <
+            -1e-10 * std::max(1.0, plane_es.eigenvalues().maxCoeff()))
+    {
+      ++out.redundancy_stats.redund_groups_degenerate_var;
+      continue;
+    }
+    const V3D plane_eigs = plane_es.eigenvalues().cwiseMax(0.0);
+    const M3D plane_sqrt = plane_es.eigenvectors() *
+        plane_eigs.cwiseSqrt().asDiagonal();
+    Eigen::MatrixXd U(group.size(), 3);
+    bool metadata_valid = true;
+    for (size_t i = 0; i < group.size(); ++i)
+    {
+      if ((group[i]->plane_covariance - group.front()->plane_covariance).norm() >
+          1e-9 * std::max(1.0, plane_cov.norm()))
+      {
+        metadata_valid = false;
+        break;
+      }
+      U.row(i) = std::sqrt(options.rho) *
+          group[i]->plane_jacobian.transpose() * plane_sqrt;
+      const double represented = U.row(i).squaredNorm();
+      if (std::abs(represented - shared_i[i]) >
+          1e-8 * std::max(1.0, std::abs(shared_i[i])))
+      {
+        metadata_valid = false;
+        break;
+      }
+    }
+    if (!metadata_valid)
+    {
+      ++out.redundancy_stats.redund_groups_degenerate_var;
       continue;
     }
     std::vector<double> independent_weights;
@@ -393,11 +425,9 @@ JointLidarInformation accumulateJointLidarInformation(
     Eigen::MatrixXd corrected_gamma = Eigen::MatrixXd::Zero(
         state_dimension, state_dimension);
     Eigen::VectorXd corrected_b = Eigen::VectorXd::Zero(state_dimension);
-    // sum_loaded_h/_r are the v_i-loaded sums (D^-1 v)^T H / r; sum_loaded_sq
-    // is v^T D^-1 v = sum(shared_i * weight_i) -- all reduce to the former
-    // scalar-shared expressions exactly when every shared_i is equal.
-    Eigen::VectorXd sum_loaded_h = Eigen::VectorXd::Zero(state_dimension);
-    double sum_loaded_r = 0.0, sum_loaded_sq = 0.0;
+    Eigen::MatrixXd weighted_h_u = Eigen::MatrixXd::Zero(state_dimension, 3);
+    V3D weighted_u_r = V3D::Zero();
+    M3D core = M3D::Identity();
     for (size_t i = 0; i < group.size(); ++i)
     {
       const JointLidarRow& row = *group[i];
@@ -407,43 +437,49 @@ JointLidarInformation accumulateJointLidarInformation(
       naive_b.noalias() += -naive_weight * row.H.transpose() * row.residual;
       corrected_gamma.noalias() += weight * row.H.transpose() * row.H;
       corrected_b.noalias() += -weight * row.H.transpose() * row.residual;
-      // v_i = sqrt(shared_i); this row's contribution to (D^-1 v) is
-      // v_i * weight_i, and to v^T D^-1 v is v_i^2 * weight_i = shared_i * weight_i.
-      const double v_i = std::sqrt(shared_i[i]);
-      sum_loaded_h.noalias() += (v_i * weight) * row.H.transpose();
-      sum_loaded_r += (v_i * weight) * row.residual;
-      sum_loaded_sq += shared_i[i] * weight;
+      const Eigen::RowVector3d ui = U.row(i);
+      weighted_h_u.noalias() += weight * row.H.transpose() * ui;
+      weighted_u_r.noalias() += weight * ui.transpose() * row.residual;
+      core.noalias() += weight * ui.transpose() * ui;
     }
-    const double denom = 1.0 + sum_loaded_sq;
-    corrected_gamma.noalias() -= (1.0 / denom) *
-        sum_loaded_h * sum_loaded_h.transpose();
-    corrected_b.noalias() += (1.0 / denom) * sum_loaded_h * sum_loaded_r;
+    const Eigen::LDLT<M3D> core_ldlt(core);
+    if (core_ldlt.info() != Eigen::Success || !core_ldlt.isPositive())
+    {
+      ++out.redundancy_stats.redund_groups_degenerate_var;
+      continue;
+    }
+    corrected_gamma.noalias() -= weighted_h_u *
+        core_ldlt.solve(weighted_h_u.transpose());
+    corrected_b.noalias() += weighted_h_u * core_ldlt.solve(weighted_u_r);
 
     const double naive_trace = naive_gamma.trace();
-    if (naive_trace > 0.0)
-    {
-      const double discount = 1.0 - corrected_gamma.trace() / naive_trace;
-      if (discount > options.max_discount)
-      {
-        const double scale = options.max_discount / discount;
-        corrected_gamma = naive_gamma + scale * (corrected_gamma - naive_gamma);
-        corrected_b = naive_b + scale * (corrected_b - naive_b);
-        ++out.redundancy_stats.max_discount_bound_groups;
-      }
-    }
     ++out.redundancy_stats.redund_groups;
     out.redundancy_stats.redund_n_raw += static_cast<int>(group.size());
     const double corrected_trace = corrected_gamma.trace();
     naive_trace_total += naive_trace;
     corrected_trace_total += corrected_trace;
-    if (naive_trace > 0.0)
-      out.redundancy_stats.redund_n_eff += static_cast<int>(std::ceil(
-          group.size() * corrected_trace / naive_trace));
+    if (corrected_trace > naive_trace * (1.0 + 1e-12))
+      ++out.redundancy_stats.information_increase_groups;
     delta_gamma.noalias() += corrected_gamma - naive_gamma;
     delta_b.noalias() += corrected_b - naive_b;
   }
   out.redundancy_stats.naive_info_gain = naive_trace_total;
   out.redundancy_stats.woodbury_info_gain = corrected_trace_total;
+  out.redundancy_stats.gamma_correction_trace = delta_gamma.trace();
+  out.redundancy_stats.gamma_correction_frobenius = delta_gamma.norm();
+  out.redundancy_stats.b_correction_norm = delta_b.norm();
+  if (delta_gamma.rows() > 0)
+  {
+    const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> correction_es(
+        0.5 * (delta_gamma + delta_gamma.transpose()));
+    if (correction_es.info() == Eigen::Success)
+    {
+      out.redundancy_stats.gamma_correction_min_eigenvalue =
+          correction_es.eigenvalues().minCoeff();
+      out.redundancy_stats.gamma_correction_max_eigenvalue =
+          correction_es.eigenvalues().maxCoeff();
+    }
+  }
   if (naive_trace_total > 0.0)
     out.redundancy_stats.redund_info_ratio =
         corrected_trace_total / naive_trace_total;
@@ -488,7 +524,8 @@ JointKnotSolve solveJointKnotInformation(
     }
     lidar_rows.push_back(JointLidarRow{
         H, residual.r, residual.sigma_squared,
-        residual.plane_var_term, residual.plane_id});
+        residual.plane_var_term, residual.plane_id,
+        residual.plane_jacobian, residual.plane_covariance});
     abs_r += std::abs(residual.r);
   }
   const JointLidarInformation lidar = accumulateJointLidarInformation(

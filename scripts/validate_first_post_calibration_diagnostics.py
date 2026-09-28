@@ -53,6 +53,22 @@ def validate_coupled(path: Path) -> None:
         if scan_ids != {1}:
             raise RuntimeError(
                 f"{file_path} is not first-frame-only; scan IDs={sorted(scan_ids)}")
+    with (path / "joint_knot_states.csv").open(newline="") as stream:
+        state_rows = list(csv.DictReader(stream))
+    required_state_columns = {
+        "knot_index", "knot_t", "immutable_head",
+        "theta_x", "theta_y", "theta_z",
+        "p_x", "p_y", "p_z", "v_x", "v_y", "v_z",
+        "bg_x", "bg_y", "bg_z", "ba_x", "ba_y", "ba_z",
+        "g_x", "g_y", "g_z",
+    }
+    missing_state_columns = required_state_columns.difference(state_rows[0])
+    if missing_state_columns:
+        raise RuntimeError(
+            f"joint-knot state columns missing: {sorted(missing_state_columns)}")
+    if not any(row["knot_index"] == "0" and row["immutable_head"] == "1"
+               for row in state_rows):
+        raise RuntimeError("joint-knot state log does not identify the immutable head")
     with (path / "joint_knot_first_frame_state_chain.csv").open(newline="") as stream:
         rows = list(csv.DictReader(stream))
     required = {

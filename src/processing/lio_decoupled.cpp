@@ -2340,13 +2340,20 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
       diag.redund_groups_degenerate_pv    = redundancy_stats_.redund_groups_degenerate_pv;
       diag.redund_groups_degenerate_var   = redundancy_stats_.redund_groups_degenerate_var;
       diag.redund_n_raw      = redundancy_stats_.redund_n_raw;
-      diag.redund_n_eff      = redundancy_stats_.redund_n_eff;
       diag.redund_info_ratio = redundancy_stats_.redund_info_ratio;
+      diag.information_increase_groups = redundancy_stats_.information_increase_groups;
       // CQ-31 item 7: log beside, do not drive -- always populated,
       // including mode=="off", from the stats applyResidualRedundancyCorrection()
       // now always computes (see residual_redundancy.cpp).
       diag.naive_info_gain    = redundancy_stats_.naive_info_gain;
       diag.woodbury_info_gain = redundancy_stats_.woodbury_info_gain;
+      diag.gamma_correction_trace = redundancy_stats_.gamma_correction_trace;
+      diag.gamma_correction_frobenius = redundancy_stats_.gamma_correction_frobenius;
+      diag.gamma_correction_min_eigenvalue =
+          redundancy_stats_.gamma_correction_min_eigenvalue;
+      diag.gamma_correction_max_eigenvalue =
+          redundancy_stats_.gamma_correction_max_eigenvalue;
+      diag.b_correction_norm = redundancy_stats_.b_correction_norm;
       // CQ-31 item 8: reduced_chi2 was computed twice already in this file
       // (lines ~1048, ~1648) but only ever streamed to a log line -- TQ-23
       // could not report it per-cell for exactly that reason. Same formula,

@@ -75,7 +75,8 @@ the production `StateGroup` covariance.
   realized values.
 - `joint_knot_scan_summary.csv`: final correction from the post-IMU state,
   convergence reason, and before/after distance to the pre-IMU state.
-- `joint_knot_states.csv`: absolute before/after state of every knot.
+- `joint_knot_states.csv`: absolute before/after state of every knot, including
+  knot ID/time, immutable-head marker, knot-specific `bg/ba`, and gravity.
 - `joint_knot_first_frame_state_chain.csv`: gravity-aligned pre-IMU,
   post-IMU, and current tail state without assuming attitude starts at zero.
 - `joint_knot_first_frame_matrices.txt`: complete first-frame matrices and

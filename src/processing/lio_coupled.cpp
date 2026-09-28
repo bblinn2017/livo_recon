@@ -80,8 +80,6 @@ std::string LioProcCoupled::engagementReport() const
       << " lidar_information=" << opts_.residual_redundancy.mode
       << " lidar_correlation_group=matched_plane_id"
       << " lidar_correlation_rho=" << opts_.residual_redundancy.rho
-      << " lidar_correlation_max_discount="
-      << opts_.residual_redundancy.max_discount
       << " clipping=none";
   return out.str();
 }

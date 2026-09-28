@@ -3,4 +3,3 @@ lio:
   residual_redundancy:
     mode: woodbury
     rho: 1.0
-    max_discount: 0.9

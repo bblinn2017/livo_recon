@@ -887,6 +887,8 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
   res.sigma_squared  = floor_term + sigma_diag_squared;
   res.plane_id       = this;
   res.plane_var_term = plane_var_term;
+  res.plane_jacobian = J_nq.transpose();
+  res.plane_covariance = plane_var_;
   {
     // CQ-18 item (2): s_prior_pose (H P- H^T) is needed on every accepted
     // residual for frame_stats.txt's S decomposition, not just when

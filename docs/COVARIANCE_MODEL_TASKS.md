@@ -82,18 +82,36 @@ and LiDAR information are identifiable in real-data experiments.
 - [x] Preserve an independent-residual baseline mode.
 - [x] Add a dense-`C^-1` algebra oracle and compact all-scan engagement and
   information diagnostics.
+- [x] Replace R45's scalar `sqrt(var_i var_j)` approximation with the signed,
+  rank-at-most-three `J_i P_plane J_j^T` covariance in both estimator paths.
+- [x] Remove the trace-discount clamp and the misleading effective-residual
+  count; report exact information ratios and information-increase groups.
+- [x] Preserve knot IDs/timestamps, immutable-head labels, knot-specific
+  biases, and gravity in the first-frame trajectory export.
+- [ ] Compile and run the dense covariance oracle through the coding agent.
+- [ ] Re-run the Phase-3 real-data comparison; R45's scalar results are not
+  evidence for or against the corrected model.
 - [ ] Validate information growth versus residual density/redundancy.
 - [ ] Identify and validate correlations beyond shared map-plane uncertainty
   before enabling a broader live covariance model; do not fold prior-state or
   deskew uncertainty into measurement covariance and count it twice.
 - [ ] Re-evaluate P0/Q_k consistency only after Gamma_L is corrected.
 
-The existing model groups by matched map-plane identity and represents the
-shared plane-fit variance with a rank-one covariance term. Legacy decoupled
-code also contains rescale/directional variants tied to its 6-D pose block;
-those were intentionally not ported because there is no canonical equivalent
-position subspace in the extended knot state. The new joint path accepts only
-`off` and the mathematically direct `woodbury` model.
+The model groups by matched map-plane identity and represents the shared
+plane-fit error with its actual three-parameter covariance. For residuals
+`i,j` on one `VoxelPlane`, the correlated term is
+`rho * J_nq_i * P_plane * J_nq_j^T`. Factoring `P_plane=L L^T` gives a
+rank-at-most-three Woodbury factor `U_i=sqrt(rho) J_nq_i L`. A scalar
+`sqrt(plane_var_i*plane_var_j)` construction is incorrect because it discards
+the signed/directional cross-covariance. R45 used that scalar approximation;
+R46 replaces it in both the joint-knot and legacy decoupled accumulators.
+
+The exact covariance update is not trace-clamped: blending it back toward the
+independent result would no longer correspond to the stated measurement
+model. A trace ratio is retained as a diagnostic, together with a count of
+groups whose signed correlations add information in residual-difference
+directions. It is not reported as an "effective residual count", since that
+interpretation is invalid when the exact trace can increase.
 
 ### Incremental Stage-3 sequence
 
