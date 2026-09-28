@@ -423,6 +423,60 @@ int main()
     return fail("clamped Gamma lands exactly on the max_discount-scaled naive/corrected blend",
         (clamped.Gamma - expected_clamped_gamma).norm(), 0.0);
 
+  // R45 repair regression test: plane_var_term = J_nq*plane_var_*J_nq^T is
+  // evaluated per-POINT (voxelplane.cpp), so real matched-plane groups have
+  // DIFFERING plane_var_term across members -- the original patch asserted
+  // they must be equal and threw on every real coupled run. The fix treats
+  // each row's own plane_var_term as its personal loading onto one shared
+  // latent factor (general rank-1 C = D + v*v^T, v_i = sqrt(rho*pvt_i)) and
+  // must no longer throw, matching an explicit dense inverse exactly.
+  const double nonuniform_rho = 0.7;
+  const std::vector<double> nonuniform_independent_var{0.15, 0.22, 0.31, 0.18};
+  const std::vector<double> nonuniform_plane_var_term{0.05, 0.09, 0.02, 0.07};
+  const std::vector<double> nonuniform_residual{0.08, -0.11, 0.05, 0.13};
+  Eigen::MatrixXd H_nonuniform(4, lidar_dim);
+  H_nonuniform << 0.6, -0.2, 0.4, 0.1, 0.0,
+                  0.1, 0.5, -0.3, 0.2, 0.4,
+                  -0.4, 0.3, 0.2, -0.5, 0.1,
+                  0.2, 0.1, 0.5, 0.3, -0.2;
+  int nonuniform_plane_token = 0;
+  const void* nonuniform_plane_id = &nonuniform_plane_token;
+  std::vector<JointLidarRow> nonuniform_rows;
+  for (int i = 0; i < 4; ++i)
+    nonuniform_rows.push_back(JointLidarRow{
+        H_nonuniform.row(i), nonuniform_residual[i],
+        nonuniform_independent_var[i] + nonuniform_rho * nonuniform_plane_var_term[i],
+        nonuniform_plane_var_term[i], nonuniform_plane_id});
+  ResidualRedundancyOptions nonuniform_options;
+  nonuniform_options.mode = "woodbury";
+  nonuniform_options.rho = nonuniform_rho;
+  nonuniform_options.max_discount = 1.0;
+  const JointLidarInformation nonuniform = accumulateJointLidarInformation(
+      nonuniform_rows, lidar_dim, nonuniform_options);
+  Eigen::Vector4d v_nonuniform, sigma_nonuniform;
+  for (int i = 0; i < 4; ++i) {
+    v_nonuniform(i) = std::sqrt(nonuniform_rho * nonuniform_plane_var_term[i]);
+    sigma_nonuniform(i) = nonuniform_independent_var[i];
+  }
+  Eigen::Matrix4d C_nonuniform = v_nonuniform * v_nonuniform.transpose();
+  for (int i = 0; i < 4; ++i) C_nonuniform(i, i) += sigma_nonuniform(i);
+  const Eigen::Vector4d r_nonuniform(
+      nonuniform_residual[0], nonuniform_residual[1],
+      nonuniform_residual[2], nonuniform_residual[3]);
+  const Eigen::MatrixXd expected_nonuniform_gamma =
+      H_nonuniform.transpose() * C_nonuniform.inverse() * H_nonuniform;
+  const Eigen::VectorXd expected_nonuniform_b =
+      -H_nonuniform.transpose() * C_nonuniform.inverse() * r_nonuniform;
+  if ((nonuniform.Gamma - expected_nonuniform_gamma).norm() >= 1e-9)
+    return fail("non-uniform plane_var_term Woodbury matches dense C inverse (Gamma)",
+        (nonuniform.Gamma - expected_nonuniform_gamma).norm(), 0.0);
+  if ((nonuniform.b - expected_nonuniform_b).norm() >= 1e-9)
+    return fail("non-uniform plane_var_term Woodbury matches dense C inverse (b)",
+        (nonuniform.b - expected_nonuniform_b).norm(), 0.0);
+  if (nonuniform.redundancy_stats.redund_groups != 1)
+    return fail("non-uniform plane_var_term group is admitted, not rejected as degenerate",
+        nonuniform.redundancy_stats.redund_groups, 1.0);
+
   std::cout << "joint-knot estimator invariants passed\n";
   return 0;
 }

@@ -352,13 +352,22 @@ JointLidarInformation accumulateJointLidarInformation(
   {
     if (group.size() < 2) continue;
     ++out.redundancy_stats.redund_groups_seen;
-    const double shared = options.rho * group.front()->plane_var_term;
-    for (const JointLidarRow* row : group)
-      if (std::abs(row->plane_var_term - group.front()->plane_var_term) >
-          1e-9 * std::max(1.0, std::abs(group.front()->plane_var_term)))
-        throw std::invalid_argument(
-            "rows sharing a plane_id must share plane_var_term");
-    if (!(shared > 0.0))
+    // R45 repair: plane_var_term = J_nq * plane_var_ * J_nq^T is evaluated
+    // at each POINT's own offset from the plane center (voxelplane.cpp's
+    // J_nq), so it is legitimately point-specific even within one matched
+    // plane -- requiring every member to share one scalar (the original
+    // patch's assumption) throws on ordinary real data. The true model is
+    // one shared latent plane-fit perturbation with a PER-ROW loading
+    // v_i = sqrt(rho * plane_var_term_i); Sherman-Morrison for a general
+    // rank-1 covariance C = D + v v^T (not requiring v_i constant) gives
+    // C^-1 = D^-1 - (D^-1 v)(D^-1 v)^T / (1 + v^T D^-1 v). This reduces
+    // EXACTLY to the original uniform-shared formula when every
+    // plane_var_term_i happens to be equal (verified in the isolated test).
+    std::vector<double> shared_i(group.size());
+    for (size_t i = 0; i < group.size(); ++i)
+      shared_i[i] = options.rho * group[i]->plane_var_term;
+    if (std::none_of(shared_i.begin(), shared_i.end(),
+                      [](double s) { return s > 0.0; }))
     {
       ++out.redundancy_stats.redund_groups_degenerate_pv;
       continue;
@@ -366,9 +375,9 @@ JointLidarInformation accumulateJointLidarInformation(
     std::vector<double> independent_weights;
     independent_weights.reserve(group.size());
     bool valid = true;
-    for (const JointLidarRow* row : group)
+    for (size_t i = 0; i < group.size(); ++i)
     {
-      const double independent_variance = row->sigma_squared - shared;
+      const double independent_variance = group[i]->sigma_squared - shared_i[i];
       if (!(independent_variance > 0.0)) { valid = false; break; }
       independent_weights.push_back(1.0 / independent_variance);
     }
@@ -384,8 +393,11 @@ JointLidarInformation accumulateJointLidarInformation(
     Eigen::MatrixXd corrected_gamma = Eigen::MatrixXd::Zero(
         state_dimension, state_dimension);
     Eigen::VectorXd corrected_b = Eigen::VectorXd::Zero(state_dimension);
-    Eigen::VectorXd sum_weighted_h = Eigen::VectorXd::Zero(state_dimension);
-    double sum_weighted_r = 0.0, sum_weight = 0.0;
+    // sum_loaded_h/_r are the v_i-loaded sums (D^-1 v)^T H / r; sum_loaded_sq
+    // is v^T D^-1 v = sum(shared_i * weight_i) -- all reduce to the former
+    // scalar-shared expressions exactly when every shared_i is equal.
+    Eigen::VectorXd sum_loaded_h = Eigen::VectorXd::Zero(state_dimension);
+    double sum_loaded_r = 0.0, sum_loaded_sq = 0.0;
     for (size_t i = 0; i < group.size(); ++i)
     {
       const JointLidarRow& row = *group[i];
@@ -395,14 +407,17 @@ JointLidarInformation accumulateJointLidarInformation(
       naive_b.noalias() += -naive_weight * row.H.transpose() * row.residual;
       corrected_gamma.noalias() += weight * row.H.transpose() * row.H;
       corrected_b.noalias() += -weight * row.H.transpose() * row.residual;
-      sum_weighted_h.noalias() += weight * row.H.transpose();
-      sum_weighted_r += weight * row.residual;
-      sum_weight += weight;
+      // v_i = sqrt(shared_i); this row's contribution to (D^-1 v) is
+      // v_i * weight_i, and to v^T D^-1 v is v_i^2 * weight_i = shared_i * weight_i.
+      const double v_i = std::sqrt(shared_i[i]);
+      sum_loaded_h.noalias() += (v_i * weight) * row.H.transpose();
+      sum_loaded_r += (v_i * weight) * row.residual;
+      sum_loaded_sq += shared_i[i] * weight;
     }
-    const double coefficient = shared / (1.0 + shared * sum_weight);
-    corrected_gamma.noalias() -= coefficient *
-        sum_weighted_h * sum_weighted_h.transpose();
-    corrected_b.noalias() += coefficient * sum_weighted_h * sum_weighted_r;
+    const double denom = 1.0 + sum_loaded_sq;
+    corrected_gamma.noalias() -= (1.0 / denom) *
+        sum_loaded_h * sum_loaded_h.transpose();
+    corrected_b.noalias() += (1.0 / denom) * sum_loaded_h * sum_loaded_r;
 
     const double naive_trace = naive_gamma.trace();
     if (naive_trace > 0.0)
