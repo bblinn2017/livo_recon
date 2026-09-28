@@ -10,6 +10,7 @@ namespace
 {
 
 int g_current_frame_idx = -1;
+bool g_bootstrap_insertion = false;
 
 // Diagnostic-only (see the point_filter_num=1 single-frame-init failure
 // mode investigation): one line per voxel's FIRST plane fit, comparing raw
@@ -29,6 +30,7 @@ void debugLogPlaneInit(const std::string& msg)
 }  // namespace
 
 void setCurrentFrame(int idx) { g_current_frame_idx = idx; }
+void setBootstrapInsertion(bool active) { g_bootstrap_insertion = active; }
 
 VoxelNode::VoxelNode(VoxelOptsPtr opts, VoxelStatsPtr stats, int layer, const V3D& center)
   : opts_(opts), stats_(stats), plane_(opts), layer_(layer),
@@ -319,6 +321,8 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     else if (opts_->convergence_mode == "always_update" && now_plane)
       should_lock = false;
   }
+
+  if (g_bootstrap_insertion) should_lock = false;
 
   if (!should_lock) {
     PlaneVizInfo info;
