@@ -64,6 +64,25 @@ int main()
   }
 
   // ------------------------------------------------------------------
+  // 6. A zero-ambiguity PSD prior is made strictly PD by the same symmetric
+  //    eigenvalue floor used by production before information-form solves.
+  // ------------------------------------------------------------------
+  {
+    Eigen::MatrixXd P = Eigen::MatrixXd::Zero(18, 18);
+    P.diagonal().setConstant(1e-4);
+    P(0,0) = 0.0;  // exact null direction exposed by R43's ambiguity=0 cells
+    P(1,1) = -1e-20;  // representative floating-point roundoff
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (P + P.transpose()));
+    if (es.info() != Eigen::Success) return fail("P0 floor eigensolve succeeded");
+    const double floor = 1e-12;
+    P = es.eigenvectors() * es.eigenvalues().cwiseMax(floor).asDiagonal() *
+        es.eigenvectors().transpose();
+    const double me = minEig(P);
+    if (me < floor * (1.0 - 1e-10))
+      return fail("P0 numerical floor makes zero-ambiguity prior PD", me, floor);
+  }
+
+  // ------------------------------------------------------------------
   // 2. Tilt and b_a marginal variances are equal in acceleration-equivalent
   //    units: g^2 * P_theta_amb == P_ba_amb exactly (derivation: A_pinv =
   //    -skew(axis)/g, so A_pinv*tangent*A_pinv^T = tangent/g^2 using

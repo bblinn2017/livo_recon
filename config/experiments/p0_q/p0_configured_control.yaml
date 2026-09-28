@@ -1,0 +1,11 @@
+# R44 configured-P0 control. Load after ntu_viral.yaml and coupled_joint_knots.yaml.
+calib:
+  p0:
+    mode: configured
+    numerical_eigenvalue_floor: 1.0e-12
+imu:
+  process_noise:
+    model: fixed
+estimator:
+  coupled:
+    gating_state_uncertainty: false

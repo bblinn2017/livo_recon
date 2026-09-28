@@ -37,3 +37,10 @@
    norms or summary statistics without explicit requester approval. If the
    archive still cannot fit, report the exact limit and projected size before
    making further omissions or splitting the return.
+10. Campaign instructions must name the exact rows and columns required from
+    every diagnostic source. When only a subset is needed, construct a compact
+    lossless extraction and do not return the wider source file. The extraction
+    must retain run/scan/iteration keys and enough metadata to reproduce its
+    selection; the raw-file manifest records the omitted source columns and
+    selection predicate. Do not include a large diagnostic file merely because
+    it already exists when the requested analysis uses only a small subset.

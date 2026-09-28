@@ -91,6 +91,9 @@ calib:
     tilt_ba_ambiguity_accel_std: 0.0856
     bg_model_floor: -1.0
     ba_radial_model_floor: -1.0
+    # Numerical SPD floor for information-form solves. This does not express
+    # physical uncertainty and is reported before/after in calibration_p0.txt.
+    numerical_eigenvalue_floor: 1.0e-12
 state:
   est:
     bg: true
@@ -114,11 +117,24 @@ state:
     bg: [0., 0., 0.]
 imu:
   process_noise:
+    # "fixed" preserves production behavior. "isotropic" and "axis_aware"
+    # use stationary-calibration variance as the floor and add bounded motion
+    # variance from gravity-removed acceleration and bias-corrected gyro rate.
+    model: fixed
     fixed:
       # FAST-LIVO2's tuned NTU_VIRAL acc_cov/gyr_cov. These operating
       # variances are intentionally separate from the stationary floor.
       acc_variance: 0.5
       gyro_variance: 0.3
+    motion:
+      # beta=0 uses each IMU sample directly; beta in [0,1) low-pass filters
+      # the dynamic variance. Scales are dimensionless because the motion
+      # signal is squared to produce a variance contribution.
+      beta: 0.0
+      acc_scale: 1.0
+      gyro_scale: 1.0
+      acc_max_dynamic_variance: 0.5
+      gyro_max_dynamic_variance: 0.3
     bias_random_walk:
       gyro_variance_rate: 1.0e-5
       accel_variance_rate: 1.0e-5

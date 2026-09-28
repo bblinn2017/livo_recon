@@ -25,6 +25,16 @@ struct ImuProcOptions
   double q_alpha_acc = 1.0;
   double q_alpha_gyr = 1.0;
   double q_alpha_bias = 1.0;
+
+  // Runtime accelerometer/gyroscope process-noise model. "fixed" is the
+  // production control. The dynamic modes use the stationary-calibration
+  // variance as their floor and add a bounded motion-dependent variance.
+  std::string process_noise_model = "fixed";  // fixed|isotropic|axis_aware
+  double motion_beta = 0.0;  // 0 = instantaneous; larger = more smoothing
+  double motion_acc_scale = 1.0;
+  double motion_gyr_scale = 1.0;
+  double motion_acc_max_dynamic_variance = 0.5;
+  double motion_gyr_max_dynamic_variance = 0.3;
 };
 
 // T7-a: the two quantities the Myers-Tapley process-noise estimator needs,
@@ -84,6 +94,10 @@ private:
 
   ImuProcOptions opts_;
   ImuSample last_imu_sample_;
+  V3D filtered_acc_dynamic_variance_ = V3D::Zero();
+  V3D filtered_gyr_dynamic_variance_ = V3D::Zero();
+  bool motion_noise_primed_ = false;
+  size_t propagation_index_ = 0;
 };
 
 }  // namespace livo_recon

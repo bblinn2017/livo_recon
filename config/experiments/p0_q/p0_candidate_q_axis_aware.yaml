@@ -1,0 +1,10 @@
+# Phase-2 axis-aware motion-Q experiment; load after p0_candidate_fixed_q.yaml.
+imu:
+  process_noise:
+    model: axis_aware
+    motion:
+      beta: 0.0
+      acc_scale: 1.0
+      gyro_scale: 1.0
+      acc_max_dynamic_variance: 0.5
+      gyro_max_dynamic_variance: 0.3

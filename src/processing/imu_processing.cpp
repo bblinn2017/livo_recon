@@ -2,10 +2,14 @@
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/state/state.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/motion_q_writer.h"
 
 #include <fstream>
 #include <iomanip>
 #include <mutex>
+#include <algorithm>
+#include <cmath>
+#include <stdexcept>
 
 namespace livo_recon
 {
@@ -95,6 +99,30 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "imu/q_alpha_bias", opts_.q_alpha_bias, 1.0);
   paramWarn<bool>(pnh, "imu/log_debug_en", opts_.log_debug_en, false);
   paramWarn<bool>(pnh, "imu/log_qhat_en", opts_.log_qhat_en, false);
+  paramWarn<std::string>(pnh, "imu/process_noise/model",
+                         opts_.process_noise_model, std::string("fixed"));
+  paramWarn<double>(pnh, "imu/process_noise/motion/beta", opts_.motion_beta, 0.0);
+  paramWarn<double>(pnh, "imu/process_noise/motion/acc_scale",
+                    opts_.motion_acc_scale, 1.0);
+  paramWarn<double>(pnh, "imu/process_noise/motion/gyro_scale",
+                    opts_.motion_gyr_scale, 1.0);
+  paramWarn<double>(pnh, "imu/process_noise/motion/acc_max_dynamic_variance",
+                    opts_.motion_acc_max_dynamic_variance, 0.5);
+  paramWarn<double>(pnh, "imu/process_noise/motion/gyro_max_dynamic_variance",
+                    opts_.motion_gyr_max_dynamic_variance, 0.3);
+  if (opts_.process_noise_model != "fixed" &&
+      opts_.process_noise_model != "isotropic" &&
+      opts_.process_noise_model != "axis_aware")
+    throw std::invalid_argument(
+        "imu/process_noise/model must be fixed, isotropic, or axis_aware");
+  if (!std::isfinite(opts_.motion_beta) || opts_.motion_beta < 0.0 ||
+      opts_.motion_beta >= 1.0)
+    throw std::invalid_argument("imu/process_noise/motion/beta must be in [0,1)");
+  for (double v : {opts_.motion_acc_scale, opts_.motion_gyr_scale,
+                   opts_.motion_acc_max_dynamic_variance,
+                   opts_.motion_gyr_max_dynamic_variance})
+    if (!std::isfinite(v) || v < 0.0)
+      throw std::invalid_argument("IMU motion-noise scales/caps must be finite and nonnegative");
   // Read directly rather than being wired from LioProcOptions: the two
   // classes are constructed independently and this keeps the single source
   // of truth in the parameter server, where the sweep harness writes it.
@@ -132,6 +160,12 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  q_alpha_acc:          " << opts_.q_alpha_acc
       << "\n  q_alpha_gyr:          " << opts_.q_alpha_gyr
       << "\n  q_alpha_bias:         " << opts_.q_alpha_bias
+      << "\n  process_noise/model:  " << opts_.process_noise_model
+      << "\n  motion/beta:          " << opts_.motion_beta
+      << "\n  motion/acc_scale:     " << opts_.motion_acc_scale
+      << "\n  motion/gyro_scale:    " << opts_.motion_gyr_scale
+      << "\n  motion/acc_cap:       " << opts_.motion_acc_max_dynamic_variance
+      << "\n  motion/gyro_cap:      " << opts_.motion_gyr_max_dynamic_variance
       << "\n  log_qhat_en:          " << (opts_.log_qhat_en ? "true" : "false")
       << "\n  keep_raw_samples:     " << (opts_.keep_raw_samples ? "true" : "false");
   return oss.str();
@@ -168,7 +202,11 @@ void ImuProc::propagate(MeasureGroup& mg)
   M3D rot_imu(state_->rot());
   V3D pos_imu(state_->pos()), vel_imu(state_->vel());
 
-  const M3D var_acc_diag = state_->varAcc().asDiagonal();
+  ++propagation_index_;
+  const bool dynamic_q = opts_.process_noise_model != "fixed";
+  size_t q_samples = 0, acc_clamped = 0, gyr_clamped = 0;
+  V3D q_acc_sum = V3D::Zero(), q_gyr_sum = V3D::Zero();
+  double acc_motion_sum = 0.0, gyr_motion_sum = 0.0;
 
   // Snapshot the raw stream BEFORE the loop consumes it -- the spline-vs-
   // IMU residual (lio/spline.h) needs the unaveraged, un-bias-corrected
@@ -218,6 +256,76 @@ void ImuProc::propagate(MeasureGroup& mg)
     acc_avr    = 0.5 * (head.acc  + tail.acc) - state_->biasAcc();
     angvel_avr = 0.5 * (head.gyro + tail.gyro) - state_->biasGyr();
 
+    // At rest acc_avr == -R^T g, hence this is the gravity-removed dynamic
+    // specific force in the IMU/body frame. Angular rate is already
+    // bias-corrected above.
+    const V3D dynamic_acc = acc_avr + rot_imu.transpose() * state_->gravity();
+    const V3D dynamic_gyr = angvel_avr;
+    V3D var_acc_step = state_->varAcc();
+    V3D var_gyr_step = state_->varGyr();
+    V3D acc_dynamic_variance = V3D::Zero();
+    V3D gyr_dynamic_variance = V3D::Zero();
+    if (dynamic_q)
+    {
+      if ((state_->varAccFloor().array() <= 0.0).any() ||
+          (state_->varGyrFloor().array() <= 0.0).any())
+        throw std::runtime_error(
+            "motion-dependent Q requires positive stationary calibration floors");
+      if (opts_.process_noise_model == "isotropic")
+      {
+        acc_dynamic_variance.setConstant(
+            opts_.motion_acc_scale * opts_.motion_acc_scale *
+            dynamic_acc.squaredNorm() / 3.0);
+        gyr_dynamic_variance.setConstant(
+            opts_.motion_gyr_scale * opts_.motion_gyr_scale *
+            dynamic_gyr.squaredNorm() / 3.0);
+      }
+      else
+      {
+        acc_dynamic_variance = opts_.motion_acc_scale * opts_.motion_acc_scale *
+            dynamic_acc.array().square().matrix();
+        gyr_dynamic_variance = opts_.motion_gyr_scale * opts_.motion_gyr_scale *
+            dynamic_gyr.array().square().matrix();
+      }
+      for (int axis = 0; axis < 3; ++axis)
+      {
+        if (acc_dynamic_variance(axis) > opts_.motion_acc_max_dynamic_variance)
+          ++acc_clamped;
+        if (gyr_dynamic_variance(axis) > opts_.motion_gyr_max_dynamic_variance)
+          ++gyr_clamped;
+        acc_dynamic_variance(axis) = std::min(
+            acc_dynamic_variance(axis), opts_.motion_acc_max_dynamic_variance);
+        gyr_dynamic_variance(axis) = std::min(
+            gyr_dynamic_variance(axis), opts_.motion_gyr_max_dynamic_variance);
+      }
+      if (!motion_noise_primed_)
+      {
+        filtered_acc_dynamic_variance_ = acc_dynamic_variance;
+        filtered_gyr_dynamic_variance_ = gyr_dynamic_variance;
+        motion_noise_primed_ = true;
+      }
+      else
+      {
+        filtered_acc_dynamic_variance_ = opts_.motion_beta *
+            filtered_acc_dynamic_variance_ + (1.0 - opts_.motion_beta) *
+            acc_dynamic_variance;
+        filtered_gyr_dynamic_variance_ = opts_.motion_beta *
+            filtered_gyr_dynamic_variance_ + (1.0 - opts_.motion_beta) *
+            gyr_dynamic_variance;
+      }
+      var_acc_step = state_->varAccFloor() + filtered_acc_dynamic_variance_;
+      var_gyr_step = state_->varGyrFloor() + filtered_gyr_dynamic_variance_;
+    }
+    ++q_samples;
+    q_acc_sum += var_acc_step;
+    q_gyr_sum += var_gyr_step;
+    acc_motion_sum += dynamic_acc.norm();
+    gyr_motion_sum += dynamic_gyr.norm();
+    writeMotionQSampleDiagnostic(
+        propagation_index_, q_samples - 1, tail.t + data_queues_->start_time,
+        opts_.process_noise_model, dynamic_acc, dynamic_gyr,
+        var_acc_step, var_gyr_step);
+
     // ---- save head state for pose storage ----
     const M3D rot_at_head = rot_imu;
     const V3D pos_at_head = pos_imu;
@@ -226,7 +334,7 @@ void ImuProc::propagate(MeasureGroup& mg)
 
     // ---- covariance propagation ----
     acc_avr_skew << SKEW_SYM_MATRX(acc_avr);
-    acc_noise_world = rot_imu * var_acc_diag * rot_imu.transpose();
+    acc_noise_world = rot_imu * var_acc_step.asDiagonal() * rot_imu.transpose();
     Exp_f = Exp(angvel_avr, dt);
 
     F_x.setIdentity();
@@ -255,7 +363,7 @@ void ImuProc::propagate(MeasureGroup& mg)
 
     // Rotation noise
     cov_w.block<3,3>(StateGroup::idxR(), StateGroup::idxR()).diagonal() =
-        opts_.q_alpha_gyr * state_->varGyr() * dt2;
+        opts_.q_alpha_gyr * var_gyr_step * dt2;
 
     // Velocity noise
     cov_w.block<3,3>(StateGroup::idxV(), StateGroup::idxV()) =
@@ -340,6 +448,16 @@ void ImuProc::propagate(MeasureGroup& mg)
   mg.imu_samples.clear();
 
   state_->setPropagatedState(rot_imu, pos_imu, vel_imu);
+
+  // One compact row per scan; the first post-calibration scan is also logged
+  // sample-by-sample above. Both are intentionally small enough for campaign
+  // returns.
+  const double inv_n = q_samples ? 1.0 / static_cast<double>(q_samples) : 0.0;
+  writeMotionQScanDiagnostic(
+      propagation_index_, mg.image.t + data_queues_->start_time,
+      opts_.process_noise_model, opts_.motion_beta, q_samples,
+      acc_motion_sum * inv_n, gyr_motion_sum * inv_n,
+      q_acc_sum * inv_n, q_gyr_sum * inv_n, acc_clamped, gyr_clamped);
 
   if (opts_.log_debug_en)
   {

@@ -1,0 +1,20 @@
+# Best R43 stationary region, retained with the existing fixed-Q control.
+# Bias floors had negligible effect; the top cell's explicit values are kept.
+calib:
+  p0:
+    mode: calibration_derived
+    known_pos_variance: 1.0e-12
+    known_vel_variance: 1.0e-4
+    tilt_ba_ambiguity_accel_std: 0.03
+    bg_model_floor: 1.0e-5
+    ba_radial_model_floor: 1.0e-5
+    numerical_eigenvalue_floor: 1.0e-12
+state:
+  cov:
+    rot_yaw: 1.0e-2
+imu:
+  process_noise:
+    model: fixed
+estimator:
+  coupled:
+    gating_state_uncertainty: false

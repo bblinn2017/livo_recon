@@ -56,6 +56,12 @@ public:
     initial_covariance_actual_ = cov_;
     initial_covariance_mode_ = mode;
   }
+  void setP0Stabilization(double min_before, double floor, double min_after)
+  {
+    p0_min_eigenvalue_before_ = min_before;
+    p0_eigenvalue_floor_ = floor;
+    p0_min_eigenvalue_after_ = min_after;
+  }
   void setPropagatedState(const M3D& rot, const V3D& pos, const V3D& vel);
   Eigen::MatrixXd& covMut() { return cov_; }
   void applyDelta(const Eigen::VectorXd& dx);
@@ -110,6 +116,9 @@ public:
   {
     return initial_covariance_mode_;
   }
+  double p0MinEigenvalueBefore() const { return p0_min_eigenvalue_before_; }
+  double p0EigenvalueFloor() const { return p0_eigenvalue_floor_; }
+  double p0MinEigenvalueAfter() const { return p0_min_eigenvalue_after_; }
 
   // ── R / t getters ─────────────────────────────────────────────────────────
 
@@ -196,6 +205,9 @@ private:
   double init_cov_ba_ = 1e-6;
   Eigen::MatrixXd initial_covariance_actual_;
   std::string initial_covariance_mode_ = "uncaptured";
+  double p0_min_eigenvalue_before_ = 0.0;
+  double p0_eigenvalue_floor_ = 0.0;
+  double p0_min_eigenvalue_after_ = 0.0;
 
   // Extrinsics
   M3D R_li_, R_il_, R_lc_, R_ic_;

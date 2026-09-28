@@ -28,9 +28,9 @@ and LiDAR information are identifiable in real-data experiments.
 - [x] Represent the unobservable transverse tilt–accelerometer-bias direction
   with one balanced acceleration-equivalent uncertainty and its negative
   cross-covariance; retain separate gyro-bias and radial-bias floors.
-- [ ] Real-data A/B: configured baseline versus calibration-derived P0 on
+- [x] Real-data A/B: configured baseline versus calibration-derived P0 on
   eee_01, first post-calibration frame and 30 s stationary window.
-- [ ] Validate per-block NEES before IMU propagation, post-IMU, and post-LIO.
+- [x] Validate per-block NEES before IMU propagation, post-IMU, and post-LIO.
 - [x] Preserve the actual post-calibration P0 and its mode in StateGroup so
   later diagnostics cannot mistake configured inputs for effective P0.
 - [x] Make `initialization_consistency_all_scans.csv` report both configured
@@ -40,24 +40,27 @@ and LiDAR information are identifiable in real-data experiments.
   cells completed; the 96 `tilt_ba_ambiguity_accel_std=0` cells crash
   (`scan-head covariance is not positive definite` in
   `buildJointKnotImuPrior`'s LDLT check) — see R43's REPORT.md for the
-  root-cause finding. Documented only, not fixed, per explicit instruction.
+  root-cause finding.
+- [x] Stabilize every configured or calibration-derived P0 by symmetric
+  eigendecomposition and a separately reported numerical eigenvalue floor.
+- [x] Preserve the R43 candidate and configured-P0 control as named overlays.
 
 ## Stage 2 — motion-dependent Q_k
 
-- [ ] Add one mode flag: `fixed`, `motion_isotropic`, or `motion_axis_aware`.
-- [ ] Retain calibrated per-axis stationary variance as the noise floor.
-- [ ] Define gravity-removed specific-force excitation using the production
+- [x] Add one mode flag: `fixed`, `isotropic`, or `axis_aware`.
+- [x] Retain calibrated per-axis stationary variance as the noise floor.
+- [x] Define gravity-removed specific-force excitation using the production
   frame/sign convention and verify it is near zero while stationary.
-- [ ] Add acceleration and angular-rate scale parameters `s_a`, `s_omega`.
+- [x] Add acceleration and angular-rate scale parameters `s_a`, `s_omega`.
 - [ ] Determine which scales are available from the VN-100/NTU VIRAL sensor
   specification; do not infer dynamic scale error from stationary data.
 - [ ] Add programmatic real-data calibration/ablation for unidentified scales.
-- [ ] Add optional low-pass excitation filtering; `beta=0` must disable it.
-- [ ] Bound each dynamic variance contribution independently.
-- [ ] Implement isotropic dynamic contribution (norm times identity).
-- [ ] Implement axis-aware dynamic contribution while retaining full frame
+- [x] Add optional low-pass excitation filtering; `beta=0` disables it.
+- [x] Bound each dynamic variance contribution independently.
+- [x] Implement isotropic dynamic contribution (norm-squared/3 times identity).
+- [x] Implement axis-aware dynamic contribution while retaining full frame
   transformations into the propagation covariance.
-- [ ] Keep bias random-walk noise distinct from acc/gyr measurement noise.
+- [x] Keep bias random-walk noise distinct from acc/gyr measurement noise.
 - [ ] Verify fixed mode reproduces the existing propagation exactly.
 - [ ] Compare beta=0 and filtered variants on the same real-data windows.
 

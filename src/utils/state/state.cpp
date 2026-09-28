@@ -73,6 +73,9 @@ StateGroup& StateGroup::operator=(const StateGroup& o)
     init_cov_ba_ = o.init_cov_ba_;
     initial_covariance_actual_ = o.initial_covariance_actual_;
     initial_covariance_mode_ = o.initial_covariance_mode_;
+    p0_min_eigenvalue_before_ = o.p0_min_eigenvalue_before_;
+    p0_eigenvalue_floor_ = o.p0_eigenvalue_floor_;
+    p0_min_eigenvalue_after_ = o.p0_min_eigenvalue_after_;
     R_li_ = o.R_li_; t_li_ = o.t_li_;
     R_il_ = o.R_il_; t_il_ = o.t_il_;
     R_lc_ = o.R_lc_; t_lc_ = o.t_lc_;

@@ -40,6 +40,10 @@ struct CalibProcOptions
   double p0_tilt_ba_ambiguity_accel_std = -1.0;
   double p0_bg_model_floor = -1.0;
   double p0_ba_radial_model_floor = -1.0;
+  // Purely numerical covariance floor. This is not a physical uncertainty
+  // model: it only makes the symmetric P0 strictly positive definite for
+  // information-form solves when a physically valid construction is PSD.
+  double p0_numerical_eigenvalue_floor = 1e-12;
 
   // A stationary calibration window measures the sensor's noise *floor*,
   // not the process noise real dynamic motion needs. The measured floor is
@@ -78,6 +82,7 @@ private:
                                         const M3D& R_init,
                                         const M3D& acc_mean_cov,
                                         const M3D& gyro_mean_cov);
+  void        stabilizeP0();
   M3D         computeInitialRotation(const V3D& acc_bias) const;
 
   // Why calibration is starving, counted rather than guessed. The prime

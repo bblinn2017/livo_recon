@@ -25,6 +25,9 @@ void writeCalibrationP0Diagnostic(
       << "sample_count " << sample_count << '\n'
       << "autocov_lags " << autocov_lags << '\n'
       << "state_dim " << state.dimState() << '\n'
+      << "numerical_stabilization min_before " << state.p0MinEigenvalueBefore()
+      << " floor " << state.p0EigenvalueFloor()
+      << " min_after " << state.p0MinEigenvalueAfter() << '\n'
       << "ordering theta[0:3] p[3:6] v[6:9]";
   if (state.estBG()) out << " bg[" << state.idxBG() << ':' << state.idxBG()+3 << ']';
   if (state.estBA()) out << " ba[" << state.idxBA() << ':' << state.idxBA()+3 << ']';

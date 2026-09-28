@@ -2,7 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
+#include <Eigen/Eigenvalues>
 #include "livo_recon/diagnostics/calibration_p0_writer.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/state/state.h"
@@ -43,6 +45,8 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
                     opts_.p0_bg_model_floor, -1.0);
   paramWarn<double>(pnh, "calib/p0/ba_radial_model_floor",
                     opts_.p0_ba_radial_model_floor, -1.0);
+  paramWarn<double>(pnh, "calib/p0/numerical_eigenvalue_floor",
+                    opts_.p0_numerical_eigenvalue_floor, 1e-12);
 
   if (opts_.num_samples < 1)
     opts_.num_samples = 1;
@@ -55,7 +59,9 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
     throw std::invalid_argument("calib/p0 known-state variances must be finite and positive");
   if (!std::isfinite(opts_.p0_tilt_ba_ambiguity_accel_std) ||
       !std::isfinite(opts_.p0_bg_model_floor) ||
-      !std::isfinite(opts_.p0_ba_radial_model_floor))
+      !std::isfinite(opts_.p0_ba_radial_model_floor) ||
+      !std::isfinite(opts_.p0_numerical_eigenvalue_floor) ||
+      opts_.p0_numerical_eigenvalue_floor <= 0.0)
     throw std::invalid_argument("calib/p0 ambiguity and floor parameters must be finite");
   std::ostringstream oss;
   oss << "[params/calib/stationary]"
@@ -74,7 +80,46 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
       << opts_.p0_tilt_ba_ambiguity_accel_std
       << "\n  p0/model_floors(bg,ba_radial): " << opts_.p0_bg_model_floor << ", "
       << opts_.p0_ba_radial_model_floor;
+  oss << "\n  p0/numerical_eigenvalue_floor: "
+      << opts_.p0_numerical_eigenvalue_floor;
   return oss.str();
+}
+
+void CalibProc::stabilizeP0()
+{
+  Eigen::MatrixXd& P = state_->covMut();
+  P = 0.5 * (P + P.transpose());
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(P);
+  if (es.info() != Eigen::Success)
+    throw std::runtime_error("P0 stabilization eigensolve failed");
+  const double min_before = es.eigenvalues().minCoeff();
+  if (min_before < opts_.p0_numerical_eigenvalue_floor)
+  {
+    const Eigen::VectorXd values =
+        es.eigenvalues().cwiseMax(opts_.p0_numerical_eigenvalue_floor);
+    P = es.eigenvectors() * values.asDiagonal() * es.eigenvectors().transpose();
+    P = 0.5 * (P + P.transpose());
+  }
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> check(P);
+  if (check.info() != Eigen::Success)
+    throw std::runtime_error("stabilized P0 verification eigensolve failed");
+  double min_after = check.eigenvalues().minCoeff();
+  if (min_after < opts_.p0_numerical_eigenvalue_floor)
+  {
+    const double lift = opts_.p0_numerical_eigenvalue_floor - min_after +
+        std::numeric_limits<double>::epsilon() *
+        std::max(1.0, opts_.p0_numerical_eigenvalue_floor);
+    P.diagonal().array() += lift;
+    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> lifted(P);
+    if (lifted.info() != Eigen::Success)
+      throw std::runtime_error("lifted P0 verification eigensolve failed");
+    min_after = lifted.eigenvalues().minCoeff();
+  }
+  state_->setP0Stabilization(min_before,
+      opts_.p0_numerical_eigenvalue_floor, min_after);
+  ROS_INFO_STREAM("[calib/P0] SPD stabilization: min_before=" << min_before
+      << " floor=" << opts_.p0_numerical_eigenvalue_floor
+      << " min_after=" << min_after);
 }
 
 bool CalibProc::collectSamples()
@@ -396,6 +441,7 @@ std::string CalibProc::estimateFromBuffer()
   state_->setNoiseFloor(var_acc, var_gyr);
   if (opts_.p0_mode == "calibration_derived")
     applyCalibrationDerivedP0(acc_bias, R_init, acc_mean_cov, gyro_mean_cov);
+  stabilizeP0();
   state_->captureInitialCovariance(opts_.p0_mode);
   writeCalibrationP0Diagnostic(
       *state_, opts_.p0_mode, static_cast<int>(calib_imu_samples.size()),
