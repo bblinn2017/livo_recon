@@ -4,6 +4,7 @@
 #include "livo_recon/utils/data/data_wrappers.h"
 #include "livo_recon/utils/map/voxelmap_utils.h"
 #include "livo_recon/utils/state/state.h"
+#include "livo_recon/lio/residual_redundancy.h"
 
 #include <Eigen/Dense>
 #include <algorithm>
@@ -118,7 +119,33 @@ struct JointKnotSolve
   double mean_abs_residual = 0.0;
   std::vector<int> residual_count_by_interval;
   int zero_jacobian_residual_count = 0;
+  std::string lidar_information_mode = "independent";
+  ResidualRedundancyStats redundancy_stats;
 };
+
+// Pre-linearized scalar LiDAR row used by the shared joint information
+// accumulator. Keeping this independent of trajectory interpolation makes the
+// correlated-group algebra directly testable against dense C^-1.
+struct JointLidarRow
+{
+  Eigen::RowVectorXd H;
+  double residual = 0.0;
+  double sigma_squared = 0.0;
+  double plane_var_term = 0.0;
+  const void* plane_id = nullptr;
+};
+
+struct JointLidarInformation
+{
+  Eigen::MatrixXd Gamma;
+  Eigen::VectorXd b;
+  ResidualRedundancyStats redundancy_stats;
+  std::string mode = "independent";
+};
+
+JointLidarInformation accumulateJointLidarInformation(
+    const std::vector<JointLidarRow>& rows, int state_dimension,
+    const ResidualRedundancyOptions& options);
 
 JointKnotSolve solveJointKnotInformation(
     const JointKnotTrajectory& current,
@@ -126,7 +153,8 @@ JointKnotSolve solveJointKnotInformation(
     const JointKnotPrior& prior,
     const std::vector<Residual>& residuals,
     const std::vector<PointXYZCov>& evaluated_points,
-    JointKnotResidualTime residual_time);
+    JointKnotResidualTime residual_time,
+    const ResidualRedundancyOptions& redundancy_options = {});
 
 Eigen::MatrixXd extractTailStateCovariance(const JointKnotTrajectory& trajectory,
                                            const Eigen::MatrixXd& joint_cov,

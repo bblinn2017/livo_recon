@@ -1856,15 +1856,8 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
     // frame), so there's nothing to blend and state_->cov() should stay
     // exactly as it was going into this frame.
     //
-    // CQ-70: covRedundancyKappa() is 1.0 (no-op) unless
-    // lio/ekf/cov_redundancy_discount is set -- the REAL posterior write is
-    // the only one this card discounts. The shadow update above (line ~1161,
-    // used only for a trace(P) diagnostic comparison at an earlier
-    // point_filter_num) is deliberately left undiscounted, so that
-    // diagnostic keeps comparing against the historical formula rather than
-    // silently changing shape when this new option is engaged.
     if (any_solved)
-      ekf_.applyCovarianceUpdate(state_, prior_cov_, covRedundancyKappa());
+      ekf_.applyCovarianceUpdate(state_, prior_cov_, 1.0);
 
     // The covariance is intentionally updated once, after all fixed-prior
     // mean iterations.  Earlier per-iteration diagnostics therefore show
@@ -1973,11 +1966,7 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
           // see imuProcQhatRead()'s own doc comment). eig(H^TWH) is NOT
           // separately tracked anywhere in this codebase -- reconstructed
           // here from ekf.h's own A = H_full + prior_cov^-1 identity:
-          // H_full = P_after_LIO^-1 - P_after_IMU^-1 exactly, when
-          // lio/ekf/cov_redundancy_discount is "off" (kappa==1, the
-          // default) -- NOT valid if a non-default discount is active,
-          // flagged via the h_eff_valid column so a reader never mistakes
-          // a discounted run's number for the true LiDAR information.
+          // H_full = P_after_LIO^-1 - P_after_IMU^-1 exactly.
           if (p_before.rows() == P_post.rows() && p_before.rows() > 0) {
             const Eigen::MatrixXd P_after_imu = phi_p_phit + accum_cov_w;
             auto eigStats = [](const Eigen::MatrixXd& M, double& trP, double& logdetP,
@@ -2000,18 +1989,15 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
             eigStats(accum_cov_w, trP_qeff, ld_qeff, lmin_qeff, lmax_qeff);
             eigStats(P_post, trP_lio, ld_lio, lmin_lio, lmax_lio);
 
-            const bool discount_off = !opts_.cov_redundancy_discount.on();
             double trP_h = std::numeric_limits<double>::quiet_NaN();
             double ld_h = std::numeric_limits<double>::quiet_NaN();
             double lmin_h = std::numeric_limits<double>::quiet_NaN();
             double lmax_h = std::numeric_limits<double>::quiet_NaN();
-            if (discount_off) {
-              Eigen::LDLT<Eigen::MatrixXd> ldlt_imu(P_after_imu), ldlt_lio(P_post);
-              if (ldlt_imu.info() == Eigen::Success && ldlt_lio.info() == Eigen::Success) {
-                const Eigen::MatrixXd I = Eigen::MatrixXd::Identity(P_post.rows(), P_post.rows());
-                const Eigen::MatrixXd H_eff = ldlt_lio.solve(I) - ldlt_imu.solve(I);
-                eigStats(H_eff, trP_h, ld_h, lmin_h, lmax_h);
-              }
+            Eigen::LDLT<Eigen::MatrixXd> ldlt_imu(P_after_imu), ldlt_lio(P_post);
+            if (ldlt_imu.info() == Eigen::Success && ldlt_lio.info() == Eigen::Success) {
+              const Eigen::MatrixXd I = Eigen::MatrixXd::Identity(P_post.rows(), P_post.rows());
+              const Eigen::MatrixXd H_eff = ldlt_lio.solve(I) - ldlt_imu.solve(I);
+              eigStats(H_eff, trP_h, ld_h, lmin_h, lmax_h);
             }
 
             static PersistentLogStream ib_log("info_budget.txt");
@@ -2026,7 +2012,7 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
                         "trP_after_lio,logdet_after_lio,lmin_after_lio,lmax_after_lio,"
                         "trP_h,logdet_h,lmin_h,lmax_h\n";
             ib_ofs << voxel_map_->frame_idx_ << "," << std::setprecision(12) << t_abs << ","
-                   << (discount_off ? 1 : 0) << ","
+                   << 1 << ","
                    << trP_before << "," << ld_before << "," << lmin_before << "," << lmax_before << ","
                    << trP_imu << "," << ld_imu << "," << lmin_imu << "," << lmax_imu << ","
                    << trP_fpf << "," << ld_fpf << "," << lmin_fpf << "," << lmax_fpf << ","
@@ -2373,49 +2359,6 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
         diag.reduced_chi2 = residuals_.empty() ? 0.0 : sum_chi2 / residuals_.size();
       }
 
-      // CQ-37 items 2/3/4/6: axis A/B/D engagement, log beside (never drive
-      // -- these fields were already applied earlier this frame, before
-      // accumulation; this just carries the counters into the diagnostic
-      // row).
-      diag.collapse_groups_collapsed  = collapse_stats_.groups_collapsed;
-      diag.collapse_residuals_removed = collapse_stats_.residuals_removed;
-      diag.per_residual_touched       = per_residual_stats_.residuals_touched;
-      diag.per_residual_renorm_factor = per_residual_stats_.renorm_factor;
-      diag.per_residual_mean_scale    = per_residual_stats_.mean_applied_scale;
-      diag.sigma_scale_applied        = last_density_scale_;
-      diag.sigma_scale_chi2_ema       = chi2_ema_;
-
-      // CQ-36 item 4/CQ-37 axis D "chi2", FIXED per CQ-36 M4 (coding inbox,
-      // 2026-09-17): update chi2_ema_ (the smoothed MEASURED, i.e.
-      // post-scale, reduced_chi2 -- diag.reduced_chi2 was just computed
-      // above under whatever chi2_scale_ this frame actually applied) from
-      // THIS frame's own reading, exactly as before. THEN accumulate it
-      // into chi2_scale_ multiplicatively -- chi2_scale_ *= chi2_ema_ --
-      // which is the actual fix: an integral controller whose fixed point
-      // is chi2_ema_ == 1 (scale stops moving only once measured chi2 has
-      // reached 1), unlike the retired "scale = chi2_ema_" direct
-      // assignment, whose fixed point was sqrt(raw_chi2) on both sides.
-      // Warmup: chi2_ema_ is seeded directly (unchanged) and chi2_scale_
-      // stays at its 1.0 (inert) default throughout warmup -- the very
-      // first post-warmup frame seeds chi2_scale_ FROM chi2_ema_ (a
-      // bootstrap step) rather than starting the multiplicative
-      // accumulation from the arbitrary default.
-      if (opts_.sigma_scale.chi2On() && diag.reduced_chi2 > 0.0) {
-        ++chi2_ema_frames_;
-        if (chi2_ema_frames_ <= opts_.sigma_scale.chi2_warmup_frames) {
-          chi2_ema_ = diag.reduced_chi2;
-        } else if (chi2_ema_frames_ == opts_.sigma_scale.chi2_warmup_frames + 1) {
-          const double a = opts_.sigma_scale.chi2_ema;
-          chi2_ema_ = a * chi2_ema_ + (1.0 - a) * diag.reduced_chi2;
-          chi2_scale_ = chi2_ema_;  // bootstrap: seed from the EMA, not from 1.0
-        } else {
-          const double a = opts_.sigma_scale.chi2_ema;
-          chi2_ema_ = a * chi2_ema_ + (1.0 - a) * diag.reduced_chi2;
-          chi2_scale_ = std::min(std::max(chi2_scale_ * chi2_ema_, opts_.sigma_scale.min_ratio),
-                                  opts_.sigma_scale.max_ratio);
-        }
-      }
-
       if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) vm->noteLioFrameDiag(diag);
       logEigenspectrum18(voxel_map_->frame_idx_, mg.image.t + data_queues_->start_time, "decoupled");
     }
@@ -2600,7 +2543,6 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
           << "  mean_frac_strong_pp=" << mean_frac_strong_pp
           << "  mean_frac_weak_rr=" << mean_frac_weak_rr
           << "  mean_frac_strong_rr=" << mean_frac_strong_rr
-          << "  sigma_scale=" << last_density_scale_
           << "  trace(P_RR)=" << P_RR.trace()
           << "  trace(P_PP)=" << P_PP.trace()
           << "  trace(P_VV)=" << P_VV.trace()

@@ -94,8 +94,11 @@ private:
 
   ImuProcOptions opts_;
   ImuSample last_imu_sample_;
-  V3D filtered_acc_dynamic_variance_ = V3D::Zero();
-  V3D filtered_gyr_dynamic_variance_ = V3D::Zero();
+  // Low-pass state is excitation ENERGY before the stationary noise floor is
+  // subtracted. Filtering the already-rectified dynamic variance would retain
+  // the positive bias of squared stationary sensor noise.
+  V3D filtered_acc_excitation_energy_ = V3D::Zero();
+  V3D filtered_gyr_excitation_energy_ = V3D::Zero();
   bool motion_noise_primed_ = false;
   size_t propagation_index_ = 0;
 };

@@ -206,6 +206,8 @@ void ImuProc::propagate(MeasureGroup& mg)
   const bool dynamic_q = opts_.process_noise_model != "fixed";
   size_t q_samples = 0, acc_clamped = 0, gyr_clamped = 0;
   V3D q_acc_sum = V3D::Zero(), q_gyr_sum = V3D::Zero();
+  V3D debiased_acc_energy_sum = V3D::Zero();
+  V3D debiased_gyr_energy_sum = V3D::Zero();
   double acc_motion_sum = 0.0, gyr_motion_sum = 0.0;
 
   // Snapshot the raw stream BEFORE the loop consumes it -- the spline-vs-
@@ -265,6 +267,8 @@ void ImuProc::propagate(MeasureGroup& mg)
     V3D var_gyr_step = state_->varGyr();
     V3D acc_dynamic_variance = V3D::Zero();
     V3D gyr_dynamic_variance = V3D::Zero();
+    V3D debiased_acc_energy = V3D::Zero();
+    V3D debiased_gyr_energy = V3D::Zero();
     if (dynamic_q)
     {
       if ((state_->varAccFloor().array() <= 0.0).any() ||
@@ -273,20 +277,54 @@ void ImuProc::propagate(MeasureGroup& mg)
             "motion-dependent Q requires positive stationary calibration floors");
       if (opts_.process_noise_model == "isotropic")
       {
-        acc_dynamic_variance.setConstant(
-            opts_.motion_acc_scale * opts_.motion_acc_scale *
-            dynamic_acc.squaredNorm() / 3.0);
-        gyr_dynamic_variance.setConstant(
-            opts_.motion_gyr_scale * opts_.motion_gyr_scale *
-            dynamic_gyr.squaredNorm() / 3.0);
+        const V3D acc_energy = V3D::Constant(dynamic_acc.squaredNorm() / 3.0);
+        const V3D gyr_energy = V3D::Constant(dynamic_gyr.squaredNorm() / 3.0);
+        if (!motion_noise_primed_)
+        {
+          filtered_acc_excitation_energy_ = acc_energy;
+          filtered_gyr_excitation_energy_ = gyr_energy;
+        }
+        else
+        {
+          filtered_acc_excitation_energy_ = opts_.motion_beta *
+              filtered_acc_excitation_energy_ + (1.0 - opts_.motion_beta) * acc_energy;
+          filtered_gyr_excitation_energy_ = opts_.motion_beta *
+              filtered_gyr_excitation_energy_ + (1.0 - opts_.motion_beta) * gyr_energy;
+        }
+        // The isotropic signal has one shared energy, so subtract the mean
+        // calibrated per-axis floor. This removes stationary sensor power
+        // before the scale is applied instead of counting it twice.
+        debiased_acc_energy.setConstant(std::max(
+            0.0, filtered_acc_excitation_energy_.x() - state_->varAccFloor().mean()));
+        debiased_gyr_energy.setConstant(std::max(
+            0.0, filtered_gyr_excitation_energy_.x() - state_->varGyrFloor().mean()));
       }
       else
       {
-        acc_dynamic_variance = opts_.motion_acc_scale * opts_.motion_acc_scale *
-            dynamic_acc.array().square().matrix();
-        gyr_dynamic_variance = opts_.motion_gyr_scale * opts_.motion_gyr_scale *
-            dynamic_gyr.array().square().matrix();
+        const V3D acc_energy = dynamic_acc.array().square().matrix();
+        const V3D gyr_energy = dynamic_gyr.array().square().matrix();
+        if (!motion_noise_primed_)
+        {
+          filtered_acc_excitation_energy_ = acc_energy;
+          filtered_gyr_excitation_energy_ = gyr_energy;
+        }
+        else
+        {
+          filtered_acc_excitation_energy_ = opts_.motion_beta *
+              filtered_acc_excitation_energy_ + (1.0 - opts_.motion_beta) * acc_energy;
+          filtered_gyr_excitation_energy_ = opts_.motion_beta *
+              filtered_gyr_excitation_energy_ + (1.0 - opts_.motion_beta) * gyr_energy;
+        }
+        debiased_acc_energy = (filtered_acc_excitation_energy_ -
+            state_->varAccFloor()).cwiseMax(0.0);
+        debiased_gyr_energy = (filtered_gyr_excitation_energy_ -
+            state_->varGyrFloor()).cwiseMax(0.0);
       }
+      motion_noise_primed_ = true;
+      acc_dynamic_variance = opts_.motion_acc_scale * opts_.motion_acc_scale *
+          debiased_acc_energy;
+      gyr_dynamic_variance = opts_.motion_gyr_scale * opts_.motion_gyr_scale *
+          debiased_gyr_energy;
       for (int axis = 0; axis < 3; ++axis)
       {
         if (acc_dynamic_variance(axis) > opts_.motion_acc_max_dynamic_variance)
@@ -298,33 +336,20 @@ void ImuProc::propagate(MeasureGroup& mg)
         gyr_dynamic_variance(axis) = std::min(
             gyr_dynamic_variance(axis), opts_.motion_gyr_max_dynamic_variance);
       }
-      if (!motion_noise_primed_)
-      {
-        filtered_acc_dynamic_variance_ = acc_dynamic_variance;
-        filtered_gyr_dynamic_variance_ = gyr_dynamic_variance;
-        motion_noise_primed_ = true;
-      }
-      else
-      {
-        filtered_acc_dynamic_variance_ = opts_.motion_beta *
-            filtered_acc_dynamic_variance_ + (1.0 - opts_.motion_beta) *
-            acc_dynamic_variance;
-        filtered_gyr_dynamic_variance_ = opts_.motion_beta *
-            filtered_gyr_dynamic_variance_ + (1.0 - opts_.motion_beta) *
-            gyr_dynamic_variance;
-      }
-      var_acc_step = state_->varAccFloor() + filtered_acc_dynamic_variance_;
-      var_gyr_step = state_->varGyrFloor() + filtered_gyr_dynamic_variance_;
+      var_acc_step = state_->varAccFloor() + acc_dynamic_variance;
+      var_gyr_step = state_->varGyrFloor() + gyr_dynamic_variance;
     }
     ++q_samples;
     q_acc_sum += var_acc_step;
     q_gyr_sum += var_gyr_step;
+    debiased_acc_energy_sum += debiased_acc_energy;
+    debiased_gyr_energy_sum += debiased_gyr_energy;
     acc_motion_sum += dynamic_acc.norm();
     gyr_motion_sum += dynamic_gyr.norm();
     writeMotionQSampleDiagnostic(
         propagation_index_, q_samples - 1, tail.t + data_queues_->start_time,
         opts_.process_noise_model, dynamic_acc, dynamic_gyr,
-        var_acc_step, var_gyr_step);
+        debiased_acc_energy, debiased_gyr_energy, var_acc_step, var_gyr_step);
 
     // ---- save head state for pose storage ----
     const M3D rot_at_head = rot_imu;
@@ -455,9 +480,12 @@ void ImuProc::propagate(MeasureGroup& mg)
   const double inv_n = q_samples ? 1.0 / static_cast<double>(q_samples) : 0.0;
   writeMotionQScanDiagnostic(
       propagation_index_, mg.image.t + data_queues_->start_time,
-      opts_.process_noise_model, opts_.motion_beta, q_samples,
+      opts_.process_noise_model, opts_.motion_beta,
+      opts_.motion_acc_scale, opts_.motion_gyr_scale, q_samples,
       acc_motion_sum * inv_n, gyr_motion_sum * inv_n,
-      q_acc_sum * inv_n, q_gyr_sum * inv_n, acc_clamped, gyr_clamped);
+      q_acc_sum * inv_n, q_gyr_sum * inv_n,
+      debiased_acc_energy_sum * inv_n, debiased_gyr_energy_sum * inv_n,
+      acc_clamped, gyr_clamped);
 
   if (opts_.log_debug_en)
   {

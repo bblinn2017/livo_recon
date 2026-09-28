@@ -15,6 +15,13 @@ void writeJointKnotIterationDiagnostics(
     int residual_count, double mean_gating_cov_trace,
     double max_gating_cov_trace);
 
+// Compact all-scan record of the exact LiDAR information admitted to the
+// canonical solve.  Unlike the large first-frame matrix dump this is intended
+// for 30 s real-data comparisons of independent and correlated Gamma_L.
+void writeJointKnotLidarInformationDiagnostics(
+    const std::string& test_id, int scan_id, int iteration, double t_abs,
+    const JointKnotSolve& solve, int residual_count);
+
 void writeJointKnotAllScanDiagnostics(
     const std::string& test_id, int scan_id, int iteration, double t_abs,
     const M3D& reference_R, const V3D& reference_p, const V3D& reference_v,

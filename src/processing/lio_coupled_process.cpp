@@ -3,7 +3,6 @@
 #include "livo_recon/diagnostics/init_consistency.h"
 #include "livo_recon/diagnostics/joint_knots/joint_knot_diagnostic_writer.h"
 #include "livo_recon/diagnostics/stationary_diagnostic_writer.h"
-#include "livo_recon/lio/residual_weighting.h"
 #include "livo_recon/lio/residual_redundancy.h"
 #include "livo_recon/map/voxelmap.h"
 
@@ -85,15 +84,8 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
       break;
     }
 
-    collapse_stats_ = CollapseStats{};
-    if (opts_.residual_weighting.perResidualOn())
-      per_residual_stats_ = applyPerResidualReweight(
-          residuals_, opts_.residual_weighting.per_residual);
-    else
-      per_residual_stats_ = PerResidualStats{};
-    applySigmaScale(residuals_);
-    // Write after every solve-side reweighting so solve_input_hash describes
-    // the exact residual values consumed below, not merely gate output.
+    // The accepted residual covariance is consumed directly. Deprecated
+    // global density/chi2 scalers and per-residual reweighting are absent.
     if (!copts_.minimal_diagnostics)
       writeGatingIterationDiagnostics(
           copts_.test_id, architecture, voxel_map_->frame_idx_, iteration,
@@ -106,7 +98,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     const JointKnotTrajectory before = trajectory_;
     last_solve_ = solveJointKnotInformation(
         trajectory_, imu_prior_mean_, joint_prior_, residuals_,
-        evaluated_points, copts_.residualTime());
+        evaluated_points, copts_.residualTime(), opts_.residual_redundancy);
     // Intentionally no clipping, blockwise limiting or damping: this is the
     // same full-step fixed-prior MAP convention used by the ordinary IEKF.
     trajectory_.applyDelta(last_solve_.delta);
@@ -116,6 +108,10 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     ++iterations_;
 
     if (!copts_.minimal_diagnostics) {
+      writeJointKnotLidarInformationDiagnostics(
+          copts_.test_id, voxel_map_->frame_idx_, iteration,
+          mg.image.t + data_queues_->start_time, last_solve_,
+          static_cast<int>(residuals_.size()));
       writeJointKnotIterationDiagnostics(
           copts_.test_id, voxel_map_->frame_idx_, iteration,
           mg.image.t + data_queues_->start_time,

@@ -147,7 +147,6 @@ add_executable(livo_recon_node
   src/lio/spline.cpp
   src/lio/adaptive_q.cpp
   src/lio/residual_redundancy.cpp
-  src/lio/residual_weighting.cpp
   src/lio/joint_knot_estimator.cpp
   src/diagnostics/joint_knots/joint_knot_diagnostic_writer.cpp
   src/map/voxelmap.cpp

@@ -40,7 +40,11 @@ void writeJointKnotIterationDiagnostics(
            "prior_min_eig,prior_max_eig,lidar_max_eig,posterior_min_eig,posterior_max_eig,"
            "tail_dtheta_norm,tail_dp_norm,tail_dv_norm,dbg_norm,dba_norm,dg_norm,"
            "max_knot_dt,max_geodesic_angle,mean_gating_cov_trace,"
-           "max_gating_cov_trace,solve_uses_gating_covariance\n";
+           "max_gating_cov_trace,solve_uses_gating_covariance,"
+           "lidar_information_mode,redund_groups_seen,redund_groups,"
+           "redund_groups_degenerate_pv,redund_groups_degenerate_var,"
+           "redund_n_raw,redund_n_eff,redund_info_ratio,"
+           "naive_info_gain,woodbury_info_gain\n";
   const int tail = after.knotCount() - 1;
   const V3D dtheta = Log(M3D(before.knots()[tail].R.transpose() * after.knots()[tail].R));
   const V3D dp = after.knots()[tail].p - before.knots()[tail].p;
@@ -77,7 +81,17 @@ void writeJointKnotIterationDiagnostics(
       << (after.tailBiasAcc() - before.tailBiasAcc()).norm() << ','
       << (after.gravity() - before.gravity()).norm() << ','
       << max_dt << ',' << max_angle << ','
-      << mean_gating_cov_trace << ',' << max_gating_cov_trace << ",0\n";
+      << mean_gating_cov_trace << ',' << max_gating_cov_trace << ",0,"
+      << solve.lidar_information_mode << ','
+      << solve.redundancy_stats.redund_groups_seen << ','
+      << solve.redundancy_stats.redund_groups << ','
+      << solve.redundancy_stats.redund_groups_degenerate_pv << ','
+      << solve.redundancy_stats.redund_groups_degenerate_var << ','
+      << solve.redundancy_stats.redund_n_raw << ','
+      << solve.redundancy_stats.redund_n_eff << ','
+      << solve.redundancy_stats.redund_info_ratio << ','
+      << solve.redundancy_stats.naive_info_gain << ','
+      << solve.redundancy_stats.woodbury_info_gain << '\n';
   csv.flush();
 
   static PersistentLogStream knot_states("joint_knot_states.csv");
@@ -181,6 +195,34 @@ void writeJointKnotIterationDiagnostics(
         << " logR " << Log(after.knots()[k].R).transpose() << '\n';
   }
   out.flush();
+}
+
+void writeJointKnotLidarInformationDiagnostics(
+    const std::string& test_id, int scan_id, int iteration, double t_abs,
+    const JointKnotSolve& solve, int residual_count)
+{
+  static PersistentLogStream log("joint_knot_lidar_information.csv");
+  bool first = false;
+  std::ofstream& csv = log.stream(&first);
+  if (first)
+    csv << "test_id,scan_id,iteration,t_abs,lidar_information_mode,"
+           "residual_count,gamma_trace,gamma_frobenius,b_norm,"
+           "redund_groups_seen,redund_groups,redund_groups_degenerate_pv,"
+           "redund_groups_degenerate_var,redund_n_raw,redund_n_eff,"
+           "redund_info_ratio,naive_info_gain,woodbury_info_gain,"
+           "max_discount_bound_groups\n";
+  const ResidualRedundancyStats& s = solve.redundancy_stats;
+  csv << test_id << ',' << scan_id << ',' << iteration << ','
+      << std::setprecision(17) << t_abs << ','
+      << solve.lidar_information_mode << ',' << residual_count << ','
+      << solve.Gamma_L.trace() << ',' << solve.Gamma_L.norm() << ','
+      << solve.b_L.norm() << ',' << s.redund_groups_seen << ','
+      << s.redund_groups << ',' << s.redund_groups_degenerate_pv << ','
+      << s.redund_groups_degenerate_var << ',' << s.redund_n_raw << ','
+      << s.redund_n_eff << ',' << s.redund_info_ratio << ','
+      << s.naive_info_gain << ',' << s.woodbury_info_gain << ','
+      << s.max_discount_bound_groups << '\n';
+  csv.flush();
 }
 
 void writeJointKnotStateChainDiagnostics(

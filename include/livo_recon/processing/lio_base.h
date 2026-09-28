@@ -9,7 +9,6 @@
 #include "livo_recon/utils/log/profiler.h"
 #include "livo_recon/lio/deskew.h"
 #include "livo_recon/lio/residual_redundancy.h"
-#include "livo_recon/lio/residual_weighting.h"
 
 #include <array>
 #include <initializer_list>
@@ -69,73 +68,9 @@ struct LioProcOptions
   // deviation figure and this card's own item 2 both already use).
   int nees_tier1_window_scans = 489;
 
-  // A per-residual reweighting mechanism (LioProcBase::applyResidualWeighting(),
-  // LioProcOptions::residual_weighting) was investigated (2026-08) as a way
-  // to correct for correlated/redundant residuals (many points hitting the
-  // same plane, especially at ds_leaf_size=0) and removed entirely after
-  // three different, independently-derived schemes were tried:
-  //   - "plane_averaged": collapse each plane's residuals to one, at the
-  //     centroid. Catastrophically diverged point_filter_num=1+
-  //     ds_leaf_size=0 (0.028m -> 3.34m) and regressed the production
-  //     baseline (+34%) -- discarded genuine within-plane spatial spread
-  //     that constrains rotation, not just correlated noise.
-  //   - "count_weighted": keep every residual, scale sigma_squared_i by its
-  //     plane's group size (with and without a n_planes/n_residuals
-  //     normalization to preserve the aggregate weight budget). Nearly
-  //     identical catastrophic failure either way -- root cause was a
-  //     dominant, high-point-count plane being the load-bearing source of
-  //     POSITION constraint (H_pp_min_eig collapsed ~4-4.6x, H_rr/rotation
-  //     untouched) in an otherwise-weak direction; any purely count-based
-  //     discount starves that direction regardless of global rescaling.
-  //   - "info_gain": direction-aware (Sherman-Morrison running-covariance
-  //     downdate, not grouping-based) -- found and fixed a real bug where
-  //     its running covariance was seeded from the filter's own
-  //     accumulated state_->cov() instead of an uninformative per-frame
-  //     prior, causing a runaway cross-frame feedback spiral. Fixing that
-  //     (verified via temporary gain-distribution logging) still left it
-  //     catastrophic on BOTH the dense config (2.47m) and the previously-
-  //     rock-solid production baseline (3.64m, vs 3.73m before the fix --
-  //     barely different).
-  // All three, done correctly, converge on the same outcome: properly
-  // discounting redundant residuals weakens LIO's correction below what's
-  // needed to track this dataset's fast-motion segments. Working
-  // hypothesis: the unweighted baseline's stability isn't explained by
-  // genuinely-sufficient independent geometric information there -- it's
-  // propped up by systematically overcounting correlated residuals as
-  // independent, which happens to supply enough (statistically
-  // unwarranted) extra correction strength to track the maneuver in
-  // practice. Residual-correlation-correction was concluded NOT to be the
-  // right lever for this problem.
-  //
-  // Two more variants tried later the same investigation, both also
-  // removed after also degrading performance despite being more
-  // principled than the three above:
-  //   - "info_gain_derived" density_sigma_mode: reused the (corrected)
-  //     Sherman-Morrison info_gain machinery, but PURELY to compute one
-  //     aggregate per-frame scalar (n_residuals/n_eff, n_eff = sum of
-  //     individual Sherman-Morrison information gains) applied UNIFORMLY
-  //     to every residual -- unlike info_gain's original per-residual use,
-  //     this can't cause direction-specific starvation. Still regressed
-  //     (0.0254m -> 0.0316m, eee_01): the adaptive scale it computed
-  //     averaged ~164x (vs the fixed density_sigma_ref=3000's ~3.4x),
-  //     overshooting pfn3_baseline's own confidence level by ~20x and
-  //     overdamping the correction.
-  //   - "woodbury_plane_correction": grouped residuals by plane and
-  //     properly marginalized each plane's shared plane_var_ fit
-  //     uncertainty out of the group's joint noise model via the Woodbury
-  //     identity, instead of count_weighted's ad hoc group-size scaling.
-  //     Mathematically the most principled of all five schemes tried --
-  //     still regressed both pfn1_ds000 (0.0254m -> 0.0287m) and
-  //     pfn3_baseline (0.0245m -> 0.0292m), with reduced_chi2 ~0.45-0.52
-  //     (overly conservative by the residual-level calibration standard)
-  //     in both cases. A fifth independent confirmation of the same
-  //     conclusion above.
-
-  // CQ-28: re-lands the "woodbury_plane_correction" mechanism named in the
-  // historical comment above, as a standalone config-gated mode -- see
-  // residual_redundancy.h for the full derivation. "off" (default) means
-  // this mechanism is never invoked at all, so it cannot perturb existing
-  // behavior by even one ULP.
+  // The residual model has one independent control and one direct
+  // per-VoxelPlane covariance marginalization. Failed collapse, count, and
+  // conditioning heuristics were removed; see docs/RESIDUAL_MODE_AUDIT.md.
   ResidualRedundancyOptions residual_redundancy;
 
   // CQ-31 item 5: the scalar P controls, independent of residual_redundancy
@@ -143,95 +78,6 @@ struct LioProcOptions
   // see residual_redundancy.h's PriorScalarOptions. Identity at every
   // default.
   PriorScalarOptions prior_scalar;
-
-  // CQ-70: SPLIT information update -- discount redundancy ONLY in
-  // EkfUpdate::applyCovarianceUpdate()'s own H_full contribution (dividing
-  // it by kappa before forming A), leaving applyMeanUpdate()'s H_full/Htz
-  // completely untouched. Every prior redundancy-discounting mechanism in
-  // this codebase (residual_redundancy's Woodbury modes above) discounts
-  // the SAME HtH/Htz that both the mean and covariance updates read from,
-  // so it necessarily costs tracking accuracy along with fixing
-  // overconfidence -- this is the first mechanism that can touch ONLY the
-  // covariance's own belief about its uncertainty, leaving the actual state
-  // correction (and therefore ATE) mechanically unable to move. Candidate
-  // fix for the ~1000x aggregate NEES overconfidence found three
-  // independent ways (standing/round-61's 275x factor, CQ-47's ~123x
-  // directional over-count, CQ-62's 251-2955x per-axis/1008x aggregate) --
-  // decoupled's own reduced_chi2=1.226 already rules out a simple flat
-  // residual-variance miscalibration as the explanation, since that would
-  // show up as reduced_chi2 far from 1, not as a healthy per-residual
-  // calibration alongside a wildly overconfident joint covariance.
-  //
-  // "off" (default): kappa==1.0 always, A is built exactly as before --
-  // byte-identical to pre-CQ-70 behavior.
-  // "info_gain": kappa = redundancy_stats_.redund_n_raw /
-  //   redundancy_stats_.redund_n_eff for THIS frame's FINAL inner-iteration
-  //   value (NOT the one-frame lag sigma_scale's own info_gain_derived level
-  //   uses -- applyCovarianceUpdate() runs once, after the inner loop, by
-  //   which point redundancy_stats_ already holds this frame's own last
-  //   solveSystem[_cuda]() call's counters). kappa==1.0 (no discount)
-  //   whenever redund_n_raw or redund_n_eff is 0 (no grouped residuals this
-  //   frame -- nothing to discount).
-  // "fixed": kappa == cov_redundancy_kappa, a constant set by the caller
-  //   (used for the card's own arm D: a very large fixed kappa drives the
-  //   covariance update's own H_full contribution toward zero -- P then
-  //   tracks the propagated prior almost exactly, isolating "how much does
-  //   the covariance shrink from Q/prediction alone" from "how much does it
-  //   shrink from LiDAR information").
-  struct CovRedundancyDiscountOptions
-  {
-    std::string mode = "off";
-    double kappa = 1.0;  // only read when mode == "fixed"
-    bool on() const { return mode != "off"; }
-  } cov_redundancy_discount;
-
-  // CQ-37 axis A/B: residual-set reduction (collapse) and per-residual
-  // reweight (per_residual) -- see residual_weighting.h for the full
-  // derivation of both. Both default off/identity.
-  ResidualWeightingOptions residual_weighting;
-
-  // CQ-37 axis D: ONE global multiplicative scalar applied to every
-  // residual's sigma_squared (and, item 1c, plane_var_term by the same
-  // factor) BEFORE accumulation. SUBSUMES the former standalone
-  // density_sigma_mode/density_sigma_ref (now sigma_scale.mode's three
-  // "density_*" levels, unchanged shape -- see below) and CQ-36's proposed
-  // standalone sigma_calibration_mode (now sigma_scale.mode's "chi2"
-  // level): two separate keys would let two multiplicative scales on the
-  // same quantity fight silently, so this rebuild keeps axis D as one
-  // enum, exclusive by construction (CQ-37 item 1).
-  //
-  // Levels: "off" (default, identity). "density_linear"/"density_sqrt"/
-  // "density_quadratic" -- x = n_residuals/sigma_scale.density_ref, scale
-  // = x / sqrt(x) / x^2 respectively, clamped >= 1 (only ever INCREASES
-  // sigma_squared -- this is the former density_sigma_mode's exact shape,
-  // renamed). "info_gain_derived" -- one aggregate per-frame scalar
-  // n_raw/n_eff from the PREVIOUS frame's residual-redundancy-correction
-  // counters (LioProcBase::redundancy_stats_ -- axis D runs before
-  // accumulation, so THIS frame's own n_raw/n_eff do not exist yet; using
-  // last frame's is a one-frame lag, not a same-frame reuse, and is
-  // flagged as such at its own call site), bounded by
-  // [sigma_scale.min_ratio, sigma_scale.max_ratio]. "chi2" -- an EMA of
-  // the previous frames' reduced_chi2 (LioProcBase::chi2_ema_), applied
-  // DIRECTLY as the scale (reduced_chi2 < 1 means sigma_squared is too
-  // LARGE, so the scale must be able to go BELOW 1 -- CQ-36 item 4b's
-  // explicit correction against reusing density's max(1, .) clamp),
-  // bounded the same way.
-  struct SigmaScaleOptions
-  {
-    std::string mode = "off";
-    double density_ref = 0.0;
-    double min_ratio = 0.01;
-    double max_ratio = 100.0;
-    double chi2_ema = 0.9;
-    int    chi2_warmup_frames = 20;
-
-    bool densityOn() const {
-      return mode == "density_linear" || mode == "density_sqrt" || mode == "density_quadratic";
-    }
-    bool infoGainDerivedOn() const { return mode == "info_gain_derived"; }
-    bool chi2On() const { return mode == "chi2"; }
-    bool on() const { return mode != "off"; }
-  } sigma_scale;
 
   // History (151-159): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-151
 
@@ -260,7 +106,7 @@ struct LioProcOptions
 // machinery. THIN by design (rule: inheritance for dispatch, composition
 // for the shared half would be even safer, but the shared methods below
 // are NON-VIRTUAL -- nothing can override buildResiduals()/solveSystem()/
-// applySigmaScale()/accumulateForCombined(), so a derived class cannot
+// accumulateForCombined(), so a derived class cannot
 // silently break the decoupled path's byte-identity through a well-meaning
 // partial override, which is the same protection the card's own
 // ResidualEngine-by-composition design gives, without a second indirection
@@ -308,13 +154,6 @@ public:
   void solveSystem(const std::vector<Residual>& residuals) const;
   void solveSystem_cuda(const std::vector<Residual>& residuals) const;
 
-  // CQ-70: the kappa a caller should pass to EkfUpdate::applyCovarianceUpdate()
-  // as its H_full_discount argument -- see CovRedundancyDiscountOptions's own
-  // doc comment above for what each mode computes. Always 1.0 (no discount)
-  // when opts_.cov_redundancy_discount.mode == "off", so a caller that never
-  // reads this at all is unaffected either way.
-  double covRedundancyKappa() const;
-
   // Used only by the decoupled estimator's own iteration loop, but the
   // residual-build + EKF-accumulate machinery it wraps is shared, so it
   // lives here rather than being duplicated. NOT called by the coupled
@@ -342,12 +181,6 @@ public:
   bool accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, double& avg_res);
 
 protected:
-  // Applies opts_.sigma_scale to `residuals` in place (sigma_squared AND,
-  // per item 1c, plane_var_term by the same factor) -- called once per
-  // frame from both estimateStateCorrection() and accumulateForCombined(),
-  // BEFORE accumulation. No-op when opts_.sigma_scale.mode == "off".
-  void applySigmaScale(std::vector<Residual>& residuals) const;
-
   // CQ-49 item 1: the shared half of loadParameters(), extracted once and
   // called from both derived classes' own overrides -- see lio_base.cpp's
   // own doc comment for exactly which keys this reads.
@@ -406,29 +239,6 @@ protected:
   mutable std::vector<std::array<int, 2>> build_thread_tier0_miss_;
   mutable int n_tier0_miss_coverage_ = 0;
   mutable int n_tier0_miss_mismatch_ = 0;
-
-  // Last-computed axis-D (sigma_scale) scale, for debug logging only.
-  mutable double last_density_scale_ = 1.0;
-
-  // CQ-37 axis D "chi2" level's cross-frame state.
-  //
-  // CQ-36 M4 (coding inbox, 2026-09-17): the FIRST version of this made
-  // chi2_ema_ the applied scale directly (scale = chi2_ema_). That closes
-  // the loop on the wrong variable: chi2_ema_ is an EMA of MEASURED
-  // (post-scale) reduced_chi2, and scaling sigma_squared by s makes the
-  // next measurement chi2/s -- so "scale = last measured chi2" has its
-  // fixed point where scale = raw_chi2/scale, i.e. scale* = sqrt(raw_chi2),
-  // NOT raw_chi2 itself.
-  //
-  // FIX: chi2_scale_ is a SEPARATE, persistent, multiplicatively-
-  // ACCUMULATED state -- an integral controller, not a direct assignment.
-  mutable double chi2_ema_ = 1.0;
-  mutable double chi2_scale_ = 1.0;
-  mutable int    chi2_ema_frames_ = 0;
-
-  // Axis A/B (residual_weighting) engagement/magnitude, this frame.
-  mutable CollapseStats collapse_stats_;
-  mutable PerResidualStats per_residual_stats_;
 
   mutable EkfUpdate ekf_;
 

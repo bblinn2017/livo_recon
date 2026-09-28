@@ -226,46 +226,14 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   const double sin_angle_err = std::sin(std::max(1e-6, angle_err_deg * M_PI / 180.0));
   opts_.deskew.sigma_a2 = sin_angle_err * sin_angle_err;
 
-  // CQ-28: re-lands "woodbury_plane_correction" as a standalone, config-
-  // gated, inert-by-default mode. CQ-31: "woodbury_divpos" retired.
+  // Independent control or exact per-VoxelPlane covariance marginalization.
   cfg.mode("lio/residual_redundancy/mode", opts_.residual_redundancy.mode, "off",
-           { "off", "woodbury", "woodbury_rescale", "woodbury_directional" });
+           { "off", "woodbury" });
   const bool rr = opts_.residual_redundancy.mode != "off";
   cfg.nested<double>(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/rho",
                      opts_.residual_redundancy.rho, 1.0);
   cfg.nested<double>(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/max_discount",
                      opts_.residual_redundancy.max_discount, 0.9);
-
-  // CQ-70: split information update -- see CovRedundancyDiscountOptions's
-  // own doc comment in lio_base.h for the full derivation.
-  cfg.mode("lio/ekf/cov_redundancy_discount", opts_.cov_redundancy_discount.mode, "off",
-           { "off", "info_gain", "fixed" });
-  cfg.nested<double>(opts_.cov_redundancy_discount.mode == "fixed", "lio/ekf/cov_redundancy_discount=fixed",
-                     "lio/ekf/cov_redundancy_kappa", opts_.cov_redundancy_discount.kappa, 1.0);
-
-  // CQ-37 axis A (residual-set reduction) and axis B (per-residual
-  // reweight).
-  cfg.mode("lio/residual_weighting/collapse", opts_.residual_weighting.collapse, "off",
-           { "off", "plane_averaged" });
-  cfg.mode("lio/residual_weighting/per_residual", opts_.residual_weighting.per_residual, "off",
-           { "off", "count_weighted", "count_weighted_renorm", "info_gain" });
-  // Item 1b: plane_averaged collapses every plane group to exactly one
-  // residual (k==1 everywhere afterward), which makes count_weighted*'s
-  // k-scaling and axis C's group.size()<2 guard both no-ops -- refuse the
-  // composition rather than silently running a degenerate combination.
-  if (opts_.residual_weighting.collapse == "plane_averaged" &&
-      (opts_.residual_weighting.per_residual == "count_weighted" ||
-       opts_.residual_weighting.per_residual == "count_weighted_renorm" ||
-       opts_.residual_redundancy.mode != "off"))
-    cfg.requireCombination(
-        "lio/residual_weighting/collapse=plane_averaged collapses every plane "
-        "group to exactly one residual, which makes lio/residual_weighting/"
-        "per_residual=count_weighted* (k-scaling; k==1 everywhere after "
-        "collapsing) and lio/residual_redundancy/mode!=off (group.size()<2 "
-        "guard) both no-ops -- an inert flag left set is a lie about what "
-        "the run did (CQ-37 item 1b, the use_bins/redund_groups lesson). Set "
-        "per_residual to off or info_gain, and residual_redundancy/mode to "
-        "off, when collapsing -- or drop the collapse.");
 
   // CQ-31 item 5: three independently-switchable scalar P controls, all
   // default-identity.
@@ -288,38 +256,6 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
            opts_.deskew.time_based_process_noise, "var_acc",
            { "none", "state", "var_acc" });
 
-  // CQ-37 axis D: ONE global scalar on every residual's sigma_squared,
-  // BEFORE accumulation.
-  cfg.refuseIfSet("lio/ekf/density_sigma_mode",
-      "RENAMED under CQ-37 axis D: use lio/ekf/sigma_scale_mode with level "
-      "'density_linear' (old 'linear'), 'density_sqrt' (old 'sqrt') or "
-      "'density_quadratic' (old 'quadratic') -- the shape is unchanged, "
-      "only the key/level names moved so this axis no longer shares a "
-      "namespace with a name describing only one of its five levels.");
-  cfg.refuseIfSet("lio/ekf/density_sigma_ref",
-      "RENAMED under CQ-37 axis D: use lio/ekf/sigma_scale/density_ref, "
-      "nested under sigma_scale_mode = density_*.");
-  cfg.mode("lio/ekf/sigma_scale_mode", opts_.sigma_scale.mode, "off",
-           { "off", "density_linear", "density_sqrt", "density_quadratic",
-             "info_gain_derived", "chi2" });
-  const bool ssm_density = opts_.sigma_scale.densityOn();
-  cfg.nested<double>(ssm_density, "lio/ekf/sigma_scale_mode=density_*",
-                     "lio/ekf/sigma_scale/density_ref", opts_.sigma_scale.density_ref, 0.0);
-  if (!ssm_density) opts_.sigma_scale.density_ref = 0.0;
-  else if (!(opts_.sigma_scale.density_ref > 0.0))
-    cfg.requireCombination(
-        "lio/ekf/sigma_scale/density_ref must be > 0 when lio/ekf/sigma_scale_mode "
-        "is '" + opts_.sigma_scale.mode + "' -- otherwise the mode is inert");
-  const bool ssm_bounded = opts_.sigma_scale.infoGainDerivedOn() || opts_.sigma_scale.chi2On();
-  cfg.nested<double>(ssm_bounded, "lio/ekf/sigma_scale_mode=info_gain_derived|chi2",
-                     "lio/ekf/sigma_scale/bounds/min_ratio", opts_.sigma_scale.min_ratio, 0.01);
-  cfg.nested<double>(ssm_bounded, "lio/ekf/sigma_scale_mode=info_gain_derived|chi2",
-                     "lio/ekf/sigma_scale/bounds/max_ratio", opts_.sigma_scale.max_ratio, 100.0);
-  const bool ssm_chi2 = opts_.sigma_scale.chi2On();
-  cfg.nested<double>(ssm_chi2, "lio/ekf/sigma_scale_mode=chi2",
-                     "lio/ekf/sigma_scale/chi2/ema", opts_.sigma_scale.chi2_ema, 0.9);
-  cfg.nested<int>(ssm_chi2, "lio/ekf/sigma_scale_mode=chi2",
-                  "lio/ekf/sigma_scale/chi2/warmup_frames", opts_.sigma_scale.chi2_warmup_frames, 20);
 }
 
 // CQ-49: the shared finish -- refuse anything left unclaimed in the given
@@ -529,59 +465,6 @@ void LioProcBase::solveSystem(const std::vector<Residual>& residuals) const {
   ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
 }
 
-// CQ-70: see CovRedundancyDiscountOptions's own doc comment in lio_base.h.
-double LioProcBase::covRedundancyKappa() const {
-  const auto& o = opts_.cov_redundancy_discount;
-  if (!o.on()) return 1.0;
-  if (o.mode == "fixed") return o.kappa;
-  // mode == "info_gain": this frame's OWN final-iteration counters (not a
-  // one-frame lag -- see the doc comment on why this differs from
-  // sigma_scale's info_gain_derived level). No discount when there was
-  // nothing grouped to discount against.
-  if (redundancy_stats_.redund_n_raw > 0 && redundancy_stats_.redund_n_eff > 0)
-    return static_cast<double>(redundancy_stats_.redund_n_raw) /
-           static_cast<double>(redundancy_stats_.redund_n_eff);
-  return 1.0;
-}
-
-// CQ-37 axis D.  See LioProcOptions::SigmaScaleOptions's own doc comment for
-// each level's formula.
-void LioProcBase::applySigmaScale(std::vector<Residual>& residuals) const
-{
-  if (!opts_.sigma_scale.on() || residuals.empty()) return;
-
-  double scale = 1.0;
-  if (opts_.sigma_scale.densityOn()) {
-    const double x = residuals.size() / opts_.sigma_scale.density_ref;
-    scale = x;
-    if (opts_.sigma_scale.mode == "density_sqrt")      scale = std::sqrt(x);
-    else if (opts_.sigma_scale.mode == "density_quadratic") scale = x * x;
-    scale = std::max(1.0, scale);  // unchanged from the former density_sigma_mode: never shrinks below baseline
-  } else if (opts_.sigma_scale.infoGainDerivedOn()) {
-    // One-frame lag, documented in SigmaScaleOptions's own comment: axis D
-    // runs before accumulation, so THIS frame's redund_n_raw/n_eff do not
-    // exist yet -- redundancy_stats_ still holds the PREVIOUS frame's
-    // values at this point in the call sequence.
-    if (redundancy_stats_.redund_n_raw > 0 && redundancy_stats_.redund_n_eff > 0)
-      scale = static_cast<double>(redundancy_stats_.redund_n_raw) /
-              static_cast<double>(redundancy_stats_.redund_n_eff);
-    scale = std::min(std::max(scale, opts_.sigma_scale.min_ratio), opts_.sigma_scale.max_ratio);
-  } else if (opts_.sigma_scale.chi2On()) {
-    // CQ-36 M4 fix: chi2_scale_ is the persistent, multiplicatively-
-    // accumulated state (updated post-solve, in each derived class's own
-    // processLIO()) -- NOT the raw chi2_ema_ reading.
-    scale = std::min(std::max(chi2_scale_, opts_.sigma_scale.min_ratio), opts_.sigma_scale.max_ratio);
-  }
-
-  for (auto& r : residuals) {
-    r.sigma_squared *= scale;
-    // Item 1c: buildResiduals() has already folded plane_var_term into
-    // sigma_squared by this point, so the two must move together.
-    if (r.plane_var_term > 0.0) r.plane_var_term *= scale;
-  }
-  last_density_scale_ = scale;
-}
-
 double LioProcBase::estimateStateCorrection(
   const std::vector<PointXYZCov>& pts,
   V3D &dtheta,
@@ -594,19 +477,6 @@ double LioProcBase::estimateStateCorrection(
   }
   if (residuals_.empty())
     return 0.0;
-
-  // CQ-37: axes A (collapse) and B (per_residual) run first -- A changes
-  // WHICH residuals exist, B then reweights whatever A left -- axis D
-  // (applySigmaScale) applies its one global scalar last.
-  if (opts_.residual_weighting.collapseOn())
-    collapse_stats_ = applyResidualCollapse(residuals_);
-  else
-    collapse_stats_ = CollapseStats{};
-  if (opts_.residual_weighting.perResidualOn())
-    per_residual_stats_ = applyPerResidualReweight(residuals_, opts_.residual_weighting.per_residual);
-  else
-    per_residual_stats_ = PerResidualStats{};
-  applySigmaScale(residuals_);
 
   double avg_res = 0.0;
   for (const auto& r : residuals_)
@@ -689,16 +559,6 @@ bool LioProcBase::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, double
     buildResiduals(mg.points, residuals_);
   }
   if (residuals_.empty()) return false;
-
-  if (opts_.residual_weighting.collapseOn())
-    collapse_stats_ = applyResidualCollapse(residuals_);
-  else
-    collapse_stats_ = CollapseStats{};
-  if (opts_.residual_weighting.perResidualOn())
-    per_residual_stats_ = applyPerResidualReweight(residuals_, opts_.residual_weighting.per_residual);
-  else
-    per_residual_stats_ = PerResidualStats{};
-  applySigmaScale(residuals_);
 
   avg_res = 0.0;
   for (const auto& r : residuals_)

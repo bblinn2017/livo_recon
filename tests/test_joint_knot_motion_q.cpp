@@ -24,16 +24,19 @@ int main()
 
   // Isotropic contribution preserves the trace of scale^2*a*a^T's
   // diagonal-energy approximation and adds the calibrated per-axis floor.
-  const double iso = std::min(scale * scale * a.squaredNorm() / 3.0, cap);
+  const double debiased_iso_energy = std::max(
+      0.0, a.squaredNorm() / 3.0 - floor.mean());
+  const double iso = std::min(scale * scale * debiased_iso_energy, cap);
   const V3D q_iso = floor + V3D::Constant(iso);
-  if (std::abs((q_iso - floor).sum() - scale * scale * a.squaredNorm()) > 1e-12)
-    return fail("isotropic dynamic-Q trace", (q_iso - floor).sum(),
-                scale * scale * a.squaredNorm());
+  if (std::abs((q_iso - floor).sum() - 3.0 * iso) > 1e-12)
+    return fail("noise-debiased isotropic dynamic-Q trace",
+                (q_iso - floor).sum(), 3.0 * iso);
 
   // Axis-aware contribution follows component energy and is capped per axis.
-  V3D axis = scale * scale * a.array().square().matrix();
+  V3D axis = scale * scale *
+      (a.array().square().matrix() - floor).cwiseMax(0.0);
   for (int k = 0; k < 3; ++k) axis(k) = std::min(axis(k), cap);
-  const V3D expected(0.36, 0.5, 0.0);
+  const V3D expected(0.35996, 0.5, 0.0);
   if ((axis - expected).norm() > 1e-12)
     return fail("axis-aware dynamic-Q and cap", (axis - expected).norm(), 1e-12);
 
@@ -43,6 +46,13 @@ int main()
   const V3D filtered = beta * previous + (1.0 - beta) * current;
   if ((filtered - current).norm() > 0.0)
     return fail("beta=0 disables filtering", (filtered - current).norm(), 0.0);
+
+  // A signal whose filtered squared energy equals the calibrated stationary
+  // floor must contribute exactly zero dynamic variance.
+  const V3D stationary_energy = floor;
+  const V3D debiased = (stationary_energy - floor).cwiseMax(0.0);
+  if (debiased.norm() != 0.0)
+    return fail("stationary sensor power is not counted twice", debiased.norm(), 0.0);
 
   // Production sign convention: a stationary accelerometer reads -R^T*g,
   // so acc_unbiased + R^T*g is exactly zero.

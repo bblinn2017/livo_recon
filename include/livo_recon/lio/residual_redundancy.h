@@ -46,45 +46,9 @@
 // against -- so this module only ever touches groups with >= 2 residuals,
 // leaving every frame's non-redundant majority untouched.
 //
-// CQ-31, 2026-09-17: "woodbury_divpos" is RETIRED, and the fault was CQ-28's
-// own spec, not the implementation. The Woodbury group correction is a
-// rank-one DOWNDATE of HtH (it only ever subtracts c*(sumJ)(sumJ)^T on top
-// of a smaller per-residual sum), so by Weyl's inequality every eigenvalue
-// of the corrected HtH can only be <= the corresponding eigenvalue of the
-// naive HtH -- h_pp_min_eig CANNOT rise, and "preserve it exactly" is
-// satisfiable only on a measure-zero alignment between the downdate
-// direction and HtH's own eigenvectors. CQ-28's own item-4 sweep confirmed
-// this empirically: the GAMMA grid search fell back to 0 (== off) on every
-// tested frame of site2_robot_1's median cell. See standing/rank-one-
-// downdate in the register index. Two REPLACEMENTS, both exactly
-// satisfiable and neither needing a search, take its place:
-//
-// mode == "woodbury_rescale": apply the per-group Woodbury downdate exactly
-// as "woodbury" does, then multiply the ENTIRE corrected HtH by one scalar
-// s = lambda_min(HtH_naive) / lambda_min(HtH_corrected) (restricted to the
-// position block, matching h_pp_min_eig's own definition) -- this preserves
-// h_pp_min_eig EXACTLY, by construction, with no search. It inflates the
-// position block's trace back up in the process; the trace was never the
-// quantity worth preserving here (that is exactly what "count_weighted",
-// one of the five originally-deleted schemes, tried and lost 4-4.6x on
-// h_pp_min_eig doing the opposite -- preserving trace at eig's expense).
-//
-// mode == "woodbury_directional": project the TOTAL per-frame downdate
-// delta_HtH_total onto the subspace orthogonal to HtH's own minimum-
-// eigenvalue eigenvector (restricted to the position block) before adding
-// it, so the starved direction is untouched BY CONSTRUCTION rather than by
-// a global rescale of every direction. This is the more principled of the
-// two: redundancy concentrates in the DOMINANT directions (many residuals
-// sharing one plane normal), so a discount that acts there and spares the
-// weak direction is what "discount redundancy, protect conditioning" always
-// meant; woodbury_rescale protects the weak direction only as a side effect
-// of scaling everything, including the directions that legitimately earned
-// their discount.
-//
-// mode == "off" (default): this entire module is never called -- see the
-// call sites in lio_processing.cpp -- so there is zero risk of a
-// floating-point reordering making "off" differ from pre-CQ-28 behavior by
-// even one ULP.
+// mode == "off" (default): the module still computes diagnostic comparison
+// statistics, but it never mutates HtH/Htz. The independent accumulator runs
+// first in its original residual order, so the estimator update is unchanged.
 // ============================================================================
 
 namespace livo_recon
@@ -92,10 +56,8 @@ namespace livo_recon
 
 struct ResidualRedundancyOptions
 {
-  // "off" | "woodbury" | "woodbury_rescale" | "woodbury_directional".
-  // "woodbury_divpos" is GONE, not merely defaulted away -- CQ-31 item 3:
-  // resolveMode() below hard-fails with the Weyl reason rather than silently
-  // falling back to "off" the way the retired mode used to.
+  // "off" | "woodbury". Deprecated conditioning workarounds were removed;
+  // the live correlated mode is the direct covariance model above.
   std::string mode = "off";
 
   // Intra-plane correlation assumed for the shared plane_var_term component
@@ -173,6 +135,13 @@ struct ResidualRedundancyStats
   // X%" without switching it on.
   double naive_info_gain = 0.0;
   double woodbury_info_gain = 0.0;
+
+  // R45: number of groups (of redund_groups admitted, non-degenerate) whose
+  // raw discount 1-corrected_trace/naive_trace exceeded max_discount and was
+  // therefore clamped back toward the naive (uncorrected) information for
+  // that group -- i.e. max_discount actually bound and changed the result,
+  // not just a configured ceiling that happened not to matter.
+  int max_discount_bound_groups = 0;
 };
 
 // Groups `residuals` by plane_id; for every group with >= 2 members, computes
@@ -190,9 +159,6 @@ struct ResidualRedundancyStats
 // passing mode=="off" computes and returns stats but leaves ekf untouched,
 // so "off" still reproduces pre-CQ-28 behavior to the ULP.
 //
-// Hard-fails (std::runtime_error) if opts.mode == "woodbury_divpos" -- CQ-31
-// item 3: that mode is retired, not merely defaulted away, and this is the
-// enforcement point.
 ResidualRedundancyStats applyResidualRedundancyCorrection(
     const std::vector<Residual>& residuals,
     const ResidualRedundancyOptions& opts,

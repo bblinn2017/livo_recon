@@ -47,21 +47,11 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
         "coupled_joint_knots requires state/est/ba=true, state/est/bg=true, "
         "and state/est/gravity=true because knot-specific [bg,ba] and shared g "
         "are part of the joint state");
-  if (opts_.residual_weighting.collapseOn())
+  if (opts_.residual_redundancy.mode != "off" &&
+      opts_.residual_redundancy.mode != "woodbury")
     cfg.requireCombination(
-        "coupled_joint_knots requires lio/residual_weighting/collapse=off: "
-        "collapsing measurements with different timestamps would destroy "
-        "the unique knot Jacobian for each residual");
-  if (opts_.residual_weighting.perResidualOn())
-    cfg.requireCombination(
-        "coupled_joint_knots currently requires lio/residual_weighting/per_residual=off: "
-        "the legacy reweighter does not evaluate measurement-time knot Jacobians");
-  if (opts_.residual_redundancy.on())
-    cfg.requireCombination(
-        "coupled_joint_knots currently requires lio/residual_redundancy/mode=off");
-  if (opts_.cov_redundancy_discount.on())
-    cfg.requireCombination(
-        "coupled_joint_knots currently requires lio/ekf/cov_redundancy_discount=off");
+        "coupled_joint_knots supports lio/residual_redundancy/mode=off or "
+        "woodbury");
   if (cuda_enable_)
     cfg.requireCombination(
         "coupled_joint_knots currently requires cuda/enable=false");
@@ -87,6 +77,11 @@ std::string LioProcCoupled::engagementReport() const
       << " biases=knot_specific_markov"
       << " process_covariance=full_production_Q"
       << " gravity=unconstrained_additive_3vector"
+      << " lidar_information=" << opts_.residual_redundancy.mode
+      << " lidar_correlation_group=matched_plane_id"
+      << " lidar_correlation_rho=" << opts_.residual_redundancy.rho
+      << " lidar_correlation_max_discount="
+      << opts_.residual_redundancy.max_discount
       << " clipping=none";
   return out.str();
 }

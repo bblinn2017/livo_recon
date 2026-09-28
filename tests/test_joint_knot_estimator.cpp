@@ -320,6 +320,109 @@ int main()
     return fail("diagnostic correction split sums exactly to delta",
         (restore.delta - restore.lidar_delta - restore.prior_delta).norm(), 1e-12);
 
+  // Phase-3 algebra oracle: independent mode must retain the ordinary
+  // diagonal accumulation, while Woodbury mode must equal an explicit dense
+  // inverse of C = D + shared*11^T for one matched-plane group.
+  constexpr int lidar_dim = 5;
+  int plane_token = 0;
+  const void* plane_id = &plane_token;
+  std::vector<JointLidarRow> rows;
+  const double shared = 0.08;
+  const std::vector<double> independent_var{0.21, 0.34, 0.27};
+  const std::vector<double> residual_value{0.12, -0.07, 0.19};
+  Eigen::MatrixXd H_dense(3, lidar_dim);
+  H_dense << 1.0, 0.2, -0.3, 0.0, 0.5,
+             0.4, -0.8, 0.1, 0.7, 0.0,
+             -0.2, 0.3, 0.9, -0.4, 0.6;
+  for (int i = 0; i < 3; ++i)
+    rows.push_back(JointLidarRow{
+        H_dense.row(i), residual_value[i], independent_var[i] + shared,
+        shared, plane_id});
+  ResidualRedundancyOptions independent_options;
+  independent_options.mode = "off";
+  const JointLidarInformation independent = accumulateJointLidarInformation(
+      rows, lidar_dim, independent_options);
+  Eigen::MatrixXd expected_independent = Eigen::MatrixXd::Zero(lidar_dim, lidar_dim);
+  Eigen::VectorXd expected_independent_b = Eigen::VectorXd::Zero(lidar_dim);
+  for (int i = 0; i < 3; ++i) {
+    const double w = 1.0 / (independent_var[i] + shared);
+    expected_independent.noalias() += w * H_dense.row(i).transpose() * H_dense.row(i);
+    expected_independent_b.noalias() += -w * H_dense.row(i).transpose() * residual_value[i];
+  }
+  if ((independent.Gamma - expected_independent).norm() >= 1e-12 ||
+      (independent.b - expected_independent_b).norm() >= 1e-12)
+    return fail("independent joint LiDAR accumulation matches diagonal oracle");
+
+  ResidualRedundancyOptions woodbury_options;
+  woodbury_options.mode = "woodbury";
+  woodbury_options.rho = 1.0;
+  woodbury_options.max_discount = 1.0;
+  const JointLidarInformation woodbury = accumulateJointLidarInformation(
+      rows, lidar_dim, woodbury_options);
+  Eigen::Matrix3d C = Eigen::Matrix3d::Constant(shared);
+  for (int i = 0; i < 3; ++i) C(i, i) += independent_var[i];
+  const Eigen::Vector3d r_dense(
+      residual_value[0], residual_value[1], residual_value[2]);
+  const Eigen::MatrixXd expected_woodbury =
+      H_dense.transpose() * C.inverse() * H_dense;
+  const Eigen::VectorXd expected_woodbury_b =
+      -H_dense.transpose() * C.inverse() * r_dense;
+  if ((woodbury.Gamma - expected_woodbury).norm() >= 1e-11 ||
+      (woodbury.b - expected_woodbury_b).norm() >= 1e-11)
+    return fail("Woodbury joint LiDAR accumulation matches dense C inverse");
+  if ((woodbury.Gamma - independent.Gamma).norm() <= 1e-6)
+    return fail("correlated and independent joint LiDAR information differ");
+  if (woodbury.redundancy_stats.redund_groups != 1 ||
+      woodbury.redundancy_stats.redund_n_raw != 3)
+    return fail("joint LiDAR redundancy engagement is reported");
+  if (woodbury.redundancy_stats.max_discount_bound_groups != 0)
+    return fail("max_discount_bound_groups is 0 when max_discount=1.0 never binds",
+        woodbury.redundancy_stats.max_discount_bound_groups, 0.0);
+
+  // A group of duplicate (identical H, high shared-variance-fraction)
+  // measurements has a large TRUE discount (naively triple-counting one
+  // measurement as three independent ones) -- verified externally at
+  // discount ~= 0.643 for these exact numbers. A max_discount below that
+  // must actually clamp, and the clamped result must land exactly on the
+  // max_discount-scaled blend between naive and corrected, not merely
+  // differ from the unclamped correction.
+  std::vector<JointLidarRow> dup_rows;
+  Eigen::RowVectorXd H_dup = Eigen::RowVectorXd::Zero(lidar_dim);
+  H_dup(0) = 1.0;
+  const double dup_shared = 0.09, dup_independent_var = 0.01;
+  for (int i = 0; i < 3; ++i)
+    dup_rows.push_back(JointLidarRow{
+        H_dup, 0.1, dup_independent_var + dup_shared, dup_shared, plane_id});
+  ResidualRedundancyOptions unclamped_dup_options;
+  unclamped_dup_options.mode = "woodbury";
+  unclamped_dup_options.rho = 1.0;
+  unclamped_dup_options.max_discount = 1.0;
+  const JointLidarInformation unclamped_dup = accumulateJointLidarInformation(
+      dup_rows, lidar_dim, unclamped_dup_options);
+  if (unclamped_dup.redundancy_stats.max_discount_bound_groups != 0)
+    return fail("max_discount=1.0 does not bind on the duplicate-measurement group",
+        unclamped_dup.redundancy_stats.max_discount_bound_groups, 0.0);
+
+  ResidualRedundancyOptions clamped_options = unclamped_dup_options;
+  clamped_options.max_discount = 0.5;
+  const JointLidarInformation clamped = accumulateJointLidarInformation(
+      dup_rows, lidar_dim, clamped_options);
+  if (clamped.redundancy_stats.max_discount_bound_groups != 1)
+    return fail("max_discount=0.5 clamps the duplicate-measurement group and increments the bound counter",
+        clamped.redundancy_stats.max_discount_bound_groups, 1.0);
+
+  ResidualRedundancyOptions independent_dup_options;
+  independent_dup_options.mode = "off";
+  const JointLidarInformation naive_dup = accumulateJointLidarInformation(
+      dup_rows, lidar_dim, independent_dup_options);
+  const double scale = clamped_options.max_discount /
+      (1.0 - unclamped_dup.Gamma.trace() / naive_dup.Gamma.trace());
+  const Eigen::MatrixXd expected_clamped_gamma =
+      naive_dup.Gamma + scale * (unclamped_dup.Gamma - naive_dup.Gamma);
+  if ((clamped.Gamma - expected_clamped_gamma).norm() >= 1e-9)
+    return fail("clamped Gamma lands exactly on the max_discount-scaled naive/corrected blend",
+        (clamped.Gamma - expected_clamped_gamma).norm(), 0.0);
+
   std::cout << "joint-knot estimator invariants passed\n";
   return 0;
 }

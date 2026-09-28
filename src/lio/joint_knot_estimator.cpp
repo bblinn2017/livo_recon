@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
+#include <unordered_map>
 
 namespace livo_recon
 {
@@ -306,18 +307,152 @@ JointKnotPrior buildJointKnotImuPrior(
   return out;
 }
 
+JointLidarInformation accumulateJointLidarInformation(
+    const std::vector<JointLidarRow>& rows, int state_dimension,
+    const ResidualRedundancyOptions& options)
+{
+  if (options.mode != "off" && options.mode != "woodbury")
+    throw std::invalid_argument(
+        "joint-knot LiDAR information supports only residual_redundancy "
+        "modes off and woodbury");
+  if (options.rho < 0.0 || options.rho > 1.0 ||
+      options.max_discount < 0.0 || options.max_discount > 1.0)
+    throw std::invalid_argument(
+        "joint-knot residual redundancy requires rho and max_discount in [0,1]");
+  JointLidarInformation out;
+  out.Gamma = Eigen::MatrixXd::Zero(state_dimension, state_dimension);
+  out.b = Eigen::VectorXd::Zero(state_dimension);
+  out.mode = options.mode == "off" ? "independent" : "woodbury_plane";
+
+  // Preserve first-observed plane order. Pointer-hash iteration order would
+  // make the floating-point summation depend on allocator addresses even for
+  // an otherwise deterministic run.
+  std::unordered_map<const void*, size_t> group_index;
+  std::vector<std::vector<const JointLidarRow*>> groups;
+  for (const JointLidarRow& row : rows)
+  {
+    if (row.H.size() != state_dimension)
+      throw std::invalid_argument("joint LiDAR row has the wrong state dimension");
+    const double w = 1.0 / std::max(row.sigma_squared, 1e-12);
+    out.Gamma.noalias() += w * row.H.transpose() * row.H;
+    out.b.noalias() += -w * row.H.transpose() * row.residual;
+    if (row.plane_id != nullptr)
+    {
+      auto inserted = group_index.emplace(row.plane_id, groups.size());
+      if (inserted.second) groups.emplace_back();
+      groups[inserted.first->second].push_back(&row);
+    }
+  }
+
+  Eigen::MatrixXd delta_gamma = Eigen::MatrixXd::Zero(
+      state_dimension, state_dimension);
+  Eigen::VectorXd delta_b = Eigen::VectorXd::Zero(state_dimension);
+  double naive_trace_total = 0.0, corrected_trace_total = 0.0;
+  for (const auto& group : groups)
+  {
+    if (group.size() < 2) continue;
+    ++out.redundancy_stats.redund_groups_seen;
+    const double shared = options.rho * group.front()->plane_var_term;
+    for (const JointLidarRow* row : group)
+      if (std::abs(row->plane_var_term - group.front()->plane_var_term) >
+          1e-9 * std::max(1.0, std::abs(group.front()->plane_var_term)))
+        throw std::invalid_argument(
+            "rows sharing a plane_id must share plane_var_term");
+    if (!(shared > 0.0))
+    {
+      ++out.redundancy_stats.redund_groups_degenerate_pv;
+      continue;
+    }
+    std::vector<double> independent_weights;
+    independent_weights.reserve(group.size());
+    bool valid = true;
+    for (const JointLidarRow* row : group)
+    {
+      const double independent_variance = row->sigma_squared - shared;
+      if (!(independent_variance > 0.0)) { valid = false; break; }
+      independent_weights.push_back(1.0 / independent_variance);
+    }
+    if (!valid)
+    {
+      ++out.redundancy_stats.redund_groups_degenerate_var;
+      continue;
+    }
+
+    Eigen::MatrixXd naive_gamma = Eigen::MatrixXd::Zero(
+        state_dimension, state_dimension);
+    Eigen::VectorXd naive_b = Eigen::VectorXd::Zero(state_dimension);
+    Eigen::MatrixXd corrected_gamma = Eigen::MatrixXd::Zero(
+        state_dimension, state_dimension);
+    Eigen::VectorXd corrected_b = Eigen::VectorXd::Zero(state_dimension);
+    Eigen::VectorXd sum_weighted_h = Eigen::VectorXd::Zero(state_dimension);
+    double sum_weighted_r = 0.0, sum_weight = 0.0;
+    for (size_t i = 0; i < group.size(); ++i)
+    {
+      const JointLidarRow& row = *group[i];
+      const double naive_weight = 1.0 / std::max(row.sigma_squared, 1e-12);
+      const double weight = independent_weights[i];
+      naive_gamma.noalias() += naive_weight * row.H.transpose() * row.H;
+      naive_b.noalias() += -naive_weight * row.H.transpose() * row.residual;
+      corrected_gamma.noalias() += weight * row.H.transpose() * row.H;
+      corrected_b.noalias() += -weight * row.H.transpose() * row.residual;
+      sum_weighted_h.noalias() += weight * row.H.transpose();
+      sum_weighted_r += weight * row.residual;
+      sum_weight += weight;
+    }
+    const double coefficient = shared / (1.0 + shared * sum_weight);
+    corrected_gamma.noalias() -= coefficient *
+        sum_weighted_h * sum_weighted_h.transpose();
+    corrected_b.noalias() += coefficient * sum_weighted_h * sum_weighted_r;
+
+    const double naive_trace = naive_gamma.trace();
+    if (naive_trace > 0.0)
+    {
+      const double discount = 1.0 - corrected_gamma.trace() / naive_trace;
+      if (discount > options.max_discount)
+      {
+        const double scale = options.max_discount / discount;
+        corrected_gamma = naive_gamma + scale * (corrected_gamma - naive_gamma);
+        corrected_b = naive_b + scale * (corrected_b - naive_b);
+        ++out.redundancy_stats.max_discount_bound_groups;
+      }
+    }
+    ++out.redundancy_stats.redund_groups;
+    out.redundancy_stats.redund_n_raw += static_cast<int>(group.size());
+    const double corrected_trace = corrected_gamma.trace();
+    naive_trace_total += naive_trace;
+    corrected_trace_total += corrected_trace;
+    if (naive_trace > 0.0)
+      out.redundancy_stats.redund_n_eff += static_cast<int>(std::ceil(
+          group.size() * corrected_trace / naive_trace));
+    delta_gamma.noalias() += corrected_gamma - naive_gamma;
+    delta_b.noalias() += corrected_b - naive_b;
+  }
+  out.redundancy_stats.naive_info_gain = naive_trace_total;
+  out.redundancy_stats.woodbury_info_gain = corrected_trace_total;
+  if (naive_trace_total > 0.0)
+    out.redundancy_stats.redund_info_ratio =
+        corrected_trace_total / naive_trace_total;
+  if (options.mode == "woodbury")
+  {
+    out.Gamma += delta_gamma;
+    out.b += delta_b;
+  }
+  return out;
+}
+
 JointKnotSolve solveJointKnotInformation(
     const JointKnotTrajectory& current,
     const JointKnotTrajectory& imu_prior_mean,
     const JointKnotPrior& prior,
     const std::vector<Residual>& residuals,
     const std::vector<PointXYZCov>& evaluated_points,
-    JointKnotResidualTime residual_time)
+    JointKnotResidualTime residual_time,
+    const ResidualRedundancyOptions& redundancy_options)
 {
   JointKnotSolve out;
   const int D = current.dim();
-  out.Gamma_L = Eigen::MatrixXd::Zero(D,D);
-  out.b_L = Eigen::VectorXd::Zero(D);
+  std::vector<JointLidarRow> lidar_rows;
+  lidar_rows.reserve(residuals.size());
   out.residual_count_by_interval.assign(
       std::max(0, current.knotCount() - 1), 0);
   double abs_r = 0.0;
@@ -336,11 +471,17 @@ JointKnotSolve solveJointKnotInformation(
         ++interval_index;
       ++out.residual_count_by_interval[interval_index];
     }
-    const double w = 1.0 / std::max(residual.sigma_squared, 1e-12);
-    out.Gamma_L.noalias() += w * H.transpose() * H;
-    out.b_L.noalias() += -w * H.transpose() * residual.r;
+    lidar_rows.push_back(JointLidarRow{
+        H, residual.r, residual.sigma_squared,
+        residual.plane_var_term, residual.plane_id});
     abs_r += std::abs(residual.r);
   }
+  const JointLidarInformation lidar = accumulateJointLidarInformation(
+      lidar_rows, D, redundancy_options);
+  out.Gamma_L = lidar.Gamma;
+  out.b_L = lidar.b;
+  out.redundancy_stats = lidar.redundancy_stats;
+  out.lidar_information_mode = lidar.mode;
   out.mean_abs_residual = residuals.empty() ? 0.0 : abs_r / residuals.size();
   out.vec = current.boxminus(imu_prior_mean);
   out.A = prior.P_inverse + out.Gamma_L;

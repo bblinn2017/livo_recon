@@ -44,6 +44,11 @@ and LiDAR information are identifiable in real-data experiments.
 - [x] Stabilize every configured or calibration-derived P0 by symmetric
   eigendecomposition and a separately reported numerical eigenvalue floor.
 - [x] Preserve the R43 candidate and configured-P0 control as named overlays.
+- [x] Treat the zero-ambiguity P0 cells as an invalid overconfident boundary,
+  not as a missing candidate: they were stabilized numerically and were worse
+  than the selected nonzero-ambiguity region on real data.
+- [x] Retain the best observed R43 region as the named Phase-1 candidate while
+  keeping configured P0 as the baseline control.
 
 ## Stage 2 — motion-dependent Q_k
 
@@ -57,6 +62,8 @@ and LiDAR information are identifiable in real-data experiments.
 - [ ] Add programmatic real-data calibration/ablation for unidentified scales.
 - [x] Add optional low-pass excitation filtering; `beta=0` disables it.
 - [x] Bound each dynamic variance contribution independently.
+- [x] Subtract the calibrated stationary measurement-noise energy before
+  applying motion scale/cap so the stationary floor is not counted twice.
 - [x] Implement isotropic dynamic contribution (norm-squared/3 times identity).
 - [x] Implement axis-aware dynamic contribution while retaining full frame
   transformations into the propagation covariance.
@@ -66,14 +73,69 @@ and LiDAR information are identifiable in real-data experiments.
 
 ## Stage 3 — correlation-aware Gamma_L
 
-- [ ] Audit the existing residual-redundancy/Woodbury implementations and
+- [x] Audit the existing residual-redundancy/Woodbury implementations and
   document which production paths currently use them.
-- [ ] Port the chosen correlation model to the full joint-knot Jacobian.
-- [ ] Accumulate each correlated group as `H_g^T C_g^-1 H_g` and
+- [x] Port the existing matched-plane shared-uncertainty model to the full
+  joint-knot Jacobian as an experimental first correlation model.
+- [x] Accumulate each correlated group as `H_g^T C_g^-1 H_g` and
   `-H_g^T C_g^-1 r_g` in the one canonical joint solve.
-- [ ] Preserve an independent-residual baseline mode.
+- [x] Preserve an independent-residual baseline mode.
+- [x] Add a dense-`C^-1` algebra oracle and compact all-scan engagement and
+  information diagnostics.
 - [ ] Validate information growth versus residual density/redundancy.
+- [ ] Identify and validate correlations beyond shared map-plane uncertainty
+  before enabling a broader live covariance model; do not fold prior-state or
+  deskew uncertainty into measurement covariance and count it twice.
 - [ ] Re-evaluate P0/Q_k consistency only after Gamma_L is corrected.
+
+The existing model groups by matched map-plane identity and represents the
+shared plane-fit variance with a rank-one covariance term. Legacy decoupled
+code also contains rescale/directional variants tied to its 6-D pose block;
+those were intentionally not ported because there is no canonical equivalent
+position subspace in the extended knot state. The new joint path accepts only
+`off` and the mathematically direct `woodbury` model.
+
+### Incremental Stage-3 sequence
+
+Do not introduce the broad surface/RBF model in the same behavioral experiment
+as the first per-plane correction. At every step retain the preceding mode as
+a control and measure whether covariance consistency improves without making
+the stationary trajectory worse.
+
+1. **Independent residual control.** Retain the current diagonal `Gamma_L`.
+2. **Per-`VoxelPlane` information aggregation.** Marginalize the shared
+   plane-fit uncertainty within each exact `plane_id` and add the resulting
+   group `(Gamma_g,b_g)` once to the canonical joint solve. This is implemented
+   by the joint-knot Woodbury path. It is information aggregation, not a
+   literal averaged scalar residual, so point-specific timestamps and knot
+   Jacobians are preserved.
+3. **Validate overconfidence reduction.** Compare information ratio,
+   posterior covariance, normalized errors, first-frame correction, and 30 s
+   stationary drift against the independent control. Do not proceed merely
+   because trace information decreased.
+4. **Optional exact group compression.** If storage or assembly cost warrants
+   it, add covariance-whitened QR/SVD pseudo-residual compression and verify it
+   reproduces the uncompressed per-plane `(Gamma_g,b_g)` to numerical
+   tolerance. This is not required for estimator correctness.
+5. **Cross-voxel surface association.** Determine when adjacent `VoxelPlane`
+   objects represent one physical surface using normal, offset, adjacency, and
+   observation-history evidence. Keep this diagnostic-only until validated.
+6. **Broader surface covariance.** Only after step 5, add a surface-patch or
+   low-rank RBF latent term between plane-level groups. Use a dense small-case
+   oracle and a deterministic scalable approximation for live runs.
+
+The legacy `plane_averaged` residual-collapse mode is not step 2. It replaces
+multiple measurements with one scalar and is intentionally rejected by the
+coupled estimator because residuals at different point times have different
+joint-knot Jacobians.
+
+The residual-mode audit removed `plane_averaged`, both count-weighted modes,
+per-residual `info_gain`, and the legacy Woodbury rescale/directional
+workarounds. It also removed the density and adaptive-chi2 global residual
+scalers while retaining reduced chi-square as a read-only diagnostic. See
+`docs/RESIDUAL_MODE_AUDIT.md`. The only remaining
+`residual_redundancy` choices are the independent control and direct
+per-`VoxelPlane` covariance marginalization.
 
 ## Experiment and reporting constraints
 
