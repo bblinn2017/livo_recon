@@ -194,6 +194,9 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "voxel_map/plane/centred_accumulation", opts_->centred_accumulation, false);
   paramWarn<bool>(pnh, "voxel_map/map/snapshot_post_calibration",
                   opts_->snapshot_post_calibration, false);
+  paramWarn<std::string>(pnh, "voxel_map/map/bootstrap_mode", bootstrap_mode_, "aggregate");
+  if (bootstrap_mode_ != "aggregate" && bootstrap_mode_ != "sequential")
+    throw std::runtime_error("voxel_map/map/bootstrap_mode must be aggregate or sequential");
   paramWarn<std::string>(pnh, "voxel_map/plane/convergence_mode", opts_->convergence_mode, "normal");
   paramWarn<int>(pnh, "voxel_map/plane/min_frames_to_converge", opts_->min_frames_to_converge, 5);
   paramWarn<int>(pnh, "voxel_map/plane/min_frames_to_init", opts_->min_frames_to_init, 1);
@@ -481,8 +484,47 @@ VoxelKey VoxelMap::worldToKey(const V3D& p_world) const
 }
 
 void VoxelMap::updateMap(MeasureGroup& mg) {
+  updateMapInternal(mg, true);
+}
+
+void VoxelMap::bootstrap(const std::vector<std::vector<PointXYZCov>>& observations)
+{
+  if (!isEmpty() || frame_idx_ != 0)
+    throw std::logic_error("VoxelMap bootstrap requires a fresh map");
+
+  if (bootstrap_mode_ == "aggregate") {
+    // Aggregate is the ordinary one-shot map fit over the flattened prepared
+    // population. Do not enable sequential-only anti-lock semantics here.
+    setBootstrapInsertion(false);
+    size_t total = 0;
+    for (const auto& obs : observations) total += obs.size();
+    MeasureGroup mg;
+    mg.points.reserve(total);
+    for (const auto& obs : observations)
+      mg.points.insert(mg.points.end(), obs.begin(), obs.end());
+    updateMapInternal(mg, false);
+  } else {
+    setBootstrapInsertion(true);
+    for (const auto& obs : observations) {
+      MeasureGroup mg;
+      mg.points = obs;
+      updateMapInternal(mg, false);
+    }
+  }
+  setBootstrapInsertion(false);
+
+  // One initialization epoch regardless of how many stationary observations
+  // were inserted. Preserve R47's convention that the first real map-backed
+  // LIO query uses frame_idx_ == 1.
+  ++frame_idx_;
+  if (opts_->snapshot_post_calibration) writePostCalibrationSnapshot();
+}
+
+void VoxelMap::updateMapInternal(MeasureGroup& mg, bool advance_live_frame) {
   TimedScope ts_total(profiler_, "voxelmap");
-  setCurrentFrame(frame_idx_++);
+  const int insertion_frame = frame_idx_;
+  setCurrentFrame(insertion_frame);
+  if (advance_live_frame) ++frame_idx_;
   if (opts_->log_frame_stats_en) voxelPlaneFrameStatsReset();
   // The single point set (point_filter_num + ds_leaf_size, see measures.h's
   // docs on MeasureGroup::points) used for both voxel-map insertion and
@@ -603,7 +645,7 @@ void VoxelMap::updateMap(MeasureGroup& mg) {
     int denom_rejected_count = 0;
     double max_plane_var_trace = -1.0;
     voxelPlaneFrameStatsRead(denom_rejected_count, max_plane_var_trace);
-    debugLogFrameStats(mg.image.t + data_queues_->start_time, frame_idx_ - 1,
+    debugLogFrameStats(mg.image.t + data_queues_->start_time, insertion_frame,
                         denom_rejected_count, max_plane_var_trace,
                         lio_frame_diag_, stats_->planes.load(std::memory_order_relaxed),
                         stats_->total(),
@@ -611,7 +653,7 @@ void VoxelMap::updateMap(MeasureGroup& mg) {
                         stats_->converged.load(std::memory_order_relaxed),
                         voxelPlaneMaxCovarianceTrace());
   }
-  if (opts_->snapshot_post_calibration && frame_idx_ == 1)
+  if (advance_live_frame && opts_->snapshot_post_calibration && frame_idx_ == 1)
     writePostCalibrationSnapshot();
 }
 

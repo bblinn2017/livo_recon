@@ -136,6 +136,7 @@ public:
   // referencing a spline at all.
   virtual void deskewAndDownsample(MeasureGroup& mg) = 0;
 
+
   // Assumes deskewAndDownsample(mg) already ran this frame (mg.points
   // populated) -- see that method's doc comment for why this isn't called
   // internally here.

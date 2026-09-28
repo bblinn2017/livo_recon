@@ -282,6 +282,12 @@ void LivoReconNode::updateMaps(MeasureGroup& mg) {
   // call that used to live in this exact spot).
 }
 
+void LivoReconNode::completeCalibrationAndBootstrap()
+{
+  if (!ctx_.measures->calib_done.get() || !ctx_.voxel_map->isEmpty()) return;
+  ctx_.voxel_map->bootstrap(calib_proc_.getBootstrapObservations());
+}
+
 bool LivoReconNode::drainOnce()
 {
   while (cbk_proc_.syncMeasures()) continue;
@@ -349,6 +355,8 @@ void LivoReconNode::run()
 
     rate.sleep();
   }
+
+  completeCalibrationAndBootstrap();
 
   ros::Time last_pop_time = ros::Time::now();
   while (ros::ok())
@@ -470,6 +478,8 @@ void LivoReconNode::runOffline(const std::string& bag_path)
     ctx_.printer->print(PrintCategory::CALIB, calib_proc_.estimateFromBuffer());
     ctx_.printer->print(PrintCategory::PROFILER, ctx_.profiler->report());
   }
+
+  completeCalibrationAndBootstrap();
 
   // Main loop -- unlike FAST-LIVO2's runOffline(), no manual "vio_round_
   // pending, wait for async tracker, retry feeding" branch is needed: see

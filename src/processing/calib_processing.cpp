@@ -7,6 +7,7 @@
 #include <Eigen/Eigenvalues>
 #include "livo_recon/diagnostics/calibration_p0_writer.h"
 #include "livo_recon/utils/log/param_warn.h"
+#include "livo_recon/utils/algo/hashing.h"
 #include "livo_recon/utils/state/state.h"
 
 namespace livo_recon
@@ -28,6 +29,12 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
           legacy + "; use calib/stationary, calib/p0, and imu/process_noise");
   }
   paramWarn<int>(pnh, "calib/stationary/num_samples", opts_.num_samples, 200);
+  paramWarn<std::string>(pnh, "imu/ds/mode", opts_.ds_mode, "first");
+  if (opts_.ds_mode != "off" && opts_.ds_mode != "first" && opts_.ds_mode != "average")
+    throw std::runtime_error("imu/ds/mode must be off, first, or average");
+  paramWarn<double>(pnh, "imu/ds/ds_leaf_size", opts_.ds_leaf_size, 0.15);
+  if (opts_.ds_mode != "off" && !(opts_.ds_leaf_size > 0.0))
+    throw std::runtime_error("imu/ds/ds_leaf_size must be > 0 when downsampling is enabled");
   paramWarn<int>(pnh, "calib/stationary/stall_calls_max", opts_.stall_calls_max, 300);
   paramWarn<bool>(pnh, "calib/stationary/apply_to_state/gyro_bias",
                   opts_.apply_gyro_bias, true);
@@ -152,10 +159,10 @@ bool CalibProc::collectSamples()
     std::vector<PointXYZT> dry_run_points;
     data_queues_->popDryRunLidar(dry_run_points, calib_last_img_.t);
 
-    calib_points.insert(
-        calib_points.end(),
-        std::make_move_iterator(points.begin()),
-        std::make_move_iterator(points.end()));
+    // Preserve the scan boundary for the explicit post-calibration map
+    // bootstrap path. Keep the incumbent aggregate cloud too: aggregate
+    // mode below remains the exact regression control.
+    calib_observations_raw_.push_back(points);
 
     if (imu_samples.size() < 2)
     {
@@ -475,15 +482,41 @@ std::string CalibProc::estimateFromBuffer()
   const std::string done_msg = oss.str();
 
   data_queues_->setStartTime(calib_last_img_.t);
-  calib_last_img_.t = 0.;
-  for (auto& p : calib_points) p.t = 0.;
   calib_imu_samples.clear();
-
   measures_->curr_time.set(0.);
-  measures_->pushMeasureGroup(
-      MeasureGroup{std::move(calib_last_img_), std::move(calib_points), std::move(calib_imu_samples)});
+
+  prepareBootstrapObservations();
+  // Map seeding is now an explicit post-calibration lifecycle operation.
+  // Do not manufacture a synthetic MeasureGroup or route calibration points
+  // through IMU/LIO/VIO/EVO.
   measures_->calib_done.set(true);
   return done_msg;
+}
+
+void CalibProc::prepareBootstrapObservations()
+{
+  bootstrap_observations_.clear();
+  bootstrap_observations_.reserve(calib_observations_raw_.size());
+  const DsMode ds_mode = opts_.ds_mode == "average" ? DsMode::AVERAGE : DsMode::FIRST;
+
+  for (const auto& raw : calib_observations_raw_) {
+    std::vector<PointXYZCov> prepared;
+    prepared.reserve(raw.size());
+    for (const auto& p : raw) {
+      PointXYZCov q{state_->lidarToImu(p.p), M3D::Zero()};
+      q.t = 0.0;
+      q.raw_body_point = q.point;
+      prepared.push_back(q);
+    }
+
+    if (opts_.ds_mode == "off") {
+      bootstrap_observations_.push_back(std::move(prepared));
+    } else {
+      std::vector<PointXYZCov> downsampled;
+      voxelDownsample(prepared, downsampled, PointXYZCovKeyFn{opts_.ds_leaf_size}, ds_mode);
+      bootstrap_observations_.push_back(std::move(downsampled));
+    }
+  }
 }
 
 }  // namespace livo_recon

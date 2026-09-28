@@ -10,6 +10,8 @@ namespace livo_recon
 struct CalibProcOptions
 {
   int  num_samples       = 200;
+  std::string ds_mode = "first";
+  double ds_leaf_size = 0.15;
 
   // Calibration used to have no way to fail. collectSamples() returns false
   // whenever the buffer is short, estimateFromBuffer() reports "Calibrating
@@ -73,6 +75,9 @@ public:
   std::string loadParameters(ros::NodeHandle& pnh);
 
   std::string estimateFromBuffer();
+  const std::vector<std::vector<PointXYZCov>>& getBootstrapObservations() const
+  { return bootstrap_observations_; }
+  const ImageData& calibrationLastImage() const { return calib_last_img_; }
 private:
   bool        collectSamples();
   void        computeBiasAndNoise(V3D& acc_bias, V3D& gyro_bias,
@@ -84,6 +89,7 @@ private:
                                         const M3D& gyro_mean_cov);
   void        stabilizeP0();
   M3D         computeInitialRotation(const V3D& acc_bias) const;
+  void        prepareBootstrapObservations();
 
   // Why calibration is starving, counted rather than guessed. The prime
   // suspect is the `imu_samples.size() < 2` discard in collectSamples(): if
@@ -96,7 +102,8 @@ private:
   int    calib_stall_calls_      = 0;
   size_t calib_last_count_       = 0;
 
-  std::vector<PointXYZT> calib_points;
+  std::vector<std::vector<PointXYZT>> calib_observations_raw_;
+  std::vector<std::vector<PointXYZCov>> bootstrap_observations_;
   std::deque<ImuSample>  calib_imu_samples;
   ImageData              calib_last_img_;
 

@@ -17,6 +17,7 @@ public:
   std::string loadParameters(ros::NodeHandle& pnh) override;
 
   void updateMap(MeasureGroup& mg) override;
+  void bootstrap(const std::vector<std::vector<PointXYZCov>>& observations) override;
 
   void ensureNode(const VoxelKey &key);
   // tier0_had_plane (if non-null) is set whenever the PRIMARY voxel itself
@@ -91,6 +92,8 @@ public:
                                                   const ros::Time& stamp) override;
 
 private:
+  void updateMapInternal(MeasureGroup& mg, bool advance_live_frame);
+  std::string bootstrap_mode_ = "aggregate";
   // See setAllowConsistencyLog()'s doc comment above.
   bool allow_consistency_log_ = true;
 

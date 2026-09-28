@@ -293,6 +293,7 @@ void LioProcBase::ensureStationaryReference(const MeasureGroup& mg)
   stationary_reference_valid_ = true;
 }
 
+
 void LioProcBase::buildResiduals(
   const std::vector<PointXYZCov>& pts,
   std::vector<Residual>& residuals,

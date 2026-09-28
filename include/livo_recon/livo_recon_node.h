@@ -60,6 +60,7 @@ public:
 
 private:
   void loadParameters();
+  void completeCalibrationAndBootstrap();
   void estimateState(MeasureGroup& mg);
   void updateMaps(MeasureGroup& mg);
   // One iteration of run()'s post-CALIB drain loop (sync + pop + estimate +

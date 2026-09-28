@@ -225,6 +225,19 @@ void AkfMap::updateMap(MeasureGroup& mg)
   }
 }
 
+void AkfMap::bootstrap(const std::vector<std::vector<PointXYZCov>>& observations)
+{
+  // AKF has no stationary-observation convergence policy. Seed it once with
+  // the exact same prepared population used by VoxelMap aggregate mode.
+  MeasureGroup mg;
+  size_t total = 0;
+  for (const auto& obs : observations) total += obs.size();
+  mg.points.reserve(total);
+  for (const auto& obs : observations)
+    mg.points.insert(mg.points.end(), obs.begin(), obs.end());
+  updateMap(mg);
+}
+
 bool AkfMap::findPlaneResidual(const WorldPointCov& pt, Residual& res, bool* /*tier0_had_plane*/,
                                bool* /*had_converged_neighbor*/) const
 {

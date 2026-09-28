@@ -37,6 +37,13 @@ public:
   // omp_utils.h's pinOmpThreadsForDeterminism() doc comment for why).
   virtual void updateMap(MeasureGroup& mg) = 0;
 
+
+  // Explicit stationary calibration-map seed. CalibProc supplies one
+  // already-prepared/downsampled PointXYZCov vector per stationary LiDAR
+  // observation. The backend owns only the policy for consuming those
+  // observations (aggregate vs sequential); no estimator processing occurs.
+  virtual void bootstrap(const std::vector<std::vector<PointXYZCov>>& observations) = 0;
+
   // Per-point residual query, called from LioProc::buildResiduals()'s
   // existing per-point OMP loop (many thousands of calls/frame) -- must
   // be const/thread-safe with no shared mutable state touched across
