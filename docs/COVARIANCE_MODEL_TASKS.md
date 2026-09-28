@@ -35,8 +35,12 @@ and LiDAR information are identifiable in real-data experiments.
   later diagnostics cannot mistake configured inputs for effective P0.
 - [x] Make `initialization_consistency_all_scans.csv` report both configured
   inputs and actual effective P0 scalar projections.
-- [ ] Run the full-factorial R43 P0 sweep over known p/v variance, balanced
-  ambiguity scale, yaw variance, bias floors, and gating on/off.
+- [x] Run the full-factorial R43 P0 sweep over known p/v variance, balanced
+  ambiguity scale, yaw variance, bias floors, and gating on/off. 288/384
+  cells completed; the 96 `tilt_ba_ambiguity_accel_std=0` cells crash
+  (`scan-head covariance is not positive definite` in
+  `buildJointKnotImuPrior`'s LDLT check) — see R43's REPORT.md for the
+  root-cause finding. Documented only, not fixed, per explicit instruction.
 
 ## Stage 2 — motion-dependent Q_k
 
