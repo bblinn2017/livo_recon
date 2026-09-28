@@ -705,6 +705,22 @@ void VoxelMap::writePostCalibrationSnapshot() const
         out << m(r,c);
       }
   };
+  std::vector<std::tuple<int32_t, VoxelKey, int, int, int>> support_rows;
+  for (const auto& entry : voxel_map_)
+    if (entry.second) entry.second->appendBootstrapObservationSupport(entry.first, support_rows);
+  std::sort(support_rows.begin(), support_rows.end(), [](const auto& a, const auto& b) {
+    if (std::get<0>(a) != std::get<0>(b)) return std::get<0>(a) < std::get<0>(b);
+    return std::get<3>(a) < std::get<3>(b);
+  });
+
+  std::ofstream support_out(debugLogPath("post_calibration_voxel_observation_support.csv"));
+  support_out << "snapshot_frame,node_id,root_key_x,root_key_y,root_key_z,layer,observation_id,point_count\n";
+  for (const auto& r : support_rows) {
+    const auto& key = std::get<1>(r);
+    support_out << "0," << std::get<0>(r) << ',' << key.x << ',' << key.y << ',' << key.z
+                << ',' << std::get<2>(r) << ',' << std::get<3>(r) << ',' << std::get<4>(r) << '\n';
+  }
+
   for (const auto& r : rows) {
     out << "0," << r.node_id << ',' << r.root_key.x << ',' << r.root_key.y << ','
         << r.root_key.z << ',' << r.layer << ',';

@@ -94,6 +94,9 @@ struct PointXYZCov {
   // only a future per-point-time coupled Jacobian reads it.
   V3D raw_body_point = V3D::Zero();
 
+  // Diagnostic provenance for stationary map bootstrap. -1 for ordinary live points.
+  int bootstrap_observation_id = -1;
+
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
   PointXYZCov() = default;

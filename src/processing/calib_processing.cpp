@@ -500,7 +500,8 @@ void CalibProc::prepareBootstrapObservations()
   bootstrap_observations_.reserve(calib_observations_raw_.size());
   const DsMode ds_mode = opts_.ds_mode == "average" ? DsMode::AVERAGE : DsMode::FIRST;
 
-  for (const auto& raw : calib_observations_raw_) {
+  for (size_t obs_idx = 0; obs_idx < calib_observations_raw_.size(); ++obs_idx) {
+    const auto& raw = calib_observations_raw_[obs_idx];
     std::vector<PointXYZCov> prepared;
     prepared.reserve(raw.size());
     for (const auto& p : raw) {
@@ -511,10 +512,12 @@ void CalibProc::prepareBootstrapObservations()
     }
 
     if (opts_.ds_mode == "off") {
+      for (auto& q : prepared) q.bootstrap_observation_id = static_cast<int>(obs_idx);
       bootstrap_observations_.push_back(std::move(prepared));
     } else {
       std::vector<PointXYZCov> downsampled;
       voxelDownsample(prepared, downsampled, PointXYZCovKeyFn{opts_.ds_leaf_size}, ds_mode);
+      for (auto& q : downsampled) q.bootstrap_observation_id = static_cast<int>(obs_idx);
       bootstrap_observations_.push_back(std::move(downsampled));
     }
   }

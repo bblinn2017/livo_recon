@@ -109,6 +109,9 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     return;
   }
 
+  for (const auto& p : points_world)
+    if (p.bootstrap_observation_id >= 0) ++bootstrap_observation_support_[p.bootstrap_observation_id];
+
   if (!points_world.empty() && g_current_frame_idx != last_frame_idx_seen_) {
     last_frame_idx_seen_ = g_current_frame_idx;
     ++distinct_frames_;
@@ -388,6 +391,17 @@ void VoxelNode::appendPlaneSnapshots(
   if (status_ == VoxelStatus::PARENT)
     for (const VoxelNode* child : leaves_)
       if (child) child->appendPlaneSnapshots(root_key, out);
+}
+
+void VoxelNode::appendBootstrapObservationSupport(
+    const VoxelKey& root_key,
+    std::vector<std::tuple<int32_t, VoxelKey, int, int, int>>& out) const
+{
+  for (const auto& kv : bootstrap_observation_support_)
+    out.emplace_back(node_id_, root_key, layer_, kv.first, kv.second);
+  if (status_ == VoxelStatus::PARENT)
+    for (const VoxelNode* child : leaves_)
+      if (child) child->appendBootstrapObservationSupport(root_key, out);
 }
 
 }  // namespace livo_recon
