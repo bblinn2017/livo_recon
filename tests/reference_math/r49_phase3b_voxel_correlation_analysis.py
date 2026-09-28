@@ -122,7 +122,7 @@ def match_nodes_aggregate_sequential(planes_a, planes_b, prep, plane_model):
     ids_a, ids_b = set(planes_a), set(planes_b)
     matched = ids_a & ids_b
     only_a, only_b = ids_a - ids_b, ids_b - ids_a
-    for nid in matched:
+    for nid in sorted(matched, key=lambda x: int(x)):
         ra, rb = planes_a[nid], planes_b[nid]
         dcenter = math.sqrt(sum((f(ra, k) - f(rb, k))**2 for k in ("center_x", "center_y", "center_z")))
         dnormal = math.sqrt(sum((f(ra, k) - f(rb, k))**2 for k in ("normal_x", "normal_y", "normal_z")))
