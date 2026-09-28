@@ -331,6 +331,11 @@ public:
 protected:
   virtual const char* firstFrameArchitectureName() const { return "unknown"; }
 
+  // One immutable origin shared by every stationary diagnostic. It is
+  // captured at the first post-calibration frame that actually queries the
+  // map, never reset per frame, and is deliberately outside the estimator.
+  void ensureStationaryReference(const MeasureGroup& mg);
+
 public:
 
   // History (270-279): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-270
@@ -383,6 +388,18 @@ protected:
   mutable std::vector<std::array<int, 2>> build_thread_miss_;
   mutable int n_miss_coverage_ = 0;
   mutable int n_miss_mismatch_ = 0;
+
+  // [thread][0] = input points that reached at least one statistical gate;
+  // [thread][1] = points rejected overall after at least one statistical
+  // gate rejection. These are point counts, not candidate-plane counts.
+  mutable std::vector<std::array<int, 2>> build_thread_gate_audit_;
+  mutable int n_statistical_gate_candidates_ = 0;
+  mutable int n_statistical_gate_rejections_ = 0;
+
+  bool stationary_reference_valid_ = false;
+  M3D stationary_reference_R_ = M3D::Identity();
+  V3D stationary_reference_p_ = V3D::Zero();
+  V3D stationary_reference_v_ = V3D::Zero();
 
   // Tier0 (primary voxel)-specific miss classification -- see VoxelMap::
   // findPlaneResidual()'s tier0_had_plane out-param.

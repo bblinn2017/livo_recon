@@ -121,6 +121,7 @@ add_executable(livo_recon_node
   src/diagnostics/log/consistency_log.cpp
   src/diagnostics/eval/nees_logger.cpp
   src/diagnostics/gt_interp.cpp
+  src/diagnostics/stationary_diagnostic_writer.cpp
   src/main.cpp
   src/livo_recon_node.cpp
   src/node_context.cpp

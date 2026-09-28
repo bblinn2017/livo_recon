@@ -15,6 +15,11 @@ void writeJointKnotIterationDiagnostics(
     int residual_count, double mean_gating_cov_trace,
     double max_gating_cov_trace);
 
+void writeJointKnotAllScanDiagnostics(
+    const std::string& test_id, int scan_id, int iteration, double t_abs,
+    const M3D& reference_R, const V3D& reference_p, const V3D& reference_v,
+    const JointKnotTrajectory& before, const JointKnotTrajectory& after);
+
 void writeJointKnotStateChainDiagnostics(
     const std::string& test_id, int scan_id, int iteration,
     const std::string& phase, double t_abs,
@@ -24,7 +29,8 @@ void writeJointKnotScanSummaryDiagnostics(
     const std::string& test_id, int scan_id, double t_abs,
     int completed_iterations, const std::string& stop_reason,
     const StateGroup& post_imu, const StateGroup& final_state,
-    const MeasureGroup& measures);
+    const M3D& reference_R, const V3D& reference_p,
+    const V3D& reference_v);
 
 void writeJointKnotCovarianceDiagnostics(
     const std::string& test_id, int scan_id, double t_abs,

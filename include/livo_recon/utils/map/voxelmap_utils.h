@@ -108,6 +108,12 @@ struct Residual
 //     so it belongs in plane-match *gating* (a wider gate is reasonable
 //     when the prior pose is less certain) but must NOT also inflate the
 //     residual *weight*, which would double-count it.
+struct GateAudit
+{
+  bool reached_statistical_gate = false;
+  bool rejected_by_statistical_gate = false;
+};
+
 struct WorldPointCov
 {
   V3D point;
@@ -121,6 +127,11 @@ struct WorldPointCov
   // the information solve and adding it to the solve weight would count it
   // twice.
   bool include_pose_cov_in_gate = false;
+
+  // Optional per-input-point audit sink. VoxelPlane may be queried against
+  // several candidate planes; flags are therefore OR-accumulated. The
+  // caller decides whether the point was ultimately admitted by any plane.
+  GateAudit* gate_audit = nullptr;
 
   // History (66-87): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-66
   V3D body_point = V3D::Zero();

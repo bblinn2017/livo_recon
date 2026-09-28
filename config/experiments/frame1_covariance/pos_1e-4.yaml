@@ -1,0 +1,4 @@
+# Position-only initialization ablation. Loaded after ntu_viral.yaml.
+state:
+  cov:
+    pos: 1.0e-4   # 1 cm marginal sigma per axis

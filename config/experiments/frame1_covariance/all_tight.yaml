@@ -1,0 +1,9 @@
+# Interaction check only, after the one-factor experiments.
+state:
+  cov:
+    rot: 1.0e-4
+    pos: 1.0e-6
+    vel: 1.0e-4
+    bg: 1.0e-7
+    ba: 1.0e-7
+    gravity: 1.0e-7

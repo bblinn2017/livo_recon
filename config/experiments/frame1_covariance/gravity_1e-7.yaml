@@ -1,0 +1,4 @@
+# One-factor post-gravity-alignment initialization ablation.
+state:
+  cov:
+    gravity: 1.0e-7

@@ -1,0 +1,6 @@
+# Strong attitude prior sensitivity check. Gravity alignment constrains tilt,
+# but not yaw; interpret this only alongside gravity-tilt and full-attitude
+# diagnostics.
+state:
+  cov:
+    rot: 1.0e-6   # 0.001 rad marginal sigma per tangent axis

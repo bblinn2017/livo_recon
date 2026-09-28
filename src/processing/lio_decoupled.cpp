@@ -1,4 +1,5 @@
 #include "livo_recon/processing/lio_decoupled.h"
+#include "livo_recon/diagnostics/stationary_diagnostic_writer.h"
 #include "livo_recon/processing/imu_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/config_resolve.h"
@@ -105,9 +106,14 @@ static void logFirstFrameCovarianceBudget(const char* architecture, const char* 
     const int ir=StateGroup::idxR(), ip=StateGroup::idxP(), iv=StateGroup::idxV();
     rp=Pi.block<3,3>(ir,ip).norm(); rr=Pi.block<3,3>(ir,iv).norm(); rv=Pi.block<3,3>(ip,iv).norm(); pv=Pi.block<3,3>(ip,ir).norm();
   }
+  const int ip = StateGroup::idxP();
+  const auto positionTrace = [ip](const Eigen::MatrixXd& P) {
+    return P.rows() >= ip + 3 && P.cols() >= ip + 3
+        ? P.block<3,3>(ip, ip).trace() : 0.0;
+  };
   csv << std::setprecision(17) << architecture << ',' << phase << ',' << scan_id << ',' << iteration << ',' << t_abs << ',' << mg.image.t << ','
-      << Pi.rows() << ',' << (Pb.size()?Pb.trace():0.0) << ',' << (Pi.size()?Pi.trace():0.0) << ',' << (Pl.size()?Pl.trace():0.0) << ','
-      << (dPi.size()?dPi.trace():0.0) << ',' << (dPl.size()?dPl.trace():0.0) << ','
+      << Pi.rows() << ',' << positionTrace(Pb) << ',' << positionTrace(Pi) << ',' << positionTrace(Pl) << ','
+      << positionTrace(dPi) << ',' << positionTrace(dPl) << ','
       << firstFrameCovMinEig(Pb) << ',' << firstFrameCovMaxEig(Pb) << ',' << firstFrameCovMinEig(Pi) << ',' << firstFrameCovMaxEig(Pi) << ','
       << firstFrameCovMinEig(Pl) << ',' << firstFrameCovMaxEig(Pl) << ',' << (have_q?qeff.trace():std::numeric_limits<double>::quiet_NaN()) << ','
       << (have_q?fpf.trace():std::numeric_limits<double>::quiet_NaN()) << ',' << qerr << ',' << rp << ',' << rr << ',' << rv << '\n';
@@ -1551,8 +1557,7 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
   }
 
   if (voxel_map_->isEmpty()) return {};
-
-  if (voxel_map_->isEmpty()) return {};
+  ensureStationaryReference(mg);
 
   if (opts_.dry_run_point_filter_num > 0 && opts_.log_debug_en)
     runDryRunShadowPass(mg);
@@ -1626,6 +1631,7 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
     }
 
     for (; iter < opts_.max_iterations; iter++) {
+      const StateGroup iteration_before = *state_;
       std::vector<V3D> cp_pos_before, cp_phi_before;
       const bool log_knot_updates = opts_.log_debug_en && spline_ok_ && dopts_.spline.splineOn();
       if (log_knot_updates) {
@@ -1682,6 +1688,12 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
       // is defined over.
       setDiagnosticGnIteration(iter);
       double error = estimateStateCorrection(mg.points, dtheta, dt, /*allow_consistency_log=*/iter == 0);
+      writeStationaryIterationDiagnostics(
+          firstFrameArchitectureName(), firstFrameArchitectureName(),
+          voxel_map_->frame_idx_, iter,
+          mg.image.t + data_queues_->start_time, stationary_reference_R_,
+          stationary_reference_p_, stationary_reference_v_, iteration_before,
+          *state_, residuals_);
       if (voxel_map_->frame_idx_ == 1) {  // see the frame_idx_ fix comment above
         logDecoupledFirstFrame("post_iteration", 0, iter, mg, *state_, mg.image.t + data_queues_->start_time, static_cast<int>(residuals_.size()), decoupledFirstFrameHashPoints(mg.points), decoupledFirstFrameHashResiduals(residuals_), voxel_map_->last_n_map_pts_, voxel_map_->last_n_active_voxels_, mg.prior_pos, mg.prior_rot);
         logFirstFrameStateChain("decoupled", "post_iteration", 0, iter, mg, *state_, mg.image.t + data_queues_->start_time);

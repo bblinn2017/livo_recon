@@ -219,11 +219,56 @@ void writeJointKnotStateChainDiagnostics(
   out.flush();
 }
 
+void writeJointKnotAllScanDiagnostics(
+    const std::string& test_id, int scan_id, int iteration, double t_abs,
+    const M3D& reference_R, const V3D& reference_p, const V3D& reference_v,
+    const JointKnotTrajectory& before, const JointKnotTrajectory& after)
+{
+  static PersistentLogStream log("joint_knot_all_scans.csv");
+  bool first = false;
+  std::ofstream& out = log.stream(&first);
+  if (first)
+    out << "test_id,scan_id,iteration,t_abs,knot_index,knot_t,immutable_head,"
+           "before_p_distance,after_p_distance,dp_x,dp_y,dp_z,dp_norm,"
+           "before_attitude_distance,after_attitude_distance,dtheta_x,dtheta_y,dtheta_z,dtheta_norm,"
+           "before_velocity_distance,after_velocity_distance,dv_x,dv_y,dv_z,dv_norm,"
+           "dbg_x,dbg_y,dbg_z,dbg_norm,dba_x,dba_y,dba_z,dba_norm,"
+           "adjacent_bg_difference,adjacent_ba_difference\n";
+  for (int k = 0; k < after.knotCount(); ++k) {
+    const JointKnot& b = before.knots()[k];
+    const JointKnot& a = after.knots()[k];
+    const V3D dp = a.p - b.p;
+    const V3D dtheta = Log(M3D(b.R.transpose() * a.R));
+    const V3D dv = a.v - b.v;
+    const V3D dbg = after.biasGyr(k) - before.biasGyr(k);
+    const V3D dba = after.biasAcc(k) - before.biasAcc(k);
+    const double adjacent_bg = k == 0 ? 0.0
+        : (after.biasGyr(k) - after.biasGyr(k - 1)).norm();
+    const double adjacent_ba = k == 0 ? 0.0
+        : (after.biasAcc(k) - after.biasAcc(k - 1)).norm();
+    out << test_id << ',' << scan_id << ',' << iteration << ','
+        << std::setprecision(17) << t_abs << ',' << k << ',' << a.t << ','
+        << (k == 0 ? 1 : 0) << ','
+        << (b.p - reference_p).norm() << ',' << (a.p - reference_p).norm() << ','
+        << dp.x() << ',' << dp.y() << ',' << dp.z() << ',' << dp.norm() << ','
+        << Log(M3D(reference_R.transpose() * b.R)).norm() << ','
+        << Log(M3D(reference_R.transpose() * a.R)).norm() << ','
+        << dtheta.x() << ',' << dtheta.y() << ',' << dtheta.z() << ',' << dtheta.norm() << ','
+        << (b.v - reference_v).norm() << ',' << (a.v - reference_v).norm() << ','
+        << dv.x() << ',' << dv.y() << ',' << dv.z() << ',' << dv.norm() << ','
+        << dbg.x() << ',' << dbg.y() << ',' << dbg.z() << ',' << dbg.norm() << ','
+        << dba.x() << ',' << dba.y() << ',' << dba.z() << ',' << dba.norm() << ','
+        << adjacent_bg << ',' << adjacent_ba << '\n';
+  }
+  out.flush();
+}
+
 void writeJointKnotScanSummaryDiagnostics(
     const std::string& test_id, int scan_id, double t_abs,
     int completed_iterations, const std::string& stop_reason,
     const StateGroup& post_imu, const StateGroup& final_state,
-    const MeasureGroup& measures)
+    const M3D& reference_R, const V3D& reference_p,
+    const V3D& reference_v)
 {
   // Unlike the other joint_knot_first_frame_* diagnostics (deliberately
   // scan_id==1-only, see the guard in writeJointKnotCovarianceDiagnostics/
@@ -242,17 +287,20 @@ void writeJointKnotScanSummaryDiagnostics(
   if (first)
     out << "test_id,scan_id,t_abs,completed_iterations,stop_reason,"
            "dtheta_from_post_imu,dp_from_post_imu,dv_from_post_imu,"
-           "p_distance_from_pre_imu_before,p_distance_from_pre_imu_after,"
-           "v_distance_from_pre_imu_before,v_distance_from_pre_imu_after\n";
+           "p_distance_from_fixed_reference_before,p_distance_from_fixed_reference_after,"
+           "v_distance_from_fixed_reference_before,v_distance_from_fixed_reference_after,"
+           "attitude_distance_from_fixed_reference_before,attitude_distance_from_fixed_reference_after\n";
   out << test_id << ',' << scan_id << ',' << std::setprecision(17) << t_abs << ','
       << completed_iterations << ',' << stop_reason << ','
       << Log(M3D(post_imu.rot().transpose() * final_state.rot())).norm() << ','
       << (final_state.pos() - post_imu.pos()).norm() << ','
       << (final_state.vel() - post_imu.vel()).norm() << ','
-      << (post_imu.pos() - measures.pos_before_imu).norm() << ','
-      << (final_state.pos() - measures.pos_before_imu).norm() << ','
-      << (post_imu.vel() - measures.vel_before_imu).norm() << ','
-      << (final_state.vel() - measures.vel_before_imu).norm() << '\n';
+      << (post_imu.pos() - reference_p).norm() << ','
+      << (final_state.pos() - reference_p).norm() << ','
+      << (post_imu.vel() - reference_v).norm() << ','
+      << (final_state.vel() - reference_v).norm() << ','
+      << Log(M3D(reference_R.transpose() * post_imu.rot())).norm() << ','
+      << Log(M3D(reference_R.transpose() * final_state.rot())).norm() << '\n';
   out.flush();
 }
 

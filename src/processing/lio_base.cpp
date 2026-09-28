@@ -350,6 +350,15 @@ std::string LioProcBase::finalizeConfig(ConfigResolver& cfg, std::initializer_li
 }
 
 // Residual and EKF code
+void LioProcBase::ensureStationaryReference(const MeasureGroup& mg)
+{
+  if (stationary_reference_valid_) return;
+  stationary_reference_R_ = mg.rot_before_imu;
+  stationary_reference_p_ = mg.pos_before_imu;
+  stationary_reference_v_ = mg.vel_before_imu;
+  stationary_reference_valid_ = true;
+}
+
 void LioProcBase::buildResiduals(
   const std::vector<PointXYZCov>& pts,
   std::vector<Residual>& residuals,
@@ -367,6 +376,7 @@ void LioProcBase::buildResiduals(
   build_thread_residuals_.resize(threads);
   for (auto& v : build_thread_residuals_) v.clear();
   build_thread_miss_.assign(threads, {0, 0});
+  build_thread_gate_audit_.assign(threads, {0, 0});
   build_thread_tier0_miss_.assign(threads, {0, 0});
 
   // Frame-constant context for T0-D's corr.csv S column (H P- H^T + R) --
@@ -406,6 +416,8 @@ void LioProcBase::buildResiduals(
       pt_world.body_point = pts[i].point;
       pt_world.rot_transpose = rot_transpose;
       pt_world.prior_cov_rp = prior_cov_rp;
+      GateAudit gate_audit;
+      pt_world.gate_audit = &gate_audit;
       Residual res{};
       bool tier0_had_plane = false;
       bool tier0_missed = true;
@@ -417,7 +429,9 @@ void LioProcBase::buildResiduals(
       // visits, via this out-param, instead of scanning the box twice on
       // every total miss.
       bool had_converged_neighbor = false;
-      if (voxel_map_->findPlaneResidual(pt_world, res, &tier0_had_plane, &had_converged_neighbor)) {
+      const bool admitted = voxel_map_->findPlaneResidual(
+          pt_world, res, &tier0_had_plane, &had_converged_neighbor);
+      if (admitted) {
         res.source_index = i;
         res.point_cross_normal = pts[i].point.cross(state_->rot().transpose() * res.normal);
         res.world_point = pt_world.point;
@@ -432,6 +446,9 @@ void LioProcBase::buildResiduals(
         const int idx = had_converged_neighbor ? 1 : 0;
         ++build_thread_miss_[omp_get_thread_num()][idx];
       }
+      auto& gate_counts = build_thread_gate_audit_[omp_get_thread_num()];
+      if (gate_audit.reached_statistical_gate) ++gate_counts[0];
+      if (!admitted && gate_audit.rejected_by_statistical_gate) ++gate_counts[1];
       if (tier0_missed) {
         const int idx0 = tier0_had_plane ? 1 : 0;
         ++build_thread_tier0_miss_[omp_get_thread_num()][idx0];
@@ -471,6 +488,12 @@ void LioProcBase::buildResiduals(
   for (const auto& m : build_thread_miss_) {
     n_miss_coverage_ += m[0];
     n_miss_mismatch_ += m[1];
+  }
+  n_statistical_gate_candidates_ = 0;
+  n_statistical_gate_rejections_ = 0;
+  for (const auto& counts : build_thread_gate_audit_) {
+    n_statistical_gate_candidates_ += counts[0];
+    n_statistical_gate_rejections_ += counts[1];
   }
 
   n_tier0_miss_coverage_ = 0;

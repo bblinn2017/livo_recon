@@ -137,7 +137,8 @@ private:
             double& r, double& sigma_diag_squared, double& plane_var_term,
             Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate = nullptr,
             bool* dropped_by_ablation = nullptr,
-            double* gate_floor_term_out = nullptr) const;
+            double* gate_floor_term_out = nullptr,
+            bool* reached_statistical_gate = nullptr) const;
 
   // Additive along-normal variance floor, m^2 -- see
   // VoxelOpts::weight_floor_mode.  The SAME value feeds gate()'s admission

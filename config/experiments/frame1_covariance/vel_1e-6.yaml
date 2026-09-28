@@ -1,0 +1,4 @@
+# Strong known-stationary velocity prior sensitivity check.
+state:
+  cov:
+    vel: 1.0e-6   # 1 mm/s marginal sigma per axis

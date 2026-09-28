@@ -561,7 +561,8 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
                       const V3D& body_dir, const V3D& body_normal,
                       double& r, double& sigma_diag_squared, double& plane_var_term,
                       Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate,
-                      bool* dropped_by_ablation, double* gate_floor_term_out) const
+                      bool* dropped_by_ablation, double* gate_floor_term_out,
+                      bool* reached_statistical_gate) const
 {
   const V3D& n = plane_.normal;
   r = n.dot(p) + plane_.d;
@@ -642,6 +643,7 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
   const double sigma_gate_squared = floor_term + sigma_gate_diag_squared + plane_var_term;
   if (!std::isfinite(sigma_gate_squared) || sigma_gate_squared <= 0.0) return false;
 
+  if (reached_statistical_gate) *reached_statistical_gate = true;
   return r * r <= opts_->sigma_num_squared * sigma_gate_squared;
 }
 
@@ -693,6 +695,7 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
   double r = 0.0, sigma_diag_squared = 0.0, plane_var_term = 0.0;
   Eigen::Matrix<double, 1, 3> J_nq = Eigen::Matrix<double, 1, 3>::Zero();
   bool is_candidate = false;
+  bool reached_statistical_gate = false;
   bool dropped_by_ablation = false;
   // Ray direction and plane normal in the body frame, for weight_floor_mode
   // "incidence".  pt.body_point is the return in the body frame and the
@@ -706,7 +709,12 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
                               pt.body_point, body_normal,
                               r, sigma_diag_squared,
                               plane_var_term, J_nq, &is_candidate, &dropped_by_ablation,
-                              &gate_floor_term);
+                              &gate_floor_term, &reached_statistical_gate);
+  if (pt.gate_audit && reached_statistical_gate) {
+    pt.gate_audit->reached_statistical_gate = true;
+    if (!accepted)
+      pt.gate_audit->rejected_by_statistical_gate = true;
+  }
   // Every weight_floor_mode except "legacy" returns the identical value
   // regardless of in_gate (see weightFloor()'s own branches) -- reuse
   // gate()'s already-computed floor_term instead of calling weightFloor()
