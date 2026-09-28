@@ -80,6 +80,11 @@ public:
   // excludes them without needing to check status_.
   bool hasConvergedPlane() const { return !plane_retired_ && plane_.isPlane(); }
 
+  // Recursively exports every live octree node. Diagnostic-only and called
+  // once after calibration/map seeding when explicitly enabled.
+  void appendPlaneSnapshots(const VoxelKey& root_key,
+                            std::vector<VoxelPlaneSnapshot>& out) const;
+
 private:
   void passToChildren(const std::vector<PointXYZCov>& points_world,
                       std::vector<PlaneUpdate>& updates);

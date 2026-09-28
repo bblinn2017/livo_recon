@@ -360,7 +360,30 @@ bool VoxelNode::findPlaneResidual(const WorldPointCov& pt, Residual& res, int sc
   }
 
   if (plane_retired_) return false;
-  return plane_.computeResidual(pt, res, scan_id);
+  if (!plane_.computeResidual(pt, res, scan_id)) return false;
+  res.plane_node_id = node_id_;
+  return true;
+}
+
+void VoxelNode::appendPlaneSnapshots(
+    const VoxelKey& root_key, std::vector<VoxelPlaneSnapshot>& out) const
+{
+  VoxelPlaneSnapshot row;
+  row.node_id = node_id_;
+  row.root_key = root_key;
+  row.layer = layer_;
+  row.cell_center = voxel_center_;
+  const double half_extent = 0.5 * opts_->voxel_size /
+      static_cast<double>(1 << layer_);
+  row.cell_min = voxel_center_ - V3D::Constant(half_extent);
+  row.cell_max = voxel_center_ + V3D::Constant(half_extent);
+  row.status = static_cast<int>(status_);
+  row.retired = plane_retired_;
+  plane_.fillSnapshot(row);
+  out.push_back(row);
+  if (status_ == VoxelStatus::PARENT)
+    for (const VoxelNode* child : leaves_)
+      if (child) child->appendPlaneSnapshots(root_key, out);
 }
 
 }  // namespace livo_recon

@@ -150,6 +150,7 @@ private:
   void eraseDot(int32_t id);
   void appendDisc(int32_t id, const PlaneVizInfo& p);
   void appendDot(int32_t id, const PlaneVizInfo& p);
+  void writePostCalibrationSnapshot() const;
 };
 
 }

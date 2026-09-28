@@ -2,6 +2,14 @@
 
 `consistency.py` is the analyser: reads `corr.csv`/`scan.csv` (see
 `VoxelOpts::log_consistency_mode` and `LioProcOptions::log_consistency_scan_en`)
+
+## Diagnostic stationary ground-truth extension
+
+`build_stationary_gt_extension.py` applies the fixed global transform exported
+by `ate_per_frame_<stage>_<mode>.csv` to estimator samples before the first real
+ground-truth timestamp.  Its rows are labelled `gt_is_synthetic=1`.  They are
+for inspecting the known-stationary interval only and must not be included in
+alignment fitting or official ATE.  Native ATE exports contain real GT only.
 and reports NIS calibration,
 whiteness, the variance budget, and NIS-vs-covariate structure. `synth.py`
 generates filter runs with *known* Q/R mis-tunings so the analyser can be

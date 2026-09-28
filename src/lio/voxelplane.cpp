@@ -918,6 +918,36 @@ bool VoxelPlane::getVizInfo(PlaneVizInfo& info) const
   return true;
 }
 
+void VoxelPlane::fillSnapshot(VoxelPlaneSnapshot& out) const
+{
+  out.initialized = isInit();
+  out.is_plane = is_plane_;
+  out.full = isFull();
+  out.center = plane_.center;
+  out.normal = plane_.normal;
+  out.tangent_x = x_normal_;
+  out.tangent_y = y_normal_;
+  out.d = plane_.d;
+  out.radius = radius_;
+  out.eigenvalues = eigen_values_;
+  out.scatter = covariance_;
+  out.plane_covariance = plane_var_;
+  out.point_count = points_size_;
+  out.distinct_frames = distinct_frames_;
+  out.last_fit_j = last_fit_j_;
+  out.roughness = roughness_;
+  out.sigma_bar2 = sigma_bar2_;
+  out.info_n_raw = info_n_raw_;
+  out.info_n_eff = info_n_eff_;
+  out.info_rho = info_rho_;
+  out.info_path = info_path_;
+  out.occupied_cells = cached_occ_cells_;
+  out.occupancy_anisotropy = occupancyAnisotropy();
+  out.occupancy_var_u = cached_occ_var_u_;
+  out.occupancy_var_v = cached_occ_var_v_;
+  out.plane_conf_factor = last_plane_conf_factor_;
+}
+
 void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
                         const std::vector<double>* weights_in,
                         const RunningMoments* running,

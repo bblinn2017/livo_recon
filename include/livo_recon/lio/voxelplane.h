@@ -61,6 +61,7 @@ public:
   // (none today) can safely omit it.
   bool computeResidual(const WorldPointCov& pt, Residual& res, int scan_id = -1) const;
   bool getVizInfo(PlaneVizInfo& info) const;
+  void fillSnapshot(VoxelPlaneSnapshot& out) const;
 
   int pointsSize() const { return points_size_; }
   int lastFitJ() const { return last_fit_j_; }

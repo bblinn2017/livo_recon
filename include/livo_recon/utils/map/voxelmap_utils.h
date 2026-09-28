@@ -65,6 +65,11 @@ struct Residual
   // only for a residual that hasn't been matched to a plane yet.
   const void* plane_id = nullptr;
 
+  // Stable diagnostic identity of the owning octree node. Unlike plane_id,
+  // this can be joined across compact CSV files without serializing an
+  // allocator address. It never participates in gating or the solve.
+  int32_t plane_node_id = -1;
+
   // P6a.  This candidate's ray classified against its own plane's occupancy
   // chart: 0=hit, 1=known free, 2=unobserved, -1=not classified (not a
   // gate() candidate). Measurement only -- never read by anything that
@@ -180,6 +185,47 @@ struct PlaneUpdate
   int32_t      node_id;
   bool         deleted;  // true = remove from cache; false = add/update
   PlaneVizInfo info;     // valid when !deleted
+};
+
+// One read-only row of the live octree/plane state. Used only by the
+// post-calibration snapshot; keeping it separate from PlaneVizInfo avoids
+// turning the visualization cache into estimator state.
+struct VoxelPlaneSnapshot
+{
+  int32_t node_id = -1;
+  VoxelKey root_key{};
+  int layer = 0;
+  V3D cell_center = V3D::Zero();
+  V3D cell_min = V3D::Zero();
+  V3D cell_max = V3D::Zero();
+  int status = 0;
+  bool retired = false;
+  bool initialized = false;
+  bool is_plane = false;
+  bool full = false;
+  V3D center = V3D::Zero();
+  V3D normal = V3D::Zero();
+  V3D tangent_x = V3D::Zero();
+  V3D tangent_y = V3D::Zero();
+  double d = 0.0;
+  double radius = 0.0;
+  V3D eigenvalues = V3D::Zero();
+  M3D scatter = M3D::Zero();
+  M3D plane_covariance = M3D::Zero();
+  int point_count = 0;
+  int distinct_frames = 0;
+  int last_fit_j = 0;
+  double roughness = 0.0;
+  double sigma_bar2 = 0.0;
+  double info_n_raw = 0.0;
+  double info_n_eff = 0.0;
+  double info_rho = 0.0;
+  int info_path = 0;
+  int occupied_cells = 0;
+  double occupancy_anisotropy = -1.0;
+  double occupancy_var_u = 0.0;
+  double occupancy_var_v = 0.0;
+  double plane_conf_factor = 1.0;
 };
 
 // Running sufficient statistics for VoxelNode's DEFAULT (unweighted,
@@ -597,6 +643,10 @@ struct VoxelOpts
 
   // History (570-575): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-570
   bool log_frame_stats_en = false;
+
+  // One-shot diagnostic dump after frame 0 has seeded the map. This is the
+  // exact map queried by the first post-calibration LIO frame.
+  bool snapshot_post_calibration = false;
 };
 using VoxelOptsPtr = std::shared_ptr<VoxelOpts>;
 

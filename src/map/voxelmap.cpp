@@ -192,6 +192,8 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<int>(pnh, "voxel_map/map/max_layer",       opts_->max_layer,    2);
   paramWarn<bool>(pnh, "voxel_map/plane/sensor_noise_floor_eig0", opts_->sensor_noise_floor_eig0, false);
   paramWarn<bool>(pnh, "voxel_map/plane/centred_accumulation", opts_->centred_accumulation, false);
+  paramWarn<bool>(pnh, "voxel_map/map/snapshot_post_calibration",
+                  opts_->snapshot_post_calibration, false);
   paramWarn<std::string>(pnh, "voxel_map/plane/convergence_mode", opts_->convergence_mode, "normal");
   paramWarn<int>(pnh, "voxel_map/plane/min_frames_to_converge", opts_->min_frames_to_converge, 5);
   paramWarn<int>(pnh, "voxel_map/plane/min_frames_to_init", opts_->min_frames_to_init, 1);
@@ -608,6 +610,61 @@ void VoxelMap::updateMap(MeasureGroup& mg) {
                         stats_->planes.load(std::memory_order_relaxed),
                         stats_->converged.load(std::memory_order_relaxed),
                         voxelPlaneMaxCovarianceTrace());
+  }
+  if (opts_->snapshot_post_calibration && frame_idx_ == 1)
+    writePostCalibrationSnapshot();
+}
+
+void VoxelMap::writePostCalibrationSnapshot() const
+{
+  std::vector<VoxelPlaneSnapshot> rows;
+  for (const auto& entry : voxel_map_)
+    if (entry.second) entry.second->appendPlaneSnapshots(entry.first, rows);
+  std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+    if (a.root_key.x != b.root_key.x) return a.root_key.x < b.root_key.x;
+    if (a.root_key.y != b.root_key.y) return a.root_key.y < b.root_key.y;
+    if (a.root_key.z != b.root_key.z) return a.root_key.z < b.root_key.z;
+    if (a.layer != b.layer) return a.layer < b.layer;
+    return a.node_id < b.node_id;
+  });
+  std::ofstream out(debugLogPath("post_calibration_voxelmap.csv"));
+  out << "snapshot_frame,node_id,root_key_x,root_key_y,root_key_z,layer,"
+         "cell_center_x,cell_center_y,cell_center_z,cell_min_x,cell_min_y,cell_min_z,"
+         "cell_max_x,cell_max_y,cell_max_z,status,retired,initialized,is_plane,full,"
+         "plane_fit_mode,plane_var_mode,plane_fit_pose_cov_mode,"
+         "center_x,center_y,center_z,normal_x,normal_y,normal_z,d,"
+         "tangent_x_x,tangent_x_y,tangent_x_z,tangent_y_x,tangent_y_y,tangent_y_z,radius,"
+         "eig0,eig1,eig2,scatter_00,scatter_01,scatter_02,scatter_10,scatter_11,scatter_12,"
+         "scatter_20,scatter_21,scatter_22,plane_var_00,plane_var_01,plane_var_02,"
+         "plane_var_10,plane_var_11,plane_var_12,plane_var_20,plane_var_21,plane_var_22,"
+         "point_count,distinct_frames,last_fit_j,roughness,sigma_bar2,info_n_raw,info_n_eff,"
+         "info_rho,info_path,occupied_cells,occupancy_anisotropy,occupancy_var_u,"
+         "occupancy_var_v,plane_conf_factor\n";
+  out << std::setprecision(17);
+  auto vec = [&](const V3D& v) { out << v.x() << ',' << v.y() << ',' << v.z(); };
+  auto mat = [&](const M3D& m) {
+    for (int r = 0; r < 3; ++r)
+      for (int c = 0; c < 3; ++c) {
+        if (r || c) out << ',';
+        out << m(r,c);
+      }
+  };
+  for (const auto& r : rows) {
+    out << "0," << r.node_id << ',' << r.root_key.x << ',' << r.root_key.y << ','
+        << r.root_key.z << ',' << r.layer << ',';
+    vec(r.cell_center); out << ','; vec(r.cell_min); out << ','; vec(r.cell_max);
+    out << ',' << r.status << ',' << r.retired << ',' << r.initialized << ','
+        << r.is_plane << ',' << r.full << ',' << opts_->plane_fit_mode << ','
+        << opts_->plane_var_mode << ',' << opts_->plane_fit_pose_cov_mode << ',';
+    vec(r.center); out << ','; vec(r.normal); out << ',' << r.d << ',';
+    vec(r.tangent_x); out << ','; vec(r.tangent_y); out << ',' << r.radius << ',';
+    vec(r.eigenvalues); out << ','; mat(r.scatter); out << ','; mat(r.plane_covariance);
+    out << ',' << r.point_count << ',' << r.distinct_frames << ',' << r.last_fit_j
+        << ',' << r.roughness << ',' << r.sigma_bar2 << ',' << r.info_n_raw
+        << ',' << r.info_n_eff << ',' << r.info_rho << ',' << r.info_path
+        << ',' << r.occupied_cells << ',' << r.occupancy_anisotropy
+        << ',' << r.occupancy_var_u << ',' << r.occupancy_var_v
+        << ',' << r.plane_conf_factor << '\n';
   }
 }
 

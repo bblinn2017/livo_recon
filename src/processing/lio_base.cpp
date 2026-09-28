@@ -417,6 +417,41 @@ void LioProcBase::buildResiduals(
   for (const auto& local : build_thread_residuals_)
     residuals.insert(residuals.end(), local.begin(), local.end());
 
+  // One deliberately narrow join artifact for the voxel-model audit.  The
+  // map snapshot is taken immediately after calibration frame 0 is inserted;
+  // frame 1 is therefore the first scan that queries exactly that map.  A
+  // stable node_id lets the offline analysis join every accepted residual to
+  // the precise plane row without serialising allocator addresses.  Keep this
+  // behind the same one-shot option as the snapshot so normal runs remain
+  // byte-for-byte free of this potentially point-level diagnostic.
+  const auto* snapshot_vm = dynamic_cast<const VoxelMap*>(voxel_map_.get());
+  if (snapshot_vm && snapshot_vm->opts()->snapshot_post_calibration &&
+      voxel_map_->frame_idx_ == 1) {
+    static PersistentLogStream log("first_post_calibration_plane_associations.csv");
+    bool first_call = false;
+    std::ofstream& out = log.stream(&first_call);
+    if (first_call) {
+      out << "scan_id,iteration,source_index,point_time,plane_node_id,match_tier,"
+             "residual,sigma_squared,plane_var_term,floor_term,sigma_diag_squared,"
+             "s_prior_pose,world_x,world_y,world_z,normal_x,normal_y,normal_z,"
+             "hrot_x,hrot_y,hrot_z,plane_jac_x,plane_jac_y,plane_jac_z\n";
+    }
+    out << std::setprecision(17);
+    for (const auto& r : residuals) {
+      out << voxel_map_->frame_idx_ << ',' << diagnostic_gn_iteration_ << ','
+          << r.source_index << ',' << r.t << ',' << r.plane_node_id << ','
+          << r.match_tier << ',' << r.r << ',' << r.sigma_squared << ','
+          << r.plane_var_term << ',' << r.floor_term << ','
+          << r.sigma_diag_squared << ',' << r.s_prior_pose << ','
+          << r.world_point.x() << ',' << r.world_point.y() << ','
+          << r.world_point.z() << ',' << r.normal.x() << ',' << r.normal.y()
+          << ',' << r.normal.z() << ',' << r.point_cross_normal.x() << ','
+          << r.point_cross_normal.y() << ',' << r.point_cross_normal.z() << ','
+          << r.plane_jacobian.x() << ',' << r.plane_jacobian.y() << ','
+          << r.plane_jacobian.z() << '\n';
+    }
+  }
+
   n_miss_coverage_ = 0;
   n_miss_mismatch_ = 0;
   for (const auto& m : build_thread_miss_) {

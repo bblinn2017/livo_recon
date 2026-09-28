@@ -799,7 +799,16 @@ std::string EvoProc::exportAtePerFrameCsv() const
         std::string("ate_per_frame_") + b.stage + "_" + b.mode + ".csv");
     std::ofstream ofs(path);
     if (!ofs.is_open()) continue;
-    ofs << "frame_idx,t,gt_matched,err_pos_mm,err_rot_deg,px_mm,py_mm,pz_mm\n";
+    // This is a real-GT-only correspondence export.  It intentionally never
+    // contains a synthetic stationary extension: the one global alignment is
+    // fitted from real measurements only and is exported explicitly so an
+    // offline diagnostic can apply that fixed transform to pre-GT stationary
+    // estimates without allowing synthetic points to influence official ATE.
+    ofs << "sample_index,t,gt_source,gt_is_synthetic,alignment_source,"
+           "est_x,est_y,est_z,gt_x,gt_y,gt_z,aligned_x,aligned_y,aligned_z,"
+           "err_pos_mm,err_rot_deg,err_x_mm,err_y_mm,err_z_mm,"
+           "align_r00,align_r01,align_r02,align_r10,align_r11,align_r12,"
+           "align_r20,align_r21,align_r22,align_tx,align_ty,align_tz\n";
 
     const bool gt_rot_ok = gtOrientationMeaningful();
     double sq_err_sum = 0.0;
@@ -811,8 +820,12 @@ std::string EvoProc::exportAtePerFrameCsv() const
       const double err_pos_mm = err_vec.norm() * 1000.0;
       sq_err_sum += err_pos_mm * err_pos_mm;
 
-      ofs << i << "," << std::fixed << std::setprecision(6) << m.t << std::defaultfloat
-          << ",1," << err_pos_mm << ",";
+      ofs << i << "," << std::fixed << std::setprecision(9) << m.t << std::defaultfloat
+          << ",real,0,real_gt_global," << std::setprecision(17)
+          << m.est_pos.x() << ',' << m.est_pos.y() << ',' << m.est_pos.z() << ','
+          << m.gt_pos.x() << ',' << m.gt_pos.y() << ',' << m.gt_pos.z() << ','
+          << aligned_pos.x() << ',' << aligned_pos.y() << ',' << aligned_pos.z()
+          << ',' << err_pos_mm << ',';
       // rule 58f: NULL, not a fabricated 0.0, when GT carries no real
       // orientation (e.g. NTU VIRAL's Leica topic, identity placeholder).
       if (gt_rot_ok)
@@ -822,7 +835,10 @@ std::string EvoProc::exportAtePerFrameCsv() const
         ofs << (std::acos(cos_angle) * (180.0 / M_PI));
       }
       ofs << "," << (err_vec.x() * 1000.0) << "," << (err_vec.y() * 1000.0)
-          << "," << (err_vec.z() * 1000.0) << "\n";
+          << "," << (err_vec.z() * 1000.0);
+      for (int rr = 0; rr < 3; ++rr)
+        for (int cc = 0; cc < 3; ++cc) ofs << ',' << R_align(rr, cc);
+      ofs << ',' << t_align.x() << ',' << t_align.y() << ',' << t_align.z() << "\n";
     }
     ofs.flush();
 
