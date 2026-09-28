@@ -578,6 +578,12 @@ void VoxelMap::updateMapInternal(MeasureGroup& mg, bool advance_live_frame) {
       for (int oi = 0; oi < np; ++oi) {
         const int i = proc_order[oi];
         pts_world_[i] = state_->toWorld(map_pts[i]);
+        // toWorld() constructs its return value via PointXYZCov's 2-arg
+        // (point, sensor_cov) constructor, which default-constructs every
+        // other field -- bootstrap_observation_id would silently reset to
+        // -1 here (losing all Phase-3 provenance) without this explicit
+        // carry-through.
+        pts_world_[i].bootstrap_observation_id = map_pts[i].bootstrap_observation_id;
         // sensor_cov (see PointXYZCov's docs) is always sensor-only, never
         // mutated downstream -- a consumer needing the isotropic proxy
         // derives it inline (sensor_cov.trace()/3.0), no separate stored
