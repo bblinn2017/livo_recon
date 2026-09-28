@@ -132,6 +132,7 @@ private:
   // whose return value actually depends on in_gate) -- see
   // computeResidual()'s own call site.
   bool gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
+            bool include_pose_cov_in_gate,
             const V3D& body_dir, const V3D& body_normal,
             double& r, double& sigma_diag_squared, double& plane_var_term,
             Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate = nullptr,

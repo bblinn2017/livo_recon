@@ -557,6 +557,7 @@ VoxelPlane::VoxelPlane(VoxelOptsPtr opts)
 // which needs the incidence angle; every other mode ignores it.  Pass a null
 // vector to fall back to the isotropic form.
 bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
+                      bool include_pose_cov_in_gate,
                       const V3D& body_dir, const V3D& body_normal,
                       double& r, double& sigma_diag_squared, double& plane_var_term,
                       Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate,
@@ -611,11 +612,23 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
   // sigma_diag_squared: sensor + (optionally) pose VARIANCE. See
   // VoxelOpts::pose_cov_in_sigma's docs for the double-counting tradeoff
   // this toggles.
-  sigma_diag_squared = n.dot(sensor_cov * n);
-  if (opts_->pose_cov_in_sigma)
-    sigma_diag_squared += n.dot(pose_cov * n);
+  // Preserve the legacy global option's historical behavior: when it is
+  // enabled, pose covariance appears in both admission and the returned
+  // sigma_diag_squared used by the residual weight.  In contrast, the
+  // coupled estimator's gating_state_uncertainty override is gate-only: it
+  // widens admission but must not enter Residual::sigma_squared and double
+  // count the fixed prior already present in the information solve.
+  sigma_diag_squared = pointPlaneGateMeasurementVariance(
+      n, sensor_cov, pose_cov, opts_->pose_cov_in_sigma);
   if (!std::isfinite(sigma_diag_squared) || sigma_diag_squared <= 0.0) return false;
   if (sigma_diag_squared < 1e-6) sigma_diag_squared = 1e-6;
+
+  double sigma_gate_diag_squared = pointPlaneGateMeasurementVariance(
+      n, sensor_cov, pose_cov,
+      opts_->pose_cov_in_sigma || include_pose_cov_in_gate);
+  if (!std::isfinite(sigma_gate_diag_squared) || sigma_gate_diag_squared <= 0.0)
+    return false;
+  if (sigma_gate_diag_squared < 1e-6) sigma_gate_diag_squared = 1e-6;
 
   plane_var_term = (J_nq * plane_var_ * J_nq.transpose()).value();
 
@@ -626,7 +639,7 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
   // disagreed about S.
   const double floor_term = weightFloor(body_dir, body_normal, /*in_gate=*/true);
   if (gate_floor_term_out) *gate_floor_term_out = floor_term;
-  const double sigma_gate_squared = floor_term + sigma_diag_squared + plane_var_term;
+  const double sigma_gate_squared = floor_term + sigma_gate_diag_squared + plane_var_term;
   if (!std::isfinite(sigma_gate_squared) || sigma_gate_squared <= 0.0) return false;
 
   return r * r <= opts_->sigma_num_squared * sigma_gate_squared;
@@ -689,6 +702,7 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
   const V3D body_normal = pt.rot_transpose * plane_.normal;
   double gate_floor_term = std::numeric_limits<double>::quiet_NaN();
   const bool accepted = gate(pt.point, pt.sensor_cov, pt.pose_cov,
+                              pt.include_pose_cov_in_gate,
                               pt.body_point, body_normal,
                               r, sigma_diag_squared,
                               plane_var_term, J_nq, &is_candidate, &dropped_by_ablation,

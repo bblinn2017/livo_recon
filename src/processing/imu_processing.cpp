@@ -120,30 +120,10 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // own "mode != raw_imu" definition) instead of the deleted boolean key.
   std::string spline_mode = "raw_imu";
   paramWarn<std::string>(pnh, "spline/mode", spline_mode, std::string("raw_imu"));
-  // CQ-54 item 1: the coupled path always runs with spline/mode=raw_imu (it
-  // has no ScanSpline), so keep_raw_samples was always false there and
-  // mg.imu_samples_raw was never populated -- but adaptive_sigma/
-  // bias_freeze_on_vibration both need the raw, unaveraged IMU stream to
-  // measure vibration-inflated noise directly. Read independently here (the
-  // same "two classes, independent param-server reads" pattern spline/mode
-  // itself already uses above) rather than threading it through
-  // LioProcCoupled's own ConfigResolver claim -- coupled/* is claimed there
-  // separately; this is only about whether ImuProc keeps the samples.
-  bool coupled_adaptive_sigma = false, coupled_bias_freeze_on_vibration = false;
-  paramWarn<bool>(pnh, "estimator/coupled/adaptive_sigma", coupled_adaptive_sigma, false);
-  paramWarn<bool>(pnh, "estimator/coupled/bias_freeze_on_vibration", coupled_bias_freeze_on_vibration, false);
-  // CQ-82 Phase 2: the pose basis's IMU-as-measurement-factor term also
-  // needs the raw stream (buildPoseSplineCBlock()'s PoseSplineImuObs) --
-  // same cross-class read pattern as the two flags above, one more OR term.
-  std::string coupled_spline_mode = "raw_imu";
-  paramWarn<std::string>(pnh, "estimator/coupled/spline_mode", coupled_spline_mode, std::string("raw_imu"));
-  // "pose_control" must appear in this OR chain -- without it,
-  // mg.imu_samples_raw stays empty and the continuous-time IMU prior has
-  // no samples to build from.
-  opts_.keep_raw_samples = (spline_mode != "raw_imu") || coupled_adaptive_sigma ||
-                           coupled_bias_freeze_on_vibration ||
-                           (coupled_spline_mode == "pose") ||
-                           (coupled_spline_mode == "pose_control");
+  // The joint-knot coupled estimator consumes the propagation record in
+  // mg.poses and has no private raw-IMU/coefficient mode.  Raw samples are
+  // therefore retained only for the decoupled spline/Adaptive-Q pipeline.
+  opts_.keep_raw_samples = (spline_mode != "raw_imu");
   { std::lock_guard<std::mutex> lock(g_qhat_mtx); g_qhat_enabled = opts_.log_qhat_en; }
 
   std::ostringstream oss;
@@ -208,6 +188,12 @@ void ImuProc::propagate(MeasureGroup& mg)
   auto it = mg.imu_samples.begin();
 
   mg.poses.reserve(mg.imu_samples.size());
+  mg.pose_covariances.clear();
+  mg.imu_state_transitions.clear();
+  mg.imu_process_covariances.clear();
+  mg.pose_covariances.reserve(mg.imu_samples.size());
+  mg.imu_state_transitions.reserve(mg.imu_samples.size());
+  mg.imu_process_covariances.reserve(mg.imu_samples.size());
   for (; it != mg.imu_samples.end(); ++it)
   {
     ImuSample tail = *it;
@@ -236,6 +222,7 @@ void ImuProc::propagate(MeasureGroup& mg)
     const M3D rot_at_head = rot_imu;
     const V3D pos_at_head = pos_imu;
     const V3D vel_at_head = vel_imu;
+    const Eigen::MatrixXd cov_at_head = state_->cov();
 
     // ---- covariance propagation ----
     acc_avr_skew << SKEW_SYM_MATRX(acc_avr);
@@ -330,6 +317,9 @@ void ImuProc::propagate(MeasureGroup& mg)
         rot_at_head,
         dt
     });
+    mg.pose_covariances.push_back(cov_at_head);
+    mg.imu_state_transitions.push_back(F_x);
+    mg.imu_process_covariances.push_back(cov_w);
 
     head = tail;
 

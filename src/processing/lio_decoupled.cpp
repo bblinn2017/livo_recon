@@ -10,7 +10,7 @@
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/lio/voxelplane.h"   // voxelPlaneInformationFitCount()
 #include "livo_recon/lio/lio_accumulator.h"
-#include "livo_recon/lio/pose_control_covariance.h"
+#include "livo_recon/utils/algo/covariance_math.h"
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <array>
@@ -1854,6 +1854,18 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
     // silently changing shape when this new option is engaged.
     if (any_solved)
       ekf_.applyCovarianceUpdate(state_, prior_cov_, covRedundancyKappa());
+
+    // The covariance is intentionally updated once, after all fixed-prior
+    // mean iterations.  Earlier per-iteration diagnostics therefore show
+    // the unchanged prior by design.  Record the actual posterior here so
+    // every decoupled mode (raw-IMU/splineless and spline) returns a matched
+    // P_prior/P_after pair for the first post-calibration LIO frame.
+    if (voxel_map_->frame_idx_ == 1) {
+      mg.cov_after_lio = state_->cov();
+      logFirstFrameCovarianceBudget(
+          firstFrameArchitectureName(), "post_covariance", 0, iter,
+          mg, *state_, mg.image.t + data_queues_->start_time);
+    }
 
     // CQ-43 item (4d-ii): save this frame's own EKF rotation correction
     // (total_dtheta is local to this scope) for finalizeSplineAndQ() to

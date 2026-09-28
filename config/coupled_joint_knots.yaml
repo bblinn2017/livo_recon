@@ -1,0 +1,9 @@
+# Canonical coupled estimator.  There is no coupled estimator/mode selector:
+# every coupled run solves one joint physical knot trajectory.
+estimator:
+  mode: coupled
+  coupled:
+    knot_count: 4
+    residual_evaluation_time: measurement  # measurement | tail
+    gating_state_uncertainty: false         # false | true; gating only
+    test_id: unlabeled

@@ -1,0 +1,9 @@
+estimator:
+  mode: coupled
+  coupled:
+    knot_count: 4
+    residual_evaluation_time: tail
+    gating_state_uncertainty: true
+    test_id: tail_gating_state
+vio:
+  enable: false

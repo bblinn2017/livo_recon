@@ -16,6 +16,10 @@ namespace livo_recon
 
 struct Residual
 {
+  // Index of the input point that produced this residual.  The joint-knot
+  // estimator uses it to evaluate the measurement Jacobian at the same
+  // timestamp and raw body point that was used for association.
+  int source_index = -1;
   double r;
   V3D normal;
 
@@ -110,6 +114,14 @@ struct WorldPointCov
   M3D sensor_cov;
   M3D pose_cov;
 
+  // Estimator-local, gate-only override.  When true, pose_cov contributes
+  // to correspondence admission even if the legacy global
+  // voxel_map/residual/pose_cov_in_sigma switch is false.  It must never be
+  // copied into Residual::sigma_squared: the state prior already appears in
+  // the information solve and adding it to the solve weight would count it
+  // twice.
+  bool include_pose_cov_in_gate = false;
+
   // History (66-87): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-66
   V3D body_point = V3D::Zero();
   M3D rot_transpose = M3D::Identity();
@@ -117,6 +129,16 @@ struct WorldPointCov
 
   M3D total() const { return sensor_cov + pose_cov; }
 };
+
+inline double pointPlaneGateMeasurementVariance(
+    const V3D& normal, const M3D& sensor_cov, const M3D& pose_cov,
+    bool include_pose_cov_in_gate)
+{
+  double variance = normal.dot(sensor_cov * normal);
+  if (include_pose_cov_in_gate)
+    variance += normal.dot(pose_cov * normal);
+  return variance;
+}
 
 struct PlaneInfo
 {

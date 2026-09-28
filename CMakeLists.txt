@@ -113,6 +113,7 @@ target_compile_options(livo_cuda PRIVATE
 
 add_executable(livo_recon_node
   src/utils/state/state.cpp
+  src/utils/algo/covariance_math.cpp
   src/utils/lidar/lidar.cpp
   src/utils/data/data_queues.cpp
   src/utils/data/measures.cpp
@@ -131,10 +132,7 @@ add_executable(livo_recon_node
   src/processing/lio_base.cpp
   src/processing/lio_decoupled.cpp
   src/processing/lio_coupled.cpp
-  src/processing/lio_coupled_local_spline.cpp
-  src/processing/lio_coupled_single_tail.cpp
-  src/processing/lio_coupled_direct_lidar_imu.cpp
-  src/processing/lio_coupled_covariance_all_knots.cpp
+  src/processing/lio_coupled_process.cpp
   src/processing/combined_processing.cpp
   src/processing/evo_processing.cpp
   src/lio/voxelplane.cpp
@@ -145,18 +143,8 @@ add_executable(livo_recon_node
   src/lio/adaptive_q.cpp
   src/lio/residual_redundancy.cpp
   src/lio/residual_weighting.cpp
-  src/lio/coupled_estimator.cpp
-  src/lio/pose_spline_system.cpp
-  src/lio/pose_control_adaptive_q.cpp
-  src/diagnostics/pose_control/pose_control_physical_diagnostics.cpp
-  src/diagnostics/pose_control/pose_control_diagnostic_writer.cpp
-  src/lio/pose_control_directional_redundancy.cpp
-  src/lio/pose_control_spline.cpp
-  src/lio/pose_control_imu_prior_builder.cpp
-  src/diagnostics/pose_control/pose_control_gt_diagnostics.cpp
-  src/lio/pose_control_covariance.cpp
-  src/lio/pose_control_lidar_factor.cpp
-  src/lio/pose_control_lidar_correlation.cpp
+  src/lio/joint_knot_estimator.cpp
+  src/diagnostics/joint_knots/joint_knot_diagnostic_writer.cpp
   src/map/voxelmap.cpp
   src/map/akf_map.cpp
   src/map/map_backend_factory.cpp
@@ -224,6 +212,7 @@ target_link_libraries(cache_tracker_output_livo_recon
   tbb
 )
 
-# Pose-control unit tests are maintained in tests/pose_control.
-add_subdirectory(tests/pose_control)
+# Canonical coupled joint-knot tests.
+add_subdirectory(tests/active)
+add_subdirectory(tests/joint_knots)
 add_subdirectory(tests/reference_math)

@@ -28,6 +28,16 @@ struct MeasureGroup
   // IMU Processing
   std::vector<Pose6D> poses;
 
+  // Exact covariance ingredients used by IMU propagation, aligned with
+  // poses: entry i is the covariance at poses[i].t before interval i, and
+  // imu_state_transitions[i]/imu_process_covariances[i] are the production
+  // F/Q applied over that Pose6D::dt interval.  The coupled joint-knot prior
+  // composes these matrices between knot timestamps instead of recreating a
+  // second, approximate propagation model.
+  std::vector<Eigen::MatrixXd> pose_covariances;
+  std::vector<Eigen::MatrixXd> imu_state_transitions;
+  std::vector<Eigen::MatrixXd> imu_process_covariances;
+
   // A copy of this frame's raw IMU samples, kept ONLY when the scan-spline
   // mechanism is on (SplineOptions::enable).  ImuProc::propagate() clears
   // imu_samples once it has consumed them, but the spline-vs-IMU residual

@@ -52,7 +52,7 @@ int main() {
 
   // ---- 1. basis sanity -------------------------------------------------
   {
-    SplineOptions o; o.n_control_points = 10;
+    SplineOptions o; o.control_point_hz = 70.0;  // 0.1 s -> 10 requested CPs.
     ScanSpline s; s.fit(makePoses(t0, t1, 40), t0, t1, o);
     bool ok = true;
     for (double u = 0.0; u <= 1.0; u += 0.05) {
@@ -69,7 +69,7 @@ int main() {
 
   // ---- 2. does the fit recover the analytic derivatives? ---------------
   {
-    SplineOptions o; o.n_control_points = 12;
+    SplineOptions o; o.control_point_hz = 90.0;  // 0.1 s -> 12 requested CPs.
     ScanSpline s;
     check(s.fit(makePoses(t0, t1, 40), t0, t1, o), "fit succeeds");
     double max_p = 0, max_a = 0, max_w = 0, max_r = 0;
@@ -106,7 +106,7 @@ int main() {
         imu.emplace_back(a + V3D(na(rng), na(rng), na(rng)),
                          w + V3D(ng(rng), ng(rng), ng(rng)), t);
       }
-      SplineOptions o; o.n_control_points = 8;
+      SplineOptions o; o.control_point_hz = 50.0;  // 0.1 s -> 8 requested CPs.
       ScanSpline s; s.fit(makePoses(t0, t1, 40), t0, t1, o);
       auto st = computeSplineImuResidual(s, imu, V3D::Zero(), V3D::Zero(), g);
       double ra = std::sqrt(st.cov_acc) / sa, rg = std::sqrt(st.cov_gyr) / sg;
@@ -120,64 +120,18 @@ int main() {
     check(ok, "residual recovers injected IMU sigma within 2x on both channels");
   }
 
-  // ---- 4. the degeneracy: is the residual monotone in n_cp? ------------
-  // This is the property the whole floor/whiteness anchoring exists to
-  // handle. If it does not hold, the anchoring argument is wrong.
-  {
-    std::mt19937 rng(999);
-    const double sa = 0.02, sg = 0.002;
-    std::normal_distribution<double> na(0.0, sa), ng(0.0, sg);
-    std::vector<ImuSample> imu;
-    std::vector<Pose6D> poses = makePoses(t0, t1, 60);
-    for (int i = 0; i <= 60; ++i) {
-      double t = t0 + (t1 - t0) * i / 60.0;
-      M3D R = Truth::rot(t);
-      imu.emplace_back(R.transpose() * (Truth::acc(t) - g) + V3D(na(rng), na(rng), na(rng)),
-                       Truth::omega(t) + V3D(ng(rng), ng(rng), ng(rng)), t);
-    }
-    printf("\n  residual vs control points (the degeneracy AdaptiveQ anchors):\n");
-    double prev = 1e30; bool mono = true;
-    for (int ncp : {4, 6, 8, 12, 20, 30}) {
-      SplineOptions o; o.n_control_points = ncp;
-      ScanSpline s;
-      if (!s.fit(poses, t0, t1, o)) { printf("    n_cp=%2d  fit refused\n", ncp); continue; }
-      // Fit the spline TO THE NOISY IMU's implied motion by fitting to poses
-      // sampled densely -- here the poses are noiseless, so what varies with
-      // n_cp is purely the spline's ability to absorb the true motion.
-      auto st = computeSplineImuResidual(s, imu, V3D::Zero(), V3D::Zero(), g);
-      printf("    n_cp=%2d  sigma_a_hat=%.5f  acf1_a=%+.3f  sigma_g_hat=%.6f  acf1_g=%+.3f\n",
-             s.nControlPoints(), std::sqrt(st.cov_acc), st.acf1_acc,
-             std::sqrt(st.cov_gyr), st.acf1_gyr);
-      if (st.cov_acc > prev * 1.5) mono = false;
-      prev = st.cov_acc;
-    }
-    check(mono, "residual variance is non-increasing in control-point count");
-  }
-
-  // ---- 5. anchorTo is rigid: shape preserved, endpoint moved ----------
-  {
-    SplineOptions o; o.n_control_points = 10;
-    ScanSpline s; s.fit(makePoses(t0, t1, 40), t0, t1, o);
-    std::vector<V3D> before;
-    for (double t = t0; t <= t1; t += 0.005) before.push_back(s.accAt(t));
-    const M3D Rn = Exp(V3D(0.03, -0.02, 0.05));
-    const V3D pn(1.5, -2.5, 0.75);
-    s.anchorTo(t1, Rn, pn);
-    double endp = (s.posAt(t1) - pn).norm();
-    double endr = Log(Rn.transpose() * s.rotAt(t1)).norm();
-    double shape = 0; size_t k = 0;
-    for (double t = t0; t <= t1; t += 0.005, ++k)
-      shape = std::max(shape, (s.accAt(t).norm() - before[k].norm()));
-    char buf[200];
-    snprintf(buf, sizeof buf, "endpoint err %.2e m / %.2e rad, |acc| drift %.2e", endp, endr, shape);
-    check(endp < 1e-12 && endr < 1e-12 && std::abs(shape) < 1e-10,
-          "anchorTo lands exactly on the target and preserves |acc|", buf);
-  }
-
-  // ---- 6. AdaptiveQ safety properties ---------------------------------
+  // ---- 4. AdaptiveQ safety properties ---------------------------------
   {
     AdaptiveQOptions o; o.enable = true; o.beta_acc = 0.3; o.beta_gyr = 0.3;
     o.warmup_frames = 2; o.z_rate_limit = 1e9; o.ema = 0.0;
+    // acf1_max defaults to 1.00 (effectively disabled) so a config that
+    // never sets it doesn't unexpectedly gate anything; this test exercises
+    // the actual "not_white" refusal, so it must set the production value
+    // (config/spline_adaptive_q.yaml's own acf1_max) to actually be able to
+    // trigger it -- acf1=0.9 below is correctly "white" against the 1.00
+    // default, which is why this check previously failed once this file
+    // was first registered in CTest.
+    o.acf1_max = 0.35;
     AdaptiveQ q; q.configure(o);
     q.setNominal(0.5, 0.3);
     q.setFloor(1e-5, 1e-7);

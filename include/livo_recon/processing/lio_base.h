@@ -301,7 +301,9 @@ public:
   void buildResiduals(
     const std::vector<PointXYZCov>& pts,
     std::vector<Residual>& residuals,
-    bool allow_consistency_log = true) const;
+    bool allow_consistency_log = true,
+    bool include_state_uncertainty_in_gate = true,
+    const std::vector<M3D>* pose_cov_overrides = nullptr) const;
 
   void solveSystem(const std::vector<Residual>& residuals) const;
   void solveSystem_cuda(const std::vector<Residual>& residuals) const;

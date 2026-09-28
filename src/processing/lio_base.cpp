@@ -353,7 +353,9 @@ std::string LioProcBase::finalizeConfig(ConfigResolver& cfg, std::initializer_li
 void LioProcBase::buildResiduals(
   const std::vector<PointXYZCov>& pts,
   std::vector<Residual>& residuals,
-  bool allow_consistency_log) const {
+  bool allow_consistency_log,
+  bool include_state_uncertainty_in_gate,
+  const std::vector<M3D>* pose_cov_overrides) const {
   // Single-threaded, before the OMP region starts below -- see
   // VoxelMap::setAllowConsistencyLog()'s doc comment.
   if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get()))
@@ -392,8 +394,15 @@ void LioProcBase::buildResiduals(
     for (int i = 0; i < n; ++i)
     {
       const PointXYZCov sensor_world = state_->toWorld(pts[i]);
-      WorldPointCov pt_world{
-          sensor_world.point, sensor_world.sensor_cov, state_->poseCovAt(pts[i].point)};
+      M3D pose_cov = M3D::Zero();
+      if (include_state_uncertainty_in_gate) {
+        if (pose_cov_overrides && i < static_cast<int>(pose_cov_overrides->size()))
+          pose_cov = (*pose_cov_overrides)[i];
+        else
+          pose_cov = state_->poseCovAt(pts[i].point);
+      }
+      WorldPointCov pt_world{sensor_world.point, sensor_world.sensor_cov, pose_cov};
+      pt_world.include_pose_cov_in_gate = include_state_uncertainty_in_gate;
       pt_world.body_point = pts[i].point;
       pt_world.rot_transpose = rot_transpose;
       pt_world.prior_cov_rp = prior_cov_rp;
@@ -409,6 +418,7 @@ void LioProcBase::buildResiduals(
       // every total miss.
       bool had_converged_neighbor = false;
       if (voxel_map_->findPlaneResidual(pt_world, res, &tier0_had_plane, &had_converged_neighbor)) {
+        res.source_index = i;
         res.point_cross_normal = pts[i].point.cross(state_->rot().transpose() * res.normal);
         res.world_point = pt_world.point;
         res.sigma_squared += res.plane_var_term;

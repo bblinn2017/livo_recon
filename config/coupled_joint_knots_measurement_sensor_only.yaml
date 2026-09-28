@@ -1,0 +1,9 @@
+estimator:
+  mode: coupled
+  coupled:
+    knot_count: 4
+    residual_evaluation_time: measurement
+    gating_state_uncertainty: false
+    test_id: measurement_sensor_only
+vio:
+  enable: false
