@@ -29,6 +29,7 @@ std::string PubProc::loadParameters(ros::NodeHandle& pnh)
   opts_.export_image_interval = std::max(1, opts_.export_image_interval);
 
   paramWarn<bool>(pnh, "outputs/odom/export", opts_.export_odom, false);
+  paramWarn<bool>(pnh, "outputs/pose_pair/export", opts_.export_pose_pair, true);
   if (opts_.export_odom && !opts_.output_path.empty()) {
     std::error_code ec;
     std::filesystem::create_directories(opts_.output_path, ec);
@@ -38,16 +39,20 @@ std::string PubProc::loadParameters(ros::NodeHandle& pnh)
       ROS_ERROR_STREAM("[output] failed to open odom export path '"
         << odom_path << "' — disabling odom export");
     // P8.  Same gate, same directory, a NEW file -- odometry.txt itself is
-    // untouched.
-    const std::string pose_pair_path = opts_.output_path + "/pose_pair.csv";
-    pose_pair_file_.open(pose_pair_path, std::ios::out | std::ios::trunc);
-    if (pose_pair_file_.is_open())
-      pose_pair_file_ << "frame_idx,t,px,py,pz,qx,qy,qz,qw,"
-                         "ppx,ppy,ppz,pqx,pqy,pqz,pqw,"
-                         "vx,vy,vz,pvx,pvy,pvz\n";
-    else
-      ROS_ERROR_STREAM("[output] failed to open pose_pair export path '"
-        << pose_pair_path << "' — disabling pose_pair export");
+    // untouched. Independently switchable via outputs/pose_pair/export for a
+    // minimal-diagnostics campaign that wants odometry.txt without this
+    // per-scan predicted/realized pose+velocity file.
+    if (opts_.export_pose_pair) {
+      const std::string pose_pair_path = opts_.output_path + "/pose_pair.csv";
+      pose_pair_file_.open(pose_pair_path, std::ios::out | std::ios::trunc);
+      if (pose_pair_file_.is_open())
+        pose_pair_file_ << "frame_idx,t,px,py,pz,qx,qy,qz,qw,"
+                           "ppx,ppy,ppz,pqx,pqy,pqz,pqw,"
+                           "vx,vy,vz,pvx,pvy,pvz\n";
+      else
+        ROS_ERROR_STREAM("[output] failed to open pose_pair export path '"
+          << pose_pair_path << "' — disabling pose_pair export");
+    }
   }
 
   if (!opts_.output_path.empty() && (opts_.export_pcd || opts_.export_images)) {

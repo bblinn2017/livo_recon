@@ -64,6 +64,11 @@ StateGroup& StateGroup::operator=(const StateGroup& o)
     cov_bias_gyr_ = o.cov_bias_gyr_; cov_bias_acc_ = o.cov_bias_acc_;
     init_cov_rot_tilt_ = o.init_cov_rot_tilt_;
     init_cov_rot_yaw_ = o.init_cov_rot_yaw_;
+    init_cov_pos_ = o.init_cov_pos_;
+    init_cov_vel_ = o.init_cov_vel_;
+    init_cov_gravity_ = o.init_cov_gravity_;
+    init_cov_bg_ = o.init_cov_bg_;
+    init_cov_ba_ = o.init_cov_ba_;
     R_li_ = o.R_li_; t_li_ = o.t_li_;
     R_il_ = o.R_il_; t_il_ = o.t_il_;
     R_lc_ = o.R_lc_; t_lc_ = o.t_lc_;
@@ -246,18 +251,18 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
   updateDerivedTransforms();
 
   // Initial state covariance
-  double cov_pos, cov_vel, cov_bg, cov_ba, cov_gravity;
   paramWarn<double>(pnh, "state/cov/rot_tilt", init_cov_rot_tilt_, 1e-4);
   paramWarn<double>(pnh, "state/cov/rot_yaw", init_cov_rot_yaw_, 1e-4);
-  paramWarn<double>(pnh, "state/cov/pos",     cov_pos,     1e-4);
-  paramWarn<double>(pnh, "state/cov/vel",     cov_vel,     1e-4);
-  paramWarn<double>(pnh, "state/cov/bg",      cov_bg,      1e-6);
-  paramWarn<double>(pnh, "state/cov/ba",      cov_ba,      1e-6);
-  paramWarn<double>(pnh, "state/cov/gravity", cov_gravity, 1e-5);
+  paramWarn<double>(pnh, "state/cov/pos",     init_cov_pos_,     1e-4);
+  paramWarn<double>(pnh, "state/cov/vel",     init_cov_vel_,     1e-4);
+  paramWarn<double>(pnh, "state/cov/bg",      init_cov_bg_,      1e-6);
+  paramWarn<double>(pnh, "state/cov/ba",      init_cov_ba_,      1e-6);
+  paramWarn<double>(pnh, "state/cov/gravity", init_cov_gravity_, 1e-5);
   // Before gravity alignment there is not yet a meaningful yaw axis. Seed
   // the temporary isotropic block with the tilt value; setCalibResult()
   // replaces it with the exact aligned tilt/yaw covariance before LIO.
-  initCov(init_cov_rot_tilt_, cov_pos, cov_vel, cov_bg, cov_ba, cov_gravity);
+  initCov(init_cov_rot_tilt_, init_cov_pos_, init_cov_vel_, init_cov_bg_,
+          init_cov_ba_, init_cov_gravity_);
 
   // Initial dynamic state
   std::vector<double> g_vec, v_vec, ba_vec, bg_vec;
@@ -287,9 +292,9 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
   // THE SAME VALUE the (still-present) initial-covariance key uses, so this
   // is provably md5-inert unless a config explicitly sets the new key --
   // rule 26 item 1, no new default chosen here.
-  double bias_gyr_rw = cov_bg, bias_acc_rw = cov_ba;
-  paramWarn<double>(pnh, "imu/bias_gyr_rw", bias_gyr_rw, cov_bg);
-  paramWarn<double>(pnh, "imu/bias_acc_rw", bias_acc_rw, cov_ba);
+  double bias_gyr_rw = init_cov_bg_, bias_acc_rw = init_cov_ba_;
+  paramWarn<double>(pnh, "imu/bias_gyr_rw", bias_gyr_rw, init_cov_bg_);
+  paramWarn<double>(pnh, "imu/bias_acc_rw", bias_acc_rw, init_cov_ba_);
   cov_bias_acc_ = V3D::Constant(bias_acc_rw);
   cov_bias_gyr_ = V3D::Constant(bias_gyr_rw);
 

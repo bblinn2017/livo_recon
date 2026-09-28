@@ -83,6 +83,21 @@ public:
   const V3D& covBiasGyr() const { return cov_bias_gyr_; }
   const V3D& covBiasAcc() const { return cov_bias_acc_; }
 
+  // Resolved initial-covariance scalars (the exact seven `state/cov/*`
+  // values this run was configured with), retained for diagnostics that
+  // need to report the configuration a scan's numbers were produced under
+  // without threading the config through every call site. rot_tilt/rot_yaw
+  // are the values gravityAlignedAttitudeCovariance() was built from (see
+  // setCalibResult()); pos/vel/bg/ba/gravity are the plain isotropic
+  // diagonal values initCov() used.
+  double initCovRotTilt() const { return init_cov_rot_tilt_; }
+  double initCovRotYaw()  const { return init_cov_rot_yaw_; }
+  double initCovPos()     const { return init_cov_pos_; }
+  double initCovVel()     const { return init_cov_vel_; }
+  double initCovGravity() const { return init_cov_gravity_; }
+  double initCovBg()      const { return init_cov_bg_; }
+  double initCovBa()      const { return init_cov_ba_; }
+
   // ── R / t getters ─────────────────────────────────────────────────────────
 
   const M3D& Ric() const { return R_ic_; }
@@ -161,6 +176,11 @@ private:
   // values reproduce the former isotropic initialization exactly.
   double init_cov_rot_tilt_ = 1e-4;
   double init_cov_rot_yaw_ = 1e-4;
+  double init_cov_pos_ = 1e-4;
+  double init_cov_vel_ = 1e-4;
+  double init_cov_gravity_ = 1e-5;
+  double init_cov_bg_ = 1e-6;
+  double init_cov_ba_ = 1e-6;
 
   // Extrinsics
   M3D R_li_, R_il_, R_lc_, R_ic_;

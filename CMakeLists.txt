@@ -114,6 +114,7 @@ target_compile_options(livo_cuda PRIVATE
 add_executable(livo_recon_node
   src/utils/state/state.cpp
   src/utils/algo/covariance_math.cpp
+  src/utils/algo/chi_square.cpp
   src/utils/lidar/lidar.cpp
   src/utils/data/data_queues.cpp
   src/utils/data/measures.cpp
@@ -122,6 +123,7 @@ add_executable(livo_recon_node
   src/diagnostics/eval/nees_logger.cpp
   src/diagnostics/gt_interp.cpp
   src/diagnostics/stationary_diagnostic_writer.cpp
+  src/diagnostics/init_consistency.cpp
   src/main.cpp
   src/livo_recon_node.cpp
   src/node_context.cpp

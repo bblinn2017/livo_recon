@@ -37,6 +37,9 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<std::string>(true, "estimator/mode=coupled",
                           "estimator/coupled/test_id", copts_.test_id,
                           std::string("unlabeled"));
+  cfg.nested<bool>(true, "estimator/mode=coupled",
+                   "estimator/coupled/minimal_diagnostics",
+                   copts_.minimal_diagnostics, false);
   if (copts_.knot_count < 2)
     cfg.requireCombination("estimator/coupled/knot_count must be at least 2");
   if (!state_->estBA() || !state_->estBG() || !state_->estGravity())

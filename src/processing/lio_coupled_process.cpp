@@ -1,5 +1,6 @@
 #include "livo_recon/processing/lio_coupled.h"
 
+#include "livo_recon/diagnostics/init_consistency.h"
 #include "livo_recon/diagnostics/joint_knots/joint_knot_diagnostic_writer.h"
 #include "livo_recon/diagnostics/stationary_diagnostic_writer.h"
 #include "livo_recon/lio/residual_weighting.h"
@@ -26,9 +27,10 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   applyPriorScalarControls(prior_cov_, opts_.prior_scalar);
   state_propagat_ = *state_;
   trP_pos_pre_ = prior_cov_.block<3,3>(StateGroup::idxP(), StateGroup::idxP()).trace();
-  writeJointKnotStateChainDiagnostics(
-      copts_.test_id, voxel_map_->frame_idx_, -1, "pre_update",
-      mg.image.t + data_queues_->start_time, mg, *state_);
+  if (!copts_.minimal_diagnostics)
+    writeJointKnotStateChainDiagnostics(
+        copts_.test_id, voxel_map_->frame_idx_, -1, "pre_update",
+        mg.image.t + data_queues_->start_time, mg, *state_);
 
   trajectory_valid_ = trajectory_.initialize(
       mg.poses, mg.image.t, copts_.knot_count, state_propagat_);
@@ -70,14 +72,15 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
                    copts_.gating_state_uncertainty ? &gating_covariances : nullptr);
     const std::string architecture = "coupled_" + copts_.residual_evaluation_time;
     if (residuals_.empty()) {
-      writeGatingIterationDiagnostics(
-          copts_.test_id, architecture, voxel_map_->frame_idx_, iteration,
-          mg.image.t + data_queues_->start_time,
-          copts_.gating_state_uncertainty,
-          static_cast<int>(evaluated_points.size()),
-          n_statistical_gate_candidates_, n_statistical_gate_rejections_,
-          n_miss_coverage_, n_miss_mismatch_, mean_gating_cov_trace,
-          max_gating_cov_trace, residuals_);
+      if (!copts_.minimal_diagnostics)
+        writeGatingIterationDiagnostics(
+            copts_.test_id, architecture, voxel_map_->frame_idx_, iteration,
+            mg.image.t + data_queues_->start_time,
+            copts_.gating_state_uncertainty,
+            static_cast<int>(evaluated_points.size()),
+            n_statistical_gate_candidates_, n_statistical_gate_rejections_,
+            n_miss_coverage_, n_miss_mismatch_, mean_gating_cov_trace,
+            max_gating_cov_trace, residuals_);
       stop = "no_residuals";
       break;
     }
@@ -91,13 +94,14 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     applySigmaScale(residuals_);
     // Write after every solve-side reweighting so solve_input_hash describes
     // the exact residual values consumed below, not merely gate output.
-    writeGatingIterationDiagnostics(
-        copts_.test_id, architecture, voxel_map_->frame_idx_, iteration,
-        mg.image.t + data_queues_->start_time,
-        copts_.gating_state_uncertainty, static_cast<int>(evaluated_points.size()),
-        n_statistical_gate_candidates_, n_statistical_gate_rejections_,
-        n_miss_coverage_, n_miss_mismatch_, mean_gating_cov_trace,
-        max_gating_cov_trace, residuals_);
+    if (!copts_.minimal_diagnostics)
+      writeGatingIterationDiagnostics(
+          copts_.test_id, architecture, voxel_map_->frame_idx_, iteration,
+          mg.image.t + data_queues_->start_time,
+          copts_.gating_state_uncertainty, static_cast<int>(evaluated_points.size()),
+          n_statistical_gate_candidates_, n_statistical_gate_rejections_,
+          n_miss_coverage_, n_miss_mismatch_, mean_gating_cov_trace,
+          max_gating_cov_trace, residuals_);
 
     const JointKnotTrajectory before = trajectory_;
     last_solve_ = solveJointKnotInformation(
@@ -111,25 +115,27 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     ++completed;
     ++iterations_;
 
-    writeJointKnotIterationDiagnostics(
-        copts_.test_id, voxel_map_->frame_idx_, iteration,
-        mg.image.t + data_queues_->start_time,
-        copts_.residual_evaluation_time,
-        copts_.gating_state_uncertainty, before, trajectory_,
-        joint_prior_, last_solve_, static_cast<int>(residuals_.size()),
-        mean_gating_cov_trace, max_gating_cov_trace);
-    writeJointKnotAllScanDiagnostics(
-        copts_.test_id, voxel_map_->frame_idx_, iteration,
-        mg.image.t + data_queues_->start_time, stationary_reference_R_,
-        stationary_reference_p_, stationary_reference_v_, before, trajectory_);
-    writeStationaryIterationDiagnostics(
-        copts_.test_id, architecture, voxel_map_->frame_idx_, iteration,
-        mg.image.t + data_queues_->start_time, stationary_reference_R_,
-        stationary_reference_p_, stationary_reference_v_, iteration_before,
-        *state_, residuals_);
-    writeJointKnotStateChainDiagnostics(
-        copts_.test_id, voxel_map_->frame_idx_, iteration, "post_iteration",
-        mg.image.t + data_queues_->start_time, mg, *state_);
+    if (!copts_.minimal_diagnostics) {
+      writeJointKnotIterationDiagnostics(
+          copts_.test_id, voxel_map_->frame_idx_, iteration,
+          mg.image.t + data_queues_->start_time,
+          copts_.residual_evaluation_time,
+          copts_.gating_state_uncertainty, before, trajectory_,
+          joint_prior_, last_solve_, static_cast<int>(residuals_.size()),
+          mean_gating_cov_trace, max_gating_cov_trace);
+      writeJointKnotAllScanDiagnostics(
+          copts_.test_id, voxel_map_->frame_idx_, iteration,
+          mg.image.t + data_queues_->start_time, stationary_reference_R_,
+          stationary_reference_p_, stationary_reference_v_, before, trajectory_);
+      writeStationaryIterationDiagnostics(
+          copts_.test_id, architecture, voxel_map_->frame_idx_, iteration,
+          mg.image.t + data_queues_->start_time, stationary_reference_R_,
+          stationary_reference_p_, stationary_reference_v_, iteration_before,
+          *state_, residuals_);
+      writeJointKnotStateChainDiagnostics(
+          copts_.test_id, voxel_map_->frame_idx_, iteration, "post_iteration",
+          mg.image.t + data_queues_->start_time, mg, *state_);
+    }
 
     // Experiment policy: run exactly max_iterations whenever residuals remain
     // available. Step/error values are diagnostics only, not stop conditions.
@@ -139,22 +145,35 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
     state_->covMut() = extractTailStateCovariance(
         trajectory_, last_solve_.posterior, *state_);
     writeFinalDeskew(mg);
-    writeJointKnotCovarianceDiagnostics(
-        copts_.test_id, voxel_map_->frame_idx_,
-        mg.image.t + data_queues_->start_time, trajectory_, joint_prior_,
-        last_solve_.posterior, state_propagat_.cov(), state_->cov(),
-        controlled_head_covariance, mg.poses, mg.imu_state_transitions,
-        mg.imu_process_covariances);
+    if (!copts_.minimal_diagnostics)
+      writeJointKnotCovarianceDiagnostics(
+          copts_.test_id, voxel_map_->frame_idx_,
+          mg.image.t + data_queues_->start_time, trajectory_, joint_prior_,
+          last_solve_.posterior, state_propagat_.cov(), state_->cov(),
+          controlled_head_covariance, mg.poses, mg.imu_state_transitions,
+          mg.imu_process_covariances);
   }
   mg.pos_after_lio = state_->pos();
   mg.rot_after_lio = state_->rot();
   mg.vel_after_lio = state_->vel();
   mg.cov_after_lio = state_->cov();
-  writeJointKnotScanSummaryDiagnostics(
+  if (!copts_.minimal_diagnostics)
+    writeJointKnotScanSummaryDiagnostics(
+        copts_.test_id, voxel_map_->frame_idx_,
+        mg.image.t + data_queues_->start_time, completed, stop,
+        state_propagat_, *state_, stationary_reference_R_,
+        stationary_reference_p_, stationary_reference_v_);
+  writeInitializationConsistencyDiagnostics(
       copts_.test_id, voxel_map_->frame_idx_,
-      mg.image.t + data_queues_->start_time, completed, stop,
-      state_propagat_, *state_, stationary_reference_R_,
-      stationary_reference_p_, stationary_reference_v_);
+      mg.image.t + data_queues_->start_time,
+      state_->initCovPos(), state_->initCovVel(), state_->initCovRotTilt(),
+      state_->initCovRotYaw(), state_->initCovGravity(), state_->initCovBg(),
+      state_->initCovBa(), static_cast<int>(residuals_.size()), completed,
+      stationary_reference_R_, stationary_reference_p_, stationary_reference_v_,
+      state_propagat_.rot(), state_propagat_.pos(), state_propagat_.vel(),
+      state_propagat_.cov().block<9, 9>(StateGroup::idxR(), StateGroup::idxR()),
+      state_->rot(), state_->pos(), state_->vel(),
+      state_->cov().block<9, 9>(StateGroup::idxR(), StateGroup::idxR()));
 
   std::ostringstream report;
   report << "joint_knots: iterations=" << completed

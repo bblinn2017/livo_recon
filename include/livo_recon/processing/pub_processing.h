@@ -34,6 +34,12 @@ struct PubProcOptions
   bool        export_images         = false;
   int         export_image_interval = 1;
   bool        export_odom           = false;
+  // pose_pair.csv shares export_odom's directory/gate historically, but a
+  // minimal-diagnostics campaign (see LioProcBase's minimal_diagnostics
+  // option) wants odometry.txt without this per-scan predicted/realized
+  // pose+velocity file. Defaults true so every existing config keeps
+  // writing it exactly as before.
+  bool        export_pose_pair      = true;
 };
 
 struct WriteTask
