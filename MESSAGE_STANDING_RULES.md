@@ -21,3 +21,19 @@
    only for isolated mathematical identities.
 7. The requesting agent does not compile or run tests locally; those are
    coding-agent responsibilities.
+8. When raw results risk exceeding the single-archive size limit, first use
+   lossless per-file compression (prefer `.zst` for large CSV/text files) and
+   place the compressed files inside the one required zip. Include a raw-file
+   manifest with each run ID, original/compressed filename, original byte and
+   row counts where applicable, and the SHA-256 of the uncompressed content.
+   Compression must not round, truncate, resample, aggregate, or otherwise
+   alter the evidence; retain round-trip-safe floating-point precision.
+9. If lossless compression is insufficient, omit only demonstrably redundant
+   representations such as summaries reproducible from retained raw files,
+   duplicate logs, copied binaries, build intermediates, or identical campaign
+   baseline artifacts. Record every omission and identify the retained source
+   containing the equivalent data. Never reduce required component-wise state,
+   correction, covariance, gating, process-noise, or per-iteration evidence to
+   norms or summary statistics without explicit requester approval. If the
+   archive still cannot fit, report the exact limit and projected size before
+   making further omissions or splitting the return.

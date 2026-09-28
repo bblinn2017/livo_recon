@@ -64,10 +64,12 @@ outputs:
       enable: false
     throttle_s: 0.
 calib:
-  num_samples: 100
-  use_calib: true
-  use_calib_var: false
-  use_calib_bias: true
+  stationary:
+    num_samples: 100
+    stall_calls_max: 300
+    apply_to_state:
+      gyro_bias: true
+      accel_bias: true
 state:
   est:
     bg: true
@@ -76,18 +78,7 @@ state:
     cov_acc: false
     cov_gyr: false
   cov:
-    # Ported from FAST-LIVO2's own upstream config/HILTI22_handheld.yaml
-    # (acc_cov/gyr_cov -- confirmed to match upstream hku-mars/FAST-LIVO2's
-    # HILTI22.yaml default, see that file's own gyr_cov comment) -- NOT a
-    # livo_recon-specific tune, just the known-good starting point for this
-    # sensor/dataset. livo_recon's own HILTI configs never had ANY acc/gyr
-    # cov override before this (state/cov/acc,gyr silently fell back to
-    # config/defaults/state.yaml's acc=1.0/gyr=1.0 with online covariance
-    # estimation enabled from that point) -- confirmed 2026-08-12: the
-    # first-ever full livo_recon HILTI baseline (LIO-only) diverged
-    # catastrophically on 14/16 HILTI sequences with these untuned
-    # defaults. This is a starting point to validate against, not
-    # confirmed optimal for livo_recon's own pipeline yet.
+    # Initial state covariance only; runtime process noise is under imu/.
     # acc doubled vs the upstream-ported 0.5 starting point above --
     # confirmed via this session's hilti_covtune/covtune2/covtune3 sweeps
     # as the best single uniform cov combo (alongside point_filter_num=3/
@@ -101,14 +92,21 @@ state:
     bg: 1.0e-5
     ba: 1.0e-5
     gravity: 1.0e-5
-    acc: 1.0
-    gyr: 0.01
   init_state:
     gravity: [0., 0., -9.81]
     vel: [0., 0., 0.]
     ba: [0., 0., 0.]
     bg: [0., 0., 0.]
 imu:
+  process_noise:
+    fixed:
+      # Ported from FAST-LIVO2's HILTI22_handheld configuration; this is a
+      # starting point rather than a livo_recon-specific optimum.
+      acc_variance: 1.0
+      gyro_variance: 0.01
+    bias_random_walk:
+      gyro_variance_rate: 1.0e-5
+      accel_variance_rate: 1.0e-5
   second_order: true   # include dt² Jacobian terms F_x[P,R] and F_x[P,G]
   sensor:
     range_err: 0.02

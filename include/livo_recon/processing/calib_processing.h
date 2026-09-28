@@ -21,13 +21,30 @@ struct CalibProcOptions
   // ZERO growth in the sample count, abort loudly with the counts that
   // explain why. 0 disables the bound and restores the old behaviour.
   int  stall_calls_max   = 300;
-  bool use_calib         = true;
-  bool use_calib_var      = false;
-  bool use_calib_bias     = true;
+  bool apply_gyro_bias = true;
+  bool apply_accel_bias = true;
 
-  // use_calib_var default false: a stationary calibration window measures
-  // the sensor's noise *floor*, not the process noise real dynamic motion
-  // needs -- using it unmodified as EKF process noise makes the filter
+  // Initial-covariance policy. "configured" is the legacy path and leaves
+  // state/cov/* byte-for-byte in control. "calibration_derived" replaces
+  // the observable attitude/bias blocks after the stationary calibration;
+  // yaw, gravity and explicit model floors remain configured because a
+  // single stationary specific-force vector cannot identify them.
+  std::string p0_mode = "configured";
+  int p0_autocov_lags = 20;
+  double p0_known_pos_variance = 1e-12;
+  double p0_known_vel_variance = 1e-12;
+  // Standard deviation of the ONE transverse specific-force ambiguity
+  // shared equally (in acceleration-equivalent units) by gravity tilt and
+  // accelerometer bias. Negative conservatively derives it from the larger
+  // of the configured tilt and b_a uncertainties.
+  double p0_tilt_ba_ambiguity_accel_std = -1.0;
+  double p0_bg_model_floor = -1.0;
+  double p0_ba_radial_model_floor = -1.0;
+
+  // A stationary calibration window measures the sensor's noise *floor*,
+  // not the process noise real dynamic motion needs. The measured floor is
+  // always stored separately and never replaces imu/process_noise/fixed.
+  // Using it unmodified as EKF process noise makes the filter
   // drastically overconfident in IMU-only propagation between corrections
   // (confirmed: NTU VIRAL's eee_01 calibrates to acc=0.00434, gyr=0.0000636
   // -- ~100-1000x smaller than the values needed for stable tracking on
@@ -39,12 +56,9 @@ struct CalibProcOptions
   // vibration, linearization error) that no stationary recording can ever
   // measure, calibrated carefully or not.
   //
-  // So: var_acc/var_gyr are left as whatever state.yaml's cov/acc,gyr
-  // hardcodes (per-sensor/per-dataset, tuned empirically -- see e.g.
-  // ntu_viral/state.yaml), not derived from calibration at all. Calibration
-  // (use_calib) still runs and still sets bias (use_calib_bias) and the
-  // initial gravity-aligned rotation (computeInitialRotation(), from the
-  // same stationary acc_bias) -- only the noise/variance side is skipped.
+  // So var_acc/var_gyr remain whatever imu/process_noise/fixed configures. The
+  // stationary window is mandatory, always gravity-aligns attitude, and can
+  // independently apply or merely report each estimated bias.
 };
 
 class CalibProc
@@ -56,10 +70,14 @@ public:
 
   std::string estimateFromBuffer();
 private:
-  std::string skipCalibration();
   bool        collectSamples();
   void        computeBiasAndNoise(V3D& acc_bias, V3D& gyro_bias,
                                   V3D& var_acc, V3D& var_gyr) const;
+  M3D         covarianceOfMean(bool accelerometer) const;
+  void        applyCalibrationDerivedP0(const V3D& acc_mean,
+                                        const M3D& R_init,
+                                        const M3D& acc_mean_cov,
+                                        const M3D& gyro_mean_cov);
   M3D         computeInitialRotation(const V3D& acc_bias) const;
 
   // Why calibration is starving, counted rather than guessed. The prime

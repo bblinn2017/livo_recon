@@ -64,10 +64,33 @@ outputs:
       enable: false
     throttle_s: 0.
 calib:
-  num_samples: 100
-  use_calib: true
-  use_calib_var: false
-  use_calib_bias: true
+  # Stationary initialization is mandatory. Its measured variance is stored
+  # as a sensor floor; it never silently replaces runtime process noise.
+  stationary:
+    num_samples: 100
+    stall_calls_max: 300
+    apply_to_state:
+      gyro_bias: true
+      accel_bias: true
+  p0:
+    # Baseline-preserving default. Set to calibration_derived for the Stage-1
+    # experiment; calibration is required to begin stationary.
+    mode: configured
+    autocov_lags: 20
+    # The world/map origin is defined to be exactly zero and the platform is
+    # required to start stationary. Positive epsilons keep information-form
+    # solves nonsingular while representing those known constraints.
+    known_pos_variance: 1.0e-12
+    known_vel_variance: 1.0e-12
+    # Balanced roll/pitch-vs-b_a ambiguity in acceleration units. 0.0856
+    # m/s^2 = g * 0.5 degrees, using the VN-100's published static pitch/roll
+    # accuracy as the initial conservative ambiguity scale. Each side gets
+    # that same acceleration-equivalent uncertainty and the compensating
+    # cross-covariance. This is NOT
+    # the later motion-dependent Q scale.
+    tilt_ba_ambiguity_accel_std: 0.0856
+    bg_model_floor: -1.0
+    ba_radial_model_floor: -1.0
 state:
   est:
     bg: true
@@ -76,13 +99,7 @@ state:
     cov_acc: false
     cov_gyr: false
   cov:
-    # Hardcoded per-sensor process noise for this dataset's IMU (VN-100),
-    # not derived from calibration (calib/use_calib_var defaults false --
-    # see CalibProcOptions's docs). Matches FAST-LIVO2's own tuned
-    # NTU_VIRAL.yaml acc_cov/gyr_cov -- confirmed via sweep to sit well
-    # inside the stable range (acc: flat 5-30x the sensor's own datasheet
-    # std; gyr: flat from ~150x upward, with a real failure threshold
-    # below ~90x and no penalty at all for going higher).
+    # Initial state covariance only; runtime process noise is under imu/.
     rot_tilt: 1.0e-2
     rot_yaw: 1.0e-2
     pos: 1.0e-2
@@ -90,14 +107,21 @@ state:
     bg: 1.0e-5
     ba: 1.0e-5
     gravity: 1.0e-5
-    acc: 0.5
-    gyr: 0.3
   init_state:
     gravity: [0., 0., -9.81]
     vel: [0., 0., 0.]
     ba: [0., 0., 0.]
     bg: [0., 0., 0.]
 imu:
+  process_noise:
+    fixed:
+      # FAST-LIVO2's tuned NTU_VIRAL acc_cov/gyr_cov. These operating
+      # variances are intentionally separate from the stationary floor.
+      acc_variance: 0.5
+      gyro_variance: 0.3
+    bias_random_walk:
+      gyro_variance_rate: 1.0e-5
+      accel_variance_rate: 1.0e-5
   # FAST-LIVO2's own NTU_VIRAL.yaml value (lio/beam_err: 0.01 degrees, same
   # Ouster OS1-64), matching the sensor's actual angular precision rather
   # than defaults/imu.yaml's generic angle_err_deg=0.15. An OLD A/B (same

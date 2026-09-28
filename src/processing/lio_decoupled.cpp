@@ -1085,10 +1085,9 @@ void LioProcDecoupled::finalizeSplineAndQ(MeasureGroup& mg)
     if (!adaptive_q_primed_)
     {
       // The NOMINAL is whatever the state was configured with before any
-      // adaptation -- the YAML's state/cov/{acc,gyr} (or the calibration
-      // values, if use_calib_var is on).  The FLOOR is the calibration
-      // window's measured variance, always available now regardless of
-      // use_calib_var.  Isotropic scalars, matching the trace/3 reduction
+      // adaptation -- imu/process_noise/fixed. The FLOOR is the
+      // stationary calibration window's separate measured variance.
+      // Isotropic scalars, matching the trace/3 reduction
       // used at every other point in the pipeline.
       adaptive_q_.setNominal(state_->varAcc().mean(), state_->varGyr().mean());
       adaptive_q_.setFloor(state_->varAccFloor().mean(), state_->varGyrFloor().mean());

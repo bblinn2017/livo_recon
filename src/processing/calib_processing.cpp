@@ -1,7 +1,9 @@
 #include "livo_recon/processing/calib_processing.h"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
+#include "livo_recon/diagnostics/calibration_p0_writer.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/state/state.h"
 
@@ -15,56 +17,63 @@ CalibProc::CalibProc(NodeContext& ctx)
 
 std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
 {
-  paramWarn<int>(pnh, "calib/num_samples",   opts_.num_samples,   200);
-  paramWarn<int>(pnh, "calib/stall_calls_max", opts_.stall_calls_max, 300);
-  paramWarn<bool>(pnh, "calib/use_calib",     opts_.use_calib,     true);
-  paramWarn<bool>(pnh, "calib/use_calib_var",  opts_.use_calib_var,  false);
-  paramWarn<bool>(pnh, "calib/use_calib_bias", opts_.use_calib_bias, true);
+  for (const char* legacy : {"calib/use_calib", "calib/use_calib_var",
+                             "calib/use_calib_bias", "calib/num_samples",
+                             "calib/stall_calls_max"})
+  {
+    if (pnh.hasParam(legacy))
+      throw std::invalid_argument(std::string("removed ambiguous calibration key: ") +
+          legacy + "; use calib/stationary, calib/p0, and imu/process_noise");
+  }
+  paramWarn<int>(pnh, "calib/stationary/num_samples", opts_.num_samples, 200);
+  paramWarn<int>(pnh, "calib/stationary/stall_calls_max", opts_.stall_calls_max, 300);
+  paramWarn<bool>(pnh, "calib/stationary/apply_to_state/gyro_bias",
+                  opts_.apply_gyro_bias, true);
+  paramWarn<bool>(pnh, "calib/stationary/apply_to_state/accel_bias",
+                  opts_.apply_accel_bias, true);
+  paramWarn<std::string>(pnh, "calib/p0/mode", opts_.p0_mode, "configured");
+  paramWarn<int>(pnh, "calib/p0/autocov_lags", opts_.p0_autocov_lags, 20);
+  paramWarn<double>(pnh, "calib/p0/known_pos_variance",
+                    opts_.p0_known_pos_variance, 1e-12);
+  paramWarn<double>(pnh, "calib/p0/known_vel_variance",
+                    opts_.p0_known_vel_variance, 1e-12);
+  paramWarn<double>(pnh, "calib/p0/tilt_ba_ambiguity_accel_std",
+                    opts_.p0_tilt_ba_ambiguity_accel_std, -1.0);
+  paramWarn<double>(pnh, "calib/p0/bg_model_floor",
+                    opts_.p0_bg_model_floor, -1.0);
+  paramWarn<double>(pnh, "calib/p0/ba_radial_model_floor",
+                    opts_.p0_ba_radial_model_floor, -1.0);
 
   if (opts_.num_samples < 1)
     opts_.num_samples = 1;
-
+  opts_.p0_autocov_lags = std::max(0, opts_.p0_autocov_lags);
+  if (opts_.p0_mode != "configured" && opts_.p0_mode != "calibration_derived")
+    throw std::invalid_argument("calib/p0/mode must be configured or calibration_derived");
+  if (!std::isfinite(opts_.p0_known_pos_variance) ||
+      !std::isfinite(opts_.p0_known_vel_variance) ||
+      opts_.p0_known_pos_variance <= 0.0 || opts_.p0_known_vel_variance <= 0.0)
+    throw std::invalid_argument("calib/p0 known-state variances must be finite and positive");
+  if (!std::isfinite(opts_.p0_tilt_ba_ambiguity_accel_std) ||
+      !std::isfinite(opts_.p0_bg_model_floor) ||
+      !std::isfinite(opts_.p0_ba_radial_model_floor))
+    throw std::invalid_argument("calib/p0 ambiguity and floor parameters must be finite");
   std::ostringstream oss;
-  oss << "[params/calib]"
-      << "\n  num_samples:    " << opts_.num_samples
-      << "\n  stall_calls_max:" << opts_.stall_calls_max
-      << "\n  use_calib:      " << (opts_.use_calib      ? "true" : "false")
-      << "\n  use_calib_var:  " << (opts_.use_calib_var  ? "true" : "false")
-      << "\n  use_calib_bias: " << (opts_.use_calib_bias ? "true" : "false");
-  return oss.str();
-}
-
-std::string CalibProc::skipCalibration()
-{
-  if (!data_queues_->ready())
-    return "Waiting for first frame (calib skipped — using provided init state)...";
-
-  ImageData img = data_queues_->popImage();
-  std::vector<PointXYZT> points;
-  data_queues_->popLidar(points, img.t);
-  std::deque<ImuSample> imu_samples;
-  data_queues_->popImu(imu_samples, img.t);
-  // See collectSamples()'s matching comment -- same backlog-drain reasoning
-  // applies here (this is calibration's other entry point, use_calib=false).
-  std::vector<PointXYZT> dry_run_points;
-  data_queues_->popDryRunLidar(dry_run_points, img.t);
-
-  data_queues_->setStartTime(img.t);
-  img.t = 0.;
-  for (auto& p : points) p.t = 0.;
-  imu_samples.clear();
-  measures_->curr_time.set(0.);
-  measures_->pushMeasureGroup(
-      MeasureGroup{std::move(img), std::move(points), std::move(imu_samples)});
-  measures_->calib_done.set(true);
-
-  std::ostringstream oss;
-  oss << "Calibration skipped — using provided init state."
-      << "\n  acc bias:   " << state_->biasAcc().transpose()
-      << "\n  gyro bias:  " << state_->biasGyr().transpose()
-      << "\n  acc noise:  " << state_->varAcc().transpose()
-      << "\n  gyro noise: " << state_->varGyr().transpose()
-      << "\n  gravity:    " << state_->gravity().transpose();
+  oss << "[params/calib/stationary]"
+      << "\n  required: true"
+      << "\n  num_samples: " << opts_.num_samples
+      << "\n  stall_calls_max: " << opts_.stall_calls_max
+      << "\n  apply_to_state/gyro_bias: "
+      << (opts_.apply_gyro_bias ? "true" : "false")
+      << "\n  apply_to_state/accel_bias: "
+      << (opts_.apply_accel_bias ? "true" : "false");
+  oss << "\n  p0/mode:       " << opts_.p0_mode
+      << "\n  p0/autocov_lags: " << opts_.p0_autocov_lags
+      << "\n  p0/known_pos_variance: " << opts_.p0_known_pos_variance
+      << "\n  p0/known_vel_variance: " << opts_.p0_known_vel_variance
+      << "\n  p0/tilt_ba_ambiguity_accel_std: "
+      << opts_.p0_tilt_ba_ambiguity_accel_std
+      << "\n  p0/model_floors(bg,ba_radial): " << opts_.p0_bg_model_floor << ", "
+      << opts_.p0_ba_radial_model_floor;
   return oss.str();
 }
 
@@ -170,6 +179,155 @@ void CalibProc::computeBiasAndNoise(V3D& acc_bias, V3D& gyro_bias,
   var_gyr = V3D(gyro_cov(0,0), gyro_cov(1,1), gyro_cov(2,2));
 }
 
+M3D CalibProc::covarianceOfMean(bool accelerometer) const
+{
+  const int n = static_cast<int>(calib_imu_samples.size());
+  if (n < 2) return M3D::Zero();
+
+  V3D mean = V3D::Zero();
+  for (const auto& s : calib_imu_samples)
+    mean += accelerometer ? s.acc : s.gyro;
+  mean /= static_cast<double>(n);
+
+  // Bartlett-window HAC estimate of Cov(mean). Unlike sample_cov/N this
+  // retains the temporal correlation present in a stationary IMU stream.
+  // The Bartlett taper keeps the finite-sample estimate PSD in exact
+  // arithmetic; the eigensolver projection removes round-off negatives.
+  const int lmax = std::min(opts_.p0_autocov_lags, n - 1);
+  M3D spectral = M3D::Zero();
+  for (int lag = 0; lag <= lmax; ++lag)
+  {
+    M3D gamma = M3D::Zero();
+    for (int i = lag; i < n; ++i)
+    {
+      const V3D xi = (accelerometer ? calib_imu_samples[i].acc
+                                    : calib_imu_samples[i].gyro) - mean;
+      const V3D xj = (accelerometer ? calib_imu_samples[i-lag].acc
+                                    : calib_imu_samples[i-lag].gyro) - mean;
+      gamma += xi * xj.transpose();
+    }
+    gamma /= static_cast<double>(n);
+    if (lag == 0)
+      spectral += gamma;
+    else
+    {
+      const double w = 1.0 - static_cast<double>(lag) /
+                                 static_cast<double>(lmax + 1);
+      spectral += w * (gamma + gamma.transpose());
+    }
+  }
+  M3D cov_mean = 0.5 * (spectral + spectral.transpose()) /
+                 static_cast<double>(n);
+  Eigen::SelfAdjointEigenSolver<M3D> es(cov_mean);
+  if (es.info() != Eigen::Success) throw std::runtime_error("P0 mean covariance eigensolve failed");
+  return es.eigenvectors() * es.eigenvalues().cwiseMax(0.0).asDiagonal() *
+         es.eigenvectors().transpose();
+}
+
+void CalibProc::applyCalibrationDerivedP0(
+    const V3D& acc_mean, const M3D& R_init, const M3D& acc_mean_cov,
+    const M3D& gyro_mean_cov)
+{
+  auto rotationAndBias = [&](const V3D& mean, M3D& R, V3D& ba) {
+    R = computeInitialRotation(mean);
+    ba = mean + R.transpose() * state_->gravity();
+  };
+
+  // Numerical Jacobian is intentional: it differentiates the exact
+  // production gravity-alignment convention, including the right/body
+  // attitude perturbation consumed by StateGroup::applyDelta().
+  Eigen::Matrix<double, 6, 3> J = Eigen::Matrix<double, 6, 3>::Zero();
+  for (int axis = 0; axis < 3; ++axis)
+  {
+    const double eps = std::max(1e-7, std::abs(acc_mean(axis)) * 1e-7);
+    V3D plus = acc_mean, minus = acc_mean;
+    plus(axis) += eps;
+    minus(axis) -= eps;
+    M3D Rp, Rm;
+    V3D bap, bam;
+    rotationAndBias(plus, Rp, bap);
+    rotationAndBias(minus, Rm, bam);
+    J.block<3,1>(0, axis) =
+        (Log(R_init.transpose() * Rp) - Log(R_init.transpose() * Rm)) /
+        (2.0 * eps);
+    J.block<3,1>(3, axis) = (bap - bam) / (2.0 * eps);
+  }
+
+  Eigen::Matrix<double, 6, 6> P_acc = J * acc_mean_cov * J.transpose();
+  P_acc = 0.5 * (P_acc + P_acc.transpose());
+  const double bg_floor = opts_.p0_bg_model_floor >= 0.0
+      ? opts_.p0_bg_model_floor : state_->initCovBg();
+  const double ba_radial_floor = opts_.p0_ba_radial_model_floor >= 0.0
+      ? opts_.p0_ba_radial_model_floor : state_->initCovBa();
+
+  // Stationary specific force constrains only the SUM
+  //     delta_a = A * delta_theta + delta_ba,  A = [a_gravity]_x.
+  // Model its transverse null-space ambiguity with one latent acceleration
+  // vector e: A*dtheta=-e, dba=+e. Thus both alternatives
+  // have identical acceleration-equivalent variance and their negative
+  // cross-covariance preserves the fact that one compensates the other.
+  const double gravity_mag = state_->gravity().norm();
+  if (!std::isfinite(gravity_mag) || gravity_mag < 1e-6)
+    throw std::runtime_error("calibration-derived P0 requires nonzero finite gravity");
+  const V3D gravity_axis_body =
+      (R_init.transpose() * (-state_->gravity())).normalized();
+  const M3D tangent = M3D::Identity() -
+      gravity_axis_body * gravity_axis_body.transpose();
+  const double inherited_accel_var = std::max(
+      gravity_mag * gravity_mag * state_->initCovRotTilt(), state_->initCovBa());
+  const double ambiguity_std = opts_.p0_tilt_ba_ambiguity_accel_std >= 0.0
+      ? opts_.p0_tilt_ba_ambiguity_accel_std : std::sqrt(inherited_accel_var);
+  const M3D ambiguity_accel_cov =
+      ambiguity_std * ambiguity_std * tangent;
+  M3D A;
+  A << SKEW_SYM_MATRX(gravity_mag * gravity_axis_body);
+  // On the tangent plane pinv([g*u]_x) = -[g*u]_x/g^2.
+  const M3D A_pinv = -A / (gravity_mag * gravity_mag);
+  const M3D P_theta_amb =
+      A_pinv * ambiguity_accel_cov * A_pinv.transpose();
+  const M3D P_ba_amb = ambiguity_accel_cov;
+  const M3D P_theta_ba_amb =
+      -A_pinv * ambiguity_accel_cov;
+  P_acc.block<3,3>(0,0) += P_theta_amb;
+  P_acc.block<3,3>(3,3) += P_ba_amb + ba_radial_floor *
+      gravity_axis_body * gravity_axis_body.transpose();
+  P_acc.block<3,3>(0,3) += P_theta_ba_amb;
+  P_acc.block<3,3>(3,0) += P_theta_ba_amb.transpose();
+
+  Eigen::MatrixXd& P = state_->covMut();
+  P.block<3,3>(StateGroup::idxP(), StateGroup::idxP()) =
+      opts_.p0_known_pos_variance * M3D::Identity();
+  P.block<3,3>(StateGroup::idxV(), StateGroup::idxV()) =
+      opts_.p0_known_vel_variance * M3D::Identity();
+
+  // Accelerometer mean observes tilt, not yaw. Add the configured yaw
+  // variance along the right-perturbation gravity axis.
+  const V3D yaw_axis_body =
+      (R_init.transpose() * V3D(0.0, 0.0, -1.0)).normalized();
+  P.block<3,3>(StateGroup::idxR(), StateGroup::idxR()) =
+      P_acc.block<3,3>(0,0) + state_->initCovRotYaw() *
+          yaw_axis_body * yaw_axis_body.transpose();
+
+  if (state_->estBA())
+  {
+    P.block(state_->idxBA(), state_->idxBA(), 3, 3) = P_acc.block<3,3>(3,3);
+    P.block(StateGroup::idxR(), state_->idxBA(), 3, 3) = P_acc.block<3,3>(0,3);
+    P.block(state_->idxBA(), StateGroup::idxR(), 3, 3) = P_acc.block<3,3>(3,0);
+  }
+  if (state_->estBG())
+    P.block(state_->idxBG(), state_->idxBG(), 3, 3) =
+        gyro_mean_cov + bg_floor * M3D::Identity();
+
+  // Gravity magnitude/direction is deliberately left at state/cov/gravity:
+  // one stationary accelerometer mean cannot separate gravity from b_a.
+  P = 0.5 * (P + P.transpose());
+
+  ROS_INFO_STREAM("[calib/P0] balanced tilt-b_a ambiguity: accel_std="
+      << ambiguity_std << " m/s^2, equivalent_each_accel_std="
+      << ambiguity_std << " m/s^2, equivalent_each_tilt_std="
+      << ambiguity_std / gravity_mag << " rad");
+}
+
 M3D CalibProc::computeInitialRotation(const V3D& acc_bias) const
 {
   const V3D acc_dir  = acc_bias / acc_bias.norm();
@@ -185,9 +343,6 @@ M3D CalibProc::computeInitialRotation(const V3D& acc_bias) const
 std::string CalibProc::estimateFromBuffer()
 {
   TimedScope ts(profiler_, "calib");
-
-  if (!opts_.use_calib)
-    return skipCalibration();
 
   std::ostringstream oss;
   oss << "Calibrating IMU... " << calib_imu_samples.size() << " samples collected.";
@@ -229,22 +384,21 @@ std::string CalibProc::estimateFromBuffer()
   computeBiasAndNoise(acc_bias, gyro_bias, var_acc, var_gyr);
 
   const M3D R_init = computeInitialRotation(acc_bias);
+  const M3D acc_mean_cov = covarianceOfMean(true);
+  const M3D gyro_mean_cov = covarianceOfMean(false);
   // acc_bias = true_bias + R_init^T * [0,0,9.81]; strip gravity to get true sensor bias
   const V3D true_acc_bias = acc_bias + R_init.transpose() * state_->gravity();
   state_->setCalibResult(R_init,
-                         opts_.use_calib_bias ? gyro_bias   : state_->biasGyr(),
-                         opts_.use_calib_bias ? true_acc_bias : state_->biasAcc());
-  // use_calib_var defaults false -- see CalibProcOptions's docs. var_acc/
-  // var_gyr (computed above) are discarded in that case; state.yaml's
-  // cov/acc,gyr (hardcoded, per-sensor) stays in effect untouched.
-  // ALWAYS publish the measured variance as a FLOOR, whatever
-  // use_calib_var says -- see StateGroup::setNoiseFloor()'s doc comment for
-  // why the bound and the operating value must stay separate quantities.
-  // Previously this number was computed on every run and then discarded
-  // whenever use_calib_var was false, which is both shipped configs.
+                         opts_.apply_gyro_bias ? gyro_bias : state_->biasGyr(),
+                         opts_.apply_accel_bias ? true_acc_bias : state_->biasAcc());
+  // Stationary variance is a measured sensor-noise floor, not a complete
+  // dynamic process-noise model. Keep it separate from imu/process_noise.
   state_->setNoiseFloor(var_acc, var_gyr);
-  if (opts_.use_calib_var)
-    state_->setNoiseParams(var_acc, var_gyr);
+  if (opts_.p0_mode == "calibration_derived")
+    applyCalibrationDerivedP0(acc_bias, R_init, acc_mean_cov, gyro_mean_cov);
+  writeCalibrationP0Diagnostic(
+      *state_, opts_.p0_mode, static_cast<int>(calib_imu_samples.size()),
+      opts_.p0_autocov_lags, acc_mean_cov, gyro_mean_cov);
 
   // TQ-34, Bryce 2026-09-18: groups_seen/groups_dropped/stall_calls were
   // only ever printed on the STALL path (above) -- a normal, successful
@@ -263,6 +417,10 @@ std::string CalibProc::estimateFromBuffer()
       << "\n  acc floor:  " << state_->varAccFloor().transpose()
       << "\n  gyro floor: " << state_->varGyrFloor().transpose()
       << "\n  gravity:    " << state_->gravity().transpose()
+      << "\n  P0 mode:    " << opts_.p0_mode
+      << "\n  acc mean covariance:\n" << acc_mean_cov
+      << "\n  gyro mean covariance:\n" << gyro_mean_cov
+      << "\n  initialized P0:\n" << state_->cov()
       << "\n  groups_seen=" << calib_groups_seen_
       << " groups_dropped_for_fewer_than_2_imu=" << calib_groups_short_imu_
       << " stall_calls=" << calib_stall_calls_

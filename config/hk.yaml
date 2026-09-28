@@ -64,10 +64,12 @@ outputs:
       enable: false
     throttle_s: 0.
 calib:
-  num_samples: 500
-  use_calib: true
-  use_calib_var: false
-  use_calib_bias: true
+  stationary:
+    num_samples: 500
+    stall_calls_max: 300
+    apply_to_state:
+      gyro_bias: true
+      accel_bias: true
 state:
   est:
     bg: true
@@ -83,14 +85,19 @@ state:
     bg: 1.0e-6
     ba: 1.0e-6
     gravity: 1.0e-5
-    acc: 1.0e-4
-    gyr: 1.0e-4
   init_state:
     gravity: [0., 0., -9.81]
     vel: [0., 0., 0.]
     ba: [0., 0., 0.]
     bg: [0., 0., 0.]
 imu:
+  process_noise:
+    fixed:
+      acc_variance: 1.0e-4
+      gyro_variance: 1.0e-4
+    bias_random_walk:
+      gyro_variance_rate: 1.0e-6
+      accel_variance_rate: 1.0e-6
   second_order: true   # include dt² Jacobian terms F_x[P,R] and F_x[P,G]
   sensor:
     range_err: 0.05

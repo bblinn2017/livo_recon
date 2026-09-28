@@ -35,7 +35,7 @@
 //
 //   (1) FLOOR.  sigma_hat must not fall below the sensor's own measured
 //       noise floor (CalibProc's static-window variance, now always stored
-//       via StateGroup::setNoiseFloor() regardless of use_calib_var).  Below
+//       via StateGroup::setNoiseFloor()). Below
 //       the floor the spline is fitting noise, which is not physically
 //       possible to do honestly -- the estimator cannot find the sensor
 //       quieter than the sensor is.
@@ -155,7 +155,7 @@ struct AdaptiveQOptions
   // now logged on a configuration where they are not expected to fire.
   double acf1_max = 1.00;
 
-  // Hard bounds relative to the NOMINAL (the YAML's state/cov/{acc,gyr}).
+  // Hard bounds relative to imu/process_noise/fixed.
   // Belt and braces on top of beta -- if beta is ever raised these still
   // hold.
   double max_ratio = 100.0;
@@ -190,7 +190,7 @@ struct AdaptiveQOptions
 
 // ============================================================================
 // SEMANTICS, made explicit (external config keys unchanged for
-// compatibility -- state/cov/{acc,gyr} still name the quantity this feeds):
+// compatibility -- imu/process_noise/fixed names the quantity this feeds):
 //
 // AdaptiveQ estimates the SPREAD of the spline-vs-IMU collocation residual
 // e_acc(t)=R(t)^T(a_spline(t)-g)+bias_acc-a_measured(t) (resp. e_gyr) around
@@ -233,7 +233,7 @@ public:
   const AdaptiveQOptions& opts() const { return opts_; }
 
   // Nominal = whatever the state was configured with before adaptation
-  // starts (the YAML's state/cov/{acc,gyr}).  Floor = the calibration
+  // starts (imu/process_noise/fixed). Floor = the calibration
   // window's measured variance.  Both isotropic scalars, matching the
   // trace/3 reduction used everywhere else.
   //

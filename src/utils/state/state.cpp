@@ -1,6 +1,8 @@
 #include "livo_recon/utils/state/state.h"
 #include "livo_recon/utils/log/param_warn.h"
 
+#include <stdexcept>
+
 namespace livo_recon
 {
 
@@ -185,6 +187,13 @@ Eigen::VectorXd StateGroup::boxminusFromPropagat(const StateGroup& propagat) con
 
 std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
 {
+  for (const char* legacy : {"state/cov/acc", "state/cov/gyr",
+                             "imu/bias_gyr_rw", "imu/bias_acc_rw"})
+  {
+    if (pnh.hasParam(legacy))
+      throw std::invalid_argument(std::string("removed mixed-responsibility IMU key: ") +
+          legacy + "; use imu/process_noise/fixed or bias_random_walk");
+  }
   paramWarn<bool>(pnh, "state/est/bg",      est_bg_,      true);
   paramWarn<bool>(pnh, "state/est/ba",      est_ba_,      true);
   paramWarn<bool>(pnh, "state/est/gravity", est_gravity_, true);
@@ -275,10 +284,11 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
   bias_acc_ = V3D(ba_vec[0], ba_vec[1], ba_vec[2]);
   bias_gyr_ = V3D(bg_vec[0], bg_vec[1], bg_vec[2]);
 
-  // Initial IMU noise (overridden by calibration if use_calib=true)
+  // Fixed IMU propagation noise. Stationary calibration records a separate
+  // sensor floor and never silently replaces these operating values.
   double var_acc, var_gyr;
-  paramWarn<double>(pnh, "state/cov/acc", var_acc, 1e-4);
-  paramWarn<double>(pnh, "state/cov/gyr", var_gyr, 1e-4);
+  paramWarn<double>(pnh, "imu/process_noise/fixed/acc_variance", var_acc, 1e-4);
+  paramWarn<double>(pnh, "imu/process_noise/fixed/gyro_variance", var_gyr, 1e-4);
   var_acc_ = V3D::Constant(var_acc);
   var_gyr_ = V3D::Constant(var_gyr);
   // CQ-55 item 10: state/cov/bg and state/cov/ba used to seed BOTH the
@@ -293,8 +303,10 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
   // is provably md5-inert unless a config explicitly sets the new key --
   // rule 26 item 1, no new default chosen here.
   double bias_gyr_rw = init_cov_bg_, bias_acc_rw = init_cov_ba_;
-  paramWarn<double>(pnh, "imu/bias_gyr_rw", bias_gyr_rw, init_cov_bg_);
-  paramWarn<double>(pnh, "imu/bias_acc_rw", bias_acc_rw, init_cov_ba_);
+  paramWarn<double>(pnh, "imu/process_noise/bias_random_walk/gyro_variance_rate",
+                    bias_gyr_rw, init_cov_bg_);
+  paramWarn<double>(pnh, "imu/process_noise/bias_random_walk/accel_variance_rate",
+                    bias_acc_rw, init_cov_ba_);
   cov_bias_acc_ = V3D::Constant(bias_acc_rw);
   cov_bias_gyr_ = V3D::Constant(bias_gyr_rw);
 

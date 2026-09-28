@@ -1,5 +1,6 @@
 # One-factor calibrated-bias initialization ablation. This does not change
-# imu/bias_*_rw, which are process-noise rates and must remain a separate axis.
+# imu/process_noise/bias_random_walk/*, which are process-noise rates and
+# must remain a separate axis.
 state:
   cov:
     bg: 1.0e-7
