@@ -7,16 +7,9 @@
 namespace livo_recon
 {
 
-struct CalibrationLidarObservation
-{
-  ImageData image;
-  std::vector<PointXYZT> points;
-};
-
 struct CalibProcOptions
 {
   int  num_samples       = 200;
-  std::string map_bootstrap_mode = "aggregate";
 
   // Calibration used to have no way to fail. collectSamples() returns false
   // whenever the buffer is short, estimateFromBuffer() reports "Calibrating
@@ -80,9 +73,6 @@ public:
   std::string loadParameters(ros::NodeHandle& pnh);
 
   std::string estimateFromBuffer();
-  const std::string& mapBootstrapMode() const { return opts_.map_bootstrap_mode; }
-  std::vector<CalibrationLidarObservation> takeCalibrationObservations();
-  const ImageData& calibrationLastImage() const { return calib_last_img_; }
 private:
   bool        collectSamples();
   void        computeBiasAndNoise(V3D& acc_bias, V3D& gyro_bias,
@@ -107,7 +97,6 @@ private:
   size_t calib_last_count_       = 0;
 
   std::vector<PointXYZT> calib_points;
-  std::vector<CalibrationLidarObservation> calib_observations_;
   std::deque<ImuSample>  calib_imu_samples;
   ImageData              calib_last_img_;
 

@@ -44,7 +44,6 @@ public:
   std::string loadParameters(ros::NodeHandle& pnh) override;
 
   void updateMap(MeasureGroup& mg) override;
-  void insertBootstrapObservation(MeasureGroup& mg, int observation_id, int viewpoint_id) override;
 
   // Query-time plane derivation (AKF-LIO's ObsModel() core loop): K-NN via
   // Mahalanobis distance, then a sequential pairwise pseudo-merge gated on

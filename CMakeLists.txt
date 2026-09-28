@@ -132,7 +132,6 @@ add_executable(livo_recon_node
   src/processing/cbk_processing.cpp
   src/processing/pub_processing.cpp
   src/processing/calib_processing.cpp
-  src/processing/map_bootstrapper.cpp
   src/processing/imu_processing.cpp
   src/processing/vio_processing.cpp
   src/processing/lio_base.cpp

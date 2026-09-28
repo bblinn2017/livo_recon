@@ -225,13 +225,6 @@ void AkfMap::updateMap(MeasureGroup& mg)
   }
 }
 
-void AkfMap::insertBootstrapObservation(MeasureGroup& mg, int /*observation_id*/, int /*viewpoint_id*/)
-{
-  const int live_frame = frame_idx_;
-  updateMap(mg);
-  frame_idx_ = live_frame;
-}
-
 bool AkfMap::findPlaneResidual(const WorldPointCov& pt, Residual& res, bool* /*tier0_had_plane*/,
                                bool* /*had_converged_neighbor*/) const
 {

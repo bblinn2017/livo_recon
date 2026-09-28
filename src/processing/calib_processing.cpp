@@ -28,9 +28,6 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
           legacy + "; use calib/stationary, calib/p0, and imu/process_noise");
   }
   paramWarn<int>(pnh, "calib/stationary/num_samples", opts_.num_samples, 200);
-  paramWarn<std::string>(pnh, "calib/map_bootstrap_mode", opts_.map_bootstrap_mode, "aggregate");
-  if (opts_.map_bootstrap_mode != "aggregate" && opts_.map_bootstrap_mode != "sequential_stationary")
-    throw std::runtime_error("calib/map_bootstrap_mode must be aggregate or sequential_stationary");
   paramWarn<int>(pnh, "calib/stationary/stall_calls_max", opts_.stall_calls_max, 300);
   paramWarn<bool>(pnh, "calib/stationary/apply_to_state/gyro_bias",
                   opts_.apply_gyro_bias, true);
@@ -154,14 +151,6 @@ bool CalibProc::collectSamples()
     // poses coverage") on exactly this backlog on the very first frame.
     std::vector<PointXYZT> dry_run_points;
     data_queues_->popDryRunLidar(dry_run_points, calib_last_img_.t);
-
-    // Preserve the scan boundary for the explicit post-calibration map
-    // bootstrap path. Keep the incumbent aggregate cloud too: aggregate
-    // mode below remains the exact regression control.
-    CalibrationLidarObservation obs;
-    obs.image = calib_last_img_;
-    obs.points = points;
-    calib_observations_.push_back(std::move(obs));
 
     calib_points.insert(
         calib_points.end(),
@@ -486,24 +475,15 @@ std::string CalibProc::estimateFromBuffer()
   const std::string done_msg = oss.str();
 
   data_queues_->setStartTime(calib_last_img_.t);
+  calib_last_img_.t = 0.;
+  for (auto& p : calib_points) p.t = 0.;
   calib_imu_samples.clear();
-  measures_->curr_time.set(0.);
 
-  if (opts_.map_bootstrap_mode == "aggregate") {
-    // Exact incumbent control: preserve the synthetic aggregate MeasureGroup
-    // and let the ordinary pipeline discover the empty map exactly as before.
-    calib_last_img_.t = 0.;
-    for (auto& p : calib_points) p.t = 0.;
-    measures_->pushMeasureGroup(
-        MeasureGroup{std::move(calib_last_img_), std::move(calib_points), std::move(calib_imu_samples)});
-  }
+  measures_->curr_time.set(0.);
+  measures_->pushMeasureGroup(
+      MeasureGroup{std::move(calib_last_img_), std::move(calib_points), std::move(calib_imu_samples)});
   measures_->calib_done.set(true);
   return done_msg;
-}
-
-std::vector<CalibrationLidarObservation> CalibProc::takeCalibrationObservations()
-{
-  return std::move(calib_observations_);
 }
 
 }  // namespace livo_recon

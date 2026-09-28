@@ -481,35 +481,8 @@ VoxelKey VoxelMap::worldToKey(const V3D& p_world) const
 }
 
 void VoxelMap::updateMap(MeasureGroup& mg) {
-  updateMapInternal(mg, true);
-}
-
-void VoxelMap::beginBootstrap()
-{
-  bootstrap_active_ = true;
-  setBootstrapInsertion(true);
-}
-
-void VoxelMap::insertBootstrapObservation(MeasureGroup& mg, int /*observation_id*/, int /*viewpoint_id*/)
-{
-  if (!bootstrap_active_)
-    throw std::logic_error("VoxelMap bootstrap observation outside begin/finish transaction");
-  updateMapInternal(mg, false);
-}
-
-void VoxelMap::finishBootstrap()
-{
-  setBootstrapInsertion(false);
-  bootstrap_active_ = false;
-  ++frame_idx_;  // one calibration seed epoch; first real map-backed LIO query remains scan 1
-  if (opts_->snapshot_post_calibration) writePostCalibrationSnapshot();
-}
-
-void VoxelMap::updateMapInternal(MeasureGroup& mg, bool advance_live_frame) {
   TimedScope ts_total(profiler_, "voxelmap");
-  const int insertion_frame = frame_idx_;
-  setCurrentFrame(insertion_frame);
-  if (advance_live_frame) ++frame_idx_;
+  setCurrentFrame(frame_idx_++);
   if (opts_->log_frame_stats_en) voxelPlaneFrameStatsReset();
   // The single point set (point_filter_num + ds_leaf_size, see measures.h's
   // docs on MeasureGroup::points) used for both voxel-map insertion and
@@ -630,7 +603,7 @@ void VoxelMap::updateMapInternal(MeasureGroup& mg, bool advance_live_frame) {
     int denom_rejected_count = 0;
     double max_plane_var_trace = -1.0;
     voxelPlaneFrameStatsRead(denom_rejected_count, max_plane_var_trace);
-    debugLogFrameStats(mg.image.t + data_queues_->start_time, insertion_frame,
+    debugLogFrameStats(mg.image.t + data_queues_->start_time, frame_idx_ - 1,
                         denom_rejected_count, max_plane_var_trace,
                         lio_frame_diag_, stats_->planes.load(std::memory_order_relaxed),
                         stats_->total(),
@@ -638,7 +611,7 @@ void VoxelMap::updateMapInternal(MeasureGroup& mg, bool advance_live_frame) {
                         stats_->converged.load(std::memory_order_relaxed),
                         voxelPlaneMaxCovarianceTrace());
   }
-  if (advance_live_frame && opts_->snapshot_post_calibration && frame_idx_ == 1)
+  if (opts_->snapshot_post_calibration && frame_idx_ == 1)
     writePostCalibrationSnapshot();
 }
 

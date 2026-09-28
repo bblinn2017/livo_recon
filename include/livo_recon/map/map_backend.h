@@ -37,17 +37,6 @@ public:
   // omp_utils.h's pinOmpThreadsForDeterminism() doc comment for why).
   virtual void updateMap(MeasureGroup& mg) = 0;
 
-
-  // Explicit stationary calibration-map transaction. Bootstrap insertion
-  // must not consume a live LIO frame id. observation_id distinguishes
-  // repeated scans; viewpoint_id is shared by scans from one stationary pose.
-  virtual void beginBootstrap() {}
-  virtual void insertBootstrapObservation(MeasureGroup& mg, int observation_id, int viewpoint_id) = 0;
-  // Complete one calibration-map seed epoch. This advances the legacy
-  // calibration boundary exactly once (not once per retained observation),
-  // preserving the incumbent convention that the first real LIO query is 1.
-  virtual void finishBootstrap() { ++frame_idx_; }
-
   // Per-point residual query, called from LioProc::buildResiduals()'s
   // existing per-point OMP loop (many thousands of calls/frame) -- must
   // be const/thread-safe with no shared mutable state touched across

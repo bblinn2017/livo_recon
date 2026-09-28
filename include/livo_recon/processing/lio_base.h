@@ -136,17 +136,6 @@ public:
   // referencing a spline at all.
   virtual void deskewAndDownsample(MeasureGroup& mg) = 0;
 
-  // Calibration bootstrap preprocessing with an identity stationary deskew.
-  // The concatenated input is downsampled ONCE, exactly like the incumbent
-  // aggregate calibration group. source_observation identifies the raw scan
-  // each input point came from; output_observation assigns each surviving
-  // downsampled point to one observation for sequential replay.
-  void preprocessStationaryBootstrap(
-      const std::vector<PointXYZT>& points,
-      const std::vector<int>& source_observation,
-      std::vector<PointXYZCov>& output,
-      std::vector<int>& output_observation) const;
-
   // Assumes deskewAndDownsample(mg) already ran this frame (mg.points
   // populated) -- see that method's doc comment for why this isn't called
   // internally here.

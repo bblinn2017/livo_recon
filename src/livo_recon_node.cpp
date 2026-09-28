@@ -42,7 +42,7 @@ namespace livo_recon
 LivoReconNode::LivoReconNode(ros::NodeHandle& nh, ros::NodeHandle& pnh)
   : nh_(nh), pnh_(pnh), it_(nh_),
     ctx_(nh_, pnh_, it_),
-    cbk_proc_(ctx_), pub_proc_(ctx_), calib_proc_(ctx_), map_bootstrapper_(ctx_),
+    cbk_proc_(ctx_), pub_proc_(ctx_), calib_proc_(ctx_),
     imu_proc_(ctx_), lio_proc_(makeLioProc(pnh_, ctx_)),
     vio_proc_(ctx_), combined_proc_(ctx_), evo_proc_(ctx_)
 {
@@ -282,15 +282,6 @@ void LivoReconNode::updateMaps(MeasureGroup& mg) {
   // call that used to live in this exact spot).
 }
 
-void LivoReconNode::completeCalibrationAndBootstrap()
-{
-  if (!ctx_.measures->calib_done.get()) return;
-  if (calib_proc_.mapBootstrapMode() == "aggregate") return;
-  auto observations = calib_proc_.takeCalibrationObservations();
-  ctx_.printer->print(PrintCategory::CALIB,
-      map_bootstrapper_.seedSequentialStationary(std::move(observations), *lio_proc_));
-}
-
 bool LivoReconNode::drainOnce()
 {
   while (cbk_proc_.syncMeasures()) continue;
@@ -358,8 +349,6 @@ void LivoReconNode::run()
 
     rate.sleep();
   }
-
-  completeCalibrationAndBootstrap();
 
   ros::Time last_pop_time = ros::Time::now();
   while (ros::ok())
@@ -481,8 +470,6 @@ void LivoReconNode::runOffline(const std::string& bag_path)
     ctx_.printer->print(PrintCategory::CALIB, calib_proc_.estimateFromBuffer());
     ctx_.printer->print(PrintCategory::PROFILER, ctx_.profiler->report());
   }
-
-  completeCalibrationAndBootstrap();
 
   // Main loop -- unlike FAST-LIVO2's runOffline(), no manual "vio_round_
   // pending, wait for async tracker, retry feeding" branch is needed: see

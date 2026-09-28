@@ -293,40 +293,6 @@ void LioProcBase::ensureStationaryReference(const MeasureGroup& mg)
   stationary_reference_valid_ = true;
 }
 
-void LioProcBase::preprocessStationaryBootstrap(
-    const std::vector<PointXYZT>& points,
-    const std::vector<int>& source_observation,
-    std::vector<PointXYZCov>& output,
-    std::vector<int>& output_observation) const
-{
-  if (points.size() != source_observation.size())
-    throw std::invalid_argument("stationary bootstrap source-id count mismatch");
-
-  std::vector<PointXYZCov> stationary;
-  // Empty poses is deskewPoints()'s existing stationary-identity branch and
-  // therefore preserves the incumbent aggregate bootstrap semantics.
-  deskewPoints(state_, {}, 0.0, points, opts_.deskew, stationary);
-
-  if (!opts_.dsOn()) {
-    output = std::move(stationary);
-    output_observation = source_observation;
-    return;
-  }
-
-  std::vector<int> offsets, members;
-  const DsMode mode = opts_.ds_mode == "average" ? DsMode::AVERAGE : DsMode::FIRST;
-  voxelDownsampleIndexedCsr(stationary, output, offsets, members,
-                            PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
-  output_observation.resize(output.size());
-  for (size_t i = 0; i < output.size(); ++i) {
-    // FIRST has exactly one member. AVERAGE can span calibration scans; the
-    // processed point itself remains bit-identical to aggregate preprocessing,
-    // and is assigned deterministically to its first contributing observation
-    // so it is inserted exactly once.
-    output_observation[i] = source_observation.at(members.at(offsets.at(i)));
-  }
-}
-
 void LioProcBase::buildResiduals(
   const std::vector<PointXYZCov>& pts,
   std::vector<Residual>& residuals,

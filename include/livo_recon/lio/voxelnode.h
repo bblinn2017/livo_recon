@@ -12,9 +12,6 @@ namespace livo_recon
 // distinct_frames_), which convergence_mode=="frame_gated" requires reach
 // min_frames_to_converge before locking in.
 void setCurrentFrame(int idx);
-// During stationary bootstrap, fit/split incrementally but do not permanently
-// lock nodes before all calibration observations have been seen.
-void setBootstrapInsertion(bool active);
 
 // Running sufficient statistics for one fine spatial bin (a fixed fraction
 // of the node's own voxel extent, see VoxelNode's density_weight_leaf_),

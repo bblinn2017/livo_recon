@@ -4,7 +4,6 @@
 #include "livo_recon/processing/cbk_processing.h"
 #include "livo_recon/processing/pub_processing.h"
 #include "livo_recon/processing/calib_processing.h"
-#include "livo_recon/processing/map_bootstrapper.h"
 #include "livo_recon/processing/imu_processing.h"
 #include "livo_recon/processing/lio_decoupled.h"
 #include "livo_recon/processing/lio_coupled.h"
@@ -61,7 +60,6 @@ public:
 
 private:
   void loadParameters();
-  void completeCalibrationAndBootstrap();
   void estimateState(MeasureGroup& mg);
   void updateMaps(MeasureGroup& mg);
   // One iteration of run()'s post-CALIB drain loop (sync + pop + estimate +
@@ -79,7 +77,6 @@ private:
   CbkProc   cbk_proc_;
   PubProc   pub_proc_;
   CalibProc calib_proc_;
-  MapBootstrapper map_bootstrapper_;
   ImuProc   imu_proc_;
   // CQ-49 item 3c: estimator/mode is read ONCE, at the node, with a bare
   // paramWarn -- BEFORE lio_proc_ is constructed, since which LioProcBase
