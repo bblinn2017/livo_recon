@@ -94,7 +94,8 @@ state:
     # ds_leaf_size=0.1/calib=100), reaching 15/16 HILTI sequences healthy
     # (<10m ATE). gyr left unchanged -- no combo that moved it away from
     # the upstream value won consistently.
-    rot: 1.0e-2
+    rot_tilt: 1.0e-2
+    rot_yaw: 1.0e-2
     pos: 1.0e-2
     vel: 1.0e-2
     bg: 1.0e-5

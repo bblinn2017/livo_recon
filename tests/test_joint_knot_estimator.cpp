@@ -35,6 +35,34 @@ std::vector<Pose6D> propagation()
 
 int main()
 {
+  // Gravity alignment constrains the two tangent directions perpendicular to
+  // gravity while leaving yaw (rotation about gravity) separately tunable.
+  // Use a non-identity attitude so this catches accidental world/body-axis
+  // confusion rather than validating only the identity special case.
+  const M3D aligned_R = Exp(V3D(0.7, -1.1, 0.4));
+  const V3D yaw_axis_body =
+      (aligned_R.transpose() * V3D(0.0, 0.0, -1.0)).normalized();
+  const double tilt_variance = 1e-6, yaw_variance = 1e-2;
+  const M3D aligned_cov = StateGroup::gravityAlignedAttitudeCovariance(
+      aligned_R, tilt_variance, yaw_variance);
+  if (std::abs(yaw_axis_body.dot(aligned_cov * yaw_axis_body) -
+               yaw_variance) >= 1e-14)
+    return fail("gravity-aligned yaw covariance eigenvalue",
+        yaw_axis_body.dot(aligned_cov * yaw_axis_body) - yaw_variance, 1e-14);
+  const V3D tilt_axis_1 = yaw_axis_body.unitOrthogonal().normalized();
+  const V3D tilt_axis_2 = yaw_axis_body.cross(tilt_axis_1).normalized();
+  if (std::abs(tilt_axis_1.dot(aligned_cov * tilt_axis_1) -
+               tilt_variance) >= 1e-14 ||
+      std::abs(tilt_axis_2.dot(aligned_cov * tilt_axis_2) -
+               tilt_variance) >= 1e-14)
+    return fail("gravity-aligned tilt covariance eigenvalues",
+        std::max(std::abs(tilt_axis_1.dot(aligned_cov * tilt_axis_1) - tilt_variance),
+                 std::abs(tilt_axis_2.dot(aligned_cov * tilt_axis_2) - tilt_variance)),
+        1e-14);
+  if ((aligned_cov - aligned_cov.transpose()).norm() >= 1e-15)
+    return fail("gravity-aligned attitude covariance symmetric",
+                (aligned_cov - aligned_cov.transpose()).norm(), 1e-15);
+
   // The coupled gating-state axis must be able to add state uncertainty to
   // admission without changing the measurement variance used by the solve.
   const V3D gate_n = V3D(1.0, 2.0, -1.0).normalized();

@@ -83,7 +83,8 @@ state:
     # inside the stable range (acc: flat 5-30x the sensor's own datasheet
     # std; gyr: flat from ~150x upward, with a real failure threshold
     # below ~90x and no penalty at all for going higher).
-    rot: 1.0e-2
+    rot_tilt: 1.0e-2
+    rot_yaw: 1.0e-2
     pos: 1.0e-2
     vel: 1.0e-2
     bg: 1.0e-5

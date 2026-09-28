@@ -85,7 +85,8 @@ state:
     # optimal for livo_recon's own pipeline yet.
     # acc doubled -- see slam_2022/state.yaml's matching comment (a2g1
     # combo, confirmed via this session's cov sweeps).
-    rot: 1.0e-2
+    rot_tilt: 1.0e-2
+    rot_yaw: 1.0e-2
     pos: 1.0e-2
     vel: 1.0e-2
     bg: 1.0e-5

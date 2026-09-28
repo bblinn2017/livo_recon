@@ -1,0 +1,7 @@
+state:
+  cov:
+    pos: 1.0e-6
+    vel: 1.0e-6
+    rot_tilt: 1.0e-6
+    rot_yaw: 1.0e-2
+    gravity: 1.0e-7

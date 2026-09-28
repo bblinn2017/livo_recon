@@ -1,7 +1,7 @@
 # Frame-1 initial-covariance ablation
 
 Load exactly one fragment after `config/ntu_viral.yaml`. The unchanged NTU
-VIRAL configuration is the baseline (`rot=pos=vel=1e-2`,
+VIRAL configuration is the baseline (`rot_tilt=rot_yaw=pos=vel=1e-2`,
 `bg=ba=gravity=1e-5`). These keys initialize the state covariance; they do
 not change accelerometer/gyroscope measurement noise or bias random-walk
 process noise.

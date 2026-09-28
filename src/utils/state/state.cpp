@@ -4,6 +4,16 @@
 namespace livo_recon
 {
 
+M3D StateGroup::gravityAlignedAttitudeCovariance(
+    const M3D& aligned_rot, double tilt_variance, double yaw_variance)
+{
+  const V3D yaw_axis_body =
+      (aligned_rot.transpose() * V3D(0.0, 0.0, -1.0)).normalized();
+  return tilt_variance * M3D::Identity() +
+      (yaw_variance - tilt_variance) *
+          yaw_axis_body * yaw_axis_body.transpose();
+}
+
 void StateGroup::initCov(double cov_rot, double cov_pos, double cov_vel,
                           double cov_bg, double cov_ba, double cov_gravity)
 {
@@ -52,6 +62,8 @@ StateGroup& StateGroup::operator=(const StateGroup& o)
     cov_ = o.cov_;
     var_acc_ = o.var_acc_; var_gyr_ = o.var_gyr_;
     cov_bias_gyr_ = o.cov_bias_gyr_; cov_bias_acc_ = o.cov_bias_acc_;
+    init_cov_rot_tilt_ = o.init_cov_rot_tilt_;
+    init_cov_rot_yaw_ = o.init_cov_rot_yaw_;
     R_li_ = o.R_li_; t_li_ = o.t_li_;
     R_il_ = o.R_il_; t_il_ = o.t_il_;
     R_lc_ = o.R_lc_; t_lc_ = o.t_lc_;
@@ -114,6 +126,11 @@ void StateGroup::setCalibResult(const M3D& rot, const V3D& bias_gyr, const V3D& 
   vel_      = V3D::Zero();
   bias_gyr_ = bias_gyr;
   bias_acc_ = bias_acc;
+  // Gravity alignment observes tilt but cannot observe yaw. Since applyDelta
+  // uses a right/body-frame perturbation, the tangent-space yaw axis is the
+  // world-gravity direction expressed in the aligned body frame.
+  cov_.block<3,3>(idxR(), idxR()) = gravityAlignedAttitudeCovariance(
+      rot_, init_cov_rot_tilt_, init_cov_rot_yaw_);
   updateDerivedTransforms();
 }
 
@@ -229,15 +246,18 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
   updateDerivedTransforms();
 
   // Initial state covariance
-  double cov_rot, cov_pos, cov_vel, cov_bg, cov_ba, cov_gravity;
-  paramWarn<double>(pnh, "state/cov/rot",     cov_rot,     1e-4);
+  double cov_pos, cov_vel, cov_bg, cov_ba, cov_gravity;
+  paramWarn<double>(pnh, "state/cov/rot_tilt", init_cov_rot_tilt_, 1e-4);
+  paramWarn<double>(pnh, "state/cov/rot_yaw", init_cov_rot_yaw_, 1e-4);
   paramWarn<double>(pnh, "state/cov/pos",     cov_pos,     1e-4);
   paramWarn<double>(pnh, "state/cov/vel",     cov_vel,     1e-4);
   paramWarn<double>(pnh, "state/cov/bg",      cov_bg,      1e-6);
   paramWarn<double>(pnh, "state/cov/ba",      cov_ba,      1e-6);
   paramWarn<double>(pnh, "state/cov/gravity", cov_gravity, 1e-5);
-
-  initCov(cov_rot, cov_pos, cov_vel, cov_bg, cov_ba, cov_gravity);
+  // Before gravity alignment there is not yet a meaningful yaw axis. Seed
+  // the temporary isotropic block with the tilt value; setCalibResult()
+  // replaces it with the exact aligned tilt/yaw covariance before LIO.
+  initCov(init_cov_rot_tilt_, cov_pos, cov_vel, cov_bg, cov_ba, cov_gravity);
 
   // Initial dynamic state
   std::vector<double> g_vec, v_vec, ba_vec, bg_vec;
@@ -288,7 +308,9 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
       << "  est/gravity=" << (est_gravity_ ? "true" : "false")
       << "  est/cov_acc=" << (est_cov_acc_ ? "true" : "false")
       << "  est/cov_gyr=" << (est_cov_gyr_ ? "true" : "false")
-      << "  dimState=" << dimState();
+      << "  dimState=" << dimState()
+      << "\n  initial_attitude_cov/tilt=" << init_cov_rot_tilt_
+      << "  initial_attitude_cov/yaw=" << init_cov_rot_yaw_;
   return oss.str();
 }
 

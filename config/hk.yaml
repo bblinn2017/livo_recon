@@ -76,7 +76,8 @@ state:
     cov_acc: true
     cov_gyr: true
   cov:
-    rot: 1.0e-4
+    rot_tilt: 1.0e-4
+    rot_yaw: 1.0e-4
     pos: 1.0e-4
     vel: 1.0e-4
     bg: 1.0e-6

@@ -23,6 +23,8 @@ public:
   static constexpr int idxR() { return 0; }
   static constexpr int idxP() { return 3; }
   static constexpr int idxV() { return 6; }
+  static M3D gravityAlignedAttitudeCovariance(
+      const M3D& aligned_rot, double tilt_variance, double yaw_variance);
   int idxBG() const { return est_bg_      ? 9                                     : -1; }
   int idxBA() const { return est_ba_      ? 9 + (est_bg_ ? 3 : 0)                 : -1; }
   int idxG()  const { return est_gravity_ ? 9 + (est_bg_ ? 3 : 0) + (est_ba_ ? 3 : 0) : -1; }
@@ -155,6 +157,10 @@ private:
   Eigen::MatrixXd cov_;   // dimState() × dimState()
   V3D var_acc_, var_gyr_, cov_bias_gyr_, cov_bias_acc_;
   V3D var_acc_floor_ = V3D::Zero(), var_gyr_floor_ = V3D::Zero();
+  // Right-perturbation attitude covariance after gravity alignment. Equal
+  // values reproduce the former isotropic initialization exactly.
+  double init_cov_rot_tilt_ = 1e-4;
+  double init_cov_rot_yaw_ = 1e-4;
 
   // Extrinsics
   M3D R_li_, R_il_, R_lc_, R_ic_;
