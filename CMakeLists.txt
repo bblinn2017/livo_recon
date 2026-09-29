@@ -221,3 +221,14 @@ target_link_libraries(cache_tracker_output_livo_recon
 add_subdirectory(tests/active)
 add_subdirectory(tests/joint_knots)
 add_subdirectory(tests/reference_math)
+
+# R52 stationary map research library. Deliberately independent of the live
+# estimator; winning backends can later receive a MapBackend adapter.
+add_library(stationary_map_research
+  src/map/stationary/stationary_map.cpp
+)
+target_include_directories(stationary_map_research PUBLIC include ${EIGEN3_INCLUDE_DIRS})
+target_link_libraries(stationary_map_research Eigen3::Eigen)
+add_executable(test_stationary_map_stats tests/test_stationary_map_stats.cpp)
+target_link_libraries(test_stationary_map_stats stationary_map_research)
+add_test(NAME stationary_map_stats COMMAND test_stationary_map_stats)
