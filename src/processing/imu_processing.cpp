@@ -141,6 +141,8 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
                     opts_.motion_acc_scale, 1.0);
   paramWarn<double>(pnh, "imu/process_noise/motion/gyro_scale",
                     opts_.motion_gyr_scale, 1.0);
+  paramWarn<double>(pnh, "imu/process_noise/motion/acc_floor_scale", opts_.motion_acc_floor_scale, 1.0);
+  paramWarn<double>(pnh, "imu/process_noise/motion/gyro_floor_scale", opts_.motion_gyr_floor_scale, 1.0);
   paramWarn<double>(pnh, "imu/process_noise/motion/acc_max_dynamic_variance",
                     opts_.motion_acc_max_dynamic_variance, 0.5);
   paramWarn<double>(pnh, "imu/process_noise/motion/gyro_max_dynamic_variance",
@@ -163,6 +165,13 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   if (!std::isfinite(opts_.motion_beta) || opts_.motion_beta < 0.0 ||
       opts_.motion_beta >= 1.0)
     throw std::invalid_argument("imu/process_noise/motion/beta must be in [0,1)");
+  for (double v : {opts_.motion_acc_floor_scale, opts_.motion_gyr_floor_scale})
+    if (!std::isfinite(v) || v <= 0.0)
+      throw std::invalid_argument("imu/process_noise/motion/{acc,gyro}_floor_scale must be finite and > 0");
+  if (opts_.process_noise_model == "fixed" &&
+      (opts_.motion_acc_floor_scale != 1.0 || opts_.motion_gyr_floor_scale != 1.0))
+    throw std::invalid_argument(
+        "imu/process_noise/motion/*_floor_scale != 1 has no effect under process_noise/model=fixed (no floor term)");
   for (double v : {opts_.motion_acc_scale, opts_.motion_gyr_scale,
                    opts_.motion_acc_max_dynamic_variance,
                    opts_.motion_gyr_max_dynamic_variance})
@@ -209,6 +218,8 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  motion/beta:          " << opts_.motion_beta
       << "\n  motion/acc_scale:     " << opts_.motion_acc_scale
       << "\n  motion/gyro_scale:    " << opts_.motion_gyr_scale
+      << "\n  motion/acc_floor_scale: " << opts_.motion_acc_floor_scale
+      << "\n  motion/gyro_floor_scale:" << opts_.motion_gyr_floor_scale
       << "\n  motion/acc_cap:       " << opts_.motion_acc_max_dynamic_variance
       << "\n  motion/gyro_cap:      " << opts_.motion_gyr_max_dynamic_variance
       << "\n  first_scan_head:      always seeded from first sample (R63)"
@@ -422,8 +433,8 @@ void ImuProc::propagate(MeasureGroup& mg)
         gyr_dynamic_variance(axis) = std::min(
             gyr_dynamic_variance(axis), opts_.motion_gyr_max_dynamic_variance);
       }
-      var_acc_step = state_->varAccFloor() + acc_dynamic_variance;
-      var_gyr_step = state_->varGyrFloor() + gyr_dynamic_variance;
+      var_acc_step = state_->varAccFloor() * opts_.motion_acc_floor_scale + acc_dynamic_variance;
+      var_gyr_step = state_->varGyrFloor() * opts_.motion_gyr_floor_scale + gyr_dynamic_variance;
     }
     ++q_samples;
     q_acc_sum += var_acc_step;

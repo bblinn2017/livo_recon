@@ -82,6 +82,11 @@ struct LioProcOptions
     double reset_period_s = 0.0;
   } open_loop;
 
+  // R64: startup hold. The first startup_hold_scans LiDAR scans (frame index 1..N) are handled exactly like open-loop
+  // propagate_only scans (IMU propagation only, no LiDAR solve, no reset); the map is still built from them. 0 (default)
+  // = off, bit-identical. Tests whether the first LiDAR updates cause the scan 1-10 excursion.
+  int startup_hold_scans = 0;
+
   // The residual model has one independent control and one direct
   // per-VoxelPlane covariance marginalization. Failed collapse, count, and
   // conditioning heuristics were removed; see docs/RESIDUAL_MODE_AUDIT.md.
@@ -194,6 +199,8 @@ protected:
   void logStateTrace(const char* phase, const MeasureGroup& mg, int residual_count, int completed_iterations);
   // R61. True when lio/open_loop/mode == propagate_only.
   bool openLoopActive() const { return opts_.open_loop.mode == "propagate_only"; }
+  // R64. True while the startup hold is engaged for this frame index.
+  bool startupHoldActive(long frame_idx) const { return frame_idx >= 1 && frame_idx <= opts_.startup_hold_scans; }
   // R61. Call right after ensureStationaryReference() and the post_imu trace, only when openLoopActive(): captures
   // P0 on first use, applies the optional reset window, writes the post_lio row (= post_imu state, or the reset state),
   // fills mg.*_after_lio and returns a short report string. The caller must then return WITHOUT solving.

@@ -9,6 +9,9 @@
 #include <cmath>
 #include <functional>
 #include <cstdint>
+#include <map>
+#include <array>
+#include <iomanip>
 
 namespace livo_recon
 {
@@ -45,6 +48,69 @@ void updateMaxPlaneCovarianceTrace(double trace)
   while (trace > cur &&
          !g_max_plane_covariance_trace.compare_exchange_weak(cur, trace, std::memory_order_relaxed)) {}
 }
+// ---- R64: plane-fit outcome accounting (diagnostics only; nothing here feeds back into a fit) -------------------
+// Fit-level reason codes (per fit attempt) and VoxelNode-level events share one counter array.
+enum FitReason { kRAccept = 0, kRNLt3 = 1, kRSolverFail = 2, kREig12Small = 3, kRFloorReject = 4, kRNonFinite = 5,
+                 kRThreshold = 6, kRDenom = 7, kRCeiling = 8, kRInfoReject = 9 };
+constexpr int kNCounters = 24;
+struct FitTraceState
+{
+  std::mutex mtx;
+  std::map<int, std::array<long, kNCounters>> counts;   // key = frame * 2 + (debiased ? 1 : 0)
+  std::vector<std::string> rows;
+  std::map<int, int> rows_per_frame;   // per-frame row cap = plane_fit_trace_max_rows / (plane_fit_trace_frames + 1)
+};
+FitTraceState& fitTraceState() { static FitTraceState s; return s; }
+
+bool fitDiagWanted(const VoxelOpts& o, int frame)
+{
+  return o.plane_fit_reasons_en || (o.plane_fit_trace_frames > 0 && frame >= 0 && frame <= o.plane_fit_trace_frames);
+}
+
+void fitCount(const VoxelOpts& o, int frame, bool debiased, int idx)
+{
+  if (!o.plane_fit_reasons_en) return;
+  FitTraceState& s = fitTraceState();
+  std::lock_guard<std::mutex> lock(s.mtx);
+  auto it = s.counts.find(frame * 2 + (debiased ? 1 : 0));
+  if (it == s.counts.end()) {
+    std::array<long, kNCounters> z; z.fill(0);
+    it = s.counts.emplace(frame * 2 + (debiased ? 1 : 0), z).first;
+  }
+  ++it->second[idx];
+}
+
+// One fit attempt. raw_cov = the raw (uncorrected) scatter about the mean; sens_cov = mean sensor covariance of the
+// points (zero matrix if not available); eig_used = eigenvalues the accept test actually saw (before any floor);
+// e0_final = the value compared against thr. have_cov=false records the count only (no row).
+void fitRecord(const VoxelOpts& o, int frame, bool debiased, int reason, double N, int F, bool have_cov,
+               const V3D& mean, const M3D& raw_cov, const M3D& sens_cov, const V3D& eig_used,
+               double e0_final, double thr, bool was_plane)
+{
+  if (!fitDiagWanted(o, frame)) return;
+  fitCount(o, frame, debiased, reason);
+  if (!(o.plane_fit_trace_frames > 0 && frame >= 0 && frame <= o.plane_fit_trace_frames) || !have_cov) return;
+  Eigen::SelfAdjointEigenSolver<M3D> rs(raw_cov);
+  V3D re = V3D::Constant(std::numeric_limits<double>::quiet_NaN());
+  double sens_n = std::numeric_limits<double>::quiet_NaN();
+  if (rs.info() == Eigen::Success) {
+    re = rs.eigenvalues();
+    const V3D n0 = rs.eigenvectors().col(0);
+    sens_n = n0.dot(sens_cov * n0);
+  }
+  std::ostringstream oss;
+  oss << std::setprecision(9) << frame << ',' << (debiased ? "debiased" : "pca") << ',' << reason << ',' << (int)N << ',' << F << ','
+      << mean.x() << ',' << mean.y() << ',' << mean.z() << ','
+      << re(0) << ',' << re(1) << ',' << re(2) << ',' << sens_n << ','
+      << eig_used(0) << ',' << eig_used(1) << ',' << eig_used(2) << ',' << e0_final << ',' << thr << ','
+      << (was_plane ? 1 : 0) << '\n';
+  FitTraceState& s = fitTraceState();
+  std::lock_guard<std::mutex> lock(s.mtx);
+  const int cap = std::max(1, o.plane_fit_trace_max_rows / (o.plane_fit_trace_frames + 1));
+  int& used = s.rows_per_frame[frame];
+  if (used < cap) { s.rows.push_back(oss.str()); ++used; }
+}
+
 // CQ-35: ofs is a function-local static, opened once (truncating) and kept
 // open for the process lifetime instead of reopened every call. This one
 // matters more than most: debugLogVarianceShare()/debugLogPlaneFitStats()
@@ -514,6 +580,39 @@ void debugFlushConsistencyCorr()
   flushCorrScan(g_corr_scan);
 }
 
+// R64: see voxelplane.h. VoxelNode-level events (retire / subdivide / disabled).
+void voxelPlaneFitEvent(const VoxelOpts& o, int frame, bool debiased, int kind)
+{
+  if (!o.plane_fit_reasons_en) return;
+  fitCount(o, frame, debiased, kind);
+}
+
+void voxelPlaneFitTraceFlush()
+{
+  FitTraceState& s = fitTraceState();
+  std::lock_guard<std::mutex> lock(s.mtx);
+  if (!s.counts.empty()) {
+    static PersistentLogStream log("plane_fit_reasons.csv");
+    std::ofstream& ofs = log.stream();
+    ofs << "frame,path,accept,n_lt_3,solver_fail,eig12_small,floor_reject,non_finite,threshold_fail,denom_reject,"
+           "ceiling_reject,info_reject,ev10,ev11,ev12,ev13,ev14,ev15,retire,subdivide,disabled,ev19,ev20,ev21,ev22,ev23\n";
+    for (const auto& kv : s.counts) {
+      ofs << (kv.first / 2) << ',' << ((kv.first % 2) ? "debiased" : "pca");
+      for (int i = 0; i < kNCounters; ++i) ofs << ',' << kv.second[i];
+      ofs << '\n';
+    }
+    ofs.flush();
+  }
+  if (!s.rows.empty()) {
+    static PersistentLogStream log("plane_fit_trace.csv");
+    std::ofstream& ofs = log.stream();
+    ofs << "frame,path,reason,N,F,mean_x,mean_y,mean_z,raw_e0,raw_e1,raw_e2,sens_n_var,used_e0,used_e1,used_e2,"
+           "e0_final,threshold,was_plane\n";
+    for (const auto& r : s.rows) ofs << r;
+    ofs.flush();
+  }
+}
+
 void voxelPlaneFrameStatsReset()
 {
   g_denom_rejected_count.store(0, std::memory_order_relaxed);
@@ -961,6 +1060,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
 
   const int N = (int)points.size();
   points_size_ = (total_count >= 0) ? total_count : N;
+  trace_frame_ = frame_idx;
   if (N < 3) return;
 
   // `weights`: supplied by the caller (VoxelNode always pre-bins whenever
@@ -1012,14 +1112,26 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
     covariance_ /= N;
   }
 
+  // R64 diagnostics only: mean sensor covariance of this fit's points (computed only when a row will be written).
+  auto pcaTrace = [&](int reason, const V3D& eig_used, double e0_final) {
+    if (!fitDiagWanted(*opts_, trace_frame_)) return;
+    M3D sc = M3D::Zero();
+    if (opts_->plane_fit_trace_frames > 0 && trace_frame_ >= 0 && trace_frame_ <= opts_->plane_fit_trace_frames) {
+      for (int i = 0; i < N; ++i) sc += points[i].sensor_cov;
+      sc /= N;
+    }
+    fitRecord(*opts_, trace_frame_, false, reason, static_cast<double>(points_size_), 0, true, plane_.center,
+              covariance_, sc, eig_used, e0_final, opts_->plane_threshold, false);
+  };
+
   Eigen::SelfAdjointEigenSolver<M3D> solver(covariance_);
-  if (solver.info() != Eigen::Success) return;
+  if (solver.info() != Eigen::Success) { pcaTrace(kRSolverFail, V3D::Zero(), 0.0); return; }
 
   eigen_values_ = solver.eigenvalues();
   const M3D evecs = solver.eigenvectors();
 
   if (eigen_values_(1) < 1e-8 || eigen_values_(2) < 1e-8)
-    return;
+  { pcaTrace(kREig12Small, eigen_values_, eigen_values_(0)); return; }
 
   if (opts_->sensor_noise_floor_eig0) {
     // Uses points[i].sensor_cov's isotropic (trace/3) proxy rather than
@@ -1048,7 +1160,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
     // candidate can't be distinguished from non-planar, so reject rather
     // than risk denom1=eigen_values_(0)-eigen_values_(1) collapsing to
     // ~zero in the plane_var_ Jacobian below.
-    if (eigen_values_(0) >= eigen_values_(1)) return;
+    if (eigen_values_(0) >= eigen_values_(1)) { pcaTrace(kRFloorReject, eigen_values_, eigen_values_(0)); return; }
   }
 
   // Acceptance is min-eigenvalue-only, matching FAST-LIVO2's init_plane()
@@ -1059,6 +1171,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   // map of usable planes and driving a 2.16m full-run ATE divergence
   // FAST-LIVO2 doesn't share; removing it (alone) cut that to 0.093m.
   is_plane_ = eigen_values_(0) < opts_->plane_threshold;
+  pcaTrace(is_plane_ ? kRAccept : kRThreshold, eigen_values_, eigen_values_(0));
   if (!is_plane_) return;
 
   // NOTE: no denom1/denom2 near-degenerate-eigengap guard here, unlike
@@ -1249,6 +1362,7 @@ void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_cou
                            int distinct_frames, bool trust_sensor_noise,
                            int frame_idx)
 {
+  trace_frame_ = frame_idx;
   for (const auto& pt : points) {
     const V3D& p = pt.point;
     // History (734-755): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-734
@@ -1309,6 +1423,7 @@ void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_cou
 
 void VoxelPlane::refitDebiased()
 {
+  const bool was_plane_before = is_plane_;   // R64: read only by the hysteresis factor and the diagnostics
   plane_var_.setZero();
   covariance_.setZero();
   plane_ = {};
@@ -1317,7 +1432,11 @@ void VoxelPlane::refitDebiased()
   last_fit_j_ = 0;
 
   const double N = N_acc_;
-  if (N < 3) return;
+  if (N < 3) {
+    fitRecord(*opts_, trace_frame_, true, kRNLt3, N, distinct_frames_, false, V3D::Zero(), M3D::Zero(),
+              M3D::Zero(), V3D::Zero(), 0.0, 0.0, was_plane_before);
+    return;
+  }
 
   // CQ-56: when centred_accumulation is on, Sp_/Spp_ live in the (p-ref_)
   // basis (see addPoints()) -- mean_rel is THAT basis's own mean, exactly
@@ -1354,8 +1473,20 @@ void VoxelPlane::refitDebiased()
   // when on) for the two to cancel correctly. Scov_sensor_/Scov_pose are
   // independent of point position entirely (pure per-point/per-frame
   // covariance sums), so they're unaffected by centring either way.
-  covariance_ = Spp_ / N - mean_rel * mean_rel.transpose()
-              - Scov_sensor_ / N - pose_shrink * (Scov_pose / N);
+  // R64: raw (uncorrected) scatter, kept for the debias_mode variants and the fit diagnostics. In "full" mode
+  // (default) covariance_ is the unchanged R63 expression below.
+  const M3D raw_cov = Spp_ / N - mean_rel * mean_rel.transpose();
+  const M3D sens_mean_cov = Scov_sensor_ / N;
+  if (opts_->debias_mode == "full") {
+    covariance_ = Spp_ / N - mean_rel * mean_rel.transpose()
+                - Scov_sensor_ / N - pose_shrink * (Scov_pose / N);
+  } else {
+    covariance_ = raw_cov;   // "lambda0_only" and "none": normal and lambda1/lambda2 come from the raw scatter
+  }
+  auto dbgTrace = [&](int reason, const V3D& eig_used, double e0_final, double thr) {
+    fitRecord(*opts_, trace_frame_, true, reason, N, distinct_frames_, true, mean, raw_cov, sens_mean_cov,
+              eig_used, e0_final, thr, was_plane_before);
+  };
   // CQ-56 item 3: recorded as soon as covariance_ is computed, regardless
   // of whether this fit goes on to be accepted as a plane -- the
   // measurement this card asks for is about the raw accumulator's own
@@ -1363,12 +1494,19 @@ void VoxelPlane::refitDebiased()
   updateMaxPlaneCovarianceTrace(covariance_.trace());
 
   Eigen::SelfAdjointEigenSolver<M3D> solver(covariance_);
-  if (solver.info() != Eigen::Success) return;
+  if (solver.info() != Eigen::Success) { dbgTrace(kRSolverFail, V3D::Zero(), 0.0, opts_->plane_threshold); return; }
 
   eigen_values_ = solver.eigenvalues();
   const M3D evecs = solver.eigenvectors();
 
-  if (eigen_values_(1) < 1e-8 || eigen_values_(2) < 1e-8) return;
+  if (eigen_values_(1) < 1e-8 || eigen_values_(2) < 1e-8)
+  { dbgTrace(kREig12Small, eigen_values_, eigen_values_(0), opts_->plane_threshold); return; }
+
+  // R64 "lambda0_only": correct only the out-of-plane eigenvalue, first order, along the raw normal.
+  if (opts_->debias_mode == "lambda0_only") {
+    const V3D n_raw = evecs.col(0);
+    eigen_values_(0) -= std::max(0.0, n_raw.dot(sens_mean_cov * n_raw));
+  }
 
   // History (848-864): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-848
   eigen_values_(0) = std::max(eigen_values_(0), 0.0);
@@ -1382,15 +1520,19 @@ void VoxelPlane::refitDebiased()
       debugLogNoiseFloor(dbg.str());
     }
     eigen_values_(0) = std::max(eigen_values_(0), sensor_floor);
-    if (eigen_values_(0) >= eigen_values_(1)) return;
+    if (eigen_values_(0) >= eigen_values_(1))
+    { dbgTrace(kRFloorReject, eigen_values_, eigen_values_(0), opts_->plane_threshold); return; }
   }
 
   // Non-finite is still a hard reject (NaN/Inf from a degenerate solve) --
   // the negative case is handled by the clamp above now.
-  if (!std::isfinite(eigen_values_(0))) return;
+  if (!std::isfinite(eigen_values_(0)))
+  { dbgTrace(kRNonFinite, eigen_values_, eigen_values_(0), opts_->plane_threshold); return; }
 
-  is_plane_ = eigen_values_(0) < opts_->plane_threshold;
-  if (!is_plane_) return;
+  // R64: hysteresis factor (1.0 = identical to R63) applies only when this voxel was a plane before this refit.
+  const double threshold_eff = opts_->plane_threshold * (was_plane_before ? opts_->plane_threshold_hysteresis : 1.0);
+  is_plane_ = eigen_values_(0) < threshold_eff;
+  if (!is_plane_) { dbgTrace(kRThreshold, eigen_values_, eigen_values_(0), threshold_eff); return; }
 
   const double denom1 = eigen_values_(0) - eigen_values_(1);
   const double denom2 = eigen_values_(0) - eigen_values_(2);
@@ -1422,6 +1564,7 @@ void VoxelPlane::refitDebiased()
   if (denom_rejected) {
     is_plane_ = false;
     g_denom_rejected_count.fetch_add(1, std::memory_order_relaxed);
+    dbgTrace(kRDenom, eigen_values_, eigen_values_(0), threshold_eff);
     return;
   }
 
@@ -1453,6 +1596,7 @@ void VoxelPlane::refitDebiased()
       last_fit_j_ = (int)N;
       updateMaxPlaneVarTrace(plane_var_.trace());
     }
+    dbgTrace(is_plane_ ? kRAccept : kRInfoReject, eigen_values_, eigen_values_(0), threshold_eff);
     return;
   }
 
@@ -1508,11 +1652,13 @@ void VoxelPlane::refitDebiased()
           << " denom1=" << denom1 << " denom2=" << denom2;
       debugLogNoiseFloor(dbg.str());
     }
+    dbgTrace(kRCeiling, eigen_values_, eigen_values_(0), threshold_eff);
     return;
   }
 
   last_fit_j_ = (int)N;
   updateMaxPlaneVarTrace(plane_var_.trace());
+  dbgTrace(kRAccept, eigen_values_, eigen_values_(0), threshold_eff);
 
   if (opts_->log_debug_en) {
     std::ostringstream dbg;

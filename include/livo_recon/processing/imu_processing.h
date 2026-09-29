@@ -34,6 +34,11 @@ struct ImuProcOptions
   double motion_acc_scale = 1.0;
   double motion_gyr_scale = 1.0;
   double motion_acc_max_dynamic_variance = 0.5;
+  // R64: multipliers on the stationary calibration floor inside the motion-dependent Q (1.0 = bit-identical).
+  // var_step = floor_scale * floor + scale^2 * max(0, filtered energy - floor) (the excess is still measured
+  // against the UNSCALED floor). Refused under the "fixed" model, where there is no floor term.
+  double motion_acc_floor_scale = 1.0;
+  double motion_gyr_floor_scale = 1.0;
   double motion_gyr_max_dynamic_variance = 0.3;
 
   // Per-IMU-step trace of the first three propagations (imu_first_scans.csv).

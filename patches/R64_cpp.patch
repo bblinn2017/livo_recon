@@ -1,0 +1,805 @@
+--- a/include/livo_recon/lio/voxelplane.h
++++ b/include/livo_recon/lio/voxelplane.h
+@@ -187,6 +187,7 @@
+   // (see VoxelOpts::log_consistency_mode == "corr+covariates"). Mirrors
+   // debugLogPlaneFitStats()'s own `j` local exactly, just persisted.
+   int last_fit_j_ = 0;
++  int trace_frame_ = -1;   // R64: frame index of the latest update()/addPoints() call, diagnostics only
+ 
+   // ── the unified (information) plane model ────────────────────────────
+   // See VoxelOpts::plane_var_mode.  All three are written by
+@@ -395,4 +396,12 @@
+ // History (252-256): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-252
+ void debugFlushConsistencyCorr();
+ 
++// R64: plane-fit outcome accounting (write-only diagnostics, off unless voxel_map/plane/plane_fit_reasons_en or
++// plane_fit_trace_frames > 0). voxelPlaneFitEvent() is the VoxelNode-level hook (kinds below); the fit-level
++// outcomes are recorded inside VoxelPlane. voxelPlaneFitTraceFlush() writes plane_fit_reasons.csv and
++// plane_fit_trace.csv into the debug log dir; called once at shutdown.
++enum PlaneFitEvent { kEvRetire = 16, kEvSubdivide = 17, kEvDisabled = 18 };
++void voxelPlaneFitEvent(const VoxelOpts& o, int frame, bool debiased, int kind);
++void voxelPlaneFitTraceFlush();
++
+ }  // namespace livo_recon
+--- a/include/livo_recon/processing/imu_processing.h
++++ b/include/livo_recon/processing/imu_processing.h
+@@ -34,6 +34,11 @@
+   double motion_acc_scale = 1.0;
+   double motion_gyr_scale = 1.0;
+   double motion_acc_max_dynamic_variance = 0.5;
++  // R64: multipliers on the stationary calibration floor inside the motion-dependent Q (1.0 = bit-identical).
++  // var_step = floor_scale * floor + scale^2 * max(0, filtered energy - floor) (the excess is still measured
++  // against the UNSCALED floor). Refused under the "fixed" model, where there is no floor term.
++  double motion_acc_floor_scale = 1.0;
++  double motion_gyr_floor_scale = 1.0;
+   double motion_gyr_max_dynamic_variance = 0.3;
+ 
+   // Per-IMU-step trace of the first three propagations (imu_first_scans.csv).
+--- a/include/livo_recon/processing/lio_base.h
++++ b/include/livo_recon/processing/lio_base.h
+@@ -82,6 +82,11 @@
+     double reset_period_s = 0.0;
+   } open_loop;
+ 
++  // R64: startup hold. The first startup_hold_scans LiDAR scans (frame index 1..N) are handled exactly like open-loop
++  // propagate_only scans (IMU propagation only, no LiDAR solve, no reset); the map is still built from them. 0 (default)
++  // = off, bit-identical. Tests whether the first LiDAR updates cause the scan 1-10 excursion.
++  int startup_hold_scans = 0;
++
+   // The residual model has one independent control and one direct
+   // per-VoxelPlane covariance marginalization. Failed collapse, count, and
+   // conditioning heuristics were removed; see docs/RESIDUAL_MODE_AUDIT.md.
+@@ -194,6 +199,8 @@
+   void logStateTrace(const char* phase, const MeasureGroup& mg, int residual_count, int completed_iterations);
+   // R61. True when lio/open_loop/mode == propagate_only.
+   bool openLoopActive() const { return opts_.open_loop.mode == "propagate_only"; }
++  // R64. True while the startup hold is engaged for this frame index.
++  bool startupHoldActive(long frame_idx) const { return frame_idx >= 1 && frame_idx <= opts_.startup_hold_scans; }
+   // R61. Call right after ensureStationaryReference() and the post_imu trace, only when openLoopActive(): captures
+   // P0 on first use, applies the optional reset window, writes the post_lio row (= post_imu state, or the reset state),
+   // fills mg.*_after_lio and returns a short report string. The caller must then return WITHOUT solving.
+--- a/include/livo_recon/utils/map/voxelmap_utils.h
++++ b/include/livo_recon/utils/map/voxelmap_utils.h
+@@ -443,6 +443,25 @@
+   // History (348-361): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-348
+   std::string plane_fit_pose_cov_mode = "combined";
+ 
++  // R64. How the debiased fit applies the sensor-noise correction (only read when plane_fit_mode == "debiased").
++  // "full" (default, bit-identical to R63): subtract the accumulated sensor covariance from the whole 3x3
++  //   scatter, then eigendecompose (normal, lambda0..2 all come from the corrected matrix).
++  // "lambda0_only": eigendecompose the RAW scatter (normal, lambda1, lambda2 uncorrected) and correct only the
++  //   out-of-plane eigenvalue, lambda0_deb = lambda0_raw - n^T Sbar_sensor n (first-order, n = raw normal).
++  // "none": raw scatter, no correction at all. Keeps the persistent accumulators and the never-lock/revoke
++  //   lifecycle of the debiased path but removes the debiasing arithmetic (isolates lifecycle from arithmetic).
++  std::string debias_mode = "full";
++  // R64. Multiplier on plane_threshold applied only when a debiased voxel that WAS a plane is refit (1.0 = off,
++  // bit-identical). > 1 makes an existing plane harder to revoke than a new one is to create.
++  double plane_threshold_hysteresis = 1.0;
++  // R64. Plane-fit diagnostics (write-only, default off). plane_fit_reasons_en: per-frame counts of fit outcomes by
++  // reason for both fit paths -> plane_fit_reasons.csv. plane_fit_trace_frames > 0: one row per fit attempt for
++  // frames 0..plane_fit_trace_frames (frame 0 = bootstrap window) -> plane_fit_trace.csv, at most
++  // plane_fit_trace_max_rows rows.
++  bool plane_fit_reasons_en = false;
++  int  plane_fit_trace_frames = 0;
++  int  plane_fit_trace_max_rows = 200000;
++
+   // History (364-384): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-364
+   std::string bin_weight_mode_fit = "count";
+   std::string bin_weight_mode_var = "count";
+--- a/src/lio/voxelnode.cpp
++++ b/src/lio/voxelnode.cpp
+@@ -163,7 +163,10 @@
+       {
+         const bool now_plane_immediate = plane_.isPlane();
+         if (!was_plane && now_plane_immediate)  stats_->planes.fetch_add(1, std::memory_order_relaxed);
+-        if (was_plane  && !now_plane_immediate) stats_->planes.fetch_sub(1, std::memory_order_relaxed);
++        if (was_plane  && !now_plane_immediate) {
++          stats_->planes.fetch_sub(1, std::memory_order_relaxed);
++          voxelPlaneFitEvent(*opts_, g_current_frame_idx, true, kEvRetire);   // R64 diagnostics
++        }
+         was_plane = now_plane_immediate;
+       }
+       if (!plane_.isInit()) return;
+@@ -268,9 +271,13 @@
+   }
+ 
+   if (!was_plane && now_plane)  stats_->planes.fetch_add(1, std::memory_order_relaxed);
+-  if (was_plane  && !now_plane) stats_->planes.fetch_sub(1, std::memory_order_relaxed);
++  if (was_plane  && !now_plane) {
++    stats_->planes.fetch_sub(1, std::memory_order_relaxed);
++    voxelPlaneFitEvent(*opts_, g_current_frame_idx, debiased, kEvRetire);   // R64 diagnostics
++  }
+ 
+   if (!now_plane && layer_ < opts_->max_layer) {
++    voxelPlaneFitEvent(*opts_, g_current_frame_idx, debiased, kEvSubdivide);   // R64 diagnostics
+     stats_->transition(status_, VoxelStatus::PARENT);
+     status_ = VoxelStatus::PARENT;
+     if (was_plane) updates.push_back({node_id_, true, {}});
+@@ -356,6 +363,7 @@
+     if (plane_.getVizInfo(info))
+       updates.push_back({node_id_, false, info});
+   } else {
++    voxelPlaneFitEvent(*opts_, g_current_frame_idx, debiased, kEvDisabled);   // R64 diagnostics
+     if (was_plane) updates.push_back({node_id_, true, {}});
+     plane_retired_ = true;
+   }
+--- a/src/lio/voxelplane.cpp
++++ b/src/lio/voxelplane.cpp
+@@ -9,6 +9,9 @@
+ #include <cmath>
+ #include <functional>
+ #include <cstdint>
++#include <map>
++#include <array>
++#include <iomanip>
+ 
+ namespace livo_recon
+ {
+@@ -45,6 +48,69 @@
+   while (trace > cur &&
+          !g_max_plane_covariance_trace.compare_exchange_weak(cur, trace, std::memory_order_relaxed)) {}
+ }
++// ---- R64: plane-fit outcome accounting (diagnostics only; nothing here feeds back into a fit) -------------------
++// Fit-level reason codes (per fit attempt) and VoxelNode-level events share one counter array.
++enum FitReason { kRAccept = 0, kRNLt3 = 1, kRSolverFail = 2, kREig12Small = 3, kRFloorReject = 4, kRNonFinite = 5,
++                 kRThreshold = 6, kRDenom = 7, kRCeiling = 8, kRInfoReject = 9 };
++constexpr int kNCounters = 24;
++struct FitTraceState
++{
++  std::mutex mtx;
++  std::map<int, std::array<long, kNCounters>> counts;   // key = frame * 2 + (debiased ? 1 : 0)
++  std::vector<std::string> rows;
++  std::map<int, int> rows_per_frame;   // per-frame row cap = plane_fit_trace_max_rows / (plane_fit_trace_frames + 1)
++};
++FitTraceState& fitTraceState() { static FitTraceState s; return s; }
++
++bool fitDiagWanted(const VoxelOpts& o, int frame)
++{
++  return o.plane_fit_reasons_en || (o.plane_fit_trace_frames > 0 && frame >= 0 && frame <= o.plane_fit_trace_frames);
++}
++
++void fitCount(const VoxelOpts& o, int frame, bool debiased, int idx)
++{
++  if (!o.plane_fit_reasons_en) return;
++  FitTraceState& s = fitTraceState();
++  std::lock_guard<std::mutex> lock(s.mtx);
++  auto it = s.counts.find(frame * 2 + (debiased ? 1 : 0));
++  if (it == s.counts.end()) {
++    std::array<long, kNCounters> z; z.fill(0);
++    it = s.counts.emplace(frame * 2 + (debiased ? 1 : 0), z).first;
++  }
++  ++it->second[idx];
++}
++
++// One fit attempt. raw_cov = the raw (uncorrected) scatter about the mean; sens_cov = mean sensor covariance of the
++// points (zero matrix if not available); eig_used = eigenvalues the accept test actually saw (before any floor);
++// e0_final = the value compared against thr. have_cov=false records the count only (no row).
++void fitRecord(const VoxelOpts& o, int frame, bool debiased, int reason, double N, int F, bool have_cov,
++               const V3D& mean, const M3D& raw_cov, const M3D& sens_cov, const V3D& eig_used,
++               double e0_final, double thr, bool was_plane)
++{
++  if (!fitDiagWanted(o, frame)) return;
++  fitCount(o, frame, debiased, reason);
++  if (!(o.plane_fit_trace_frames > 0 && frame >= 0 && frame <= o.plane_fit_trace_frames) || !have_cov) return;
++  Eigen::SelfAdjointEigenSolver<M3D> rs(raw_cov);
++  V3D re = V3D::Constant(std::numeric_limits<double>::quiet_NaN());
++  double sens_n = std::numeric_limits<double>::quiet_NaN();
++  if (rs.info() == Eigen::Success) {
++    re = rs.eigenvalues();
++    const V3D n0 = rs.eigenvectors().col(0);
++    sens_n = n0.dot(sens_cov * n0);
++  }
++  std::ostringstream oss;
++  oss << std::setprecision(9) << frame << ',' << (debiased ? "debiased" : "pca") << ',' << reason << ',' << (int)N << ',' << F << ','
++      << mean.x() << ',' << mean.y() << ',' << mean.z() << ','
++      << re(0) << ',' << re(1) << ',' << re(2) << ',' << sens_n << ','
++      << eig_used(0) << ',' << eig_used(1) << ',' << eig_used(2) << ',' << e0_final << ',' << thr << ','
++      << (was_plane ? 1 : 0) << '\n';
++  FitTraceState& s = fitTraceState();
++  std::lock_guard<std::mutex> lock(s.mtx);
++  const int cap = std::max(1, o.plane_fit_trace_max_rows / (o.plane_fit_trace_frames + 1));
++  int& used = s.rows_per_frame[frame];
++  if (used < cap) { s.rows.push_back(oss.str()); ++used; }
++}
++
+ // CQ-35: ofs is a function-local static, opened once (truncating) and kept
+ // open for the process lifetime instead of reopened every call. This one
+ // matters more than most: debugLogVarianceShare()/debugLogPlaneFitStats()
+@@ -514,6 +580,39 @@
+   flushCorrScan(g_corr_scan);
+ }
+ 
++// R64: see voxelplane.h. VoxelNode-level events (retire / subdivide / disabled).
++void voxelPlaneFitEvent(const VoxelOpts& o, int frame, bool debiased, int kind)
++{
++  if (!o.plane_fit_reasons_en) return;
++  fitCount(o, frame, debiased, kind);
++}
++
++void voxelPlaneFitTraceFlush()
++{
++  FitTraceState& s = fitTraceState();
++  std::lock_guard<std::mutex> lock(s.mtx);
++  if (!s.counts.empty()) {
++    static PersistentLogStream log("plane_fit_reasons.csv");
++    std::ofstream& ofs = log.stream();
++    ofs << "frame,path,accept,n_lt_3,solver_fail,eig12_small,floor_reject,non_finite,threshold_fail,denom_reject,"
++           "ceiling_reject,info_reject,ev10,ev11,ev12,ev13,ev14,ev15,retire,subdivide,disabled,ev19,ev20,ev21,ev22,ev23\n";
++    for (const auto& kv : s.counts) {
++      ofs << (kv.first / 2) << ',' << ((kv.first % 2) ? "debiased" : "pca");
++      for (int i = 0; i < kNCounters; ++i) ofs << ',' << kv.second[i];
++      ofs << '\n';
++    }
++    ofs.flush();
++  }
++  if (!s.rows.empty()) {
++    static PersistentLogStream log("plane_fit_trace.csv");
++    std::ofstream& ofs = log.stream();
++    ofs << "frame,path,reason,N,F,mean_x,mean_y,mean_z,raw_e0,raw_e1,raw_e2,sens_n_var,used_e0,used_e1,used_e2,"
++           "e0_final,threshold,was_plane\n";
++    for (const auto& r : s.rows) ofs << r;
++    ofs.flush();
++  }
++}
++
+ void voxelPlaneFrameStatsReset()
+ {
+   g_denom_rejected_count.store(0, std::memory_order_relaxed);
+@@ -961,6 +1060,7 @@
+ 
+   const int N = (int)points.size();
+   points_size_ = (total_count >= 0) ? total_count : N;
++  trace_frame_ = frame_idx;
+   if (N < 3) return;
+ 
+   // `weights`: supplied by the caller (VoxelNode always pre-bins whenever
+@@ -1012,14 +1112,26 @@
+     covariance_ /= N;
+   }
+ 
++  // R64 diagnostics only: mean sensor covariance of this fit's points (computed only when a row will be written).
++  auto pcaTrace = [&](int reason, const V3D& eig_used, double e0_final) {
++    if (!fitDiagWanted(*opts_, trace_frame_)) return;
++    M3D sc = M3D::Zero();
++    if (opts_->plane_fit_trace_frames > 0 && trace_frame_ >= 0 && trace_frame_ <= opts_->plane_fit_trace_frames) {
++      for (int i = 0; i < N; ++i) sc += points[i].sensor_cov;
++      sc /= N;
++    }
++    fitRecord(*opts_, trace_frame_, false, reason, static_cast<double>(points_size_), 0, true, plane_.center,
++              covariance_, sc, eig_used, e0_final, opts_->plane_threshold, false);
++  };
++
+   Eigen::SelfAdjointEigenSolver<M3D> solver(covariance_);
+-  if (solver.info() != Eigen::Success) return;
++  if (solver.info() != Eigen::Success) { pcaTrace(kRSolverFail, V3D::Zero(), 0.0); return; }
+ 
+   eigen_values_ = solver.eigenvalues();
+   const M3D evecs = solver.eigenvectors();
+ 
+   if (eigen_values_(1) < 1e-8 || eigen_values_(2) < 1e-8)
+-    return;
++  { pcaTrace(kREig12Small, eigen_values_, eigen_values_(0)); return; }
+ 
+   if (opts_->sensor_noise_floor_eig0) {
+     // Uses points[i].sensor_cov's isotropic (trace/3) proxy rather than
+@@ -1048,7 +1160,7 @@
+     // candidate can't be distinguished from non-planar, so reject rather
+     // than risk denom1=eigen_values_(0)-eigen_values_(1) collapsing to
+     // ~zero in the plane_var_ Jacobian below.
+-    if (eigen_values_(0) >= eigen_values_(1)) return;
++    if (eigen_values_(0) >= eigen_values_(1)) { pcaTrace(kRFloorReject, eigen_values_, eigen_values_(0)); return; }
+   }
+ 
+   // Acceptance is min-eigenvalue-only, matching FAST-LIVO2's init_plane()
+@@ -1059,6 +1171,7 @@
+   // map of usable planes and driving a 2.16m full-run ATE divergence
+   // FAST-LIVO2 doesn't share; removing it (alone) cut that to 0.093m.
+   is_plane_ = eigen_values_(0) < opts_->plane_threshold;
++  pcaTrace(is_plane_ ? kRAccept : kRThreshold, eigen_values_, eigen_values_(0));
+   if (!is_plane_) return;
+ 
+   // NOTE: no denom1/denom2 near-degenerate-eigengap guard here, unlike
+@@ -1249,6 +1362,7 @@
+                            int distinct_frames, bool trust_sensor_noise,
+                            int frame_idx)
+ {
++  trace_frame_ = frame_idx;
+   for (const auto& pt : points) {
+     const V3D& p = pt.point;
+     // History (734-755): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-734
+@@ -1309,6 +1423,7 @@
+ 
+ void VoxelPlane::refitDebiased()
+ {
++  const bool was_plane_before = is_plane_;   // R64: read only by the hysteresis factor and the diagnostics
+   plane_var_.setZero();
+   covariance_.setZero();
+   plane_ = {};
+@@ -1317,7 +1432,11 @@
+   last_fit_j_ = 0;
+ 
+   const double N = N_acc_;
+-  if (N < 3) return;
++  if (N < 3) {
++    fitRecord(*opts_, trace_frame_, true, kRNLt3, N, distinct_frames_, false, V3D::Zero(), M3D::Zero(),
++              M3D::Zero(), V3D::Zero(), 0.0, 0.0, was_plane_before);
++    return;
++  }
+ 
+   // CQ-56: when centred_accumulation is on, Sp_/Spp_ live in the (p-ref_)
+   // basis (see addPoints()) -- mean_rel is THAT basis's own mean, exactly
+@@ -1354,8 +1473,20 @@
+   // when on) for the two to cancel correctly. Scov_sensor_/Scov_pose are
+   // independent of point position entirely (pure per-point/per-frame
+   // covariance sums), so they're unaffected by centring either way.
+-  covariance_ = Spp_ / N - mean_rel * mean_rel.transpose()
+-              - Scov_sensor_ / N - pose_shrink * (Scov_pose / N);
++  // R64: raw (uncorrected) scatter, kept for the debias_mode variants and the fit diagnostics. In "full" mode
++  // (default) covariance_ is the unchanged R63 expression below.
++  const M3D raw_cov = Spp_ / N - mean_rel * mean_rel.transpose();
++  const M3D sens_mean_cov = Scov_sensor_ / N;
++  if (opts_->debias_mode == "full") {
++    covariance_ = Spp_ / N - mean_rel * mean_rel.transpose()
++                - Scov_sensor_ / N - pose_shrink * (Scov_pose / N);
++  } else {
++    covariance_ = raw_cov;   // "lambda0_only" and "none": normal and lambda1/lambda2 come from the raw scatter
++  }
++  auto dbgTrace = [&](int reason, const V3D& eig_used, double e0_final, double thr) {
++    fitRecord(*opts_, trace_frame_, true, reason, N, distinct_frames_, true, mean, raw_cov, sens_mean_cov,
++              eig_used, e0_final, thr, was_plane_before);
++  };
+   // CQ-56 item 3: recorded as soon as covariance_ is computed, regardless
+   // of whether this fit goes on to be accepted as a plane -- the
+   // measurement this card asks for is about the raw accumulator's own
+@@ -1363,12 +1494,19 @@
+   updateMaxPlaneCovarianceTrace(covariance_.trace());
+ 
+   Eigen::SelfAdjointEigenSolver<M3D> solver(covariance_);
+-  if (solver.info() != Eigen::Success) return;
++  if (solver.info() != Eigen::Success) { dbgTrace(kRSolverFail, V3D::Zero(), 0.0, opts_->plane_threshold); return; }
+ 
+   eigen_values_ = solver.eigenvalues();
+   const M3D evecs = solver.eigenvectors();
+ 
+-  if (eigen_values_(1) < 1e-8 || eigen_values_(2) < 1e-8) return;
++  if (eigen_values_(1) < 1e-8 || eigen_values_(2) < 1e-8)
++  { dbgTrace(kREig12Small, eigen_values_, eigen_values_(0), opts_->plane_threshold); return; }
++
++  // R64 "lambda0_only": correct only the out-of-plane eigenvalue, first order, along the raw normal.
++  if (opts_->debias_mode == "lambda0_only") {
++    const V3D n_raw = evecs.col(0);
++    eigen_values_(0) -= std::max(0.0, n_raw.dot(sens_mean_cov * n_raw));
++  }
+ 
+   // History (848-864): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-848
+   eigen_values_(0) = std::max(eigen_values_(0), 0.0);
+@@ -1382,15 +1520,19 @@
+       debugLogNoiseFloor(dbg.str());
+     }
+     eigen_values_(0) = std::max(eigen_values_(0), sensor_floor);
+-    if (eigen_values_(0) >= eigen_values_(1)) return;
++    if (eigen_values_(0) >= eigen_values_(1))
++    { dbgTrace(kRFloorReject, eigen_values_, eigen_values_(0), opts_->plane_threshold); return; }
+   }
+ 
+   // Non-finite is still a hard reject (NaN/Inf from a degenerate solve) --
+   // the negative case is handled by the clamp above now.
+-  if (!std::isfinite(eigen_values_(0))) return;
++  if (!std::isfinite(eigen_values_(0)))
++  { dbgTrace(kRNonFinite, eigen_values_, eigen_values_(0), opts_->plane_threshold); return; }
+ 
+-  is_plane_ = eigen_values_(0) < opts_->plane_threshold;
+-  if (!is_plane_) return;
++  // R64: hysteresis factor (1.0 = identical to R63) applies only when this voxel was a plane before this refit.
++  const double threshold_eff = opts_->plane_threshold * (was_plane_before ? opts_->plane_threshold_hysteresis : 1.0);
++  is_plane_ = eigen_values_(0) < threshold_eff;
++  if (!is_plane_) { dbgTrace(kRThreshold, eigen_values_, eigen_values_(0), threshold_eff); return; }
+ 
+   const double denom1 = eigen_values_(0) - eigen_values_(1);
+   const double denom2 = eigen_values_(0) - eigen_values_(2);
+@@ -1422,6 +1564,7 @@
+   if (denom_rejected) {
+     is_plane_ = false;
+     g_denom_rejected_count.fetch_add(1, std::memory_order_relaxed);
++    dbgTrace(kRDenom, eigen_values_, eigen_values_(0), threshold_eff);
+     return;
+   }
+ 
+@@ -1453,6 +1596,7 @@
+       last_fit_j_ = (int)N;
+       updateMaxPlaneVarTrace(plane_var_.trace());
+     }
++    dbgTrace(is_plane_ ? kRAccept : kRInfoReject, eigen_values_, eigen_values_(0), threshold_eff);
+     return;
+   }
+ 
+@@ -1508,11 +1652,13 @@
+           << " denom1=" << denom1 << " denom2=" << denom2;
+       debugLogNoiseFloor(dbg.str());
+     }
++    dbgTrace(kRCeiling, eigen_values_, eigen_values_(0), threshold_eff);
+     return;
+   }
+ 
+   last_fit_j_ = (int)N;
+   updateMaxPlaneVarTrace(plane_var_.trace());
++  dbgTrace(kRAccept, eigen_values_, eigen_values_(0), threshold_eff);
+ 
+   if (opts_->log_debug_en) {
+     std::ostringstream dbg;
+--- a/src/livo_recon_node.cpp
++++ b/src/livo_recon_node.cpp
+@@ -319,6 +319,7 @@
+ {
+   // History (249-252): see docs/livo_recon_changelog.md#src-livo_recon_node.cpp-249
+   debugFlushConsistencyCorr();
++  voxelPlaneFitTraceFlush();   // R64: plane_fit_reasons.csv / plane_fit_trace.csv (no-op unless enabled)
+ 
+   // Stop the async tracking thread cleanly before shutdown (task #145) --
+   // no-op if it was never started (VIO disabled or tracker failed to load).
+--- a/src/map/voxelmap.cpp
++++ b/src/map/voxelmap.cpp
+@@ -6,6 +6,7 @@
+ #include "livo_recon/diagnostics/bootstrap_diagnostic_writer.h"
+ #include "livo_recon/utils/algo/omp_utils.h"
+ 
++#include <cmath>
+ #include <algorithm>
+ #include <numeric>
+ #include <random>
+@@ -212,6 +213,9 @@
+   paramWarn<double>(pnh, "voxel_map/residual/max_radius",  opts_->max_radius,          3.);
+   paramWarn<bool>(pnh, "voxel_map/residual/pose_cov_in_sigma", opts_->pose_cov_in_sigma, false);
+   paramWarn<bool>(pnh, "voxel_map/plane/log_debug_en", opts_->log_debug_en, false);
++  paramWarn<bool>(pnh, "voxel_map/plane/plane_fit_reasons_en", opts_->plane_fit_reasons_en, false);
++  paramWarn<int>(pnh, "voxel_map/plane/plane_fit_trace_frames", opts_->plane_fit_trace_frames, 0);
++  paramWarn<int>(pnh, "voxel_map/plane/plane_fit_trace_max_rows", opts_->plane_fit_trace_max_rows, 200000);
+   paramWarn<bool>(pnh, "voxel_map/plane/log_variance_shares_en", opts_->log_variance_shares_en, false);
+   paramWarn<int>(pnh, "voxel_map/search/neighborhood_size", opts_->neighborhood_size,   1);
+   {
+@@ -369,6 +373,15 @@
+     cfg.mode("voxel_map/plane/plane_fit_pose_cov_mode",
+              opts_->plane_fit_pose_cov_mode, "combined",
+              { "combined", "sensor_only" });
++    // R64: debiasing arithmetic variant; only meaningful on the debiased path.
++    cfg.nestedMode(opts_->plane_fit_mode == "debiased", "voxel_map/plane/plane_fit_mode=debiased",
++                   "voxel_map/plane/debias_mode", opts_->debias_mode, "full",
++                   { "full", "lambda0_only", "none" });
++    cfg.nested<double>(opts_->plane_fit_mode == "debiased", "voxel_map/plane/plane_fit_mode=debiased",
++                       "voxel_map/plane/plane_threshold_hysteresis",
++                       opts_->plane_threshold_hysteresis, 1.0);
++    if (!(opts_->plane_threshold_hysteresis > 0.0) || !std::isfinite(opts_->plane_threshold_hysteresis))
++      throw std::runtime_error("voxel_map/plane/plane_threshold_hysteresis must be finite and > 0");
+     // ── binning (mode 2 of the three plane-confidence corrections) ───────
+     // Binning exists ONLY on the pca path.  VoxelNode::insertPoints()'s
+     // debiased branch calls VoxelPlane::addPoints() with the raw
+@@ -445,6 +458,10 @@
+   oss << "[params/voxel_map]"
+       << "\n  map/voxel_size:                  " << opts_->voxel_size
+       << "\n  map/max_layer:                   " << opts_->max_layer
++      << "\n  plane/debias_mode:               " << opts_->debias_mode
++      << "\n  plane/plane_threshold_hysteresis:" << opts_->plane_threshold_hysteresis
++      << "\n  plane/plane_fit_reasons_en:      " << (opts_->plane_fit_reasons_en ? "true" : "false")
++      << "\n  plane/plane_fit_trace_frames:    " << opts_->plane_fit_trace_frames
+       << "\n  plane/sensor_noise_floor_eig0:   " << (opts_->sensor_noise_floor_eig0 ? "true" : "false")
+       << "\n  plane/centred_accumulation:      " << (opts_->centred_accumulation ? "true" : "false")
+       << "\n  plane/convergence_mode:          " << opts_->convergence_mode
+--- a/src/processing/imu_processing.cpp
++++ b/src/processing/imu_processing.cpp
+@@ -141,6 +141,8 @@
+                     opts_.motion_acc_scale, 1.0);
+   paramWarn<double>(pnh, "imu/process_noise/motion/gyro_scale",
+                     opts_.motion_gyr_scale, 1.0);
++  paramWarn<double>(pnh, "imu/process_noise/motion/acc_floor_scale", opts_.motion_acc_floor_scale, 1.0);
++  paramWarn<double>(pnh, "imu/process_noise/motion/gyro_floor_scale", opts_.motion_gyr_floor_scale, 1.0);
+   paramWarn<double>(pnh, "imu/process_noise/motion/acc_max_dynamic_variance",
+                     opts_.motion_acc_max_dynamic_variance, 0.5);
+   paramWarn<double>(pnh, "imu/process_noise/motion/gyro_max_dynamic_variance",
+@@ -163,6 +165,13 @@
+   if (!std::isfinite(opts_.motion_beta) || opts_.motion_beta < 0.0 ||
+       opts_.motion_beta >= 1.0)
+     throw std::invalid_argument("imu/process_noise/motion/beta must be in [0,1)");
++  for (double v : {opts_.motion_acc_floor_scale, opts_.motion_gyr_floor_scale})
++    if (!std::isfinite(v) || v <= 0.0)
++      throw std::invalid_argument("imu/process_noise/motion/{acc,gyro}_floor_scale must be finite and > 0");
++  if (opts_.process_noise_model == "fixed" &&
++      (opts_.motion_acc_floor_scale != 1.0 || opts_.motion_gyr_floor_scale != 1.0))
++    throw std::invalid_argument(
++        "imu/process_noise/motion/*_floor_scale != 1 has no effect under process_noise/model=fixed (no floor term)");
+   for (double v : {opts_.motion_acc_scale, opts_.motion_gyr_scale,
+                    opts_.motion_acc_max_dynamic_variance,
+                    opts_.motion_gyr_max_dynamic_variance})
+@@ -209,6 +218,8 @@
+       << "\n  motion/beta:          " << opts_.motion_beta
+       << "\n  motion/acc_scale:     " << opts_.motion_acc_scale
+       << "\n  motion/gyro_scale:    " << opts_.motion_gyr_scale
++      << "\n  motion/acc_floor_scale: " << opts_.motion_acc_floor_scale
++      << "\n  motion/gyro_floor_scale:" << opts_.motion_gyr_floor_scale
+       << "\n  motion/acc_cap:       " << opts_.motion_acc_max_dynamic_variance
+       << "\n  motion/gyro_cap:      " << opts_.motion_gyr_max_dynamic_variance
+       << "\n  first_scan_head:      always seeded from first sample (R63)"
+@@ -422,8 +433,8 @@
+         gyr_dynamic_variance(axis) = std::min(
+             gyr_dynamic_variance(axis), opts_.motion_gyr_max_dynamic_variance);
+       }
+-      var_acc_step = state_->varAccFloor() + acc_dynamic_variance;
+-      var_gyr_step = state_->varGyrFloor() + gyr_dynamic_variance;
++      var_acc_step = state_->varAccFloor() * opts_.motion_acc_floor_scale + acc_dynamic_variance;
++      var_gyr_step = state_->varGyrFloor() * opts_.motion_gyr_floor_scale + gyr_dynamic_variance;
+     }
+     ++q_samples;
+     q_acc_sum += var_acc_step;
+--- a/src/processing/lio_base.cpp
++++ b/src/processing/lio_base.cpp
+@@ -242,6 +242,11 @@
+   cfg.nested<double>(opts_.open_loop.mode == "propagate_only", "lio/open_loop/mode=propagate_only",
+                      "lio/open_loop/reset_period_s", opts_.open_loop.reset_period_s, 0.0);
+ 
++  // R64: startup hold (see LioProcOptions::startup_hold_scans). 0 = off.
++  cfg.get<int>("lio/startup_hold/scans", opts_.startup_hold_scans, 0);
++  if (opts_.startup_hold_scans < 0)
++    throw std::invalid_argument("lio/startup_hold/scans must be >= 0");
++
+   // CQ-31 item 5: three independently-switchable scalar P controls, all
+   // default-identity.
+   cfg.get<double>("lio/p_inflate/alpha", opts_.prior_scalar.p_inflate_alpha, 1.0);
+--- a/src/processing/lio_coupled_process.cpp
++++ b/src/processing/lio_coupled_process.cpp
+@@ -21,7 +21,7 @@
+   if (voxel_map_->isEmpty()) return {};
+   ensureStationaryReference(mg);
+   logStateTrace("post_imu", mg, 0, 0);
+-  if (openLoopActive()) return openLoopFinishScan(mg);
++  if (openLoopActive() || startupHoldActive(static_cast<long>(voxel_map_->frame_idx_))) return openLoopFinishScan(mg);
+ 
+   TimedScope scope(profiler_, "lio/joint_knots");
+   prior_cov_ = state_->cov();
+--- a/src/processing/lio_decoupled.cpp
++++ b/src/processing/lio_decoupled.cpp
+@@ -1567,7 +1567,7 @@
+     runDryRunShadowPass(mg);
+ 
+   logStateTrace("post_imu", mg, 0, 0);
+-  if (openLoopActive()) return openLoopFinishScan(mg);
++  if (openLoopActive() || startupHoldActive(static_cast<long>(voxel_map_->frame_idx_))) return openLoopFinishScan(mg);
+ 
+   {
+     TimedScope ts(profiler_, "lio/ekf");
+--- /dev/null
++++ b/tests/test_debias_modes.cpp
+@@ -0,0 +1,235 @@
++// R64 unit test for the debiased plane-fit variants (voxel_map/plane/debias_mode, plane_threshold_hysteresis) and the
++// plane-fit reason log. ROS-free: constructs VoxelPlane directly and calls the real production addPoints(); the only
++// arithmetic duplicated here is the plain reference formula the R63 code implemented, written independently
++// (Eigen + 3x3 accumulation) so "full" can be compared against it.
++//
++// Checks
++//   D1  debias_mode="full" (default) reproduces the R63 formula: eigenvalues of Spp/N - mean mean^T - Sbar_sensor
++//       (pose term is zero here: pos_cov = 0 and F = 1 or shrinkage is applied to a zero matrix) to 1e-10.
++//   D2  debias_mode="none": eigenvalues equal those of the raw scatter to 1e-10, normal equals the raw normal.
++//   D3  debias_mode="lambda0_only": lambda1, lambda2 and the normal equal the raw ones; lambda0 equals
++//       max(0, raw lambda0 - n^T Sbar n) to 1e-10.
++//   D4  isotropic sensor covariance s2*I: "full" eigenvalues equal raw eigenvalues minus s2 (all three) while all
++//       remain positive.
++//   D5  hysteresis: a voxel accepted at lambda0 ~ 0.8 thr, then refit after adding rougher points so that the
++//       combined lambda0 lies in (thr, 2 thr), is revoked at hysteresis 1.0 and kept at hysteresis 2.0; a voxel that
++//       was NOT a plane before the same refit is not helped by hysteresis 2.0 (rejected at both settings).
++//   D6  reason accounting: with plane_fit_reasons_en=true, voxelPlaneFitTraceFlush() writes plane_fit_reasons.csv
++//       into the debug log dir (/tmp when unset) whose 'accept' + rejected columns sum to the number of fit
++//       attempts made in this test for the debiased path.
++// Exit code 0 = all pass. Prints one line per check with the numbers compared.
++
++#include "livo_recon/lio/voxelplane.h"
++
++#include <Eigen/Dense>
++#include <cmath>
++#include <cstdio>
++#include <fstream>
++#include <memory>
++#include <random>
++#include <sstream>
++#include <string>
++#include <vector>
++
++using namespace livo_recon;
++
++namespace {
++
++int g_fail = 0;
++void check(bool ok, const char* name, const std::string& detail)
++{
++  std::printf("[%s] %s  %s\n", ok ? "PASS" : "FAIL", name, detail.c_str());
++  if (!ok) ++g_fail;
++}
++
++std::string fmt(double a, double b)
++{
++  std::ostringstream o; o.precision(12); o << "got " << a << " expected " << b << " diff " << std::fabs(a - b);
++  return o.str();
++}
++
++// Points on the plane z = 0.05 x + 0.02 y + offset, noise std sz in z, x,y uniform in [-1,1].
++std::vector<PointXYZCov> makePoints(std::mt19937& rng, int n, double sz, const M3D& sensor_cov, double offset = 0.0)
++{
++  std::uniform_real_distribution<double> U(-1.0, 1.0);
++  std::normal_distribution<double> Nz(0.0, sz);
++  std::vector<PointXYZCov> pts;
++  for (int i = 0; i < n; ++i) {
++    PointXYZCov p;
++    const double x = U(rng), y = U(rng);
++    p.point = V3D(x, y, 0.05 * x + 0.02 * y + offset + Nz(rng));
++    p.sensor_cov = sensor_cov;
++    p.pos_cov = M3D::Zero();
++    p.bootstrap_observation_id = -1;
++    pts.push_back(p);
++  }
++  return pts;
++}
++
++VoxelOptsPtr makeOpts(const std::string& mode, double hysteresis = 1.0, bool reasons = false)
++{
++  auto o = std::make_shared<VoxelOpts>();
++  o->plane_fit_mode = "debiased";
++  o->plane_fit_pose_cov_mode = "sensor_only";
++  o->debias_mode = mode;
++  o->plane_threshold_hysteresis = hysteresis;
++  o->plane_fit_reasons_en = reasons;
++  o->plane_threshold = 0.01;
++  return o;
++}
++
++struct Ref { V3D eig_raw; V3D eig_full; M3D evec_raw; V3D n_sens_var; M3D Sbar; };
++
++Ref reference(const std::vector<PointXYZCov>& pts)
++{
++  const double N = static_cast<double>(pts.size());
++  V3D sp = V3D::Zero(); M3D spp = M3D::Zero(); M3D ss = M3D::Zero();
++  for (const auto& p : pts) { sp += p.point; spp += p.point * p.point.transpose(); ss += p.sensor_cov; }
++  const V3D mean = sp / N;
++  const M3D raw = spp / N - mean * mean.transpose();
++  const M3D full = raw - ss / N;
++  Eigen::SelfAdjointEigenSolver<M3D> a(raw), b(full);
++  Ref r;
++  r.eig_raw = a.eigenvalues();
++  r.eig_full = b.eigenvalues();
++  r.evec_raw = a.eigenvectors();
++  r.Sbar = ss / N;
++  return r;
++}
++
++}  // namespace
++
++int main()
++{
++  std::mt19937 rng(12345);
++  const double s2 = 4.0e-4;                       // 2 cm isotropic sensor sigma
++  const M3D sens_iso = s2 * M3D::Identity();
++  M3D sens_aniso = M3D::Zero();
++  sens_aniso.diagonal() = V3D(1.0e-4, 4.0e-4, 9.0e-4);
++  const auto pts = makePoints(rng, 300, 0.02, sens_iso);
++  const auto pts_an = makePoints(rng, 300, 0.02, sens_aniso);
++
++  // ---- D1: full == R63 formula
++  {
++    auto o = std::make_shared<VoxelOpts>();       // default debias_mode must be "full"
++    o->plane_fit_mode = "debiased"; o->plane_fit_pose_cov_mode = "sensor_only";
++    check(o->debias_mode == "full", "D0 default debias_mode is full", o->debias_mode);
++    VoxelPlane vp(o);
++    vp.addPoints(pts_an, -1, 2, true, 5);
++    const Ref r = reference(pts_an);
++    // The reference is the anisotropic full correction; eigenvalues are clamped at >= 0 for lambda0 in production.
++    V3D e = vp.eigenValues();
++    check(std::fabs(e(1) - r.eig_full(1)) < 1e-10 && std::fabs(e(2) - r.eig_full(2)) < 1e-10 &&
++              std::fabs(e(0) - std::max(r.eig_full(0), 0.0)) < 1e-10,
++          "D1 full == R63 formula (aniso cov)", fmt(e(2), r.eig_full(2)));
++  }
++  // ---- D2 / D3 / D4
++  {
++    const Ref r = reference(pts_an);
++    // raw normal
++    const V3D n_raw = r.evec_raw.col(0);
++    {
++      VoxelPlane vp(makeOpts("none"));
++      vp.addPoints(pts_an, -1, 2, true, 5);
++      const V3D e = vp.eigenValues();
++      PlaneVizInfo vi{}; const bool ok = vp.getVizInfo(vi);
++      check(ok, "D2 none: accepted as plane", "");
++      check((e - r.eig_raw).norm() < 1e-10, "D2 none: eigenvalues == raw scatter", fmt(e(0), r.eig_raw(0)));
++      check(ok && std::fabs(std::fabs(vi.normal.dot(n_raw)) - 1.0) < 1e-9, "D2 none: normal == raw normal",
++            fmt(std::fabs(vi.normal.dot(n_raw)), 1.0));
++    }
++    {
++      VoxelPlane vp(makeOpts("lambda0_only"));
++      vp.addPoints(pts_an, -1, 2, true, 5);
++      const V3D e = vp.eigenValues();
++      PlaneVizInfo vi{}; const bool ok = vp.getVizInfo(vi);
++      const double sens_n = n_raw.dot(r.Sbar * n_raw);
++      const double e0_expected = std::max(r.eig_raw(0) - sens_n, 0.0);
++      check(std::fabs(e(1) - r.eig_raw(1)) < 1e-10 && std::fabs(e(2) - r.eig_raw(2)) < 1e-10,
++            "D3 lambda0_only: lambda1, lambda2 raw", fmt(e(1), r.eig_raw(1)));
++      check(std::fabs(e(0) - e0_expected) < 1e-10, "D3 lambda0_only: lambda0 = max(0, raw - n^T S n)", fmt(e(0), e0_expected));
++      check(ok && std::fabs(std::fabs(vi.normal.dot(n_raw)) - 1.0) < 1e-9, "D3 lambda0_only: normal == raw normal",
++            fmt(std::fabs(vi.normal.dot(n_raw)), 1.0));
++    }
++    {
++      const Ref ri = reference(pts);
++      VoxelPlane vp(makeOpts("full"));
++      vp.addPoints(pts, -1, 2, true, 5);
++      const V3D e = vp.eigenValues();
++      const V3D expect = ri.eig_raw - V3D::Constant(s2);
++      check(std::fabs(e(1) - expect(1)) < 1e-9 && std::fabs(e(2) - expect(2)) < 1e-9 && expect(1) > 0.0,
++            "D4 isotropic cov: full = raw - s2 on all three", fmt(e(2), expect(2)));
++    }
++  }
++  // ---- D3b: lambda0_only with an UNDER-stated sensor covariance so the corrected lambda0 stays positive
++  {
++    std::mt19937 r4(99);
++    const auto pu = makePoints(r4, 300, 0.02, 1.0e-4 * M3D::Identity());
++    const Ref r = reference(pu);
++    const V3D n_raw = r.evec_raw.col(0);
++    VoxelPlane vp(makeOpts("lambda0_only"));
++    vp.addPoints(pu, -1, 2, true, 5);
++    const double expected = r.eig_raw(0) - n_raw.dot(r.Sbar * n_raw);
++    check(expected > 1e-5 && std::fabs(vp.eigenValues()(0) - expected) < 1e-10,
++          "D3b lambda0_only positive case: lambda0 = raw - n^T S n", fmt(vp.eigenValues()(0), expected));
++    VoxelPlane vn(makeOpts("none"));
++    vn.addPoints(pu, -1, 2, true, 5);
++    check(std::fabs(vn.eigenValues()(0) - r.eig_raw(0)) < 1e-10 && vn.eigenValues()(0) > vp.eigenValues()(0),
++          "D3b none keeps the uncorrected lambda0 (larger than lambda0_only)", fmt(vn.eigenValues()(0), r.eig_raw(0)));
++  }
++  // ---- D5: hysteresis
++  {
++    std::mt19937 r2(777);
++    const M3D zero = M3D::Zero();
++    const auto a = makePoints(r2, 200, 0.09, zero);   // lambda0 ~ 0.0081 < 0.01
++    const auto b = makePoints(r2, 200, 0.14, zero);   // combined lambda0 ~ 0.0139 in (0.01, 0.02)
++    bool was_plane_h1 = false, after_h1 = true, was_plane_h2 = false, after_h2 = false;
++    {
++      VoxelPlane v1(makeOpts("none", 1.0));
++      v1.addPoints(a, -1, 1, true, 1); was_plane_h1 = v1.isPlane();
++      v1.addPoints(b, -1, 2, true, 2); after_h1 = v1.isPlane();
++    }
++    {
++      VoxelPlane v2(makeOpts("none", 2.0));
++      v2.addPoints(a, -1, 1, true, 1); was_plane_h2 = v2.isPlane();
++      v2.addPoints(b, -1, 2, true, 2); after_h2 = v2.isPlane();
++    }
++    check(was_plane_h1 && was_plane_h2, "D5 first fit accepted at both hysteresis settings", "");
++    check(!after_h1, "D5 hysteresis 1.0 revokes the plane after rougher points", "");
++    check(after_h2, "D5 hysteresis 2.0 keeps the plane", "");
++    // a voxel first seen with the combined (rough) set is rejected at both settings
++    std::vector<PointXYZCov> ab = a; ab.insert(ab.end(), b.begin(), b.end());
++    VoxelPlane v3(makeOpts("none", 2.0));
++    v3.addPoints(ab, -1, 2, true, 2);
++    check(!v3.isPlane(), "D5 hysteresis does not apply to a voxel that was not a plane", "");
++  }
++  // ---- D6: reason accounting (counts written by voxelPlaneFitTraceFlush)
++  {
++    auto o = makeOpts("full", 1.0, /*reasons=*/true);
++    VoxelPlane vp(o);
++    int attempts = 0;
++    for (int k = 0; k < 3; ++k) {
++      std::mt19937 r3(100 + k);
++      vp.addPoints(makePoints(r3, 40, 0.02, sens_iso), -1, k + 1, true, 7);
++      ++attempts;
++    }
++    voxelPlaneFitTraceFlush();
++    std::ifstream f("/tmp/plane_fit_reasons.csv");
++    std::string line; long total = 0; bool have = false;
++    if (f && std::getline(f, line)) {
++      while (std::getline(f, line)) {
++        std::stringstream ss(line); std::string tok; std::vector<std::string> c;
++        while (std::getline(ss, tok, ',')) c.push_back(tok);
++        if (c.size() >= 12 && c[0] == "7" && c[1] == "debiased") {
++          have = true;
++          for (int i = 2; i <= 11; ++i) total += std::stol(c[i]);   // accept .. info_reject
++        }
++      }
++    }
++    check(have && total == attempts, "D6 reason counts sum to fit attempts (frame 7, debiased)",
++          "sum " + std::to_string(total) + " attempts " + std::to_string(attempts) +
++          (have ? "" : "  (plane_fit_reasons.csv not found in /tmp: set the debug log dir unset for this test)"));
++  }
++  std::printf("%s (%d failed)\n", g_fail == 0 ? "ALL PASS" : "FAILURES", g_fail);
++  return g_fail == 0 ? 0 : 1;
++}

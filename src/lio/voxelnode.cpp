@@ -163,7 +163,10 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       {
         const bool now_plane_immediate = plane_.isPlane();
         if (!was_plane && now_plane_immediate)  stats_->planes.fetch_add(1, std::memory_order_relaxed);
-        if (was_plane  && !now_plane_immediate) stats_->planes.fetch_sub(1, std::memory_order_relaxed);
+        if (was_plane  && !now_plane_immediate) {
+          stats_->planes.fetch_sub(1, std::memory_order_relaxed);
+          voxelPlaneFitEvent(*opts_, g_current_frame_idx, true, kEvRetire);   // R64 diagnostics
+        }
         was_plane = now_plane_immediate;
       }
       if (!plane_.isInit()) return;
@@ -268,9 +271,13 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
   }
 
   if (!was_plane && now_plane)  stats_->planes.fetch_add(1, std::memory_order_relaxed);
-  if (was_plane  && !now_plane) stats_->planes.fetch_sub(1, std::memory_order_relaxed);
+  if (was_plane  && !now_plane) {
+    stats_->planes.fetch_sub(1, std::memory_order_relaxed);
+    voxelPlaneFitEvent(*opts_, g_current_frame_idx, debiased, kEvRetire);   // R64 diagnostics
+  }
 
   if (!now_plane && layer_ < opts_->max_layer) {
+    voxelPlaneFitEvent(*opts_, g_current_frame_idx, debiased, kEvSubdivide);   // R64 diagnostics
     stats_->transition(status_, VoxelStatus::PARENT);
     status_ = VoxelStatus::PARENT;
     if (was_plane) updates.push_back({node_id_, true, {}});
@@ -356,6 +363,7 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     if (plane_.getVizInfo(info))
       updates.push_back({node_id_, false, info});
   } else {
+    voxelPlaneFitEvent(*opts_, g_current_frame_idx, debiased, kEvDisabled);   // R64 diagnostics
     if (was_plane) updates.push_back({node_id_, true, {}});
     plane_retired_ = true;
   }

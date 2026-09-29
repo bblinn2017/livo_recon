@@ -6,6 +6,7 @@
 #include "livo_recon/diagnostics/bootstrap_diagnostic_writer.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 
+#include <cmath>
 #include <algorithm>
 #include <numeric>
 #include <random>
@@ -212,6 +213,9 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "voxel_map/residual/max_radius",  opts_->max_radius,          3.);
   paramWarn<bool>(pnh, "voxel_map/residual/pose_cov_in_sigma", opts_->pose_cov_in_sigma, false);
   paramWarn<bool>(pnh, "voxel_map/plane/log_debug_en", opts_->log_debug_en, false);
+  paramWarn<bool>(pnh, "voxel_map/plane/plane_fit_reasons_en", opts_->plane_fit_reasons_en, false);
+  paramWarn<int>(pnh, "voxel_map/plane/plane_fit_trace_frames", opts_->plane_fit_trace_frames, 0);
+  paramWarn<int>(pnh, "voxel_map/plane/plane_fit_trace_max_rows", opts_->plane_fit_trace_max_rows, 200000);
   paramWarn<bool>(pnh, "voxel_map/plane/log_variance_shares_en", opts_->log_variance_shares_en, false);
   paramWarn<int>(pnh, "voxel_map/search/neighborhood_size", opts_->neighborhood_size,   1);
   {
@@ -369,6 +373,15 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     cfg.mode("voxel_map/plane/plane_fit_pose_cov_mode",
              opts_->plane_fit_pose_cov_mode, "combined",
              { "combined", "sensor_only" });
+    // R64: debiasing arithmetic variant; only meaningful on the debiased path.
+    cfg.nestedMode(opts_->plane_fit_mode == "debiased", "voxel_map/plane/plane_fit_mode=debiased",
+                   "voxel_map/plane/debias_mode", opts_->debias_mode, "full",
+                   { "full", "lambda0_only", "none" });
+    cfg.nested<double>(opts_->plane_fit_mode == "debiased", "voxel_map/plane/plane_fit_mode=debiased",
+                       "voxel_map/plane/plane_threshold_hysteresis",
+                       opts_->plane_threshold_hysteresis, 1.0);
+    if (!(opts_->plane_threshold_hysteresis > 0.0) || !std::isfinite(opts_->plane_threshold_hysteresis))
+      throw std::runtime_error("voxel_map/plane/plane_threshold_hysteresis must be finite and > 0");
     // ── binning (mode 2 of the three plane-confidence corrections) ───────
     // Binning exists ONLY on the pca path.  VoxelNode::insertPoints()'s
     // debiased branch calls VoxelPlane::addPoints() with the raw
@@ -445,6 +458,10 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   oss << "[params/voxel_map]"
       << "\n  map/voxel_size:                  " << opts_->voxel_size
       << "\n  map/max_layer:                   " << opts_->max_layer
+      << "\n  plane/debias_mode:               " << opts_->debias_mode
+      << "\n  plane/plane_threshold_hysteresis:" << opts_->plane_threshold_hysteresis
+      << "\n  plane/plane_fit_reasons_en:      " << (opts_->plane_fit_reasons_en ? "true" : "false")
+      << "\n  plane/plane_fit_trace_frames:    " << opts_->plane_fit_trace_frames
       << "\n  plane/sensor_noise_floor_eig0:   " << (opts_->sensor_noise_floor_eig0 ? "true" : "false")
       << "\n  plane/centred_accumulation:      " << (opts_->centred_accumulation ? "true" : "false")
       << "\n  plane/convergence_mode:          " << opts_->convergence_mode

@@ -21,7 +21,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   if (voxel_map_->isEmpty()) return {};
   ensureStationaryReference(mg);
   logStateTrace("post_imu", mg, 0, 0);
-  if (openLoopActive()) return openLoopFinishScan(mg);
+  if (openLoopActive() || startupHoldActive(static_cast<long>(voxel_map_->frame_idx_))) return openLoopFinishScan(mg);
 
   TimedScope scope(profiler_, "lio/joint_knots");
   prior_cov_ = state_->cov();

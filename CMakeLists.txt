@@ -262,3 +262,10 @@ target_link_libraries(state_lib Eigen3::Eigen ${catkin_LIBRARIES})
 add_executable(test_gravity_s2 tests/test_gravity_s2.cpp)
 target_link_libraries(test_gravity_s2 state_lib)
 add_test(NAME gravity_s2 COMMAND test_gravity_s2)
+
+# R64 (planning agent's patch, section 4 of R64_INSTRUCTIONS.md): debiased plane-fit variants
+# unit test.
+add_executable(test_debias_modes tests/test_debias_modes.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
+target_include_directories(test_debias_modes PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+target_link_libraries(test_debias_modes ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
+add_test(NAME debias_modes COMMAND test_debias_modes)

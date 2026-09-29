@@ -443,6 +443,25 @@ struct VoxelOpts
   // History (348-361): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-348
   std::string plane_fit_pose_cov_mode = "combined";
 
+  // R64. How the debiased fit applies the sensor-noise correction (only read when plane_fit_mode == "debiased").
+  // "full" (default, bit-identical to R63): subtract the accumulated sensor covariance from the whole 3x3
+  //   scatter, then eigendecompose (normal, lambda0..2 all come from the corrected matrix).
+  // "lambda0_only": eigendecompose the RAW scatter (normal, lambda1, lambda2 uncorrected) and correct only the
+  //   out-of-plane eigenvalue, lambda0_deb = lambda0_raw - n^T Sbar_sensor n (first-order, n = raw normal).
+  // "none": raw scatter, no correction at all. Keeps the persistent accumulators and the never-lock/revoke
+  //   lifecycle of the debiased path but removes the debiasing arithmetic (isolates lifecycle from arithmetic).
+  std::string debias_mode = "full";
+  // R64. Multiplier on plane_threshold applied only when a debiased voxel that WAS a plane is refit (1.0 = off,
+  // bit-identical). > 1 makes an existing plane harder to revoke than a new one is to create.
+  double plane_threshold_hysteresis = 1.0;
+  // R64. Plane-fit diagnostics (write-only, default off). plane_fit_reasons_en: per-frame counts of fit outcomes by
+  // reason for both fit paths -> plane_fit_reasons.csv. plane_fit_trace_frames > 0: one row per fit attempt for
+  // frames 0..plane_fit_trace_frames (frame 0 = bootstrap window) -> plane_fit_trace.csv, at most
+  // plane_fit_trace_max_rows rows.
+  bool plane_fit_reasons_en = false;
+  int  plane_fit_trace_frames = 0;
+  int  plane_fit_trace_max_rows = 200000;
+
   // History (364-384): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-364
   std::string bin_weight_mode_fit = "count";
   std::string bin_weight_mode_var = "count";

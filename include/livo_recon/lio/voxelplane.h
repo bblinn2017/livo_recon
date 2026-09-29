@@ -187,6 +187,7 @@ private:
   // (see VoxelOpts::log_consistency_mode == "corr+covariates"). Mirrors
   // debugLogPlaneFitStats()'s own `j` local exactly, just persisted.
   int last_fit_j_ = 0;
+  int trace_frame_ = -1;   // R64: frame index of the latest update()/addPoints() call, diagnostics only
 
   // ── the unified (information) plane model ────────────────────────────
   // See VoxelOpts::plane_var_mode.  All three are written by
@@ -394,5 +395,13 @@ long voxelPlaneInformationFitCount();
 
 // History (252-256): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-252
 void debugFlushConsistencyCorr();
+
+// R64: plane-fit outcome accounting (write-only diagnostics, off unless voxel_map/plane/plane_fit_reasons_en or
+// plane_fit_trace_frames > 0). voxelPlaneFitEvent() is the VoxelNode-level hook (kinds below); the fit-level
+// outcomes are recorded inside VoxelPlane. voxelPlaneFitTraceFlush() writes plane_fit_reasons.csv and
+// plane_fit_trace.csv into the debug log dir; called once at shutdown.
+enum PlaneFitEvent { kEvRetire = 16, kEvSubdivide = 17, kEvDisabled = 18 };
+void voxelPlaneFitEvent(const VoxelOpts& o, int frame, bool debiased, int kind);
+void voxelPlaneFitTraceFlush();
 
 }  // namespace livo_recon

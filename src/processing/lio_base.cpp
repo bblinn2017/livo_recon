@@ -242,6 +242,11 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   cfg.nested<double>(opts_.open_loop.mode == "propagate_only", "lio/open_loop/mode=propagate_only",
                      "lio/open_loop/reset_period_s", opts_.open_loop.reset_period_s, 0.0);
 
+  // R64: startup hold (see LioProcOptions::startup_hold_scans). 0 = off.
+  cfg.get<int>("lio/startup_hold/scans", opts_.startup_hold_scans, 0);
+  if (opts_.startup_hold_scans < 0)
+    throw std::invalid_argument("lio/startup_hold/scans must be >= 0");
+
   // CQ-31 item 5: three independently-switchable scalar P controls, all
   // default-identity.
   cfg.get<double>("lio/p_inflate/alpha", opts_.prior_scalar.p_inflate_alpha, 1.0);

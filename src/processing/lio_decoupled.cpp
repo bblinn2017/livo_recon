@@ -1567,7 +1567,7 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
     runDryRunShadowPass(mg);
 
   logStateTrace("post_imu", mg, 0, 0);
-  if (openLoopActive()) return openLoopFinishScan(mg);
+  if (openLoopActive() || startupHoldActive(static_cast<long>(voxel_map_->frame_idx_))) return openLoopFinishScan(mg);
 
   {
     TimedScope ts(profiler_, "lio/ekf");

@@ -319,6 +319,7 @@ void finishRun(NodeContext& ctx, PubProc& pub_proc, EvoProc& evo_proc)
 {
   // History (249-252): see docs/livo_recon_changelog.md#src-livo_recon_node.cpp-249
   debugFlushConsistencyCorr();
+  voxelPlaneFitTraceFlush();   // R64: plane_fit_reasons.csv / plane_fit_trace.csv (no-op unless enabled)
 
   // Stop the async tracking thread cleanly before shutdown (task #145) --
   // no-op if it was never started (VIO disabled or tracker failed to load).
