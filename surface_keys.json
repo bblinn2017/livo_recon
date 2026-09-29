@@ -1,0 +1,30 @@
+{
+  "backend_overrides": {
+    "voxel_map.backend": "surface",
+    "voxel_map.surface.min_points": 5,
+    "voxel_map.surface.merge_angle_deg": 5.0,
+    "voxel_map.surface.merge_offset": 0.05,
+    "voxel_map.surface.merge_gap_cells": 3.0,
+    "voxel_map.surface.support_test": true,
+    "voxel_map.surface.support_gap_cells": 1.0,
+    "voxel_map.surface.split_planarity_max": 0.2,
+    "voxel_map.plane.plane_fit_pose_cov_mode": "sensor_only",
+    "voxel_map.plane.plane_var_mode": "eigengap",
+    "voxel_map.map.voxel_size": null,
+    "voxel_map.map.max_layer": null,
+    "voxel_map.points.min_init": null,
+    "voxel_map.points.min_update": null,
+    "voxel_map.points.max": null,
+    "voxel_map.search.neighborhood_size": null
+  },
+  "cell_size_key": "voxel_map.surface.cell_size",
+  "bootstrap_key": "voxel_map.map.bootstrap_mode",
+  "cell_sizes": [
+    0.25,
+    0.1
+  ],
+  "bootstrap_values": [
+    "aggregate",
+    "sequential"
+  ]
+}
