@@ -56,6 +56,8 @@ PlaneFit fitPlane(const PlaneStats& s, const ValidityRule& rule) {
   f.eigenvalues = es.eigenvalues();  // ascending
   f.center = s.mean();
   f.normal = es.eigenvectors().col(0).normalized();
+  f.y_axis = es.eigenvectors().col(1).normalized();
+  f.x_axis = es.eigenvectors().col(2).normalized();
   if (f.normal.dot(f.center) > 0.0) f.normal = -f.normal;  // point toward origin
   f.d = -f.normal.dot(f.center);
   const double den = std::max(f.eigenvalues.sum(), 1e-15);
@@ -92,6 +94,8 @@ PlaneFit fitPlaneDebiased(const PlaneStats& s, const ValidityRule& rule, const D
   Eigen::Vector3d ev = es.eigenvalues();
   f.center = s.mean();
   f.normal = es.eigenvectors().col(0).normalized();
+  f.y_axis = es.eigenvectors().col(1).normalized();
+  f.x_axis = es.eigenvectors().col(2).normalized();
   if (f.normal.dot(f.center) > 0.0) f.normal = -f.normal;
   f.d = -f.normal.dot(f.center);
   f.rank2 = ev[1] >= kRank2Eig && ev[2] >= kRank2Eig;
@@ -110,6 +114,105 @@ PlaneFit fitPlaneDebiased(const PlaneStats& s, const ValidityRule& rule, const D
   if (std::fabs(ev[0] - ev[1]) < eps_denom || std::fabs(ev[0] - ev[2]) < eps_denom) return f;
   f.valid = s.n >= rule.min_points && f.planarity <= rule.max_planarity;
   return f;
+}
+
+
+bool planeCovInformation(const PlaneStats& s, const PlaneFit& f, bool debiased, bool use_pose, M3& out) {
+  if (s.n < 3) return false;
+  const double N = static_cast<double>(s.n);
+  const M3 Cm = (use_pose ? s.sum_cov : s.sum_sensor_cov) / N;
+  const M3 Cs = s.sum_sensor_cov / N;
+  const V3& n = f.normal;
+  const double sm2 = std::max(0.0, n.dot(Cm * n));
+  const double ss2 = std::max(0.0, n.dot(Cs * n));
+  const double sp2 = std::max(0.0, sm2 - ss2);
+  const double rough = debiased ? std::max(0.0, f.eigenvalues[0]) : std::max(0.0, f.eigenvalues[0] - sm2);
+  const double sb2 = sm2 + rough;
+  if (!(sb2 > 0.0) || !std::isfinite(sb2)) return false;
+  const double F = std::max(1.0, static_cast<double>(s.obs.count()));
+  const double m = N / F;
+  const double rho = std::min(1.0, sp2 / sb2);
+  const double neff = N / std::max(1.0, 1.0 + (m - 1.0) * rho);
+  const double sc = sb2 / neff;
+  const double l1 = std::max(f.eigenvalues[1], 1e-12), l2 = std::max(f.eigenvalues[2], 1e-12);
+  out = M3::Zero();
+  out(0, 0) = sc / l1;
+  out(1, 1) = sc / l2;
+  out(2, 2) = sc;
+  return out.allFinite();
+}
+
+bool planeCovEigengap(const PlaneStats& s, const PlaneFit& f, double eps_denom, M3& out) {
+  if (s.n < 3 || !s.has_tensors) return false;
+  const double N = static_cast<double>(s.n);
+  const double d1 = f.eigenvalues[0] - f.eigenvalues[1];
+  const double d2 = f.eigenvalues[0] - f.eigenvalues[2];
+  if (std::fabs(d1) < eps_denom || std::fabs(d2) < eps_denom) return false;
+  const V3 mu = s.mean();  // origin coordinates, same as the tensors
+  const V3& n = f.normal;
+  const V3& y = f.y_axis;
+  const V3& x = f.x_axis;
+  const M3& S1 = s.covS;
+  // U_a = sum z_a C, T_ab = sum z_a z_b C with z = p - mu.
+  std::array<M3, 3> U;
+  std::array<std::array<M3, 3>, 3> T;
+  for (int a = 0; a < 3; ++a) U[a] = s.covW[a] - mu[a] * S1;
+  for (int a = 0; a < 3; ++a)
+    for (int b = 0; b < 3; ++b)
+      T[a][b] = s.covV[a][b] - mu[a] * s.covW[b] - mu[b] * s.covW[a] + mu[a] * mu[b] * S1;
+  const M3 A1 = n * y.transpose() + y * n.transpose();
+  const M3 A2 = n * x.transpose() + x * n.transpose();
+  // Q(P, R) = sum_i z_i^T P C_i R z_i = sum_{a,b,c,d} P(a,c) R(d,b) T[a][b](c,d)
+  auto Q = [&](const M3& P, const M3& R) {
+    double q = 0.0;
+    for (int a = 0; a < 3; ++a)
+      for (int b = 0; b < 3; ++b)
+        for (int c = 0; c < 3; ++c)
+          for (int d = 0; d < 3; ++d) q += P(a, c) * R(d, b) * T[a][b](c, d);
+    return q;
+  };
+  // Lc(A) = sum_i (A z_i)^T C_i n = sum_{a,c,d} A(c,a) n_d U[a](c,d)
+  auto Lc = [&](const M3& A) {
+    double q = 0.0;
+    for (int a = 0; a < 3; ++a)
+      for (int c = 0; c < 3; ++c)
+        for (int d = 0; d < 3; ++d) q += A(c, a) * n[d] * U[a](c, d);
+    return q;
+  };
+  out = M3::Zero();
+  out(0, 0) = Q(A1, A1) / (N * N * d1 * d1);
+  out(1, 1) = Q(A2, A2) / (N * N * d2 * d2);
+  out(0, 1) = out(1, 0) = Q(A1, A2) / (N * N * d1 * d2);
+  out(2, 2) = n.dot(S1 * n) / (N * N);
+  out(0, 2) = out(2, 0) = -Lc(A1) / (N * N * d1);
+  out(1, 2) = out(2, 1) = -Lc(A2) / (N * N * d2);
+  return out.allFinite();
+}
+
+double planeD2(const PlaneFit& a, const PlaneFit& b) {
+  const double inf = std::numeric_limits<double>::infinity();
+  if (!a.cov_ok || !b.cov_ok) return inf;
+  V3 nb = b.normal;
+  if (nb.dot(a.normal) < 0.0) nb = -nb;
+  Eigen::Vector2d dth(a.y_axis.dot(nb), a.x_axis.dot(nb));
+  Eigen::Matrix2d J;
+  J << a.y_axis.dot(b.y_axis), a.y_axis.dot(b.x_axis),
+       a.x_axis.dot(b.y_axis), a.x_axis.dot(b.x_axis);
+  const Eigen::Matrix2d S = a.cov.topLeftCorner<2, 2>() + J * b.cov.topLeftCorner<2, 2>() * J.transpose();
+  const double det = S.determinant();
+  if (!(det > 1e-300) || !std::isfinite(det)) return inf;
+  const double t2 = dth.dot(S.inverse() * dth);
+  const V3 mid = 0.5 * (a.center + b.center);
+  const double delta = a.normal.dot(mid - a.center) - nb.dot(mid - b.center);
+  auto var_at = [&](const PlaneFit& f) {
+    const V3 dm = mid - f.center;
+    const V3 l(f.y_axis.dot(dm), f.x_axis.dot(dm), 1.0);
+    return l.dot(f.cov * l);
+  };
+  const double v = var_at(a) + var_at(b);
+  if (!(v > 0.0) || !std::isfinite(v)) return inf;
+  const double r = t2 + delta * delta / v;
+  return std::isfinite(r) ? r : inf;
 }
 
 PlaneFit fitIncrementalPca(const PlaneStats& s, double max_ratio) {
@@ -153,10 +256,15 @@ namespace {
 
 struct Key {
   int x, y, z;
-  bool operator<(const Key& o) const { return std::tie(x, y, z) < std::tie(o.x, o.y, o.z); }
+  int l = 0;  // R57: refinement level of a robust sub-cell (0 for every leaf cell, so R56 ordering is unchanged)
+  bool operator<(const Key& o) const { return std::tie(x, y, z, l) < std::tie(o.x, o.y, o.z, o.l); }
 };
-Key key(const V3& p, double l) {
-  return {int(std::floor(p.x() / l)), int(std::floor(p.y() / l)), int(std::floor(p.z() / l))};
+Key key(const V3& p, double size, int level = 0) {
+  return {int(std::floor(p.x() / size)), int(std::floor(p.y() / size)), int(std::floor(p.z() / size)), level};
+}
+double boxGap(const V3& amin, const V3& amax, const V3& bmin, const V3& bmax) {
+  const V3 g = (amin - bmax).cwiseMax(bmin - amax).cwiseMax(0.0);
+  return g.norm();
 }
 
 // Per-cell block buffer for the robust families. NOTE: this is a fixed-size
@@ -192,6 +300,21 @@ class MapImpl : public Backend {
     R_T_ = o_.pose.R.transpose();
     if (o_.merge_criterion != "combined_fit" && o_.merge_criterion != "pairwise")
       throw std::runtime_error("merge_criterion must be combined_fit or pairwise");
+    if (o_.merge_test != "threshold" && o_.merge_test != "d2")
+      throw std::runtime_error("merge_test must be threshold or d2");
+    if (o_.plane_var_mode != "information" && o_.plane_var_mode != "eigengap")
+      throw std::runtime_error("plane_var_mode must be information or eigengap");
+    if (o_.rebuild_mode != "incremental" && o_.rebuild_mode != "scratch")
+      throw std::runtime_error("rebuild_mode must be incremental or scratch");
+    d2_ = (o_.merge_test == "d2");
+    if (o_.obs_test && !d2_) throw std::runtime_error("obs_test requires merge_test=d2");
+    tensors_ = d2_ && o_.plane_var_mode == "eigengap";
+    if (tensors_ && o_.debiased) throw std::runtime_error("plane_var_mode=eigengap is defined for the non-debiased fit only");
+    if (tensors_ && o_.sensor_var <= 0.0 && !o_.d2_pose_cov)
+      throw std::runtime_error("plane_var_mode=eigengap needs a non-zero covariance: set sensor_var > 0 or d2_pose_cov");
+    if (o_.robust_recursion_depth < 0 || o_.robust_recursion_depth > 4)
+      throw std::runtime_error("robust_recursion_depth must be 0..4");
+    eps_denom_ = std::max(1e-8, debias_.denom_floor_scale * o_.plane_eig_max);
   }
   std::string name() const override { return n_; }
 
@@ -200,22 +323,15 @@ class MapImpl : public Backend {
     auto t0 = std::chrono::steady_clock::now();
     for (const auto& p : pts) {
       auto k = key(p, o_.leaf);
-      auto& pa = cells_[k];
-      if (!pa.id) {
-        pa.id = ++next_;
-        pa.surface_id = pa.id;
-        SurfaceAgg sa; sa.id = pa.id; sa.children = {pa.id};
-        surfaces_[pa.id] = sa;
-        id_to_key_[pa.id] = k;
-      }
+      auto& pa = getCell(k);
       pa.bb_min = pa.bb_min.cwiseMin(p);
       pa.bb_max = pa.bb_max.cwiseMax(p);
       if (robust_) {
         auto& res = reservoirs_[k];
         res.offer(p, obs);
-        maybeRunRansac(pa, res);
+        maybeRunRansac(pa, res, k, 0);
       } else {
-        addPoint(pa.stats, p, obs);
+        addPoint(pa.stats, p, obs, o_.obs_test ? &half_[k] : nullptr);
       }
     }
     ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -224,14 +340,20 @@ class MapImpl : public Backend {
   Snapshot snapshot() const override {
     auto t0 = std::chrono::steady_clock::now();
     refreshFits();
+    if (o_.rebuild_mode == "scratch") resetSurfaces();
     refreshSurfaceStats();
     if (merge_) rebuildSurfaces();
     if (gaussian_) reevaluateSplits();
-    ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    const double snap_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    ms_ += snap_ms;
 
     Snapshot s;
     s.backend = n_; s.insert_ms = ms_; s.merges = merges_; s.splits = splits_; s.unmerges = unmerges_;
     s.events = events_;
+    s.snapshot_ms = snap_ms;
+    s.d2_pairs = d2_pairs_; s.d2_rejects = d2_rejects_; s.d2_nocov_pairs = d2_nocov_pairs_;
+    s.support_rejects = support_rejects_; s.obs_tested = obs_tested_; s.obs_skipped = obs_skipped_;
+    s.obs_rejects = obs_rejects_; s.validity_rejects = validity_rejects_; s.sub_cells = sub_cells_;
     s.cells_total = cells_.size();
     std::set<std::uint64_t> ids;
     for (const auto& kv : cells_) {
@@ -239,6 +361,7 @@ class MapImpl : public Backend {
       const PlaneStats& eff = eff_.at(kv.first);
       if (eff.n >= 3 && !c.fit.rank2) ++s.cells_rank_deficient;
       if (!c.fit.valid) continue;
+      if (d2_ && !c.fit.cov_ok) ++s.cells_valid_no_cov;
       Patch p = c;
       p.stats = eff;
       if (robust_) {
@@ -259,23 +382,54 @@ class MapImpl : public Backend {
     }
     s.patches = s.data.size();
     s.surfaces = ids.size();
+    s.state_bytes = stateBytes();
+    if (o_.report_surface_stats) fillSurfaceStats(s);
     return s;
   }
 
  private:
   // Per-point covariance terms (debiased mode only; zero otherwise).
-  void addPoint(PlaneStats& st, const V3& p, std::uint64_t obs) const {
-    if (o_.debiased) {
-      const M3 sensor = o_.sensor_var * M3::Identity();
-      const M3 pose = R_T_ * poseCovAtBody(o_.pose, p) * o_.pose.R;
-      st.add(p, sensor, pose);
-    } else {
-      st.add(p);
+  // `halves` (obs_test): the same point is also added to halves[obs & 1] (even/odd observation ids).
+  void addPoint(PlaneStats& st, const V3& p, std::uint64_t obs, std::array<PlaneStats, 2>* halves = nullptr) const {
+    M3 sensor = M3::Zero(), pose = M3::Zero();
+    const bool need_cov = o_.debiased || d2_;
+    if (need_cov) {
+      sensor = o_.sensor_var * M3::Identity();
+      if (o_.debiased || o_.d2_pose_cov) pose = R_T_ * poseCovAtBody(o_.pose, p) * o_.pose.R;
     }
-    st.noteObs(obs);
+    const M3 C = o_.d2_pose_cov ? M3(sensor + pose) : sensor;
+    auto feed = [&](PlaneStats& t) {
+      if (need_cov) t.add(p, sensor, pose); else t.add(p);
+      t.noteObs(obs);
+      if (tensors_) t.addCovTensors(p, C);
+    };
+    feed(st);
+    if (halves) feed((*halves)[obs & 1ULL]);
   }
   PlaneFit fit(const PlaneStats& st) const {
-    return o_.debiased ? fitPlaneDebiased(st, rule_, debias_) : fitPlane(st, rule_);
+    PlaneFit f = o_.debiased ? fitPlaneDebiased(st, rule_, debias_) : fitPlane(st, rule_);
+    if (d2_ && f.valid) {
+      M3 c;
+      const bool ok = tensors_ ? planeCovEigengap(st, f, eps_denom_, c)
+                               : planeCovInformation(st, f, o_.debiased, o_.d2_pose_cov, c);
+      f.cov_ok = ok;
+      if (ok) f.cov = c;
+    }
+    return f;
+  }
+
+  Patch& getCell(const Key& k) {
+    auto& pa = cells_[k];
+    if (!pa.id) {
+      pa.id = ++next_;
+      pa.level = k.l;
+      pa.surface_id = pa.id;
+      SurfaceAgg sa; sa.id = pa.id; sa.children = {pa.id};
+      surfaces_[pa.id] = sa;
+      id_to_key_[pa.id] = k;
+      if (k.l > 0) ++sub_cells_;
+    }
+    return pa;
   }
 
   Patch& cellOf(std::uint64_t patch_id) const { return cells_.at(id_to_key_.at(patch_id)); }
@@ -287,16 +441,27 @@ class MapImpl : public Backend {
     for (auto& kv : cells_) {
       Patch& pa = kv.second;
       PlaneStats eff = pa.stats;
+      std::array<PlaneStats, 2> eh;
+      if (o_.obs_test) {
+        auto hit = half_.find(kv.first);
+        if (hit != half_.end()) eh = hit->second;
+      }
       if (robust_) {
         auto it = reservoirs_.find(kv.first);
         if (it != reservoirs_.end() && it->second.primary.size() >= 3) {
           auto r = ransacPlane(it->second.primary, o_.robust_ransac_dist, o_.robust_ransac_iters,
                                pa.id * 7919ULL + it->second.seen);
-          if (r.found) for (int idx : r.inlier_idx) addPoint(eff, it->second.primary[idx], it->second.primary_obs[idx]);
+          if (r.found)
+            for (int idx : r.inlier_idx)
+              addPoint(eff, it->second.primary[idx], it->second.primary_obs[idx], o_.obs_test ? &eh : nullptr);
         }
       }
       eff_[kv.first] = eff;
       pa.fit = fit(eff);
+      if (o_.obs_test) {
+        eff_half_[kv.first] = eh;
+        half_fit_[kv.first] = {fit(eh[0]), fit(eh[1])};
+      }
     }
   }
 
@@ -336,27 +501,43 @@ class MapImpl : public Backend {
       } else {
         ang = planeAngleDeg(c.fit.normal, f.normal);
         off = std::abs(f.normal.dot(c.fit.center - f.center));
-        score = std::max(ang / std::max(o_.merge_angle_deg, 1e-12), off / std::max(o_.merge_offset, 1e-12));
+        if (d2_) {
+          // member vs union: no covariance on either side -> no evidence, score 0 (never blocks/splits)
+          score = (c.fit.cov_ok && f.cov_ok) ? planeD2(c.fit, f) / std::max(o_.d2_tau, 1e-12) : 0.0;
+        } else {
+          score = std::max(ang / std::max(o_.merge_angle_deg, 1e-12), off / std::max(o_.merge_offset, 1e-12));
+        }
       }
       if (score > r.worst_score) { r.worst_score = score; r.worst = cid; r.worst_ang = ang; r.worst_off = off; }
     }
     r.ok = !degraded && r.worst_score <= 1.0;
+    // d2 merge context: a union whose plane covariance cannot be computed gives no evidence, so refuse the merge
+    // (splits, invalid_violates=true, are never forced by a missing covariance).
+    if (d2_ && !invalid_violates && f.valid && !f.cov_ok) r.ok = false;
     return r;
   }
 
   // Robust extraction: promote a full block's RANSAC inliers into the cell's
   // permanent additive stats; rejected points go to a bounded leftover tier
   // that gets exactly one further independent RANSAC attempt.
-  void maybeRunRansac(Patch& pa, Reservoir& res) {
+  // With robust_recursion_depth > level, the rejected points of a full block are offered to the sub-cell of
+  // size leaf / 2^(level+1) containing them (which becomes its own patch) instead of the leftover tier.
+  void maybeRunRansac(Patch& pa, Reservoir& res, const Key& k, int level) {
     if (res.primary.size() < o_.robust_reservoir) return;
+    std::array<PlaneStats, 2>* hp = o_.obs_test ? &half_[k] : nullptr;
+    const double cell = o_.leaf / static_cast<double>(1 << level);
     auto run = [&](std::vector<V3>& pool, std::vector<std::uint64_t>& pool_obs,
                    std::vector<V3>& rej, std::vector<std::uint64_t>& rej_obs) {
       auto r = ransacPlane(pool, o_.robust_ransac_dist, o_.robust_ransac_iters, pa.id * 7919ULL + res.seen);
+      if (r.found && o_.robust_validity_test && !distributionValid(pool, r, cell)) {
+        r.found = false;
+        ++validity_rejects_;
+      }
       if (r.found) {
         std::vector<bool> is_inlier(pool.size(), false);
         for (int idx : r.inlier_idx) is_inlier[idx] = true;
         for (std::size_t i = 0; i < pool.size(); ++i) {
-          if (is_inlier[i]) addPoint(pa.stats, pool[i], pool_obs[i]);
+          if (is_inlier[i]) addPoint(pa.stats, pool[i], pool_obs[i], hp);
           else { rej.push_back(pool[i]); rej_obs.push_back(pool_obs[i]); }
         }
       } else {
@@ -366,6 +547,10 @@ class MapImpl : public Backend {
     };
     std::vector<V3> rej_p; std::vector<std::uint64_t> rej_p_obs;
     run(res.primary, res.primary_obs, rej_p, rej_p_obs);
+    if (level < o_.robust_recursion_depth) {
+      for (std::size_t i = 0; i < rej_p.size(); ++i) routeRejected(rej_p[i], rej_p_obs[i], level + 1);
+      return;
+    }
     for (std::size_t i = 0; i < rej_p.size(); ++i) {
       if (res.leftover.size() < o_.robust_reservoir) { res.leftover.push_back(rej_p[i]); res.leftover_obs.push_back(rej_p_obs[i]); }
       else ++res.rejected_total;
@@ -375,6 +560,49 @@ class MapImpl : public Backend {
       run(res.leftover, res.leftover_obs, rej_l, rej_l_obs);
       res.rejected_total += rej_l.size();
     }
+  }
+
+  void routeRejected(const V3& p, std::uint64_t obs, int level) {
+    const Key k = key(p, o_.leaf / static_cast<double>(1 << level), level);
+    Patch& pa = getCell(k);
+    pa.bb_min = pa.bb_min.cwiseMin(p);
+    pa.bb_max = pa.bb_max.cwiseMax(p);
+    auto& res = reservoirs_[k];
+    res.offer(p, obs);
+    maybeRunRansac(pa, res, k, level);
+  }
+
+  // R-VoxelMap-style validity test: the RANSAC inliers projected on their plane, binned at cell/robust_grid_div,
+  // must form one dominant 8-connected occupied region (largest component / occupied cells >= robust_conn_min).
+  bool distributionValid(const std::vector<V3>& pool, const RansacResult& r, double cell) const {
+    if (r.inlier_idx.size() < 3) return false;
+    const V3 n = r.normal.normalized();
+    const V3 t1 = n.cross(std::fabs(n.z()) < 0.9 ? V3::UnitZ() : V3::UnitX()).normalized();
+    const V3 t2 = n.cross(t1);
+    const double g = std::max(cell / std::max(o_.robust_grid_div, 1.0), 1e-6);
+    std::set<std::pair<int, int>> occ;
+    for (int idx : r.inlier_idx) {
+      const V3& p = pool[idx];
+      occ.insert({int(std::floor(p.dot(t1) / g)), int(std::floor(p.dot(t2) / g))});
+    }
+    std::set<std::pair<int, int>> seen;
+    std::size_t best = 0;
+    for (const auto& c0 : occ) {
+      if (seen.count(c0)) continue;
+      std::vector<std::pair<int, int>> stack{c0};
+      seen.insert(c0);
+      std::size_t cnt = 0;
+      while (!stack.empty()) {
+        const auto c = stack.back(); stack.pop_back(); ++cnt;
+        for (int dx = -1; dx <= 1; ++dx)
+          for (int dy = -1; dy <= 1; ++dy) {
+            const std::pair<int, int> nb{c.first + dx, c.second + dy};
+            if (occ.count(nb) && !seen.count(nb)) { seen.insert(nb); stack.push_back(nb); }
+          }
+      }
+      best = std::max(best, cnt);
+    }
+    return static_cast<double>(best) / static_cast<double>(occ.size()) >= o_.robust_conn_min;
   }
 
   void rebuildSurfaces() const {
@@ -392,12 +620,88 @@ class MapImpl : public Backend {
             if (bit == buckets.end()) continue;
             for (Patch* b : bit->second) {
               if (b->id <= a->id || a->surface_id == b->surface_id) continue;
-              if (planeAngleDeg(a->fit.normal, b->fit.normal) > o_.merge_angle_deg) continue;
-              if (planeOffset(a->fit, b->fit) > o_.merge_offset) continue;
-              if ((a->fit.center - b->fit.center).norm() > o_.merge_gap) continue;
+              if (d2_) {
+                if ((a->fit.center - b->fit.center).norm() > o_.merge_gap) continue;
+                if (o_.support_test && boxGap(a->bb_min, a->bb_max, b->bb_min, b->bb_max) > o_.support_gap) {
+                  ++support_rejects_; continue;
+                }
+                if (!a->fit.cov_ok || !b->fit.cov_ok) { ++d2_nocov_pairs_; continue; }
+                ++d2_pairs_;
+                if (planeD2(a->fit, b->fit) > o_.d2_tau) { ++d2_rejects_; continue; }
+                if (o_.obs_test && !obsCompatible(*a, *b)) continue;
+              } else {
+                if (planeAngleDeg(a->fit.normal, b->fit.normal) > o_.merge_angle_deg) continue;
+                if (planeOffset(a->fit, b->fit) > o_.merge_offset) continue;
+                if ((a->fit.center - b->fit.center).norm() > o_.merge_gap) continue;
+                if (o_.support_test && boxGap(a->bb_min, a->bb_max, b->bb_min, b->bb_max) > o_.support_gap) {
+                  ++support_rejects_; continue;
+                }
+              }
               tryMerge(a->surface_id, b->surface_id);
             }
           }
+    }
+  }
+
+  // Split-half observation consistency: both the even-observation and the odd-observation statistics must
+  // separately agree that A and B are one plane (sum of the two D2 values against d2_tau_half, 6 dof).
+  bool obsCompatible(const Patch& a, const Patch& b) const {
+    const auto& ha = half_fit_.at(id_to_key_.at(a.id));
+    const auto& hb = half_fit_.at(id_to_key_.at(b.id));
+    double sum = 0.0;
+    for (int h = 0; h < 2; ++h) {
+      if (!ha[h].valid || !hb[h].valid || !ha[h].cov_ok || !hb[h].cov_ok) { ++obs_skipped_; return true; }
+      sum += planeD2(ha[h], hb[h]);
+    }
+    ++obs_tested_;
+    if (!(sum <= o_.d2_tau_half)) { ++obs_rejects_; return false; }
+    return true;
+  }
+
+  // rebuild_mode=scratch: every cell back to a singleton surface; per-snapshot counters restart.
+  void resetSurfaces() const {
+    surfaces_.clear();
+    for (auto& kv : cells_) {
+      Patch& pa = kv.second;
+      pa.surface_id = pa.id;
+      SurfaceAgg sa; sa.id = pa.id; sa.children = {pa.id};
+      surfaces_[pa.id] = sa;
+    }
+    events_.clear();
+    merges_ = splits_ = unmerges_ = 0;
+    d2_pairs_ = d2_rejects_ = d2_nocov_pairs_ = support_rejects_ = 0;
+    obs_tested_ = obs_skipped_ = obs_rejects_ = 0;
+  }
+
+  std::uint64_t stateBytes() const {
+    std::uint64_t b = cells_.size() * (sizeof(Patch) + sizeof(PlaneStats));
+    if (o_.obs_test) b += cells_.size() * 2 * sizeof(PlaneStats);
+    for (const auto& kv : reservoirs_)
+      b += (kv.second.primary.size() + kv.second.leftover.size()) * (sizeof(V3) + sizeof(std::uint64_t));
+    b += surfaces_.size() * sizeof(SurfaceAgg) + id_to_key_.size() * (sizeof(std::uint64_t) + sizeof(Key));
+    return b;
+  }
+
+  void fillSurfaceStats(Snapshot& s) const {
+    for (const auto& kv : surfaces_) {
+      const SurfaceAgg& sa = kv.second;
+      std::vector<const Patch*> ch;
+      for (auto cid : sa.children) { const Patch& c = cellOf(cid); if (c.fit.valid) ch.push_back(&c); }
+      if (ch.size() < 2 || !sa.fit.valid) continue;
+      Snapshot::SurfaceStat st;
+      st.surface_id = sa.id; st.n_patches = ch.size();
+      double sum_d2 = 0.0;
+      for (const Patch* c : ch) {
+        st.points += static_cast<double>(eff_.at(id_to_key_.at(c->id)).n);
+        st.max_angle_deg = std::max(st.max_angle_deg, planeAngleDeg(c->fit.normal, sa.fit.normal));
+        st.max_offset = std::max(st.max_offset, std::abs(sa.fit.normal.dot(c->fit.center - sa.fit.center)));
+        if (d2_ && c->fit.cov_ok && sa.fit.cov_ok) {
+          const double d = planeD2(c->fit, sa.fit);
+          st.max_d2 = std::max(st.max_d2, d); sum_d2 += d; ++st.n_d2;
+        }
+      }
+      st.mean_d2 = st.n_d2 ? sum_d2 / static_cast<double>(st.n_d2) : 0.0;
+      s.surface_stats.push_back(st);
     }
   }
 
@@ -482,12 +786,21 @@ class MapImpl : public Backend {
   bool merge_, robust_, gaussian_;
   mutable std::map<Key, Patch> cells_;
   mutable std::map<Key, PlaneStats> eff_;
+  // R57 obs_test: promoted even/odd-observation stats, effective (with pending robust inliers) copies and their fits.
+  std::map<Key, std::array<PlaneStats, 2>> half_;
+  mutable std::map<Key, std::array<PlaneStats, 2>> eff_half_;
+  mutable std::map<Key, std::array<PlaneFit, 2>> half_fit_;
   std::map<std::uint64_t, Key> id_to_key_;
   std::map<Key, Reservoir> reservoirs_;
   mutable std::map<std::uint64_t, SurfaceAgg> surfaces_;
   mutable std::vector<MergeEvent> events_;
   std::uint64_t next_ = 0;
   mutable std::uint64_t merges_ = 0, splits_ = 0, unmerges_ = 0;
+  bool d2_ = false, tensors_ = false;
+  double eps_denom_ = 1e-8;
+  mutable std::uint64_t d2_pairs_ = 0, d2_rejects_ = 0, d2_nocov_pairs_ = 0, support_rejects_ = 0;
+  mutable std::uint64_t obs_tested_ = 0, obs_skipped_ = 0, obs_rejects_ = 0;
+  std::uint64_t validity_rejects_ = 0, sub_cells_ = 0;
   mutable double ms_ = 0;
 };
 

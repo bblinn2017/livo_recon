@@ -94,9 +94,12 @@ def main():
     p.add_argument('--distance',type=float,default=.02);p.add_argument('--min-points',type=int,default=100)
     p.add_argument('--cluster-eps',type=float,default=.15);p.add_argument('--ransac-iters',type=int,default=1000)
     p.add_argument('--seed',type=int,default=42)
+    p.add_argument('--max-obs',type=int,default=0,help='R57: use only the first N observation files (sorted order); 0 = all (R53/R54 behaviour). Scan 480 = 480.')
     a=p.parse_args()
     rng = np.random.default_rng(a.seed)
-    xs=[np.load(f)['xyz'] for f in sorted(glob.glob(os.path.join(a.input,'obs_*.npz')))]
+    files=sorted(glob.glob(os.path.join(a.input,'obs_*.npz')))
+    if a.max_obs>0: files=files[:a.max_obs]
+    xs=[np.load(f)['xyz'] for f in files]
     working = np.concatenate(xs) if xs else np.empty((0,3))
     rows=[];sid=0;stall_guard=0
     while len(working) >= a.min_points and stall_guard < 10000:

@@ -13,6 +13,10 @@
 //       [--max-planarity R] [--merge-criterion combined_fit|pairwise]
 //       [--debiased [--debias-context CSV] [--sensor-var V] [--sensor-noise-floor-eig0]]
 //       [--merge-angle-deg A] [--merge-offset M] [--merge-gap G] ...
+//   R57: [--merge-test threshold|d2] [--plane-var-mode information|eigengap] [--d2-tau T] [--d2-tau-half T]
+//       [--d2-pose-cov] [--support-test [--support-gap G]] [--obs-test] [--rebuild incremental|scratch]
+//       [--robust-recursion-depth D] [--robust-validity-test [--robust-grid-div V] [--robust-conn-min F]]
+//       [--v2-summary-out CSV] [--surfaces-out CSV]   (the two extra outputs are only written when given)
 // Defaults reproduce the production VoxelMap plane-validity test (rank-2 and
 // absolute eig0 < 0.01). The R52 rule is --plane-eig-max 1e30
 // --min-secondary-eig 0 --max-planarity 0.10 --merge-criterion pairwise.
@@ -22,6 +26,8 @@
 #include <cstdio>
 #include <fstream>
 #include <iomanip>
+#include <memory>
+#include <stdexcept>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -74,7 +80,7 @@ std::vector<std::string> splitCsvArg(const std::string& s) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  std::string family, input, patches_out, summary_out;
+  std::string family, input, patches_out, summary_out, v2_summary_out, surfaces_out;
   std::string checkpoints_arg = "1,2,3,5,10,20,50,100,200,500,1000,999999999";
   Options o;
   // ntu_viral.yaml voxel_map/plane/plane_threshold (the R49-R51 control jobs used it);
@@ -106,6 +112,21 @@ int main(int argc, char** argv) {
     else if (a == "--robust-ransac-dist") o.robust_ransac_dist = std::stod(next());
     else if (a == "--robust-ransac-iters") o.robust_ransac_iters = std::stoi(next());
     else if (a == "--split-planarity-max") o.split_planarity_max = std::stod(next());
+    else if (a == "--merge-test") o.merge_test = next();
+    else if (a == "--plane-var-mode") o.plane_var_mode = next();
+    else if (a == "--d2-tau") o.d2_tau = std::stod(next());
+    else if (a == "--d2-tau-half") o.d2_tau_half = std::stod(next());
+    else if (a == "--d2-pose-cov") o.d2_pose_cov = true;
+    else if (a == "--support-test") o.support_test = true;
+    else if (a == "--support-gap") o.support_gap = std::stod(next());
+    else if (a == "--obs-test") o.obs_test = true;
+    else if (a == "--rebuild") o.rebuild_mode = next();
+    else if (a == "--robust-recursion-depth") o.robust_recursion_depth = std::stoi(next());
+    else if (a == "--robust-validity-test") o.robust_validity_test = true;
+    else if (a == "--robust-grid-div") o.robust_grid_div = std::stod(next());
+    else if (a == "--robust-conn-min") o.robust_conn_min = std::stod(next());
+    else if (a == "--v2-summary-out") v2_summary_out = next();
+    else if (a == "--surfaces-out") surfaces_out = next();
     else { std::fprintf(stderr, "unknown arg: %s\n", a.c_str()); return 1; }
   }
   if (family.empty() || input.empty() || patches_out.empty() || summary_out.empty()) {
@@ -145,7 +166,14 @@ int main(int argc, char** argv) {
   checkpoints.erase(std::unique(checkpoints.begin(), checkpoints.end()), checkpoints.end());
 
   auto manifest = loadManifest(input);
-  auto backend = makeBackend(family, o);
+  o.report_surface_stats = !surfaces_out.empty();
+  std::unique_ptr<Backend> backend;
+  try {
+    backend = makeBackend(family, o);
+  } catch (const std::exception& e) {
+    std::fprintf(stderr, "error: %s\n", e.what());
+    return 1;
+  }
 
   std::ofstream patches_f(patches_out);
   patches_f << std::setprecision(17);
@@ -156,6 +184,18 @@ int main(int argc, char** argv) {
   summary_f << "checkpoint,backend,observations_ingested,total_raw_points_ingested,patches,surfaces,"
                "merges,splits,unmerges,cumulative_insert_ms,cells_total,cells_rank_deficient\n";
 
+  std::ofstream v2_f, surf_f;
+  if (!v2_summary_out.empty()) {
+    v2_f.open(v2_summary_out);
+    v2_f << std::setprecision(17);
+    v2_f << "checkpoint,backend,snapshot_ms,state_bytes,cells_valid_no_cov,d2_pairs,d2_rejects,d2_nocov_pairs,"
+            "support_rejects,obs_tested,obs_skipped,obs_rejects,validity_rejects,sub_cells,merges,splits,unmerges\n";
+  }
+  if (!surfaces_out.empty()) {
+    surf_f.open(surfaces_out);
+    surf_f << std::setprecision(17);
+    surf_f << "checkpoint,surface_id,n_patches,n_d2,points,max_angle_deg,max_offset_m,max_d2,mean_d2\n";
+  }
   std::size_t cp_idx = 0;
   std::uint64_t total_points = 0;
   for (std::size_t i = 0; i < manifest.size(); ++i) {
@@ -175,6 +215,16 @@ int main(int argc, char** argv) {
                 << snap.patches << "," << snap.surfaces << "," << snap.merges << "," << snap.splits << ","
                 << snap.unmerges << "," << snap.insert_ms << ","
                 << snap.cells_total << "," << snap.cells_rank_deficient << "\n";
+      if (v2_f.is_open())
+        v2_f << obs_count << "," << family << "," << snap.snapshot_ms << "," << snap.state_bytes << ","
+             << snap.cells_valid_no_cov << "," << snap.d2_pairs << "," << snap.d2_rejects << "," << snap.d2_nocov_pairs << ","
+             << snap.support_rejects << "," << snap.obs_tested << "," << snap.obs_skipped << "," << snap.obs_rejects << ","
+             << snap.validity_rejects << "," << snap.sub_cells << "," << snap.merges << "," << snap.splits << ","
+             << snap.unmerges << "\n";
+      if (surf_f.is_open())
+        for (const auto& st : snap.surface_stats)
+          surf_f << obs_count << "," << st.surface_id << "," << st.n_patches << "," << st.n_d2 << "," << st.points << ","
+                 << st.max_angle_deg << "," << st.max_offset << "," << st.max_d2 << "," << st.mean_d2 << "\n";
       for (const auto& p : snap.data) {
         patches_f << obs_count << "," << p.id << "," << p.surface_id << "," << p.children.size() << ",\"";
         for (std::size_t c = 0; c < p.children.size(); ++c) { if (c) patches_f << ";"; patches_f << p.children[c]; }

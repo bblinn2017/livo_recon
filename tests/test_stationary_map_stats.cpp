@@ -2,7 +2,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <algorithm>
 #include <functional>
+#include <stdexcept>
 #include <vector>
 
 // R53: every check is a CHECK(), which is NOT compiled out by NDEBUG (R52 used
@@ -298,6 +300,189 @@ void checkDebiased() {
   CHECK(std::abs(sd.data[0].fit.eigenvalues[2] - (sp.data[0].fit.eigenvalues[2] - s2)) < 1e-9);
 }
 
+
+// ---------------------------------------------------------------- R57 checks
+// (each is a CHECK(), not compiled out by NDEBUG)
+M3 testCov(const V3& p) { return 1e-4 * M3::Identity() + 1e-5 * (p * p.transpose()); }
+
+void checkTensorsAndCovModels() {
+  auto pts = grid(0.0, 0.0, 9, 7, 0.04, [](double x, double y) { return 1.5 + 0.1 * x - 0.05 * y + 0.002 * std::sin(37.0 * x + 11.0 * y); });
+  PlaneStats all, a, b;
+  for (std::size_t i = 0; i < pts.size(); ++i) {
+    const M3 C = testCov(pts[i]);
+    all.add(pts[i], 1e-4 * M3::Identity(), M3::Zero()); all.addCovTensors(pts[i], C); all.noteObs(i % 3);
+    PlaneStats& t = (i % 2 ? a : b);
+    t.add(pts[i], 1e-4 * M3::Identity(), M3::Zero()); t.addCovTensors(pts[i], C); t.noteObs(i % 3);
+  }
+  a.merge(b);
+  CHECK(a.n == all.n);
+  CHECK((a.covS - all.covS).norm() < 1e-12);
+  for (int i = 0; i < 3; ++i) {
+    CHECK((a.covW[i] - all.covW[i]).norm() < 1e-9);
+    for (int j = 0; j < 3; ++j) CHECK((a.covV[i][j] - all.covV[i][j]).norm() < 1e-9);
+  }
+  ValidityRule rule;
+  PlaneFit f = fitPlane(all, rule);
+  CHECK(f.valid);
+  // eigengap covariance from the additive tensors == brute force over the raw points
+  M3 cov;
+  CHECK(planeCovEigengap(all, f, 1e-12, cov));
+  const double N = double(pts.size());
+  const double d1 = f.eigenvalues[0] - f.eigenvalues[1], d2 = f.eigenvalues[0] - f.eigenvalues[2];
+  const V3 mu = all.mean();
+  M3 bf = M3::Zero();
+  for (const auto& p : pts) {
+    const V3 z = p - mu;
+    const double a0 = f.normal.dot(z), a1 = f.y_axis.dot(z), a2 = f.x_axis.dot(z);
+    Eigen::Matrix<double, 3, 3> J;
+    J.row(0) = ((a1 * f.normal + a0 * f.y_axis) / (N * d1)).transpose();
+    J.row(1) = ((a2 * f.normal + a0 * f.x_axis) / (N * d2)).transpose();
+    J.row(2) = (-f.normal / N).transpose();
+    bf += J * testCov(p) * J.transpose();
+  }
+  CHECK(cov.allFinite());
+  CHECK((cov - bf).norm() <= 1e-8 * bf.norm() + 1e-20);
+  CHECK((cov - cov.transpose()).norm() <= 1e-12 * cov.norm());
+  Eigen::SelfAdjointEigenSolver<M3> es(cov);
+  CHECK(es.eigenvalues()[0] > -1e-15);
+  // a denominator guard larger than the eigengap refuses a covariance
+  CHECK(!planeCovEigengap(all, f, 1e9, cov));
+
+  // information model against its closed form (sensor-only covariance, 3 observations)
+  M3 ci;
+  CHECK(planeCovInformation(all, f, false, false, ci));
+  const double sm2 = std::max(0.0, f.normal.dot((all.sum_sensor_cov / N) * f.normal));
+  const double rough = std::max(0.0, f.eigenvalues[0] - sm2);
+  const double sb2 = sm2 + rough;
+  CHECK(std::abs(ci(2, 2) - sb2 / N) < 1e-15);   // rho = 0 (no pose part) -> n_eff = N
+  CHECK(std::abs(ci(0, 0) - sb2 / (N * f.eigenvalues[1])) < 1e-15);
+  CHECK(std::abs(ci(1, 1) - sb2 / (N * f.eigenvalues[2])) < 1e-15);
+  CHECK(std::abs(ci(0, 1)) == 0.0 && std::abs(ci(0, 2)) == 0.0);
+}
+
+void checkD2MergeTest() {
+  Options o; o.leaf = 1.0; o.merge_gap = 1.5; o.sensor_var = 1e-4;
+  auto A = grid(0.05, 0.05, 8, 8, 0.1, [](double, double) { return 1.5; });
+  auto B = grid(1.05, 0.05, 8, 8, 0.1, [](double, double) { return 1.5; });
+  // ~2 degrees: inside the 5 deg / 5 cm threshold gates, but many sigma for the covariance-aware test
+  auto Bt = grid(1.05, 0.05, 8, 8, 0.1, [](double x, double) { return 1.5 + 0.0349 * (x - 1.4); });
+  for (const char* pv : {"information", "eigengap"}) {
+    Options od = o; od.merge_test = "d2"; od.plane_var_mode = pv;
+    auto m = makeBackend("mergeable_voxel", od);
+    m->insert(0, A); m->insert(0, B);
+    auto sm = m->snapshot();
+    CHECK(sm.patches == 2 && sm.surfaces == 1 && sm.merges >= 1);
+    CHECK(sm.d2_pairs >= 1 && sm.cells_valid_no_cov == 0);
+    auto t = makeBackend("mergeable_voxel", od);
+    t->insert(0, A); t->insert(0, Bt);
+    auto st = t->snapshot();
+    CHECK(st.patches == 2 && st.surfaces == 2 && st.d2_rejects >= 1);
+    // the threshold test merges the same pair
+    auto th = makeBackend("mergeable_voxel", o);
+    th->insert(0, A); th->insert(0, Bt);
+    CHECK(th->snapshot().surfaces == 1);
+  }
+  // eigengap without any covariance source is refused at construction
+  Options bad = o; bad.sensor_var = 0.0; bad.merge_test = "d2"; bad.plane_var_mode = "eigengap";
+  bool threw = false;
+  try { makeBackend("mergeable_voxel", bad); } catch (const std::runtime_error&) { threw = true; }
+  CHECK(threw);
+  // per-surface report
+  Options orp = o; orp.merge_test = "d2"; orp.report_surface_stats = true;
+  auto r = makeBackend("gaussian_surface", orp);
+  r->insert(0, A); r->insert(0, B);
+  auto sr = r->snapshot();
+  CHECK(sr.surface_stats.size() == 1 && sr.surface_stats[0].n_patches == 2 && sr.surface_stats[0].n_d2 == 2);
+  CHECK(sr.surface_stats[0].max_d2 < 11.34);
+}
+
+void checkSupportObsAndScratch() {
+  Options o; o.leaf = 1.0; o.merge_gap = 1.5; o.sensor_var = 1e-4; o.merge_test = "d2";
+  auto A = grid(0.05, 0.05, 8, 8, 0.1, [](double, double) { return 1.5; });
+  auto Bnear = grid(1.05, 0.05, 8, 8, 0.1, [](double, double) { return 1.5; });
+  auto Bfar = grid(1.35, 0.05, 7, 8, 0.1, [](double, double) { return 1.5; });   // 0.6 m box gap to A
+  auto mkfar = [&](bool support) {
+    Options oc = o; oc.support_test = support; oc.support_gap = 0.25;
+    auto m = makeBackend("mergeable_voxel", oc); m->insert(0, A); m->insert(0, Bfar); return m->snapshot();
+  };
+  CHECK(mkfar(false).surfaces == 1);
+  auto sfar = mkfar(true);
+  CHECK(sfar.surfaces == 2 && sfar.support_rejects >= 1);
+  // the threshold test honours the support test too
+  Options ot; ot.leaf = 1.0; ot.merge_gap = 1.5; ot.support_test = true;
+  auto mt = makeBackend("mergeable_voxel", ot); mt->insert(0, A); mt->insert(0, Bfar);
+  CHECK(mt->snapshot().surfaces == 2);
+
+  // observation consistency: both parities present -> tested and merged; one parity only -> skipped, still merged
+  auto A2 = grid(0.075, 0.075, 8, 8, 0.1, [](double, double) { return 1.5; });
+  auto B2 = grid(1.075, 0.075, 8, 8, 0.1, [](double, double) { return 1.5; });
+  Options oo = o; oo.obs_test = true;
+  auto mo = makeBackend("mergeable_voxel", oo);
+  mo->insert(0, A); mo->insert(0, Bnear); mo->insert(1, A2); mo->insert(1, B2);
+  auto so = mo->snapshot();
+  CHECK(so.surfaces == 1 && so.obs_tested >= 1 && so.obs_rejects == 0);
+  auto m1 = makeBackend("mergeable_voxel", oo);
+  m1->insert(0, A); m1->insert(0, Bnear);
+  auto s1 = m1->snapshot();
+  CHECK(s1.surfaces == 1 && s1.obs_skipped >= 1 && s1.obs_tested == 0);
+
+  // scratch rebuild is schedule independent (incremental need not be)
+  auto C = grid(2.05, 0.05, 8, 8, 0.1, [](double, double) { return 1.5; });
+  Options os = o; os.rebuild_mode = "scratch";
+  auto x = makeBackend("mergeable_voxel", os);
+  x->insert(0, A); x->insert(0, Bnear); x->snapshot(); x->insert(0, C);
+  auto sx = x->snapshot();
+  auto y = makeBackend("mergeable_voxel", os);
+  y->insert(0, A); y->insert(0, Bnear); y->insert(0, C);
+  auto sy = y->snapshot();
+  auto part = [](const Snapshot& s) {
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> v;
+    for (const auto& p : s.data) v.push_back({p.id, p.surface_id});
+    std::sort(v.begin(), v.end());
+    return v;
+  };
+  CHECK(part(sx) == part(sy));
+  CHECK(sx.surfaces == 1 && sx.patches == 3);
+}
+
+void checkRobustRecursion() {
+  Options o; o.leaf = 1.0; o.robust_reservoir = 30; o.min_points = 3;
+  std::vector<V3> floor_pts, wall;
+  for (int i = 0; i < 13; ++i) for (int j = 0; j < 13; ++j) floor_pts.emplace_back(0.05 + 0.075 * i, 0.05 + 0.075 * j, 0.0);
+  for (int i = 0; i < 5; ++i) for (int j = 0; j < 5; ++j) wall.emplace_back(0.3, 0.05 + 0.05 * i, 0.05 + 0.05 * j);
+  std::vector<V3> mix; std::size_t w = 0;
+  for (std::size_t i = 0; i < floor_pts.size(); ++i) {
+    mix.push_back(floor_pts[i]);
+    if (i % 7 == 6 && w < wall.size()) mix.push_back(wall[w++]);
+  }
+  while (w < wall.size()) mix.push_back(wall[w++]);
+  auto d0 = makeBackend("robust_voxel", o);
+  d0->insert(0, mix);
+  auto s0 = d0->snapshot();
+  CHECK(s0.patches == 1 && s0.sub_cells == 0);
+  Options o1 = o; o1.robust_recursion_depth = 1;
+  auto d1 = makeBackend("robust_voxel", o1);
+  d1->insert(0, mix);
+  auto s1 = d1->snapshot();
+  CHECK(s1.sub_cells == 1 && s1.patches == 2);
+  bool floor_ok = false, wall_ok = false;
+  for (const auto& p : s1.data) {
+    if (std::abs(p.fit.normal.z()) > 0.99) floor_ok = true;
+    if (std::abs(p.fit.normal.x()) > 0.99) { wall_ok = true; CHECK(p.level == 1); }
+  }
+  CHECK(floor_ok && wall_ok);
+  // validity test: a plane whose inliers are two far-apart blobs is refused; one blob is accepted
+  Options ov = o; ov.robust_validity_test = true; ov.robust_conn_min = 0.9;
+  std::vector<V3> blobs;
+  for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) blobs.emplace_back(0.05 + 0.02 * i, 0.05 + 0.02 * j, 0.5);
+  for (int i = 0; i < 4; ++i) for (int j = 0; j < 4; ++j) blobs.emplace_back(0.80 + 0.02 * i, 0.80 + 0.02 * j, 0.5);
+  for (int i = 0; i < 6; ++i) for (int j = 0; j < 6; ++j) blobs.emplace_back(0.35 + 0.001 * i, 0.35 + 0.001 * j, 0.5);  // pad to the block size
+  auto bv = makeBackend("robust_voxel", ov);
+  bv->insert(0, blobs);
+  auto sb = bv->snapshot();
+  CHECK(sb.validity_rejects >= 1);
+}
+
 }  // namespace
 
 int main() {
@@ -307,6 +492,10 @@ int main() {
   checkRankOneBackend();
   checkMergeSplit();
   checkDebiased();
+  checkTensorsAndCovModels();
+  checkD2MergeTest();
+  checkSupportObsAndScratch();
+  checkRobustRecursion();
   std::printf("test_stationary_map_stats: all checks passed\n");
   return 0;
 }
