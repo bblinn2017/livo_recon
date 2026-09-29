@@ -1,0 +1,39 @@
+common:
+  offline_duration_secs: 60.0
+evo:
+  enable: true
+eval:
+  state_trace_en: true
+  state_trace_run_id: p2_dec_spline_axis_aware_b00_a1_g1
+vio:
+  enable: false
+estimator:
+  mode: decoupled
+spline:
+  mode: spline+refine
+  control_points:
+    hz: 100.0
+  log_en: true
+voxel_map:
+  plane:
+    weight_floor:
+      mode: sensor_range
+calib:
+  p0:
+    mode: calibration_derived
+    known_pos_variance: 1.0e-12
+    known_vel_variance: 0.0001
+    tilt_ba_ambiguity_accel_std: 0.03
+    bg_model_floor: 1.0e-05
+    ba_radial_model_floor: 1.0e-05
+    numerical_eigenvalue_floor: 1.0e-12
+state:
+  cov:
+    rot_yaw: 0.01
+imu:
+  process_noise:
+    model: axis_aware
+    motion:
+      beta: 0.0
+      acc_scale: 1.0
+      gyro_scale: 1.0

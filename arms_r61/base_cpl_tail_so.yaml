@@ -1,0 +1,19 @@
+common:
+  offline_duration_secs: 60.0
+evo:
+  enable: true
+eval:
+  state_trace_en: true
+  state_trace_run_id: base_cpl_tail_so
+vio:
+  enable: false
+estimator:
+  mode: coupled
+  coupled:
+    knot_count: 4
+    residual_evaluation_time: tail
+    gating_state_uncertainty: false
+    test_id: base_cpl_tail_so
+voxel_map:
+  plane:
+    plane_fit_pose_cov_mode: sensor_only

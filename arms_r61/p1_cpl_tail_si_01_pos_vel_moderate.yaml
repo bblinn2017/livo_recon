@@ -1,0 +1,20 @@
+common:
+  offline_duration_secs: 60.0
+evo:
+  enable: true
+eval:
+  state_trace_en: true
+  state_trace_run_id: p1_cpl_tail_si_01_pos_vel_moderate
+vio:
+  enable: false
+estimator:
+  mode: coupled
+  coupled:
+    knot_count: 4
+    residual_evaluation_time: tail
+    gating_state_uncertainty: false
+    test_id: p1_cpl_tail_si_01_pos_vel_moderate
+state:
+  cov:
+    pos: 0.0001
+    vel: 0.0001

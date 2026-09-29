@@ -1,0 +1,19 @@
+common:
+  offline_duration_secs: 60.0
+evo:
+  enable: true
+eval:
+  state_trace_en: true
+  state_trace_run_id: p1_cpl_meas_f1_pos_1e-8
+vio:
+  enable: false
+estimator:
+  mode: coupled
+  coupled:
+    knot_count: 4
+    residual_evaluation_time: measurement
+    gating_state_uncertainty: false
+    test_id: p1_cpl_meas_f1_pos_1e-8
+state:
+  cov:
+    pos: 1.0e-08

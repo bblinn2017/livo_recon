@@ -1,0 +1,29 @@
+common:
+  offline_duration_secs: 60.0
+evo:
+  enable: true
+eval:
+  state_trace_en: true
+  state_trace_run_id: p1_dec_spline_si_05_add_biases
+vio:
+  enable: false
+estimator:
+  mode: decoupled
+spline:
+  mode: spline+refine
+  control_points:
+    hz: 100.0
+  log_en: true
+voxel_map:
+  plane:
+    weight_floor:
+      mode: sensor_range
+state:
+  cov:
+    pos: 1.0e-06
+    vel: 1.0e-06
+    rot_tilt: 1.0e-06
+    rot_yaw: 0.01
+    gravity: 1.0e-07
+    bg: 1.0e-07
+    ba: 1.0e-07

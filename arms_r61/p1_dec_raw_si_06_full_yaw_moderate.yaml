@@ -1,0 +1,22 @@
+common:
+  offline_duration_secs: 60.0
+evo:
+  enable: true
+eval:
+  state_trace_en: true
+  state_trace_run_id: p1_dec_raw_si_06_full_yaw_moderate
+vio:
+  enable: false
+estimator:
+  mode: decoupled
+spline:
+  mode: raw_imu
+state:
+  cov:
+    pos: 1.0e-06
+    vel: 1.0e-06
+    rot_tilt: 1.0e-06
+    rot_yaw: 0.0001
+    gravity: 1.0e-07
+    bg: 1.0e-07
+    ba: 1.0e-07

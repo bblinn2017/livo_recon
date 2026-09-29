@@ -1,0 +1,16 @@
+common:
+  offline_duration_secs: 60.0
+evo:
+  enable: true
+eval:
+  state_trace_en: true
+  state_trace_run_id: base_dec_raw_so
+vio:
+  enable: false
+estimator:
+  mode: decoupled
+spline:
+  mode: raw_imu
+voxel_map:
+  plane:
+    plane_fit_pose_cov_mode: sensor_only

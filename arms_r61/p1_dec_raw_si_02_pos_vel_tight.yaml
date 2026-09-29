@@ -1,0 +1,17 @@
+common:
+  offline_duration_secs: 60.0
+evo:
+  enable: true
+eval:
+  state_trace_en: true
+  state_trace_run_id: p1_dec_raw_si_02_pos_vel_tight
+vio:
+  enable: false
+estimator:
+  mode: decoupled
+spline:
+  mode: raw_imu
+state:
+  cov:
+    pos: 1.0e-06
+    vel: 1.0e-06

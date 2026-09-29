@@ -1,0 +1,35 @@
+common:
+  offline_duration_secs: 60.0
+evo:
+  enable: true
+eval:
+  state_trace_en: true
+  state_trace_run_id: B_L5_exact_60s
+vio:
+  enable: false
+estimator:
+  mode: decoupled
+spline:
+  mode: spline+refine
+  control_points:
+    hz: 100.0
+  log_en: true
+  boundary_anchor_mode: exact
+voxel_map:
+  plane:
+    weight_floor:
+      mode: roughness
+    plane_var_mode: information_directional
+    plane_gate_mode: disc
+    plane_fit_pose_cov_mode: sensor_only
+    use_bins: false
+    plane_fit_mode: pca
+  residual:
+    pose_cov_in_sigma: false
+cbk:
+  lidar:
+    point_filter_num: 3
+imu:
+  ds:
+    mode: first
+    ds_leaf_size: 0.1
