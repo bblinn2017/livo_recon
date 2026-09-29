@@ -3,6 +3,7 @@
 #include "livo_recon/utils/state/state.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/diagnostics/motion_q_writer.h"
+#include "livo_recon/diagnostics/state_trace.h"
 
 #include <fstream>
 #include <iomanip>
@@ -234,6 +235,9 @@ void ImuProc::propagate(MeasureGroup& mg)
   mg.pose_covariances.reserve(mg.imu_samples.size());
   mg.imu_state_transitions.reserve(mg.imu_samples.size());
   mg.imu_process_covariances.reserve(mg.imu_samples.size());
+  // R61: exact split of the scan's covariance growth: P_end = Phi P_start Phi^T + Qacc, Qacc <- F Qacc F^T + Q per step.
+  const Eigen::MatrixXd r61_P_start = state_->cov();
+  Eigen::MatrixXd r61_Q_acc = Eigen::MatrixXd::Zero(dim, dim);
   for (; it != mg.imu_samples.end(); ++it)
   {
     ImuSample tail = *it;
@@ -417,6 +421,7 @@ void ImuProc::propagate(MeasureGroup& mg)
     // q_alpha_{acc,gyr,bias} -- cov_w is added unscaled here. All three
     // at 1.0 (default) is bit-identical to the pre-split formula.
     state_->covMut() = F_x * state_->cov() * F_x.transpose() + cov_w;
+    r61_Q_acc = F_x * r61_Q_acc * F_x.transpose() + cov_w;
 
     if (opts_.log_qhat_en) {
       std::lock_guard<std::mutex> lock(g_qhat_mtx);
@@ -473,6 +478,7 @@ void ImuProc::propagate(MeasureGroup& mg)
   mg.imu_samples.clear();
 
   state_->setPropagatedState(rot_imu, pos_imu, vel_imu);
+  writeImuCovGrowthRow(propagation_index_, mg.image.t + data_queues_->start_time, r61_P_start, state_->cov(), r61_Q_acc);
 
   // One compact row per scan; the first post-calibration scan is also logged
   // sample-by-sample above. Both are intentionally small enough for campaign

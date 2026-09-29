@@ -1561,6 +1561,9 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
   if (opts_.dry_run_point_filter_num > 0 && opts_.log_debug_en)
     runDryRunShadowPass(mg);
 
+  logStateTrace("post_imu", mg, 0, 0);
+  if (openLoopActive()) return openLoopFinishScan(mg);
+
   {
     TimedScope ts(profiler_, "lio/ekf");
     V3D dtheta, dt;
@@ -2577,6 +2580,8 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
 
       debugLogLio(dbg.str());
     }
+
+    logStateTrace("post_lio", mg, static_cast<int>(residuals_.size()), iter);
 
     // CQ-60 item 5: Tier 1's shared NEES machinery -- independent of
     // log_debug_en, mirrors LioProcCoupled's own hook exactly.

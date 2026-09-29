@@ -124,6 +124,7 @@ add_executable(livo_recon_node
   src/diagnostics/gt_interp.cpp
   src/diagnostics/stationary_diagnostic_writer.cpp
   src/diagnostics/init_consistency.cpp
+  src/diagnostics/state_trace.cpp
   src/diagnostics/calibration_p0_writer.cpp
   src/diagnostics/motion_q_writer.cpp
   src/diagnostics/bootstrap_diagnostic_writer.cpp

@@ -7,6 +7,7 @@
 #include "livo_recon/lio/voxelplane.h"   // voxelPlaneInformationFitCount(), flushVarianceShareLog/flushConsistencyCorrLog
 #include "livo_recon/lio/lio_accumulator.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/state_trace.h"
 
 #include <cmath>
 #include <fstream>
@@ -215,6 +216,8 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   paramWarn<int>(pnh, "lio/dry_run_point_filter_num", opts_.dry_run_point_filter_num, 0);
   paramWarn<bool>(pnh, "eval/nees_per_dof_en", opts_.nees_per_dof_en, false);
   paramWarn<int>(pnh, "eval/nees_tier1_window_scans", opts_.nees_tier1_window_scans, 489);
+  paramWarn<bool>(pnh, "eval/state_trace_en", opts_.state_trace_en, true);
+  paramWarn<std::string>(pnh, "eval/state_trace_run_id", opts_.state_trace_run_id, "run");
   paramWarn<bool>(pnh, "cuda/enable",               cuda_enable_,          false);
 
   // History (134-136): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-134
@@ -232,6 +235,12 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   const bool rr = opts_.residual_redundancy.mode != "off";
   cfg.nested<double>(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/rho",
                      opts_.residual_redundancy.rho, 1.0);
+
+  // R61: open-loop IMU propagation (see OpenLoopOptions). reset_period_s is only meaningful, and only accepted,
+  // under propagate_only.
+  cfg.mode("lio/open_loop/mode", opts_.open_loop.mode, "off", { "off", "propagate_only" });
+  cfg.nested<double>(opts_.open_loop.mode == "propagate_only", "lio/open_loop/mode=propagate_only",
+                     "lio/open_loop/reset_period_s", opts_.open_loop.reset_period_s, 0.0);
 
   // CQ-31 item 5: three independently-switchable scalar P controls, all
   // default-identity.
@@ -291,8 +300,46 @@ void LioProcBase::ensureStationaryReference(const MeasureGroup& mg)
   stationary_reference_p_ = mg.pos_before_imu;
   stationary_reference_v_ = mg.vel_before_imu;
   stationary_reference_valid_ = true;
+  writeStateReference(stationary_reference_R_, stationary_reference_p_, stationary_reference_v_,
+                      mg.pose_covariances.empty() ? state_->cov() : mg.pose_covariances.front());
 }
 
+
+void LioProcBase::logStateTrace(const char* phase, const MeasureGroup& mg, int residual_count,
+                                int completed_iterations)
+{
+  if (!opts_.state_trace_en) return;
+  writeStateTraceRow(opts_.state_trace_run_id, static_cast<int>(voxel_map_->frame_idx_),
+                     mg.image.t + data_queues_->start_time, phase, *state_, residual_count, completed_iterations,
+                     ol_window_, ol_reset_now_);
+}
+
+std::string LioProcBase::openLoopFinishScan(MeasureGroup& mg)
+{
+  const double t_abs = mg.image.t + data_queues_->start_time;
+  if (!ol_captured_) {
+    // First scan that reached ensureStationaryReference(): its head covariance is the first-frame pre-IMU P0.
+    ol_P0_ = mg.pose_covariances.empty() ? state_->cov() : mg.pose_covariances.front();
+    ol_window_ = 0;
+    ol_window_t0_ = t_abs;
+    ol_captured_ = true;
+  }
+  ol_reset_now_ = 0;
+  // The post_imu row was already written by the caller for the CURRENT window. Reset (if due) starts the next one.
+  if (opts_.open_loop.reset_period_s > 0.0 && (t_abs - ol_window_t0_) >= opts_.open_loop.reset_period_s) {
+    state_->setPropagatedState(stationary_reference_R_, stationary_reference_p_, stationary_reference_v_);
+    state_->covMut() = ol_P0_;
+    ++ol_window_;
+    ol_window_t0_ = t_abs;
+    ol_reset_now_ = 1;
+  }
+  logStateTrace("post_lio", mg, 0, 0);
+  mg.pos_after_lio = state_->pos();
+  mg.rot_after_lio = state_->rot();
+  mg.vel_after_lio = state_->vel();
+  mg.cov_after_lio = state_->cov();
+  return "[open_loop] propagate_only window=" + std::to_string(ol_window_) + " reset=" + std::to_string(ol_reset_now_);
+}
 
 void LioProcBase::buildResiduals(
   const std::vector<PointXYZCov>& pts,

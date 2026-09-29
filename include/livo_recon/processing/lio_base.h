@@ -68,6 +68,20 @@ struct LioProcOptions
   // deviation figure and this card's own item 2 both already use).
   int nees_tier1_window_scans = 489;
 
+  // R61: raw state + full covariance trace per scan (diagnostics/state_trace.h). Write-only; default ON.
+  bool state_trace_en = true;
+  std::string state_trace_run_id = "run";
+
+  // R61: open-loop IMU propagation. "off" (default) = normal operation, bit-identical to before.
+  // "propagate_only" skips the LiDAR solve entirely (state and covariance are only propagated by the IMU);
+  // reset_period_s > 0 resets the state to the stationary reference and the covariance to its first-frame P0
+  // every that many seconds, giving several independent drift windows in one run. 0 = never reset.
+  struct OpenLoopOptions
+  {
+    std::string mode = "off";
+    double reset_period_s = 0.0;
+  } open_loop;
+
   // The residual model has one independent control and one direct
   // per-VoxelPlane covariance marginalization. Failed collapse, count, and
   // conditioning heuristics were removed; see docs/RESIDUAL_MODE_AUDIT.md.
@@ -176,6 +190,15 @@ protected:
   // map, never reset per frame, and is deliberately outside the estimator.
   void ensureStationaryReference(const MeasureGroup& mg);
 
+  // R61. Writes one state_trace.csv row (no-op when eval/state_trace_en is false).
+  void logStateTrace(const char* phase, const MeasureGroup& mg, int residual_count, int completed_iterations);
+  // R61. True when lio/open_loop/mode == propagate_only.
+  bool openLoopActive() const { return opts_.open_loop.mode == "propagate_only"; }
+  // R61. Call right after ensureStationaryReference() and the post_imu trace, only when openLoopActive(): captures
+  // P0 on first use, applies the optional reset window, writes the post_lio row (= post_imu state, or the reset state),
+  // fills mg.*_after_lio and returns a short report string. The caller must then return WITHOUT solving.
+  std::string openLoopFinishScan(MeasureGroup& mg);
+
 public:
 
   // History (270-279): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-270
@@ -229,6 +252,13 @@ protected:
   mutable std::vector<std::array<int, 2>> build_thread_gate_audit_;
   mutable int n_statistical_gate_candidates_ = 0;
   mutable int n_statistical_gate_rejections_ = 0;
+
+  // R61 open-loop bookkeeping
+  bool ol_captured_ = false;
+  Eigen::MatrixXd ol_P0_;
+  int ol_window_ = 0;
+  double ol_window_t0_ = 0.0;
+  int ol_reset_now_ = 0;
 
   bool stationary_reference_valid_ = false;
   M3D stationary_reference_R_ = M3D::Identity();

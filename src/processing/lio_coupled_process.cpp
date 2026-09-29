@@ -20,6 +20,8 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   mg.prior_vel = state_->vel();
   if (voxel_map_->isEmpty()) return {};
   ensureStationaryReference(mg);
+  logStateTrace("post_imu", mg, 0, 0);
+  if (openLoopActive()) return openLoopFinishScan(mg);
 
   TimedScope scope(profiler_, "lio/joint_knots");
   prior_cov_ = state_->cov();
@@ -159,6 +161,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         mg.image.t + data_queues_->start_time, completed, stop,
         state_propagat_, *state_, stationary_reference_R_,
         stationary_reference_p_, stationary_reference_v_);
+  logStateTrace("post_lio", mg, static_cast<int>(residuals_.size()), completed);
   writeInitializationConsistencyDiagnostics(
       copts_.test_id, voxel_map_->frame_idx_,
       mg.image.t + data_queues_->start_time,
