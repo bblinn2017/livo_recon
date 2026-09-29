@@ -1,0 +1,40 @@
+arm	tier	arch	kind	duration_s	yaml	notes	priority	optional
+A_splineless_pca_baseline_60s	A	dec_raw	closed	60		reference for every closed-loop comparison	1	0
+A_splineless_pca_baseline_60s_no_new_logging	A	dec_raw	closed	60		byte-identity control: same as the line above but eval.imu_first_scans_en unset; results_lio.txt, state_trace.csv must be identical	1	0
+A_splineless_pca_baseline_full_length	A	dec_raw	closed	full		full bag: is 0.0281 m reproduced here?	1	0
+A_archived_dx1r_l0_config_verbatim_60s	A	dec_raw	closed	60		archived config flattened to dotted keys, no L0 pins added	1	0
+A_archived_dx1r_l0_config_verbatim_full_length	A	dec_raw	closed	full		archived config flattened to dotted keys, no L0 pins added	1	0
+B_closed_loop_splineless_accel_bias_not_applied_60s	B	dec_raw	closed	60		closed loop, configured P0, fixed Q	1	0
+B_closed_loop_splineless_gyro_bias_not_applied_60s	B	dec_raw	closed	60		closed loop, configured P0, fixed Q	1	0
+B_closed_loop_splineless_both_biases_not_applied_60s	B	dec_raw	closed	60		closed loop, configured P0, fixed Q	1	0
+B_open_loop_5s_windows_configured_P0_fixed_Q_default_calibration_biases	B	dec_raw	open	60		open loop (propagation only, 5 s windows), configured P0, fixed Q	1	0
+B_open_loop_5s_windows_configured_P0_fixed_Q_accel_bias_not_applied	B	dec_raw	open	60		open loop (propagation only, 5 s windows), configured P0, fixed Q	1	0
+B_open_loop_5s_windows_configured_P0_fixed_Q_gyro_bias_not_applied	B	dec_raw	open	60		open loop (propagation only, 5 s windows), configured P0, fixed Q	1	0
+B_open_loop_5s_windows_configured_P0_fixed_Q_both_biases_not_applied	B	dec_raw	open	60		open loop (propagation only, 5 s windows), configured P0, fixed Q	1	0
+C_closed_loop_splineless_first_scan_head_seeded_60s	C	dec_raw	closed	60		removes the zero head-sample defect (scan 1)	1	0
+C_open_loop_5s_windows_first_scan_head_seeded	C	dec_raw	open	60		as the B open-loop default-biases arm but head seeded	1	0
+C_open_loop_5s_windows_first_scan_head_seeded_both_biases_not_applied	C	dec_raw	open	60		head seeded and biases not applied	1	0
+D_open_loop_5s_windows_tiny_P0_fixed_Q	D	dec_raw	open	60		predicted sd from fixed Q alone	1	0
+D_open_loop_full_run_tiny_P0_fixed_Q	D	dec_raw	open	60		same, no window reset (60 s of propagation)	1	0
+D_open_loop_5s_windows_tiny_P0_isotropic_Q_beta00	D	dec_raw	open	60		motion-dependent Q, engagement cell	1	0
+D_open_loop_5s_windows_tiny_P0_isotropic_Q_beta09	D	dec_raw	open	60		motion-dependent Q, engagement cell	1	0
+D_open_loop_5s_windows_tiny_P0_axis_aware_Q_beta00	D	dec_raw	open	60		motion-dependent Q, engagement cell	1	0
+D_open_loop_5s_windows_tiny_P0_axis_aware_Q_beta09	D	dec_raw	open	60		motion-dependent Q, engagement cell	1	0
+D_open_loop_5s_windows_tiny_P0_isotropic_Q_beta09_acc03_gyro20	D	dec_raw	open	60		R45 grid corner	1	0
+D_open_loop_5s_windows_tiny_P0_isotropic_Q_beta09_acc03_gyro60	D	dec_raw	open	60		R45 grid corner	1	0
+D_open_loop_5s_windows_tiny_P0_isotropic_Q_beta09_acc10_gyro20	D	dec_raw	open	60		R45 grid corner	1	0
+D_open_loop_5s_windows_tiny_P0_isotropic_Q_beta09_acc10_gyro60	D	dec_raw	open	60		R45 grid corner	1	0
+D_open_loop_5s_windows_tiny_P0_fixed_Q_first_scan_head_seeded	D	dec_raw	open	60		tiny-P0 fixed-Q with head seeded	1	0
+E_closed_loop_splineless_pca_map_PFN3_ds_first_calibration_derived_P0_60s	E	dec_raw	closed	60		map type x point density x P0	1	0
+E_closed_loop_splineless_pca_map_PFN1_ds_off_configured_P0_60s	E	dec_raw	closed	60		map type x point density x P0	1	0
+E_closed_loop_splineless_pca_map_PFN1_ds_off_calibration_derived_P0_60s	E	dec_raw	closed	60		map type x point density x P0	1	0
+E_closed_loop_splineless_debiased_map_PFN3_ds_first_configured_P0_60s	E	dec_raw	closed	60		map type x point density x P0	1	0
+E_closed_loop_splineless_debiased_map_PFN3_ds_first_calibration_derived_P0_60s	E	dec_raw	closed	60		map type x point density x P0	1	0
+E_closed_loop_splineless_debiased_map_PFN1_ds_off_configured_P0_60s	E	dec_raw	closed	60		map type x point density x P0	1	0
+E_closed_loop_splineless_debiased_map_PFN1_ds_off_calibration_derived_P0_60s	E	dec_raw	closed	60		map type x point density x P0	1	0
+F_closed_loop_splineless_calibration_derived_P0_fixed_Q_60s	F	dec_raw	closed	60		P0 from calibration, Q fixed	1	0
+F_closed_loop_splineless_calibration_derived_P0_isotropic_Q_beta09_60s	F	dec_raw	closed	60		P0 from calibration, isotropic motion Q	1	0
+F_closed_loop_splineless_calibration_derived_P0_axis_aware_Q_beta09_60s	F	dec_raw	closed	60		P0 from calibration, axis-aware motion Q	1	0
+F_closed_loop_splineless_calibration_derived_P0_isotropic_Q_beta0_60s	F	dec_raw	closed	60		beta 0 control for the above	1	0
+F_closed_loop_splineless_calibration_derived_P0_fixed_Q_first_scan_head_seeded_60s	F	dec_raw	closed	60		calibration P0 + head seeded	1	0
+F_closed_loop_splineless_calibration_derived_P0_fixed_Q_both_biases_not_applied_60s	F	dec_raw	closed	60		calibration P0 + biases not applied	1	0
