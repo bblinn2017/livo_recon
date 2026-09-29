@@ -711,20 +711,25 @@ void VoxelMap::writePostCalibrationSnapshot() const
         out << m(r,c);
       }
   };
-  std::vector<std::tuple<int32_t, VoxelKey, int, int, int>> support_rows;
+  std::vector<BootstrapObservationStatsRow> support_rows;
   for (const auto& entry : voxel_map_)
     if (entry.second) entry.second->appendBootstrapObservationSupport(entry.first, support_rows);
   std::sort(support_rows.begin(), support_rows.end(), [](const auto& a, const auto& b) {
-    if (std::get<0>(a) != std::get<0>(b)) return std::get<0>(a) < std::get<0>(b);
-    return std::get<3>(a) < std::get<3>(b);
+    if (a.node_id != b.node_id) return a.node_id < b.node_id;
+    return a.observation_id < b.observation_id;
   });
 
   std::ofstream support_out(debugLogPath("post_calibration_voxel_observation_support.csv"));
-  support_out << "snapshot_frame,node_id,root_key_x,root_key_y,root_key_z,layer,observation_id,point_count\n";
+  support_out << "snapshot_frame,node_id,root_key_x,root_key_y,root_key_z,layer,observation_id,point_count,"
+                 "sum_x,sum_y,sum_z,sum_xx,sum_xy,sum_xz,sum_yx,sum_yy,sum_yz,sum_zx,sum_zy,sum_zz\n";
+  support_out << std::setprecision(17);
   for (const auto& r : support_rows) {
-    const auto& key = std::get<1>(r);
-    support_out << "0," << std::get<0>(r) << ',' << key.x << ',' << key.y << ',' << key.z
-                << ',' << std::get<2>(r) << ',' << std::get<3>(r) << ',' << std::get<4>(r) << '\n';
+    support_out << "0," << r.node_id << ',' << r.root_key.x << ',' << r.root_key.y << ',' << r.root_key.z
+                << ',' << r.layer << ',' << r.observation_id << ',' << r.point_count
+                << ',' << r.sum_p.x() << ',' << r.sum_p.y() << ',' << r.sum_p.z();
+    for (int rr = 0; rr < 3; ++rr)
+      for (int cc = 0; cc < 3; ++cc) support_out << ',' << r.sum_pp(rr, cc);
+    support_out << '\n';
   }
 
   for (const auto& r : rows) {

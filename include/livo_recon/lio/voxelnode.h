@@ -55,6 +55,17 @@ struct PointBin
   M3D sum_pos_cov    = M3D::Zero();
 };
 
+
+struct BootstrapObservationStatsRow {
+  int32_t node_id = -1;
+  VoxelKey root_key;
+  int layer = 0;
+  int observation_id = -1;
+  int point_count = 0;
+  V3D sum_p = V3D::Zero();
+  M3D sum_pp = M3D::Zero();
+};
+
 class VoxelNode
 {
 public:
@@ -89,7 +100,7 @@ public:
   void appendPlaneSnapshots(const VoxelKey& root_key,
                             std::vector<VoxelPlaneSnapshot>& out) const;
   void appendBootstrapObservationSupport(const VoxelKey& root_key,
-      std::vector<std::tuple<int32_t, VoxelKey, int, int, int>>& out) const;
+      std::vector<BootstrapObservationStatsRow>& out) const;
 
 private:
   void passToChildren(const std::vector<PointXYZCov>& points_world,
@@ -164,7 +175,12 @@ private:
   // with non-empty points always counts as one new distinct frame.
   int last_frame_idx_seen_ = -1;
   int distinct_frames_     = 0;
-  robin_hood::unordered_flat_map<int, int> bootstrap_observation_support_;
+  struct BootstrapObservationAccumulator {
+    int count = 0;
+    V3D sum_p = V3D::Zero();
+    M3D sum_pp = M3D::Zero();
+  };
+  robin_hood::unordered_flat_map<int, BootstrapObservationAccumulator> bootstrap_observation_support_;
 
   // distinct_frames_'s value as of this node's last VoxelPlane::update()
   // call (init or refit) -- lets insertPoints() measure how many NEW

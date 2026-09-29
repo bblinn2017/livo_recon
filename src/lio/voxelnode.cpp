@@ -109,8 +109,13 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     return;
   }
 
-  for (const auto& p : points_world)
-    if (p.bootstrap_observation_id >= 0) ++bootstrap_observation_support_[p.bootstrap_observation_id];
+  for (const auto& p : points_world) {
+    if (p.bootstrap_observation_id < 0) continue;
+    auto& st = bootstrap_observation_support_[p.bootstrap_observation_id];
+    ++st.count;
+    st.sum_p += p.point;
+    st.sum_pp.noalias() += p.point * p.point.transpose();
+  }
 
   if (!points_world.empty() && g_current_frame_idx != last_frame_idx_seen_) {
     last_frame_idx_seen_ = g_current_frame_idx;
@@ -395,10 +400,19 @@ void VoxelNode::appendPlaneSnapshots(
 
 void VoxelNode::appendBootstrapObservationSupport(
     const VoxelKey& root_key,
-    std::vector<std::tuple<int32_t, VoxelKey, int, int, int>>& out) const
+    std::vector<BootstrapObservationStatsRow>& out) const
 {
-  for (const auto& kv : bootstrap_observation_support_)
-    out.emplace_back(node_id_, root_key, layer_, kv.first, kv.second);
+  for (const auto& kv : bootstrap_observation_support_) {
+    BootstrapObservationStatsRow row;
+    row.node_id = node_id_;
+    row.root_key = root_key;
+    row.layer = layer_;
+    row.observation_id = kv.first;
+    row.point_count = kv.second.count;
+    row.sum_p = kv.second.sum_p;
+    row.sum_pp = kv.second.sum_pp;
+    out.push_back(row);
+  }
   if (status_ == VoxelStatus::PARENT)
     for (const VoxelNode* child : leaves_)
       if (child) child->appendBootstrapObservationSupport(root_key, out);
