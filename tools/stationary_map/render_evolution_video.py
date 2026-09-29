@@ -4,9 +4,9 @@
 
 Per frame (one CLI checkpoint):
   top-left      VOXELS: every patch drawn as its finite-support quad, colour = the patch's OWN centre
-  top-right     SURFACES: same quads, colour = the mean centre of the patch's SURFACE
-                (point-count weighted); each multi-member (merged) surface has an outline.
-                A merge therefore shows up as several differently coloured voxels turning one colour.
+  top-right     SURFACES: same quads, colour = one distinct hue per SURFACE (--surface-color id, default since R56;
+                --surface-color mean gives the R55 mean-centre colour); each multi-member (merged) surface has an outline.
+                A merge shows up as several voxels taking one colour.
   bottom-left   REFERENCE map (static, built from all scans), coloured the same way
   bottom-right  counters (scan, time, patches, surfaces, merged surfaces, largest surface,
                 cumulative merges/splits/unmerges, points) and time-series with a moving cursor
@@ -93,6 +93,20 @@ class Colourer:
         t = np.clip((v - lo) / max(hi - lo, 1e-9), 0, 1)
         u8 = (t * 255).astype(np.uint8).reshape(-1, 1)
         return cv2.applyColorMap(u8, self.cmap).reshape(-1, 3)
+
+
+def surface_id_colours(patch_id, inv, n_surf):
+    """Categorical colour per SURFACE (R56): hue from the golden-ratio sequence of a stable key (the smallest patch_id in
+    the surface), with saturation/value cycling through a few levels, so neighbouring surfaces at the same height are told
+    apart. Returns BGR uint8 (n_patches, 3). A surface keeps its colour while its lowest-id member stays in it."""
+    key = np.full(n_surf, np.iinfo(np.int64).max, dtype=np.int64)
+    np.minimum.at(key, inv, patch_id.astype(np.int64))
+    h = (key * 0.6180339887498949) % 1.0
+    sat = 0.60 + 0.20 * (key % 3)            # 0.60, 0.80, 1.00
+    val = 0.70 + 0.30 * ((key // 3) % 2)     # 0.70, 1.00
+    hsv = np.stack([h * 179.0, sat * 255.0, val * 255.0], 1).astype(np.uint8).reshape(-1, 1, 3)
+    bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR).reshape(-1, 3)
+    return bgr[inv]
 
 
 # ---------------------------------------------------------------- data
@@ -184,6 +198,8 @@ def main():
     ap.add_argument('--stats-out'); ap.add_argument('--manifest')
     ap.add_argument('--stills-at', default=''); ap.add_argument('--stills-dir')
     ap.add_argument('--color-by', default='xyz', choices=['xyz', 'x', 'y', 'z', 'range'])
+    ap.add_argument('--surface-color', default='id', choices=['id', 'mean'],
+                    help="SURFACES panel colouring: id (default, R56) = a distinct hue per surface; mean = mean centre colour (R55)")
     ap.add_argument('--print-bounds', action='store_true', help='print 2-98 percentile bounds of the last frame (lox loy loz hix hiy hiz) and exit')
     ap.add_argument('--bounds', type=float, nargs=6, metavar=('LOX', 'LOY', 'LOZ', 'HIX', 'HIY', 'HIZ'))
     ap.add_argument('--stride', type=int, default=1); ap.add_argument('--fps', type=int, default=15)
@@ -260,7 +276,11 @@ def main():
         valid = g['rank2'] > 0.5
         cv = colr(ctr); cv[~valid] = (128, 128, 128)
         smean, inv, cnt = surface_means(g['surface_id'].astype(np.int64), ctr, np.maximum(g['point_count'], 1.0))
-        cs = colr(smean); cs[~valid] = (128, 128, 128)
+        if a.surface_color == 'id':
+            cs = surface_id_colours(g['patch_id'], inv, len(cnt))
+        else:
+            cs = colr(smean)
+        cs[~valid] = (128, 128, 128)
         groups_multi = {}
         for i, gi in enumerate(inv):
             if cnt[gi] > 1:
@@ -268,7 +288,8 @@ def main():
         A = draw_polys(base, cam, uv, keep, dep, cv, a.scale)
         B = draw_polys(base, cam, uv, keep, dep, cs, a.scale, hull_groups=groups_multi, hull_cols=cs)
         put(A, 'VOXELS: colour = own centre', (8, 20), 0.55)
-        put(B, 'SURFACES: colour = surface mean centre; outline = merged', (8, 20), 0.55)
+        put(B, ('SURFACES: hue = surface id; outline = merged' if a.surface_color == 'id'
+                else 'SURFACES: colour = surface mean centre; outline = merged'), (8, 20), 0.55)
         D = np.zeros_like(base)
         s = stats[k]
         t = tstamp.get(cp)
