@@ -8,7 +8,7 @@
 //
 // Usage:
 //   stationary_map_cli --family F --input DIR --patches-out CSV
-//       --summary-out CSV [--checkpoints 1,2,3,5,10,20,...] [--leaf L]
+//       --summary-out CSV [--checkpoints 1,2,3,5,10,20,... | 3:480:1] [--leaf L]
 //       [--min-points N] [--plane-eig-max V] [--min-secondary-eig V]
 //       [--max-planarity R] [--merge-criterion combined_fit|pairwise]
 //       [--debiased [--debias-context CSV] [--sensor-var V] [--sensor-noise-floor-eig0]]
@@ -127,8 +127,22 @@ int main(int argc, char** argv) {
   if (o.debiased && debias_context.empty())
     std::fprintf(stderr, "warning: --debiased without --debias-context: pose correction is zero\n");
 
+  // --checkpoints accepts plain numbers and inclusive ranges "a:b" or "a:b:step"
+  // (e.g. "3:480:1" = every observation from 3 to 480); the list is sorted and
+  // de-duplicated. The run stops ingesting once the last checkpoint is reached.
   std::vector<std::uint64_t> checkpoints;
-  for (auto& s : splitCsvArg(checkpoints_arg)) checkpoints.push_back(std::stoull(s));
+  for (auto& s : splitCsvArg(checkpoints_arg)) {
+    auto c1 = s.find(':');
+    if (c1 == std::string::npos) { checkpoints.push_back(std::stoull(s)); continue; }
+    auto c2 = s.find(':', c1 + 1);
+    std::uint64_t lo = std::stoull(s.substr(0, c1));
+    std::uint64_t hi = std::stoull(c2 == std::string::npos ? s.substr(c1 + 1) : s.substr(c1 + 1, c2 - c1 - 1));
+    std::uint64_t step = c2 == std::string::npos ? 1 : std::stoull(s.substr(c2 + 1));
+    if (step == 0 || hi < lo) { std::fprintf(stderr, "bad checkpoint range: %s\n", s.c_str()); return 1; }
+    for (std::uint64_t v = lo; v <= hi; v += step) checkpoints.push_back(v);
+  }
+  std::sort(checkpoints.begin(), checkpoints.end());
+  checkpoints.erase(std::unique(checkpoints.begin(), checkpoints.end()), checkpoints.end());
 
   auto manifest = loadManifest(input);
   auto backend = makeBackend(family, o);
@@ -172,7 +186,7 @@ int main(int argc, char** argv) {
                   << p.rejected_points << "," << p.reservoir_pending << "," << (p.fit.rank2 ? 1 : 0) << "\n";
       }
       while (cp_idx < checkpoints.size() && obs_count >= checkpoints[cp_idx]) ++cp_idx;
-      if (i + 1 == manifest.size()) break;
+      if (i + 1 == manifest.size() || cp_idx >= checkpoints.size()) break;
     }
   }
   std::fprintf(stderr, "%s: %zu observations, %llu points, done\n", family.c_str(), manifest.size(),
