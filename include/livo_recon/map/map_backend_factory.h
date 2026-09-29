@@ -19,7 +19,7 @@ using StateGroupPtr = std::shared_ptr<StateGroup>;
 using ProfilerPtr   = std::shared_ptr<FrameProfiler>;
 
 // Constructs the concrete MapBackend named by backend_name -- "voxel"
-// (default, today's VoxelMap) or "akf" (Phase 3's AkfMap). Called once
+// (default, today's VoxelMap), "akf" (Phase 3's AkfMap) or "surface" (SurfaceMap: cell grid + merged surfaces). Called once
 // from NodeContext's construction, before the rest of that backend's own
 // loadParameters() runs (the caller reads voxel_map/backend off pnh
 // itself, ahead of this call, to know which concrete class to build).

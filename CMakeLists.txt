@@ -152,6 +152,7 @@ add_executable(livo_recon_node
   src/diagnostics/joint_knots/joint_knot_diagnostic_writer.cpp
   src/map/voxelmap.cpp
   src/map/akf_map.cpp
+  src/map/surface_map.cpp
   src/map/map_backend_factory.cpp
   src/vio/crop_utils.cpp
   src/vio/point_tracker.cpp
@@ -169,6 +170,7 @@ target_compile_options(livo_recon_node PRIVATE
 
 target_link_libraries(livo_recon_node
   livo_cuda
+  surface_core
   ${CUDA_LIBRARIES}
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
@@ -235,3 +237,14 @@ add_test(NAME stationary_map_stats COMMAND test_stationary_map_stats)
 
 add_executable(stationary_map_cli tools/stationary_map/stationary_map_cli.cpp)
 target_link_libraries(stationary_map_cli stationary_map_research)
+
+# Surface map core (Eigen + std only): additive cell statistics and the dirty-set merge/split layer used by the
+# "surface" MapBackend (src/map/surface_map.cpp). Kept ROS-free so it can be unit-tested on its own.
+add_library(surface_core
+  src/map/surface/surface_core.cpp
+)
+target_include_directories(surface_core PUBLIC include ${EIGEN3_INCLUDE_DIRS})
+target_link_libraries(surface_core Eigen3::Eigen)
+add_executable(test_surface_core tests/test_surface_core.cpp)
+target_link_libraries(test_surface_core surface_core)
+add_test(NAME surface_core COMMAND test_surface_core)
