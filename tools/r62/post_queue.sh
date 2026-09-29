@@ -25,9 +25,23 @@ for jd in "$QUEUE_DIR"/*/; do
   D="$RUNS/$arm"
   [ "$REDO" != "1" ] && [ -f "$D/.reduced" ] && continue
   rm -rf "$D"; mkdir -p "$D"
+  # R62 agent fix (coding agent, 2026-09-29, same class as the R61 fix to tools/phase_redo/
+  # post_queue.sh): gen_jobs.py's livo_recon branch (ntu GT mode) never wires outputs/path/
+  # debug_log_dir into the job dir itself -- this manifest's own overrides route them to
+  # livo_recon_results/r62_eee01_60s/<arm> (OUT_DIR, a separate tree from
+  # ablations/_job_queue/r62_eee01_60s/<arm>, i.e. $jd). `find "$jd" ...` alone found 0/10 of
+  # the new files across all 39 arms. Read OUT_DIR from the job's own job.env and search there too.
+  OUT_DIR=""
+  if [ -f "$jd/job.env" ]; then
+    OUT_DIR="$(grep -m1 '^OUT_DIR=' "$jd/job.env" | cut -d= -f2-)"
+    OUT_DIR="${OUT_DIR/#\/root\/catkin_ws/\/home\/bblinn\/fast_ws}"
+  fi
   missing=""
   for f in $FILES; do
     src="$(find "$jd" -name "$f" -type f 2>/dev/null | head -1)"
+    if [ -z "$src" ] && [ -n "$OUT_DIR" ] && [ -d "$OUT_DIR" ]; then
+      src="$(find "$OUT_DIR" -name "$f" -type f 2>/dev/null | head -1)"
+    fi
     if [ -n "$src" ]; then cp "$src" "$D/$f"; else missing="$missing $f"; fi
   done
   rc=0; [ -f "$jd/FAILED" ] && rc=1
