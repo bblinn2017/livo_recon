@@ -22,7 +22,7 @@ def main():
     p.add_argument('--output', required=True)
     p.add_argument('--leaf', type=float, default=.25)
     p.add_argument('--min-points', type=int, default=3)
-    p.add_argument('--plane-eig-max', type=float, default=0.01)
+    p.add_argument('--plane-eig-max', type=float, default=0.0025)  # = C++ CLI default (ntu_viral.yaml plane_threshold); R53 had 0.01 here, a mismatch
     p.add_argument('--min-secondary-eig', type=float, default=1e-8)
     p.add_argument('--max-planarity', type=float, default=1.0)
     a = p.parse_args()

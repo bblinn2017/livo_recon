@@ -14,7 +14,7 @@ row_type values
 
 Example
   compare_backends.py --patches-dir OUT --arm canonical --reference reference_surfaces.csv \
-     --voxelmap pfn1_pca=/path/post_calibration_voxelmap.csv --harness-checkpoint 3 \
+     --voxelmap pfn1_pca=/path/post_calibration_voxelmap.csv --match-points 6912 \
      --oracle oracle_canonical.csv --output R53_comparison_canonical.csv
 Patch files are expected at OUT/<family>_<arm>_patches.csv.
 """
@@ -70,7 +70,8 @@ def main():
     p.add_argument('--families', default=','.join(FAMILIES))
     p.add_argument('--reference')
     p.add_argument('--voxelmap', action='append', default=[], help='LABEL=path/to/post_calibration_voxelmap.csv')
-    p.add_argument('--harness-checkpoint', type=float, help='harness checkpoint whose observation count matches the VoxelMap snapshot (calibration observations)')
+    p.add_argument('--harness-checkpoint', type=float, help='explicit harness checkpoint (observation count) to set beside the VoxelMap snapshot')
+    p.add_argument('--match-points', type=float, help='total prepared points in the VoxelMap snapshot (sum of point_count over its observations); per family the checkpoint whose cumulative ingested points (summary CSV total_raw_points_ingested) is closest is used. Production observations are camera-frame windows, harness observations are whole scans, so observation counts cannot be matched; points can.')
     p.add_argument('--oracle')
     p.add_argument('--angle-deg', type=float, default=5.0)
     p.add_argument('--offset', type=float, default=0.05)
@@ -111,15 +112,23 @@ def main():
         if R is not None:
             emit(rows, 'voxelmap_control', a.arm, label, {'ref_' + k: v for k, v in
                  C.reference_metrics(V, R, V['rank2'], angle=a.angle_deg, offset=a.offset, margin=a.support_margin).items()})
-        if a.harness_checkpoint is not None:
+        if a.harness_checkpoint is not None or a.match_points is not None:
             for f in fams:
                 path_f = os.path.join(a.patches_dir, f'{f}_{a.arm}_patches.csv')
                 if not os.path.exists(path_f):
                     continue
-                H = C.load_patches(path_f, checkpoint=a.harness_checkpoint)
-                emit(rows, 'voxelmap_control', a.arm, f'{f}@cp{a.harness_checkpoint:g}', summary_rows(H))
+                cp = a.harness_checkpoint
+                if cp is None:
+                    sm = list(csv.DictReader(open(os.path.join(a.patches_dir, f'{f}_{a.arm}_summary.csv'))))
+                    best = min(sm, key=lambda r: abs(float(r['total_raw_points_ingested']) - a.match_points))
+                    cp = float(best['checkpoint'])
+                    emit(rows, 'voxelmap_control', a.arm, f'{f}@cp{cp:g}',
+                         {'matched_cumulative_points': float(best['total_raw_points_ingested']),
+                          'target_points': a.match_points})
+                H = C.load_patches(path_f, checkpoint=cp)
+                emit(rows, 'voxelmap_control', a.arm, f'{f}@cp{cp:g}', summary_rows(H))
                 if R is not None:
-                    emit(rows, 'voxelmap_control', a.arm, f'{f}@cp{a.harness_checkpoint:g}',
+                    emit(rows, 'voxelmap_control', a.arm, f'{f}@cp{cp:g}',
                          {'ref_' + k: v for k, v in C.reference_metrics(H, R, H['rank2'], angle=a.angle_deg, offset=a.offset, margin=a.support_margin).items()})
     # oracle agreement (incremental_pca only)
     if a.oracle and 'incremental_pca' in P:
