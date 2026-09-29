@@ -110,12 +110,22 @@ class MapImpl : public Backend {
       : n_(std::move(n)), o_(o), merge_(merge), robust_(robust), gaussian_(gaussian) {}
   std::string name() const override { return n_; }
 
+  // R52 perf note: rebuildSurfaces()/reevaluateSplits() are O(n_patches^2)
+  // per call (the same pairwise-compatibility design as the originally
+  // supplied skeleton). Running them after EVERY insert() (once per
+  // observation, hundreds of observations) made the merge-enabled
+  // families (mergeable_voxel/robust_mergeable/gaussian_surface)
+  // impractically slow once patch counts reached the low thousands --
+  // confirmed by direct timing during this round's own benchmark run.
+  // Deferred to snapshot() time instead: intermediate (between-checkpoint)
+  // surface state is not needed for this round's benchmark checkpoints,
+  // only the state AT each checkpoint is ever read.
   void insert(std::uint64_t, const std::vector<V3>& pts) override {
     auto t0 = std::chrono::steady_clock::now();
     for (const auto& p : pts) {
       auto k = key(p, o_.leaf);
       auto& pa = cells_[k];
-      if (!pa.id) { pa.id = ++next_; pa.surface_id = pa.id; ensureSingleton(pa.id); }
+      if (!pa.id) { pa.id = ++next_; pa.surface_id = pa.id; ensureSingleton(pa.id); id_to_key_[pa.id] = k; }
       pa.bb_min = pa.bb_min.cwiseMin(p);
       pa.bb_max = pa.bb_max.cwiseMax(p);
       if (robust_) {
@@ -126,13 +136,15 @@ class MapImpl : public Backend {
         pa.stats.add(p);
       }
     }
-    for (auto& kv : cells_) kv.second.fit = fitIncrementalPca(kv.second.stats, o_.split_ratio);
-    if (merge_) rebuildSurfaces();
-    if (gaussian_) reevaluateSplits();
     ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
   }
 
   Snapshot snapshot() const override {
+    auto t0 = std::chrono::steady_clock::now();
+    for (auto& kv : cells_) kv.second.fit = fitIncrementalPca(kv.second.stats, o_.split_ratio);
+    if (merge_) rebuildSurfaces();
+    if (gaussian_) reevaluateSplits();
+    ms_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     Snapshot s;
     s.backend = n_; s.insert_ms = ms_; s.merges = merges_; s.splits = splits_; s.unmerges = unmerges_;
     s.events = events_;
@@ -159,7 +171,7 @@ class MapImpl : public Backend {
   }
 
  private:
-  void ensureSingleton(std::uint64_t patch_id) {
+  void ensureSingleton(std::uint64_t patch_id) const {
     if (surfaces_.count(patch_id)) return;
     SurfaceAgg sa; sa.id = patch_id; sa.children = {patch_id};
     surfaces_[patch_id] = sa;
@@ -200,7 +212,7 @@ class MapImpl : public Backend {
     }
   }
 
-  void rebuildSurfaces() {
+  void rebuildSurfaces() const {
     std::vector<Patch*> v;
     for (auto& kv : cells_) if (kv.second.fit.valid) v.push_back(&kv.second);
     for (std::size_t i = 0; i < v.size(); ++i) {
@@ -219,7 +231,7 @@ class MapImpl : public Backend {
     }
   }
 
-  void mergeSurfaces(std::uint64_t ida, std::uint64_t idb, std::vector<Patch*>& v) {
+  void mergeSurfaces(std::uint64_t ida, std::uint64_t idb, std::vector<Patch*>& v) const {
     if (ida == idb) return;
     auto ita = surfaces_.find(ida), itb = surfaces_.find(idb);
     if (ita == surfaces_.end() || itb == surfaces_.end()) return;
@@ -242,7 +254,7 @@ class MapImpl : public Backend {
   // degraded past split_planarity_max), split it back out as its own
   // singleton surface -- repartitioning the RETAINED child PlaneStats
   // (never raw historical points).
-  void reevaluateSplits() {
+  void reevaluateSplits() const {
     std::vector<std::uint64_t> ids;
     for (auto& kv : surfaces_) ids.push_back(kv.first);
     for (auto sid : ids) {
@@ -298,19 +310,21 @@ class MapImpl : public Backend {
   }
 
   Key cellKeyOf(std::uint64_t patch_id) const {
-    for (const auto& kv : cells_) if (kv.second.id == patch_id) return kv.first;
-    return Key{0, 0, 0};
+    auto it = id_to_key_.find(patch_id);
+    return it != id_to_key_.end() ? it->second : Key{0, 0, 0};
   }
 
   std::string n_;
   Options o_;
   bool merge_, robust_, gaussian_;
-  std::map<Key, Patch> cells_;
+  mutable std::map<Key, Patch> cells_;
+  std::map<std::uint64_t, Key> id_to_key_;
   std::map<Key, Reservoir> reservoirs_;
-  std::map<std::uint64_t, SurfaceAgg> surfaces_;
-  std::vector<MergeEvent> events_;
-  std::uint64_t next_ = 0, merges_ = 0, splits_ = 0, unmerges_ = 0;
-  double ms_ = 0;
+  mutable std::map<std::uint64_t, SurfaceAgg> surfaces_;
+  mutable std::vector<MergeEvent> events_;
+  std::uint64_t next_ = 0;
+  mutable std::uint64_t merges_ = 0, splits_ = 0, unmerges_ = 0;
+  mutable double ms_ = 0;
 };
 
 }  // namespace

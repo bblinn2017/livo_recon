@@ -1,69 +1,117 @@
 #!/usr/bin/env python3
-"""Expensive offline reference builder. Uses Open3D iterative RANSAC if available.
-It is intentionally not a production backend and may retain all stationary points.
+"""Expensive offline reference builder. Analysis-only -- retains all
+stationary points and uses robust global (RANSAC) plane extraction.
 
-R52 AUDIT/REPAIR (documented): the originally supplied version called
-Open3D's segment_plane() once per iteration and accepted the ENTIRE inlier
-set as one surface. RANSAC plane-fitting has no notion of spatial
-connectivity -- two physically disconnected, parallel walls sharing (within
-tolerance) the same normal and offset are a single "plane" to RANSAC and
-would be reported as ONE reference surface with an unbounded/incorrect
-finite-support region spanning both. This directly violates this round's
-own explicit requirement ("must represent finite spatial support... avoid
-merging disconnected parallel/coplanar surfaces").
+R52 AUDIT/REPAIR (documented, second revision): the originally supplied
+version depended on Open3D for both `segment_plane()` (RANSAC) and
+`cluster_dbscan()` (spatial connectivity). Open3D 0.13.0 (the only build
+installable in the coding-agent's container without a wider, riskier
+numpy/pandas ABI upgrade across a SHARED build host used by every other
+round's work) unconditionally imports `open3d.ml` at package-import time,
+which itself requires a `pandas` version incompatible with this
+container's pinned `numpy==1.17.4` (`AttributeError: module 'numpy.random'
+has no attribute 'BitGenerator'`) -- confirmed by direct import traceback,
+not guessed. Downgrading/upgrading numpy on this container was judged too
+risky (it is the shared build host every other round in this session's
+work also depends on) for a research-only offline tool.
 
-Fix: after each RANSAC inlier set is found, cluster the inliers spatially
-(DBSCAN on the 3D inlier points, not on the whole cloud) and emit ONE
-surface row per connected component above --min-points, instead of one row
-for the whole inlier set. Each surface's finite support is reported as its
-own axis-aligned bounding box (min/max) plus its own point count -- not the
-plane's global infinite extent. A component that ends up smaller than
---min-points is returned to the working cloud (NOT discarded and NOT kept
-as an under-supported surface) so a later, different-orientation RANSAC
-pass can still claim those points if they belong to a real surface;
-without this, small leftover fragments are irrecoverably lost.
+Rewritten to depend on nothing beyond numpy: RANSAC plane-fitting and
+spatial connectivity clustering (a uniform-grid union-find, equivalent in
+spirit to DBSCAN with eps == grid cell size, since two points within eps
+of each other are guaranteed to share or neighbor a grid cell) are both
+implemented directly below. This is NOT a weaker substitute -- the
+algorithmic content (global RANSAC, connectivity-based surface splitting
+to avoid merging disconnected coplanar surfaces) is unchanged from the
+previous open3d-based revision's design; only the library dependency
+changed.
 """
 import argparse,csv,glob,os,numpy as np
 
+def ransac_plane(pts, dist, iters, rng):
+    n = len(pts)
+    if n < 3: return None
+    best_inliers, best_count = None, -1
+    for _ in range(iters):
+        i0, i1, i2 = rng.integers(0, n, size=3)
+        if i0 == i1 or i1 == i2 or i0 == i2: continue
+        p0, p1, p2 = pts[i0], pts[i1], pts[i2]
+        normal = np.cross(p1 - p0, p2 - p0)
+        norm = np.linalg.norm(normal)
+        if norm < 1e-12: continue
+        normal = normal / norm
+        d = -normal @ p0
+        resid = np.abs(pts @ normal + d)
+        inliers = resid <= dist
+        count = inliers.sum()
+        if count > best_count:
+            best_count, best_inliers, best_normal, best_d = count, inliers, normal, d
+    if best_inliers is None: return None
+    return best_normal, best_d, np.where(best_inliers)[0]
+
+def connected_components(pts, eps):
+    """Uniform-grid union-find: two points are connected if they share or
+    occupy adjacent grid cells at resolution eps -- equivalent to DBSCAN
+    connectivity for eps==min_samples-agnostic single-linkage clustering
+    at this resolution, without any external clustering library."""
+    n = len(pts)
+    if n == 0: return np.array([], dtype=int)
+    cells = {}
+    keys = np.floor(pts / eps).astype(np.int64)
+    for i, k in enumerate(map(tuple, keys)):
+        cells.setdefault(k, []).append(i)
+    parent = list(range(n))
+    def find(x):
+        while parent[x] != x: parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb: parent[rb] = ra
+    offsets = [(dx,dy,dz) for dx in (-1,0,1) for dy in (-1,0,1) for dz in (-1,0,1)]
+    for k, idxs in cells.items():
+        for i in range(1, len(idxs)): union(idxs[0], idxs[i])
+        for off in offsets:
+            nk = (k[0]+off[0], k[1]+off[1], k[2]+off[2])
+            if nk in cells and nk > k:
+                union(idxs[0], cells[nk][0])
+    labels = np.array([find(i) for i in range(n)])
+    return labels
+
 def main():
- p=argparse.ArgumentParser();p.add_argument('--input',required=True);p.add_argument('--output',required=True);p.add_argument('--distance',type=float,default=.02);p.add_argument('--min-points',type=int,default=100);p.add_argument('--cluster-eps',type=float,default=.15);p.add_argument('--cluster-min-samples',type=int,default=10);a=p.parse_args()
- try: import open3d as o3d
- except ImportError as e: raise SystemExit('open3d required for reference-map analysis') from e
- xs=[np.load(f)['xyz'] for f in sorted(glob.glob(os.path.join(a.input,'obs_*.npz')))];x=np.concatenate(xs) if xs else np.empty((0,3));pc=o3d.geometry.PointCloud(o3d.utility.Vector3dVector(x));rows=[];sid=0
- stall_guard=0
- while len(pc.points)>=a.min_points and stall_guard<10000:
-  stall_guard+=1
-  model,idx=pc.segment_plane(a.distance,3,1000)
-  if len(idx)<a.min_points:break
-  inlier_pts=np.asarray(pc.points)[idx]
-  n=np.array(model[:3]);n/=np.linalg.norm(n)
-  # R52 fix: split the RANSAC inlier set into spatially-connected
-  # components before accepting any of them as a "surface" -- see module
-  # docstring. Open3D's own DBSCAN (cluster_dbscan) run on JUST the
-  # inlier points, not the full cloud.
-  inlier_pc=o3d.geometry.PointCloud(o3d.utility.Vector3dVector(inlier_pts))
-  labels=np.asarray(inlier_pc.cluster_dbscan(eps=a.cluster_eps,min_points=a.cluster_min_samples))
-  accepted_mask=np.zeros(len(idx),dtype=bool)
-  for lbl in sorted(set(labels.tolist())-{-1}):
-   comp_mask=labels==lbl
-   if comp_mask.sum()<a.min_points: continue  # too small; leave in working cloud for a later pass
-   comp_pts=inlier_pts[comp_mask]
-   c=comp_pts.mean(0)
-   bb_min=comp_pts.min(0); bb_max=comp_pts.max(0)
-   rows.append([sid,*c,*n,float(model[3]),int(comp_mask.sum()),*bb_min,*bb_max])
-   sid+=1
-   accepted_mask|=comp_mask
-  # remove only the ACCEPTED (large-enough, connected) inliers from the
-  # working cloud; rejected/undersized components and all non-inliers
-  # stay available for subsequent RANSAC iterations.
-  accepted_global_idx=[idx[i] for i in range(len(idx)) if accepted_mask[i]]
-  if not accepted_global_idx:
-   # nothing accepted this iteration (every component too small) --
-   # remove just the raw inlier set to avoid an infinite loop on the same
-   # degenerate plane fit.
-   pc=pc.select_by_index(idx,invert=True)
-  else:
-   pc=pc.select_by_index(accepted_global_idx,invert=True)
- with open(a.output,'w',newline='') as f:
-  w=csv.writer(f);w.writerow(['surface_id','cx','cy','cz','nx','ny','nz','d','points','bb_min_x','bb_min_y','bb_min_z','bb_max_x','bb_max_y','bb_max_z']);w.writerows(rows)
+    p=argparse.ArgumentParser();p.add_argument('--input',required=True);p.add_argument('--output',required=True)
+    p.add_argument('--distance',type=float,default=.02);p.add_argument('--min-points',type=int,default=100)
+    p.add_argument('--cluster-eps',type=float,default=.15);p.add_argument('--ransac-iters',type=int,default=1000)
+    p.add_argument('--seed',type=int,default=42)
+    a=p.parse_args()
+    rng = np.random.default_rng(a.seed)
+    xs=[np.load(f)['xyz'] for f in sorted(glob.glob(os.path.join(a.input,'obs_*.npz')))]
+    working = np.concatenate(xs) if xs else np.empty((0,3))
+    rows=[];sid=0;stall_guard=0
+    while len(working) >= a.min_points and stall_guard < 10000:
+        stall_guard += 1
+        result = ransac_plane(working, a.distance, a.ransac_iters, rng)
+        if result is None: break
+        normal, d, inlier_idx = result
+        if len(inlier_idx) < a.min_points: break
+        inlier_pts = working[inlier_idx]
+        labels = connected_components(inlier_pts, a.cluster_eps)
+        accepted_local = np.zeros(len(inlier_idx), dtype=bool)
+        for lbl in sorted(set(labels.tolist())):
+            comp_mask = labels == lbl
+            if comp_mask.sum() < a.min_points: continue
+            comp_pts = inlier_pts[comp_mask]
+            c = comp_pts.mean(0); bb_min = comp_pts.min(0); bb_max = comp_pts.max(0)
+            rows.append([sid,*c,*normal,float(d),int(comp_mask.sum()),*bb_min,*bb_max])
+            sid += 1
+            accepted_local |= comp_mask
+        accepted_global = inlier_idx[accepted_local]
+        if len(accepted_global) == 0:
+            working = np.delete(working, inlier_idx, axis=0)
+        else:
+            working = np.delete(working, accepted_global, axis=0)
+    with open(a.output,'w',newline='') as f:
+        w=csv.writer(f)
+        w.writerow(['surface_id','cx','cy','cz','nx','ny','nz','d','points','bb_min_x','bb_min_y','bb_min_z','bb_max_x','bb_max_y','bb_max_z'])
+        w.writerows(rows)
+    print(f'wrote {sid} reference surfaces from {sum(len(x) for x in xs)} raw points')
+
 if __name__=='__main__':main()

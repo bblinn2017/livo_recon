@@ -232,3 +232,6 @@ target_link_libraries(stationary_map_research Eigen3::Eigen)
 add_executable(test_stationary_map_stats tests/test_stationary_map_stats.cpp)
 target_link_libraries(test_stationary_map_stats stationary_map_research)
 add_test(NAME stationary_map_stats COMMAND test_stationary_map_stats)
+
+add_executable(stationary_map_cli tools/stationary_map/stationary_map_cli.cpp)
+target_link_libraries(stationary_map_cli stationary_map_research)

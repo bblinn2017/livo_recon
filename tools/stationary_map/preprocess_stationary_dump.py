@@ -63,7 +63,18 @@ def main():
  for r in src:
   x=np.load(os.path.join(a.input,r['file']))['xyz']
   x=apply_production_filters(x,a.pfn,a.blind_sq)
-  x=voxel_first(x,a.ds);fn=r['file'];np.savez_compressed(os.path.join(a.output,fn),xyz=x,timestamp=float(r['timestamp']));d=hashlib.sha256(x.tobytes()).hexdigest();H.update(x.tobytes());rows.append([r['observation_id'],r['timestamp'],len(x),fn,d,r['in_calibration']])
+  x=voxel_first(x,a.ds);fn=r['file'];np.savez_compressed(os.path.join(a.output,fn),xyz=x,timestamp=float(r['timestamp']))
+  # R52: also emit a trivial flat-binary sidecar (int64 N, then N*3
+  # float64 xyz) alongside the .npz -- the C++ benchmark driver
+  # (tools/stationary_map/stationary_map_cli.cpp) reads this format
+  # directly rather than linking an npz/zip parser into the production
+  # build for a research-only harness. Deliberate, documented
+  # simplification, not a second source of truth: both files are written
+  # from the exact same `x` array in the same call.
+  bin_fn=fn.replace('.npz','.bin')
+  with open(os.path.join(a.output,bin_fn),'wb') as bf:
+   np.array([len(x)],dtype=np.int64).tofile(bf); x.astype(np.float64).tofile(bf)
+  d=hashlib.sha256(x.tobytes()).hexdigest();H.update(x.tobytes());rows.append([r['observation_id'],r['timestamp'],len(x),fn,d,r['in_calibration']])
  with open(os.path.join(a.output,'manifest.csv'),'w',newline='') as f:w=csv.writer(f);w.writerow(['observation_id','timestamp','points','file','point_sha256','in_calibration']);w.writerows(rows)
  json.dump({'pfn':a.pfn,'ds':a.ds,'blind_sq':a.blind_sq,'stream_sha256':H.hexdigest()},open(os.path.join(a.output,'metadata.json'),'w'),indent=2)
 if __name__=='__main__':main()
