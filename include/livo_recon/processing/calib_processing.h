@@ -25,6 +25,12 @@ struct CalibProcOptions
   int  stall_calls_max   = 300;
   bool apply_gyro_bias = true;
   bool apply_accel_bias = true;
+  // R63: how the stationary accelerometer-magnitude excess (|mean acc| - G)
+  // is explained. "bias" (default, historical): absorbed by the z accel
+  // bias state. "scale": a fixed scale factor G/|mean acc| is applied to
+  // every IMU sample (as FAST-LIO2/FAST-LIVO2 do) and the bias stays at its
+  // configured initial value.
+  std::string accel_excess_model = "bias";
 
   // Initial-covariance policy. "configured" is the legacy path and leaves
   // state/cov/* byte-for-byte in control. "calibration_derived" replaces

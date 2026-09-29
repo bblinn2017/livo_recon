@@ -45,7 +45,7 @@ void writeImuFirstScanRow(size_t propagation_index, size_t step, double t_off,
                           const V3D& dynamic_acc, const V3D& acc_world_head,
                           const V3D& acc_world_tail, const V3D& acc_avr_world,
                           const V3D& vel_before, const V3D& vel_after,
-                          const V3D& pos_after, const std::string& mode)
+                          const V3D& pos_after)
 {
   static PersistentLogStream log("imu_first_scans.csv");
   bool first = false;
@@ -60,14 +60,14 @@ void writeImuFirstScanRow(size_t propagation_index, size_t step, double t_off,
            "acc_world_tail_x,acc_world_tail_y,acc_world_tail_z,"
            "acc_avr_world_x,acc_avr_world_y,acc_avr_world_z,"
            "vel_before_x,vel_before_y,vel_before_z,vel_after_x,vel_after_y,vel_after_z,"
-           "pos_after_x,pos_after_y,pos_after_z,first_scan_head\n";
+           "pos_after_x,pos_after_y,pos_after_z\n";
   out << std::setprecision(17) << propagation_index << ',' << step << ','
       << head.t + t_off << ',' << tail.t + t_off << ',' << dt;
   for (const V3D* v : {&head.acc, &tail.acc, &head.gyro, &tail.gyro, &ba, &bg, &g,
                        &dynamic_acc, &acc_world_head, &acc_world_tail, &acc_avr_world,
                        &vel_before, &vel_after, &pos_after})
     out << ',' << (*v)(0) << ',' << (*v)(1) << ',' << (*v)(2);
-  out << ',' << mode << '\n';
+  out << '\n';
   out.flush();
 }
 
@@ -145,13 +145,16 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
                     opts_.motion_acc_max_dynamic_variance, 0.5);
   paramWarn<double>(pnh, "imu/process_noise/motion/gyro_max_dynamic_variance",
                     opts_.motion_gyr_max_dynamic_variance, 0.3);
-  paramWarn<std::string>(pnh, "imu/first_scan_head", opts_.first_scan_head,
-                         std::string("default"));
+  {
+    // R63 (F-118): the zero-initialised head sample is removed. The key is
+    // no longer an option; a config that still sets it is refused rather
+    // than silently ignored.
+    if (pnh.hasParam("imu/first_scan_head"))
+      throw std::invalid_argument(
+          "imu/first_scan_head was removed in R63: the first interval head "
+          "is always seeded from the first IMU sample");
+  }
   paramWarn<bool>(pnh, "eval/imu_first_scans_en", opts_.first_scans_log_en, false);
-  if (opts_.first_scan_head != "default" &&
-      opts_.first_scan_head != "seed_from_first_sample")
-    throw std::invalid_argument(
-        "imu/first_scan_head must be default or seed_from_first_sample");
   if (opts_.process_noise_model != "fixed" &&
       opts_.process_noise_model != "isotropic" &&
       opts_.process_noise_model != "axis_aware")
@@ -208,7 +211,7 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  motion/gyro_scale:    " << opts_.motion_gyr_scale
       << "\n  motion/acc_cap:       " << opts_.motion_acc_max_dynamic_variance
       << "\n  motion/gyro_cap:      " << opts_.motion_gyr_max_dynamic_variance
-      << "\n  first_scan_head:      " << opts_.first_scan_head
+      << "\n  first_scan_head:      always seeded from first sample (R63)"
       << "\n  log_qhat_en:          " << (opts_.log_qhat_en ? "true" : "false")
       << "\n  keep_raw_samples:     " << (opts_.keep_raw_samples ? "true" : "false");
   return oss.str();
@@ -224,6 +227,30 @@ void ImuProc::propagate(MeasureGroup& mg)
   }
 
   const double t_curr = mg.image.t;
+
+  // R63: fixed accelerometer scale (calib/stationary/accel_excess_model ==
+  // scale). Applied once to this group's raw samples so the head/tail
+  // bookkeeping, the raw-sample snapshot and every consumer downstream see
+  // the same scaled stream. 1.0 (bit-identical, loop skipped) otherwise.
+  if (state_->accScale() != 1.0)
+  {
+    for (auto& smp : mg.imu_samples) smp.acc *= state_->accScale();
+    acc_scale_applied_samples_ += static_cast<long>(mg.imu_samples.size());
+    if (!acc_scale_logged_)
+    {
+      acc_scale_logged_ = true;
+      ROS_INFO_STREAM("[imu] accel scale " << state_->accScale()
+                      << " applied to the IMU stream (engagement counter starts)");
+    }
+  }
+
+  if (state_->gravityS2() && !s2_logged_)
+  {
+    s2_logged_ = true;
+    ROS_INFO_STREAM("[imu] gravity_model=s2 active: state dim " << state_->dimState()
+                    << ", gravity Jacobian columns " << state_->gravDim()
+                    << ", |g|=" << state_->gravity().norm());
+  }
 
   // CQ-71 item 0: snapshot P BEFORE this frame's propagation touches it.
   // Same gate as the rest of the qhat machinery below; a plain read, never
@@ -267,28 +294,18 @@ void ImuProc::propagate(MeasureGroup& mg)
       if (s.t <= t_curr) mg.imu_samples_raw.push_back(s);
   }
 
-  // R62: the very first interval starts from last_imu_sample_, which is
-  // default-constructed (acc = gyro = 0, t = 0). Historical behaviour is
-  // kept under first_scan_head == "default"; "seed_from_first_sample"
-  // replaces the head acc/gyro with the first sample of this group.
+  // R63 (F-118): the very first interval's head sample is the first IMU
+  // sample of the first non-empty measure group. (Before R63 the head was a
+  // default-constructed zero sample, which halved gravity for one step.)
   if (!head_seeded_)
   {
     head_seeded_ = true;
-    if (opts_.first_scan_head == "seed_from_first_sample")
-    {
-      last_imu_sample_.acc  = mg.imu_samples.front().acc;
-      last_imu_sample_.gyro = mg.imu_samples.front().gyro;
-      ++first_head_seed_count_;
-      ROS_INFO_STREAM("[imu] first_scan_head=seed_from_first_sample applied (engagement "
-                      << first_head_seed_count_ << "): head acc=["
-                      << last_imu_sample_.acc.transpose() << "]");
-    }
-    else
-    {
-      ROS_INFO_STREAM("[imu] first_scan_head=default: first interval head sample is acc=["
-                      << last_imu_sample_.acc.transpose() << "] gyro=["
-                      << last_imu_sample_.gyro.transpose() << "] t=" << last_imu_sample_.t);
-    }
+    last_imu_sample_.acc  = mg.imu_samples.front().acc;
+    last_imu_sample_.gyro = mg.imu_samples.front().gyro;
+    ++first_head_seed_count_;
+    ROS_INFO_STREAM("[imu] first interval head seeded from first sample (engagement "
+                    << first_head_seed_count_ << "): head acc=["
+                    << last_imu_sample_.acc.transpose() << "]");
   }
   ImuSample head = last_imu_sample_;
   auto it = mg.imu_samples.begin();
@@ -433,6 +450,11 @@ void ImuProc::propagate(MeasureGroup& mg)
 
     F_x.setIdentity();
     cov_w.setZero();
+    // R63: d(g)/d(gravity error coordinates); I3 for vector3 (bit-identical
+    // to the pre-R63 blocks), -[g]x B for s2. g and B do not change during
+    // propagation, so this is constant over the whole call.
+    const Eigen::MatrixXd J_g = state_->estGravity() ? Eigen::MatrixXd(state_->gravityJacobian())
+                                                     : Eigen::MatrixXd(Eigen::MatrixXd::Zero(3, 0));
 
     // Rotation
     F_x.block<3,3>(StateGroup::idxR(), StateGroup::idxR()) = Exp_f.transpose();
@@ -445,7 +467,7 @@ void ImuProc::propagate(MeasureGroup& mg)
     {
       F_x.block<3,3>(StateGroup::idxP(), StateGroup::idxR()) += -0.5 * rot_imu * acc_avr_skew * dt2;
       if (state_->estGravity())
-        F_x.block(StateGroup::idxP(), state_->idxG(), 3, 3) = 0.5 * Eye3d * dt2;
+        F_x.block(StateGroup::idxP(), state_->idxG(), 3, state_->gravDim()) = 0.5 * J_g * dt2;
     }
 
     // Velocity
@@ -453,7 +475,7 @@ void ImuProc::propagate(MeasureGroup& mg)
     if (state_->estBA())
       F_x.block(StateGroup::idxV(), state_->idxBA(), 3, 3) = -rot_imu * dt;
     if (state_->estGravity())
-      F_x.block(StateGroup::idxV(), state_->idxG(), 3, 3) = Eye3d * dt;
+      F_x.block(StateGroup::idxV(), state_->idxG(), 3, state_->gravDim()) = J_g * dt;
 
     // Rotation noise
     cov_w.block<3,3>(StateGroup::idxR(), StateGroup::idxR()).diagonal() =
@@ -513,7 +535,7 @@ void ImuProc::propagate(MeasureGroup& mg)
                            head, tail, dt, state_->biasAcc(), state_->biasGyr(),
                            state_->gravity(), dynamic_acc, acc_world_head,
                            acc_world_tail, acc_avr_world, vel_at_head, vel_imu,
-                           pos_imu, opts_.first_scan_head);
+                           pos_imu);
 
     // ---- store pose at head time with head state ----
     mg.poses.emplace_back(Pose6D{

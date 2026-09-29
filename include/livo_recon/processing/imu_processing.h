@@ -36,13 +36,6 @@ struct ImuProcOptions
   double motion_acc_max_dynamic_variance = 0.5;
   double motion_gyr_max_dynamic_variance = 0.3;
 
-  // R62: what the head (previous-sample) IMU value is for the very first
-  // propagation interval of the run. "default" keeps the historical
-  // behaviour: last_imu_sample_ is default-constructed (acc = gyro = 0),
-  // so the first interval integrates 0.5*(0 + a_tail), i.e. about half of
-  // gravity, for one sample period. "seed_from_first_sample" sets the head
-  // acc/gyro to the first sample of the first non-empty measure group.
-  std::string first_scan_head = "default";  // default|seed_from_first_sample
   // Per-IMU-step trace of the first three propagations (imu_first_scans.csv).
   bool first_scans_log_en = false;
 };
@@ -104,9 +97,12 @@ private:
 
   ImuProcOptions opts_;
   ImuSample last_imu_sample_;
-  // R62: first-interval head seeding (see ImuProcOptions::first_scan_head).
+  // R63 (F-118): first-interval head is always seeded from the first IMU sample.
   bool head_seeded_ = false;
-  long first_head_seed_count_ = 0;   // engagement counter: 1 iff the seed was applied
+  long first_head_seed_count_ = 0;
+  long acc_scale_applied_samples_ = 0;   // R63 engagement counter (accel scale)
+  bool acc_scale_logged_ = false;
+  bool s2_logged_ = false;   // engagement counter: 1 iff the seed was applied
   // Low-pass state is excitation ENERGY before the stationary noise floor is
   // subtracted. Filtering the already-rectified dynamic variance would retain
   // the positive bias of squared stationary sensor noise.

@@ -42,6 +42,10 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
                    copts_.minimal_diagnostics, false);
   if (copts_.knot_count < 2)
     cfg.requireCombination("estimator/coupled/knot_count must be at least 2");
+  if (state_->gravityS2())
+    cfg.requireCombination(
+        "state/gravity_model=s2 is not implemented for the coupled estimator "
+        "(joint knots carry a 3-vector shared gravity)");
   if (!state_->estBA() || !state_->estBG() || !state_->estGravity())
     cfg.requireCombination(
         "coupled_joint_knots requires state/est/ba=true, state/est/bg=true, "

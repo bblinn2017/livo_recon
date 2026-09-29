@@ -28,7 +28,20 @@ public:
   int idxBG() const { return est_bg_      ? 9                                     : -1; }
   int idxBA() const { return est_ba_      ? 9 + (est_bg_ ? 3 : 0)                 : -1; }
   int idxG()  const { return est_gravity_ ? 9 + (est_bg_ ? 3 : 0) + (est_ba_ ? 3 : 0) : -1; }
-  int dimState() const { return 9 + (est_bg_ ? 3 : 0) + (est_ba_ ? 3 : 0) + (est_gravity_ ? 3 : 0); }
+  // R63: gravity block width. vector3 (historical): 3 free Euclidean
+  // components. s2: 2 tangent coordinates on the sphere |g| = const.
+  int gravDim() const { return est_gravity_ ? (gravity_model_s2_ ? 2 : 3) : 0; }
+  int dimState() const { return 9 + (est_bg_ ? 3 : 0) + (est_ba_ ? 3 : 0) + gravDim(); }
+  bool gravityS2() const { return est_gravity_ && gravity_model_s2_; }
+  const char* gravityModelName() const { return gravity_model_s2_ ? "s2" : "vector3"; }
+  // d(gravity vector)/d(gravity error coordinates), 3 x gravDim():
+  // I3 for vector3; -[g]x B for s2 (B = current 3x2 tangent basis).
+  Eigen::MatrixXd gravityJacobian() const;
+  const Eigen::Matrix<double, 3, 2>& gravityBasis() const { return gravity_basis_; }
+  // R63: fixed accelerometer scale factor applied to every IMU sample
+  // (1.0 unless calib/stationary/accel_excess_model == scale). Not a state.
+  double accScale() const { return acc_scale_; }
+  void setAccScale(double s) { acc_scale_ = s; }
 
   bool estBG()      const { return est_bg_; }
   bool estBA()      const { return est_ba_; }
@@ -185,6 +198,14 @@ private:
   bool est_bg_      = true;
   bool est_ba_      = true;
   bool est_gravity_ = true;
+  // R63: gravity_ is always the 3-vector; under s2 its norm is held fixed
+  // and gravity_basis_ (3x2, orthonormal, orthogonal to gravity_) defines
+  // the tangent coordinates of the error state. The basis is parallel-
+  // transported by applyDelta so error covariance never needs transporting.
+  bool gravity_model_s2_ = false;
+  Eigen::Matrix<double, 3, 2> gravity_basis_ = Eigen::Matrix<double, 3, 2>::Zero();
+  double acc_scale_ = 1.0;
+  void resetGravityBasis();
   bool est_cov_acc_ = false;
   bool est_cov_gyr_ = false;
 

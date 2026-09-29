@@ -34,7 +34,8 @@ void writeCalibrationP0Diagnostic(
       << "ordering theta[0:3] p[3:6] v[6:9]";
   if (state.estBG()) out << " bg[" << state.idxBG() << ':' << state.idxBG()+3 << ']';
   if (state.estBA()) out << " ba[" << state.idxBA() << ':' << state.idxBA()+3 << ']';
-  if (state.estGravity()) out << " g[" << state.idxG() << ':' << state.idxG()+3 << ']';
+  if (state.estGravity()) out << " g[" << state.idxG() << ':' << state.idxG()+state.gravDim() << ']'
+                              << " gravity_model " << state.gravityModelName();
   out << "\nconfigured_init_variances tilt " << state.initCovRotTilt()
       << " yaw " << state.initCovRotYaw()
       << " p " << state.initCovPos()
@@ -61,7 +62,7 @@ void writeCalibrationP0Diagnostic(
         << "P0_theta_ba\n" << P.block(state.idxR(), state.idxBA(), 3, 3) << '\n';
   }
   if (state.estGravity())
-    out << "P0_g_g\n" << P.block(state.idxG(), state.idxG(), 3, 3) << '\n';
+    out << "P0_g_g\n" << P.block(state.idxG(), state.idxG(), state.gravDim(), state.gravDim()) << '\n';
   out << "P0_full\n" << P << '\n';
   if (eig.info() == Eigen::Success)
     out << "P0_eigenvalues " << eig.eigenvalues().transpose() << '\n';

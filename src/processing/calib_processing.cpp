@@ -41,6 +41,11 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
                   opts_.apply_gyro_bias, true);
   paramWarn<bool>(pnh, "calib/stationary/apply_to_state/accel_bias",
                   opts_.apply_accel_bias, true);
+  paramWarn<std::string>(pnh, "calib/stationary/accel_excess_model",
+                         opts_.accel_excess_model, std::string("bias"));
+  if (opts_.accel_excess_model != "bias" && opts_.accel_excess_model != "scale")
+    throw std::invalid_argument(
+        "calib/stationary/accel_excess_model must be bias or scale");
   paramWarn<std::string>(pnh, "calib/p0/mode", opts_.p0_mode, "configured");
   paramWarn<int>(pnh, "calib/p0/autocov_lags", opts_.p0_autocov_lags, 20);
   paramWarn<double>(pnh, "calib/p0/known_pos_variance",
@@ -436,8 +441,24 @@ std::string CalibProc::estimateFromBuffer()
   V3D acc_bias, gyro_bias, var_acc, var_gyr;
   computeBiasAndNoise(acc_bias, gyro_bias, var_acc, var_gyr);
 
+  double r63_acc_scale = 1.0;
+  if (opts_.accel_excess_model == "scale")
+  {
+    // acc_bias here is the stationary MEAN specific force (name is historical).
+    const double mean_norm = acc_bias.norm();
+    const double g_norm = state_->gravity().norm();
+    if (!std::isfinite(mean_norm) || mean_norm < 1e-6)
+      throw std::runtime_error("accel_excess_model=scale requires a nonzero mean accel");
+    r63_acc_scale = g_norm / mean_norm;
+    acc_bias *= r63_acc_scale;
+    var_acc *= r63_acc_scale * r63_acc_scale;
+    ROS_INFO_STREAM("[calib] accel_excess_model=scale: |mean acc| " << mean_norm
+                    << " -> " << g_norm << " (scale " << r63_acc_scale
+                    << "); accel bias left at its initial value");
+  }
   const M3D R_init = computeInitialRotation(acc_bias);
-  const M3D acc_mean_cov = covarianceOfMean(true);
+  M3D acc_mean_cov = covarianceOfMean(true);
+  acc_mean_cov *= r63_acc_scale * r63_acc_scale;
   const M3D gyro_mean_cov = covarianceOfMean(false);
   // acc_bias = true_bias + R_init^T * [0,0,9.81]; strip gravity to get true sensor bias
   const V3D true_acc_bias = acc_bias + R_init.transpose() * state_->gravity();
@@ -448,6 +469,7 @@ std::string CalibProc::estimateFromBuffer()
   // Stationary variance is a measured sensor-noise floor, not a complete
   // dynamic process-noise model. Keep it separate from imu/process_noise.
   state_->setNoiseFloor(var_acc, var_gyr);
+  state_->setAccScale(r63_acc_scale);
   if (opts_.p0_mode == "calibration_derived")
     applyCalibrationDerivedP0(acc_bias, R_init, acc_mean_cov, gyro_mean_cov);
   stabilizeP0();

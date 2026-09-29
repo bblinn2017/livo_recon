@@ -1,6 +1,7 @@
 #include "livo_recon/utils/state/state.h"
 #include "livo_recon/utils/log/param_warn.h"
 
+#include <cmath>
 #include <stdexcept>
 
 namespace livo_recon
@@ -26,7 +27,33 @@ void StateGroup::initCov(double cov_rot, double cov_pos, double cov_vel,
   cov_.block<3,3>(idxV(), idxV()) = cov_vel     * M3D::Identity();
   if (est_bg_)      cov_.block(idxBG(), idxBG(), 3, 3) = cov_bg      * M3D::Identity();
   if (est_ba_)      cov_.block(idxBA(), idxBA(), 3, 3) = cov_ba      * M3D::Identity();
-  if (est_gravity_) cov_.block(idxG(),  idxG(),  3, 3) = cov_gravity * M3D::Identity();
+  if (est_gravity_)
+    cov_.block(idxG(), idxG(), gravDim(), gravDim()) =
+        cov_gravity * Eigen::MatrixXd::Identity(gravDim(), gravDim());
+}
+
+void StateGroup::resetGravityBasis()
+{
+  gravity_basis_.setZero();
+  const double n = gravity_.norm();
+  if (n < 1e-9) return;
+  const V3D u = gravity_ / n;
+  Eigen::Index k = 0;
+  u.cwiseAbs().minCoeff(&k);
+  V3D e = V3D::Zero();
+  e(k) = 1.0;
+  const V3D t1 = u.cross(e).normalized();
+  const V3D t2 = u.cross(t1);
+  gravity_basis_.col(0) = t1;
+  gravity_basis_.col(1) = t2;
+}
+
+Eigen::MatrixXd StateGroup::gravityJacobian() const
+{
+  if (!gravity_model_s2_) return Eigen::MatrixXd::Identity(3, 3);
+  M3D gx;
+  gx << SKEW_SYM_MATRX(gravity_);
+  return -gx * gravity_basis_;
 }
 
 StateGroup::StateGroup()
@@ -59,6 +86,9 @@ StateGroup& StateGroup::operator=(const StateGroup& o)
     est_bg_      = o.est_bg_;
     est_ba_      = o.est_ba_;
     est_gravity_ = o.est_gravity_;
+    gravity_model_s2_ = o.gravity_model_s2_;
+    gravity_basis_ = o.gravity_basis_;
+    acc_scale_ = o.acc_scale_;
     rot_ = o.rot_; pos_ = o.pos_; vel_ = o.vel_;
     bias_gyr_ = o.bias_gyr_; bias_acc_ = o.bias_acc_; gravity_ = o.gravity_;
     cov_ = o.cov_;
@@ -171,7 +201,21 @@ void StateGroup::applyDelta(const Eigen::VectorXd& dx)
   vel_      += dx.segment<3>(idxV());
   if (est_bg_)      bias_gyr_ += dx.segment<3>(idxBG());
   if (est_ba_)      bias_acc_ += dx.segment<3>(idxBA());
-  if (est_gravity_) gravity_  += dx.segment<3>(idxG());
+  if (est_gravity_)
+  {
+    if (!gravity_model_s2_)
+      gravity_ += dx.segment<3>(idxG());
+    else
+    {
+      // Retraction on the sphere: rotate g about an axis orthogonal to g,
+      // and rotate the tangent basis by the same rotation (parallel
+      // transport along the geodesic).
+      const V3D w = gravity_basis_ * dx.segment<2>(idxG());
+      const M3D Rg = Exp(w);
+      gravity_ = Rg * gravity_;
+      gravity_basis_ = Rg * gravity_basis_;
+    }
+  }
   updateDerivedTransforms();
 }
 
@@ -184,7 +228,23 @@ Eigen::VectorXd StateGroup::boxminusFromPropagat(const StateGroup& propagat) con
   vec.segment<3>(idxV()) = propagat.vel_ - vel_;
   if (est_bg_)      vec.segment<3>(idxBG()) = propagat.bias_gyr_ - bias_gyr_;
   if (est_ba_)      vec.segment<3>(idxBA()) = propagat.bias_acc_ - bias_acc_;
-  if (est_gravity_) vec.segment<3>(idxG())  = propagat.gravity_ - gravity_;
+  if (est_gravity_)
+  {
+    if (!gravity_model_s2_)
+      vec.segment<3>(idxG()) = propagat.gravity_ - gravity_;
+    else
+    {
+      // Geodesic deviation of the prior gravity direction from the current
+      // one, in the current tangent basis: delta = B_c^T w, where w has
+      // magnitude equal to the angle between the two vectors and direction
+      // g_c x g_p (normalised).
+      const V3D c = gravity_.cross(propagat.gravity_);
+      const double cn = c.norm();
+      const double ang = std::atan2(cn, gravity_.dot(propagat.gravity_));
+      const V3D w = (cn > 1e-15) ? V3D(c * (ang / cn)) : V3D(V3D::Zero());
+      vec.segment<2>(idxG()) = gravity_basis_.transpose() * w;
+    }
+  }
   return vec;
 }
 
@@ -202,6 +262,13 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "state/est/bg",      est_bg_,      true);
   paramWarn<bool>(pnh, "state/est/ba",      est_ba_,      true);
   paramWarn<bool>(pnh, "state/est/gravity", est_gravity_, true);
+  {
+    std::string gm;
+    paramWarn<std::string>(pnh, "state/gravity_model", gm, std::string("vector3"));
+    if (gm != "vector3" && gm != "s2")
+      throw std::invalid_argument("state/gravity_model must be vector3 or s2");
+    gravity_model_s2_ = (gm == "s2");
+  }
   paramWarn<bool>(pnh, "state/est/cov_acc", est_cov_acc_, false);
   paramWarn<bool>(pnh, "state/est/cov_gyr", est_cov_gyr_, false);
 
@@ -285,6 +352,7 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
   paramWarn<std::vector<double>>(pnh, "state/init_state/ba",      ba_vec, {0., 0., 0.});
   paramWarn<std::vector<double>>(pnh, "state/init_state/bg",      bg_vec, {0., 0., 0.});
   gravity_  = V3D(g_vec[0],  g_vec[1],  g_vec[2]);
+  resetGravityBasis();
   vel_      = V3D(v_vec[0],  v_vec[1],  v_vec[2]);
   bias_acc_ = V3D(ba_vec[0], ba_vec[1], ba_vec[2]);
   bias_gyr_ = V3D(bg_vec[0], bg_vec[1], bg_vec[2]);
@@ -328,6 +396,7 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
       << "\n  est/bg=" << (est_bg_ ? "true" : "false")
       << "  est/ba=" << (est_ba_ ? "true" : "false")
       << "  est/gravity=" << (est_gravity_ ? "true" : "false")
+      << "  gravity_model=" << gravityModelName()
       << "  est/cov_acc=" << (est_cov_acc_ ? "true" : "false")
       << "  est/cov_gyr=" << (est_cov_gyr_ ? "true" : "false")
       << "  dimState=" << dimState()

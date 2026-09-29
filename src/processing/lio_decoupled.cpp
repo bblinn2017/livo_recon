@@ -373,6 +373,10 @@ std::string LioProcDecoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.mode("spline/mode", dopts_.spline.mode, "spline",
            { "raw_imu", "spline", "spline+refine" });
   const bool sp = dopts_.spline.splineOn();
+  if (state_->gravityS2() && dopts_.spline.mode != "raw_imu")
+    cfg.requireCombination(
+        "state/gravity_model=s2 is implemented only with spline/mode=raw_imu: "
+        "the spline paths read and write gravity as a 3-vector");
 
   // Control-point RATE is the only control-point knob: n_cp is derived from
   // it and the scan duration, so the axis is comparable across sequences.
@@ -823,10 +827,11 @@ void LioProcDecoupled::finalizeSplineAndQ(MeasureGroup& mg)
       const int iBG = state_->idxBG(), iBA = state_->idxBA(), iGr = state_->idxG();
       const bool have_bg = iBG >= 0 && P.rows() >= iBG + 3 && P.cols() >= iBG + 3;
       const bool have_ba = iBA >= 0 && P.rows() >= iBA + 3 && P.cols() >= iBA + 3;
-      const bool have_gr = iGr >= 0 && P.rows() >= iGr + 3 && P.cols() >= iGr + 3;
+      const int gd = state_->gravDim();
+      const bool have_gr = iGr >= 0 && P.rows() >= iGr + gd && P.cols() >= iGr + gd;
       const double trP_bg = have_bg ? P.block<3, 3>(iBG, iBG).trace() : -1.0;
       const double trP_ba = have_ba ? P.block<3, 3>(iBA, iBA).trace() : -1.0;
-      const double trP_grav = have_gr ? P.block<3, 3>(iGr, iGr).trace() : -1.0;
+      const double trP_grav = have_gr ? P.block(iGr, iGr, gd, gd).trace() : -1.0;
 
       // item (5): free_tail_d, using diagnosticFreeTailFit() with the
       // regularizers FORCED ON (curvature_weight=1.0, imu_acc_weight=1.0)
