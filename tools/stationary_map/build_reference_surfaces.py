@@ -48,6 +48,19 @@ def ransac_plane(pts, dist, iters, rng):
     if best_inliers is None: return None
     return best_normal, best_d, np.where(best_inliers)[0]
 
+def refit_plane(pts):
+    """Least-squares refit of a RANSAC inlier set (RANSAC's own normal comes
+    from a single 3-point sample and carries that sample's noise). Returns
+    (normal, d, rms_residual) with the normal oriented toward the origin
+    (d >= 0), so d is comparable across surfaces."""
+    c = pts.mean(0)
+    dx = pts - c
+    w, U = np.linalg.eigh(dx.T @ dx / len(pts))
+    n = U[:, 0]
+    if n @ c > 0:
+        n = -n
+    return n, float(-n @ c), float(np.sqrt(max(w[0], 0.0)))
+
 def connected_components(pts, eps):
     """Uniform-grid union-find: two points are connected if they share or
     occupy adjacent grid cells at resolution eps -- equivalent to DBSCAN
@@ -93,6 +106,9 @@ def main():
         normal, d, inlier_idx = result
         if len(inlier_idx) < a.min_points: break
         inlier_pts = working[inlier_idx]
+        # refit on the inliers (R53): reference normals must not carry the 3-point sample's noise
+        if len(inlier_pts) >= 3:
+            normal, d, _ = refit_plane(inlier_pts)
         labels = connected_components(inlier_pts, a.cluster_eps)
         accepted_local = np.zeros(len(inlier_idx), dtype=bool)
         for lbl in sorted(set(labels.tolist())):
@@ -100,7 +116,8 @@ def main():
             if comp_mask.sum() < a.min_points: continue
             comp_pts = inlier_pts[comp_mask]
             c = comp_pts.mean(0); bb_min = comp_pts.min(0); bb_max = comp_pts.max(0)
-            rows.append([sid,*c,*normal,float(d),int(comp_mask.sum()),*bb_min,*bb_max])
+            resid = float(np.sqrt(np.mean((comp_pts @ normal + d) ** 2)))
+            rows.append([sid,*c,*normal,float(d),int(comp_mask.sum()),*bb_min,*bb_max,resid])
             sid += 1
             accepted_local |= comp_mask
         accepted_global = inlier_idx[accepted_local]
@@ -110,7 +127,7 @@ def main():
             working = np.delete(working, accepted_global, axis=0)
     with open(a.output,'w',newline='') as f:
         w=csv.writer(f)
-        w.writerow(['surface_id','cx','cy','cz','nx','ny','nz','d','points','bb_min_x','bb_min_y','bb_min_z','bb_max_x','bb_max_y','bb_max_z'])
+        w.writerow(['surface_id','cx','cy','cz','nx','ny','nz','d','points','bb_min_x','bb_min_y','bb_min_z','bb_max_x','bb_max_y','bb_max_z','rms_residual'])
         w.writerows(rows)
     print(f'wrote {sid} reference surfaces from {sum(len(x) for x in xs)} raw points')
 

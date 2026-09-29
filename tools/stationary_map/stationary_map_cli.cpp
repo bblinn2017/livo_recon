@@ -8,7 +8,14 @@
 //
 // Usage:
 //   stationary_map_cli --family F --input DIR --patches-out CSV
-//       --summary-out CSV [--checkpoints 1,2,5,10,20,...] [--leaf L] ...
+//       --summary-out CSV [--checkpoints 1,2,3,5,10,20,...] [--leaf L]
+//       [--min-points N] [--plane-eig-max V] [--min-secondary-eig V]
+//       [--max-planarity R] [--merge-criterion combined_fit|pairwise]
+//       [--debiased [--debias-context CSV] [--sensor-var V] [--sensor-noise-floor-eig0]]
+//       [--merge-angle-deg A] [--merge-offset M] [--merge-gap G] ...
+// Defaults reproduce the production VoxelMap plane-validity test (rank-2 and
+// absolute eig0 < 0.01). The R52 rule is --plane-eig-max 1e30
+// --min-secondary-eig 0 --max-planarity 0.10 --merge-criterion pairwise.
 #include "livo_recon/map/stationary/stationary_map.h"
 #include <algorithm>
 #include <cstdint>
@@ -68,8 +75,12 @@ std::vector<std::string> splitCsvArg(const std::string& s) {
 
 int main(int argc, char** argv) {
   std::string family, input, patches_out, summary_out;
-  std::string checkpoints_arg = "1,2,5,10,20,50,100,200,500,1000,999999999";
+  std::string checkpoints_arg = "1,2,3,5,10,20,50,100,200,500,1000,999999999";
   Options o;
+  // ntu_viral.yaml voxel_map/plane/plane_threshold (the R49-R51 control jobs used it);
+  // the library's own default is the code default 0.01.
+  o.plane_eig_max = 2.5e-3;
+  std::string debias_context;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     auto next = [&]() { return std::string(argv[++i]); };
@@ -83,7 +94,14 @@ int main(int argc, char** argv) {
     else if (a == "--merge-angle-deg") o.merge_angle_deg = std::stod(next());
     else if (a == "--merge-offset") o.merge_offset = std::stod(next());
     else if (a == "--merge-gap") o.merge_gap = std::stod(next());
-    else if (a == "--split-ratio") o.split_ratio = std::stod(next());
+    else if (a == "--plane-eig-max") o.plane_eig_max = std::stod(next());
+    else if (a == "--min-secondary-eig") o.min_secondary_eig = std::stod(next());
+    else if (a == "--max-planarity") o.max_planarity = std::stod(next());
+    else if (a == "--merge-criterion") o.merge_criterion = next();
+    else if (a == "--debiased") o.debiased = true;
+    else if (a == "--sensor-noise-floor-eig0") o.sensor_noise_floor_eig0 = true;
+    else if (a == "--sensor-var") o.sensor_var = std::stod(next());
+    else if (a == "--debias-context") debias_context = next();
     else if (a == "--robust-reservoir") o.robust_reservoir = std::stoul(next());
     else if (a == "--robust-ransac-dist") o.robust_ransac_dist = std::stod(next());
     else if (a == "--robust-ransac-iters") o.robust_ransac_iters = std::stoi(next());
@@ -93,6 +111,21 @@ int main(int argc, char** argv) {
   if (family.empty() || input.empty() || patches_out.empty() || summary_out.empty()) {
     std::fprintf(stderr, "missing required args\n"); return 1;
   }
+
+  if (!debias_context.empty()) {
+    // One line of 36 comma-separated numbers, row-major: R(9), P_RR(9), P_PP(9), P_RP(9).
+    std::ifstream cf(debias_context);
+    std::string line, tok;
+    std::getline(cf, line);
+    std::stringstream ss(line);
+    std::vector<double> v;
+    while (std::getline(ss, tok, ',')) v.push_back(std::stod(tok));
+    if (v.size() != 36) { std::fprintf(stderr, "--debias-context needs 36 numbers, got %zu\n", v.size()); return 1; }
+    auto m3 = [&](int off) { M3 m; for (int r = 0; r < 3; ++r) for (int c = 0; c < 3; ++c) m(r, c) = v[off + 3 * r + c]; return m; };
+    o.pose.R = m3(0); o.pose.P_RR = m3(9); o.pose.P_PP = m3(18); o.pose.P_RP = m3(27);
+  }
+  if (o.debiased && debias_context.empty())
+    std::fprintf(stderr, "warning: --debiased without --debias-context: pose correction is zero\n");
 
   std::vector<std::uint64_t> checkpoints;
   for (auto& s : splitCsvArg(checkpoints_arg)) checkpoints.push_back(std::stoull(s));
@@ -104,10 +137,10 @@ int main(int argc, char** argv) {
   patches_f << std::setprecision(17);
   patches_f << "checkpoint,patch_id,surface_id,n_children,child_ids,point_count,center_x,center_y,center_z,"
                "normal_x,normal_y,normal_z,d,eig0,eig1,eig2,planarity,bb_min_x,bb_min_y,bb_min_z,bb_max_x,bb_max_y,bb_max_z,"
-               "rejected_points,reservoir_pending\n";
+               "rejected_points,reservoir_pending,rank2\n";
   std::ofstream summary_f(summary_out);
   summary_f << "checkpoint,backend,observations_ingested,total_raw_points_ingested,patches,surfaces,"
-               "merges,splits,unmerges,cumulative_insert_ms\n";
+               "merges,splits,unmerges,cumulative_insert_ms,cells_total,cells_rank_deficient\n";
 
   std::size_t cp_idx = 0;
   std::uint64_t total_points = 0;
@@ -126,7 +159,8 @@ int main(int argc, char** argv) {
       auto snap = backend->snapshot();
       summary_f << obs_count << "," << family << "," << obs_count << "," << total_points << ","
                 << snap.patches << "," << snap.surfaces << "," << snap.merges << "," << snap.splits << ","
-                << snap.unmerges << "," << snap.insert_ms << "\n";
+                << snap.unmerges << "," << snap.insert_ms << ","
+                << snap.cells_total << "," << snap.cells_rank_deficient << "\n";
       for (const auto& p : snap.data) {
         patches_f << obs_count << "," << p.id << "," << p.surface_id << "," << p.children.size() << ",\"";
         for (std::size_t c = 0; c < p.children.size(); ++c) { if (c) patches_f << ";"; patches_f << p.children[c]; }
@@ -135,7 +169,7 @@ int main(int argc, char** argv) {
                   << p.fit.eigenvalues[0] << "," << p.fit.eigenvalues[1] << "," << p.fit.eigenvalues[2] << "," << p.fit.planarity << ","
                   << p.bb_min.x() << "," << p.bb_min.y() << "," << p.bb_min.z() << ","
                   << p.bb_max.x() << "," << p.bb_max.y() << "," << p.bb_max.z() << ","
-                  << p.rejected_points << "," << p.reservoir_pending << "\n";
+                  << p.rejected_points << "," << p.reservoir_pending << "," << (p.fit.rank2 ? 1 : 0) << "\n";
       }
       while (cp_idx < checkpoints.size() && obs_count >= checkpoints[cp_idx]) ++cp_idx;
       if (i + 1 == manifest.size()) break;

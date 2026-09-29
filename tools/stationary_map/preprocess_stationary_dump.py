@@ -23,6 +23,15 @@ behavior):
      separate, non-default option not exercised by this round's 4
      canonical/dsoff x PFN1/PFN3 cache combinations).
 
+R53 REPAIR: production's bootstrap path (src/processing/calib_processing.cpp:
+508-519) converts every retained point with state_->lidarToImu(p) = R_l2i*p + t_l2i
+BEFORE the voxel downsample, so voxel keys are formed in the IMU frame. R52 down-
+sampled in the raw sensor frame; with t_l2i = (-0.050, 0, 0.055) (ntu_viral.yaml
+extrinsics) the FIRST-mode voxel boundaries, and therefore which points survive,
+differ. This script now applies --lidar-to-imu-R/--lidar-to-imu-t after the PFN/
+finite/blind filters and before the downsample, and the cache is in the IMU frame.
+The reference map must be built from a cache in this same frame.
+
 R52 REPAIR (documented, from the original supplied script): the supplied
 version omitted the blind-radius filter entirely (a genuine production/
 harness semantic mismatch, not merely an omission of an optional feature
@@ -57,12 +66,16 @@ def apply_production_filters(x,pfn,blind_sq):
  sqn=(x*x).sum(axis=1)
  return x[sqn>=blind_sq]
 
+def to_imu(x,R,t):
+ return x@np.asarray(R,dtype=np.float64).reshape(3,3).T+np.asarray(t,dtype=np.float64)
+
 def main():
- p=argparse.ArgumentParser();p.add_argument('--input',required=True);p.add_argument('--output',required=True);p.add_argument('--pfn',type=int,required=True);p.add_argument('--ds',type=float,default=0);p.add_argument('--blind-sq',type=float,default=BLIND_SQ_DEFAULT);a=p.parse_args();os.makedirs(a.output,exist_ok=True)
+ p=argparse.ArgumentParser();p.add_argument('--input',required=True);p.add_argument('--output',required=True);p.add_argument('--pfn',type=int,required=True);p.add_argument('--ds',type=float,default=0);p.add_argument('--blind-sq',type=float,default=BLIND_SQ_DEFAULT);p.add_argument('--lidar-to-imu-R',type=float,nargs=9,default=[1,0,0,0,1,0,0,0,1]);p.add_argument('--lidar-to-imu-t',type=float,nargs=3,default=[0,0,0]);a=p.parse_args();os.makedirs(a.output,exist_ok=True)
  rows=[];H=hashlib.sha256();src=list(csv.DictReader(open(os.path.join(a.input,'manifest.csv'))))
  for r in src:
   x=np.load(os.path.join(a.input,r['file']))['xyz']
   x=apply_production_filters(x,a.pfn,a.blind_sq)
+  if len(x):x=to_imu(x,a.lidar_to_imu_R,a.lidar_to_imu_t)
   x=voxel_first(x,a.ds);fn=r['file'];np.savez_compressed(os.path.join(a.output,fn),xyz=x,timestamp=float(r['timestamp']))
   # R52: also emit a trivial flat-binary sidecar (int64 N, then N*3
   # float64 xyz) alongside the .npz -- the C++ benchmark driver
@@ -76,5 +89,5 @@ def main():
    np.array([len(x)],dtype=np.int64).tofile(bf); x.astype(np.float64).tofile(bf)
   d=hashlib.sha256(x.tobytes()).hexdigest();H.update(x.tobytes());rows.append([r['observation_id'],r['timestamp'],len(x),fn,d,r['in_calibration']])
  with open(os.path.join(a.output,'manifest.csv'),'w',newline='') as f:w=csv.writer(f);w.writerow(['observation_id','timestamp','points','file','point_sha256','in_calibration']);w.writerows(rows)
- json.dump({'pfn':a.pfn,'ds':a.ds,'blind_sq':a.blind_sq,'stream_sha256':H.hexdigest()},open(os.path.join(a.output,'metadata.json'),'w'),indent=2)
+ json.dump({'pfn':a.pfn,'ds':a.ds,'blind_sq':a.blind_sq,'lidar_to_imu_R':a.lidar_to_imu_R,'lidar_to_imu_t':a.lidar_to_imu_t,'frame':'imu','stream_sha256':H.hexdigest()},open(os.path.join(a.output,'metadata.json'),'w'),indent=2)
 if __name__=='__main__':main()
