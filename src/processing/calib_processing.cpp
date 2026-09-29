@@ -441,6 +441,7 @@ std::string CalibProc::estimateFromBuffer()
   const M3D gyro_mean_cov = covarianceOfMean(false);
   // acc_bias = true_bias + R_init^T * [0,0,9.81]; strip gravity to get true sensor bias
   const V3D true_acc_bias = acc_bias + R_init.transpose() * state_->gravity();
+  const M3D r62_R_before_alignment = state_->rot();
   state_->setCalibResult(R_init,
                          opts_.apply_gyro_bias ? gyro_bias : state_->biasGyr(),
                          opts_.apply_accel_bias ? true_acc_bias : state_->biasAcc());
@@ -451,6 +452,9 @@ std::string CalibProc::estimateFromBuffer()
     applyCalibrationDerivedP0(acc_bias, R_init, acc_mean_cov, gyro_mean_cov);
   stabilizeP0();
   state_->captureInitialCovariance(opts_.p0_mode);
+  writeGravityAlignmentDiagnostic(
+      calib_imu_samples, acc_mean_cov, gyro_mean_cov, r62_R_before_alignment,
+      R_init, *state_, true_acc_bias, opts_.apply_accel_bias, opts_.apply_gyro_bias);
   writeCalibrationP0Diagnostic(
       *state_, opts_.p0_mode, static_cast<int>(calib_imu_samples.size()),
       opts_.p0_autocov_lags, acc_mean_cov, gyro_mean_cov);
