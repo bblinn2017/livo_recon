@@ -249,3 +249,16 @@ target_link_libraries(surface_core Eigen3::Eigen)
 add_executable(test_surface_core tests/test_surface_core.cpp)
 target_link_libraries(test_surface_core surface_core)
 add_test(NAME surface_core COMMAND test_surface_core)
+
+# R63 (coding agent addition, not part of the planning agent's patch): StateGroup's s2 gravity
+# model, exercised ROS-free via #define private public (no ros::NodeHandle/loadParameters() path
+# needed for these three checks). state.cpp needs roscpp/xmlrpcpp for state.h's ros::NodeHandle/
+# XmlRpcValue types even though this test never calls ros::init() or touches a live master.
+add_library(state_lib
+  src/utils/state/state.cpp
+)
+target_include_directories(state_lib PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+target_link_libraries(state_lib Eigen3::Eigen ${catkin_LIBRARIES})
+add_executable(test_gravity_s2 tests/test_gravity_s2.cpp)
+target_link_libraries(test_gravity_s2 state_lib)
+add_test(NAME gravity_s2 COMMAND test_gravity_s2)
