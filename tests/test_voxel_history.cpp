@@ -70,19 +70,23 @@ void scenario(const std::string& mode, int max_points, bool expect_history)
   auto stats = std::make_shared<VoxelStats>();
   VoxelNode node(opts, stats, 0, V3D::Zero());
   std::vector<PlaneUpdate> updates;
-  const int nA = 60, nB = 60;
+  // R66: batch B enlarged (was 60) so the planar share of the pooled points is 60/460 and the off-plane scatter is
+  // unambiguous; VH2 printed no state when it failed in R65, so the node state is now printed before the check.
+  const int nA = 60, nB = 400;
   setCurrentFrame(1);
   node.insertPoints(planar(rng, nA), updates);
   const std::string tag = mode + " max_points=" + std::to_string(max_points);
   if (mode == "debiased") CHECK(node.plane_.isPlane(), ("VH1 planar batch gives a plane (" + tag + ")").c_str());
   setCurrentFrame(2);
   node.insertPoints(scatter(rng, nB), updates);
+  std::printf("[INFO] after batch B (%s): status=%d is_plane=%d pointsSize=%d\n", tag.c_str(),
+              static_cast<int>(node.status_), node.plane_.isPlane() ? 1 : 0, static_cast<int>(node.plane_.pointsSize()));
   CHECK(node.status_ == VoxelStatus::PARENT, ("VH2 voxel subdivided (" + tag + ")").c_str());
   int sum = 0;
   for (int i = 0; i < 8; ++i)
     if (node.leaves_[i]) sum += node.leaves_[i]->plane_.pointsSize();
   if (expect_history)
-    CHECK(sum == nA + nB, ("VH3 children hold all history " + std::to_string(sum) + " == 120 (" + tag + ")").c_str());
+    CHECK(sum == nA + nB, ("VH3 children hold all history " + std::to_string(sum) + " == " + std::to_string(nA + nB) + " (" + tag + ")").c_str());
   else
     CHECK(sum >= nB, ("VH5 control children hold at least the last batch, got " + std::to_string(sum) + " (" + tag + ")").c_str());
   CHECK(node.points_.empty(), ("VH4 parent points_ cleared (" + tag + ")").c_str());

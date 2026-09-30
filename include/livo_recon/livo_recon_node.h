@@ -116,6 +116,9 @@ private:
   // once, in updateMaps() (called after estimateState() fully returns, so
   // after BOTH LIO and VIO have corrected the state).
   bool insert_map_after_lio_ = false;
+  // R66 item 0b: per-frame window log (diagnostics/frame_window_log, default false).
+  bool frame_window_log_ = false;
+  std::size_t frame_window_index_ = 0;
 };
 
 }  // namespace livo_recon

@@ -3,6 +3,7 @@
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/lio/voxelplane.h"
+#include "livo_recon/diagnostics/r66_writers.h"
 
 #include <memory>
 #include <stdexcept>
@@ -132,6 +133,7 @@ void LivoReconNode::loadParameters()
   paramWarn<double>(pnh_, "outputs/auto_terminate_idle_secs", auto_terminate_idle_secs_, 5.0);
 
   paramWarn<bool>(pnh_, "common/insert_map_after_lio", insert_map_after_lio_, false);
+  paramWarn<bool>(pnh_, "diagnostics/frame_window_log", frame_window_log_, false);
   ctx_.printer->print(PrintCategory::PARAMS,
       std::string("[params/common]  insert_map_after_lio: ") +
       (insert_map_after_lio_ ? "true" : "false"));
@@ -192,6 +194,9 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
   // downsamplePoints() used to guarantee before this deskewing logic
   // moved out of ImuProc).
   lio_proc_->deskewAndDownsample(mg);
+  if (frame_window_log_)
+    writeFrameWindowRow(++frame_window_index_, mg.image.t + ctx_.data_queues->start_time,
+                        mg.lidar_points.size(), mg.points.size(), mg.n_imu_samples);
 
   // mg.tracked_frame was already populated by CbkProc::syncMeasures()
   // before this measure group ever reached popMeasureGroup() (task #145)

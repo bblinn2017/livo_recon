@@ -21,6 +21,13 @@ struct LioProcCoupledOptions
   // Default false preserves every existing round's full-diagnostic behavior.
   bool minimal_diagnostics = false;
 
+  // R66 (C-D4): "throw" (default, existing behaviour) lets a solver exception abort the node; "skip_scan" catches it,
+  // restores the state to its value at the start of the scan, logs it in coupled_scan_status.csv and continues.
+  std::string on_solver_error = "throw";
+  // R66 (C-D3): multiplier on every Gauss-Newton delta (1.0 = the existing full step, bit-identical). Damps the
+  // state step only; the posterior covariance is still the full-step one (a stated inconsistency of this test).
+  double step_scale = 1.0;
+
   JointKnotResidualTime residualTime() const {
     return residual_evaluation_time == "tail"
         ? JointKnotResidualTime::Tail
@@ -40,6 +47,8 @@ public:
   std::string processLIO(MeasureGroup& mg) override;
 
 private:
+  std::string processLIOBody(MeasureGroup& mg);
+  long solver_errors_skipped_ = 0;
   const char* firstFrameArchitectureName() const override { return "coupled_joint_knots"; }
   void makeEvaluationPoints(const MeasureGroup& mg,
                             std::vector<PointXYZCov>& points,

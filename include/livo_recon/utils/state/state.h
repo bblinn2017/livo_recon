@@ -77,6 +77,9 @@ public:
   }
   void setPropagatedState(const M3D& rot, const V3D& pos, const V3D& vel);
   Eigen::MatrixXd& covMut() { return cov_; }
+  // R66: mean-bias writers, used only by the opt-in Gauss-Markov bias model (imu/process_noise/bias_model).
+  V3D& biasGyrMut() { return bias_gyr_; }
+  V3D& biasAccMut() { return bias_acc_; }
   void applyDelta(const Eigen::VectorXd& dx);
 
   // Manifold-consistent (SO(3)-aware for rotation, plain subtraction

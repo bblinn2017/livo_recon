@@ -2,6 +2,7 @@
 
 #include "livo_recon/diagnostics/init_consistency.h"
 #include "livo_recon/diagnostics/joint_knots/joint_knot_diagnostic_writer.h"
+#include "livo_recon/diagnostics/r66_writers.h"
 #include "livo_recon/diagnostics/stationary_diagnostic_writer.h"
 #include "livo_recon/lio/residual_redundancy.h"
 #include "livo_recon/map/voxelmap.h"
@@ -14,6 +15,42 @@ namespace livo_recon
 {
 
 std::string LioProcCoupled::processLIO(MeasureGroup& mg)
+{
+  const int iterations_before = iterations_;
+  const double t_abs = mg.image.t + data_queues_->start_time;
+  std::string report;
+  if (copts_.on_solver_error == "throw")
+  {
+    report = processLIOBody(mg);
+    writeCoupledScanStatus(static_cast<long>(voxel_map_->frame_idx_), t_abs, report,
+                           iterations_ - iterations_before, 0, std::string());
+    return report;
+  }
+  const StateGroup snapshot = *state_;
+  try
+  {
+    report = processLIOBody(mg);
+    writeCoupledScanStatus(static_cast<long>(voxel_map_->frame_idx_), t_abs, report,
+                           iterations_ - iterations_before, 0, std::string());
+  }
+  catch (const std::exception& e)
+  {
+    *state_ = snapshot;
+    mg.pos_after_lio = state_->pos();
+    mg.rot_after_lio = state_->rot();
+    mg.vel_after_lio = state_->vel();
+    mg.cov_after_lio = state_->cov();
+    ++solver_errors_skipped_;
+    report = "joint_knots:solver_error_skipped";
+    ROS_ERROR_STREAM("[coupled] solver error on scan " << voxel_map_->frame_idx_ << ", state restored, scan skipped: "
+                     << e.what());
+    writeCoupledScanStatus(static_cast<long>(voxel_map_->frame_idx_), t_abs, report,
+                           iterations_ - iterations_before, 1, e.what());
+  }
+  return report;
+}
+
+std::string LioProcCoupled::processLIOBody(MeasureGroup& mg)
 {
   mg.prior_pos = state_->pos();
   mg.prior_rot = state_->rot();
@@ -103,7 +140,13 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
         evaluated_points, copts_.residualTime(), opts_.residual_redundancy);
     // Intentionally no clipping, blockwise limiting or damping: this is the
     // same full-step fixed-prior MAP convention used by the ordinary IEKF.
-    trajectory_.applyDelta(last_solve_.delta);
+    if (copts_.step_scale == 1.0)
+      trajectory_.applyDelta(last_solve_.delta);
+    else
+    {
+      const Eigen::VectorXd scaled_delta = last_solve_.delta * copts_.step_scale;
+      trajectory_.applyDelta(scaled_delta);
+    }
     commitTrajectoryToState();
     any_solved = true;
     ++completed;

@@ -40,6 +40,11 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(true, "estimator/mode=coupled",
                    "estimator/coupled/minimal_diagnostics",
                    copts_.minimal_diagnostics, false);
+  cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/on_solver_error",
+                 copts_.on_solver_error, "throw", {"throw", "skip_scan"});
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/step_scale", copts_.step_scale, 1.0);
+  if (!(copts_.step_scale > 0.0 && copts_.step_scale <= 1.0))
+    cfg.requireCombination("estimator/coupled/step_scale must be in (0, 1]");
   if (copts_.knot_count < 2)
     cfg.requireCombination("estimator/coupled/knot_count must be at least 2");
   if (state_->gravityS2())
@@ -84,7 +89,10 @@ std::string LioProcCoupled::engagementReport() const
       << " lidar_information=" << opts_.residual_redundancy.mode
       << " lidar_correlation_group=matched_plane_id"
       << " lidar_correlation_rho=" << opts_.residual_redundancy.rho
-      << " clipping=none";
+      << " clipping=none"
+      << " on_solver_error=" << copts_.on_solver_error
+      << " solver_errors_skipped=" << solver_errors_skipped_
+      << " step_scale=" << copts_.step_scale;
   return out.str();
 }
 

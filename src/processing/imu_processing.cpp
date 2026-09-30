@@ -158,6 +158,39 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
           "is always seeded from the first IMU sample");
   }
   paramWarn<bool>(pnh, "eval/imu_first_scans_en", opts_.first_scans_log_en, false);
+  // R66: bias process model (dependency structure: the four Gauss-Markov numbers exist only under gauss_markov,
+  // the random-walk rate keys only under random_walk; a key out of scope is an error, not ignored).
+  paramWarn<std::string>(pnh, "imu/process_noise/bias_model", opts_.bias_model, std::string("random_walk"));
+  {
+    const char* gm_keys[4] = {"imu/process_noise/gauss_markov/gyro/correlation_time_s",
+                              "imu/process_noise/gauss_markov/gyro/sigma",
+                              "imu/process_noise/gauss_markov/accel/correlation_time_s",
+                              "imu/process_noise/gauss_markov/accel/sigma"};
+    for (const char* k : gm_keys) markParamConsumed(k);
+    if (opts_.bias_model != "random_walk" && opts_.bias_model != "gauss_markov")
+      throw std::invalid_argument("imu/process_noise/bias_model must be random_walk or gauss_markov");
+    if (opts_.bias_model == "random_walk")
+    {
+      for (const char* k : gm_keys)
+        if (pnh.hasParam(k))
+          throw std::invalid_argument(std::string(k) + " is set but imu/process_noise/bias_model=random_walk");
+    }
+    else
+    {
+      for (const char* k : {"imu/process_noise/bias_random_walk/gyro_variance_rate",
+                            "imu/process_noise/bias_random_walk/accel_variance_rate"})
+        if (pnh.hasParam(k))
+          throw std::invalid_argument(std::string(k) + " is set but imu/process_noise/bias_model=gauss_markov");
+      double* dst[4] = {&opts_.gm_gyr_tau, &opts_.gm_gyr_sigma, &opts_.gm_acc_tau, &opts_.gm_acc_sigma};
+      for (int i = 0; i < 4; ++i)
+      {
+        if (!pnh.getParam(gm_keys[i], *dst[i]))
+          throw std::invalid_argument(std::string(gm_keys[i]) + " is required when imu/process_noise/bias_model=gauss_markov");
+        if (!std::isfinite(*dst[i]) || *dst[i] <= 0.0)
+          throw std::invalid_argument(std::string(gm_keys[i]) + " must be finite and > 0");
+      }
+    }
+  }
   if (opts_.process_noise_model != "fixed" &&
       opts_.process_noise_model != "isotropic" &&
       opts_.process_noise_model != "axis_aware")
@@ -223,6 +256,9 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  motion/gyro_floor_scale:" << opts_.motion_gyr_floor_scale
       << "\n  motion/acc_cap:       " << opts_.motion_acc_max_dynamic_variance
       << "\n  motion/gyro_cap:      " << opts_.motion_gyr_max_dynamic_variance
+      << "\n  bias_model:           " << opts_.bias_model
+      << "  gm gyro tau/sigma=" << opts_.gm_gyr_tau << "/" << opts_.gm_gyr_sigma
+      << "  gm accel tau/sigma=" << opts_.gm_acc_tau << "/" << opts_.gm_acc_sigma
       << "\n  first_scan_head:      always seeded from first sample (R63)"
       << "\n  log_qhat_en:          " << (opts_.log_qhat_en ? "true" : "false")
       << "\n  keep_raw_samples:     " << (opts_.keep_raw_samples ? "true" : "false");
@@ -318,6 +354,20 @@ void ImuProc::propagate(MeasureGroup& mg)
     ROS_INFO_STREAM("[imu] first interval head seeded from first sample (engagement "
                     << first_head_seed_count_ << "): head acc=["
                     << last_imu_sample_.acc.transpose() << "]");
+  }
+  const bool gm_on = opts_.bias_model == "gauss_markov";
+  if (gm_on && !gm_ref_set_)
+  {
+    gm_ref_set_ = true;
+    gm_ref_gyr_ = state_->biasGyr();
+    gm_ref_acc_ = state_->biasAcc();
+    ROS_INFO_STREAM("[imu] gauss_markov bias model ON: reference (calibrated) bias gyr=["
+                    << gm_ref_gyr_.transpose() << "] acc=[" << gm_ref_acc_.transpose()
+                    << "]  gyro tau=" << opts_.gm_gyr_tau << " s sigma=" << opts_.gm_gyr_sigma
+                    << " rad/s  accel tau=" << opts_.gm_acc_tau << " s sigma=" << opts_.gm_acc_sigma
+                    << " m/s^2  (equivalent short-time random-walk rates 2 sigma^2/tau: gyro "
+                    << 2.0 * opts_.gm_gyr_sigma * opts_.gm_gyr_sigma / opts_.gm_gyr_tau << " (rad/s)^2/s, accel "
+                    << 2.0 * opts_.gm_acc_sigma * opts_.gm_acc_sigma / opts_.gm_acc_tau << " (m/s^2)^2/s)");
   }
   ImuSample head = last_imu_sample_;
   auto it = mg.imu_samples.begin();
@@ -498,15 +548,47 @@ void ImuProc::propagate(MeasureGroup& mg)
     cov_w.block<3,3>(StateGroup::idxV(), StateGroup::idxV()) =
         opts_.q_alpha_acc * acc_noise_world * dt2;
 
-    // Bias Gyro random-walk noise
-    if (state_->estBG())
-      cov_w.block(state_->idxBG(), state_->idxBG(), 3, 3).diagonal() =
-          (opts_.q_alpha_bias * state_->covBiasGyr() * dt).eval();
+    // R66: Gauss-Markov bias factors (1.0 / unused under random_walk).
+    double gm_a_gyr = 1.0, gm_a_acc = 1.0;
+    if (gm_on)
+    {
+      gm_a_gyr = std::exp(-dt / opts_.gm_gyr_tau);
+      gm_a_acc = std::exp(-dt / opts_.gm_acc_tau);
+      if (state_->estBG())
+        F_x.block<3,3>(state_->idxBG(), state_->idxBG()) = M3D::Identity() * gm_a_gyr;
+      if (state_->estBA())
+        F_x.block<3,3>(state_->idxBA(), state_->idxBA()) = M3D::Identity() * gm_a_acc;
+    }
 
-    // Bias Acc random-walk noise
+    // Bias Gyro noise (random walk, or Gauss-Markov driving noise)
+    if (state_->estBG())
+    {
+      if (gm_on)
+      {
+        const double q_g = opts_.q_alpha_bias * opts_.gm_gyr_sigma * opts_.gm_gyr_sigma *
+                           (1.0 - gm_a_gyr * gm_a_gyr);
+        cov_w.block(state_->idxBG(), state_->idxBG(), 3, 3).diagonal() = V3D::Constant(q_g);
+        gm_max_q_gyr_ = std::max(gm_max_q_gyr_, q_g);
+      }
+      else
+        cov_w.block(state_->idxBG(), state_->idxBG(), 3, 3).diagonal() =
+            (opts_.q_alpha_bias * state_->covBiasGyr() * dt).eval();
+    }
+
+    // Bias Acc noise (random walk, or Gauss-Markov driving noise)
     if (state_->estBA())
-      cov_w.block(state_->idxBA(), state_->idxBA(), 3, 3).diagonal() =
-          (opts_.q_alpha_bias * state_->covBiasAcc() * dt).eval();
+    {
+      if (gm_on)
+      {
+        const double q_a = opts_.q_alpha_bias * opts_.gm_acc_sigma * opts_.gm_acc_sigma *
+                           (1.0 - gm_a_acc * gm_a_acc);
+        cov_w.block(state_->idxBA(), state_->idxBA(), 3, 3).diagonal() = V3D::Constant(q_a);
+        gm_max_q_acc_ = std::max(gm_max_q_acc_, q_a);
+      }
+      else
+        cov_w.block(state_->idxBA(), state_->idxBA(), 3, 3).diagonal() =
+            (opts_.q_alpha_bias * state_->covBiasAcc() * dt).eval();
+    }
 
     if (opts_.second_order)
     {
@@ -565,6 +647,19 @@ void ImuProc::propagate(MeasureGroup& mg)
     mg.imu_state_transitions.push_back(F_x);
     mg.imu_process_covariances.push_back(cov_w);
 
+    // R66: Gauss-Markov mean reversion of the bias estimate toward the calibrated bias, after this step used the
+    // bias (the error-state F block above is the matching e^{-dt/tau}).
+    if (gm_on)
+    {
+      if (state_->estBG())
+        state_->biasGyrMut() = gm_ref_gyr_ + gm_a_gyr * (state_->biasGyr() - gm_ref_gyr_);
+      if (state_->estBA())
+        state_->biasAccMut() = gm_ref_acc_ + gm_a_acc * (state_->biasAcc() - gm_ref_acc_);
+      ++gm_steps_;
+      gm_max_dev_gyr_ = std::max(gm_max_dev_gyr_, (state_->biasGyr() - gm_ref_gyr_).norm());
+      gm_max_dev_acc_ = std::max(gm_max_dev_acc_, (state_->biasAcc() - gm_ref_acc_).norm());
+    }
+
     head = tail;
 
     if (is_last)
@@ -593,6 +688,12 @@ void ImuProc::propagate(MeasureGroup& mg)
       state_->setRelCovProfile(std::move(head_times), std::move(blocks));
     }
   }
+
+  if (gm_on && (propagation_index_ == 1 || propagation_index_ % 500 == 0))
+    ROS_INFO_STREAM("[imu] gauss_markov engagement: steps=" << gm_steps_ << " max Q bias entry gyr=" << gm_max_q_gyr_
+                    << " acc=" << gm_max_q_acc_ << " max |b-mu| gyr=" << gm_max_dev_gyr_ << " acc=" << gm_max_dev_acc_);
+  if (gm_on && propagation_index_ == 200 && (gm_max_q_gyr_ <= 0.0 && gm_max_q_acc_ <= 0.0))
+    ROS_ERROR_STREAM("[imu] gauss_markov bias model is ON but injected no bias process noise (inert-when-on)");
 
   last_imu_sample_ = head;
   mg.n_imu_samples = static_cast<int>(mg.imu_samples.size());

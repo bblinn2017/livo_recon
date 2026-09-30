@@ -3,6 +3,7 @@
 #include "livo_recon/processing/lio_base.h"
 #include "livo_recon/lio/spline.h"
 #include "livo_recon/lio/adaptive_q.h"
+#include "livo_recon/lio/akf_q.h"
 #include "livo_recon/diagnostics/eval/nees_logger.h"
 
 #include <array>
@@ -115,6 +116,7 @@ private:
   // validate it; AdaptiveQOptions::use_noise_floor is derived from it.
   std::string adaptive_q_floor_mode_ = "allan";
   AdaptiveQ  adaptive_q_;
+  AkfQ       akf_q_;   // R66 opt-in AKF-style Q adaptation (akf_q/enable, default false)
   bool       adaptive_q_primed_ = false;
   SplineImuResidualStats last_spline_stats_;
   int        spline_fit_fail_count_ = 0;
@@ -126,6 +128,8 @@ private:
   // abut in time, so the last (t1) sample of one scan's finalized spline
   // and the first (t0) sample of the next MEASURE the inter-scan
   // discontinuity.
+  std::string head_pin_update_ = "on_ok";   // R66 spline/head_pin_update
+  long  head_pin_forced_count_ = 0;          // R66 engagement counter (failed-fit frames re-pinned)
   bool  prev_scan_end_valid_ = false;
   V3D   prev_scan_end_pos_   = V3D::Zero();
   M3D   prev_scan_end_rot_   = M3D::Identity();

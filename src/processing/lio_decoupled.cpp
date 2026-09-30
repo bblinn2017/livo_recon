@@ -373,6 +373,10 @@ std::string LioProcDecoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.mode("spline/mode", dopts_.spline.mode, "spline",
            { "raw_imu", "spline", "spline+refine" });
   const bool sp = dopts_.spline.splineOn();
+  // R66 (S-D1): head pin after a failed fit. "on_ok" (default, existing behaviour, bit-identical) updates the
+  // pin only after a successful fit, so after one failure the next head is pinned to a stale earlier pose;
+  // "always" updates it from the current state every frame.
+  cfg.nestedMode(sp, "spline/mode", "spline/head_pin_update", head_pin_update_, "on_ok", { "on_ok", "always" });
   if (state_->gravityS2() && dopts_.spline.mode != "raw_imu")
     cfg.requireCombination(
         "state/gravity_model=s2 is implemented only with spline/mode=raw_imu: "
@@ -457,6 +461,28 @@ std::string LioProcDecoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<bool>(aq, "adaptive_q/enable", "adaptive_q/log_en", dopts_.adaptive_q.log_en, false);
   adaptive_q_.configure(dopts_.adaptive_q);
 
+  // ── R66: AKF-style process-noise adaptation (opt-in) ─────────────────
+  {
+    AkfQOptions ak;
+    cfg.get<bool>("akf_q/enable", ak.enable, false);
+    cfg.nested<double>(ak.enable, "akf_q/enable", "akf_q/forgetting", ak.forgetting, 0.95);
+    cfg.nested<int>(ak.enable, "akf_q/enable", "akf_q/warmup_frames", ak.warmup_frames, 20);
+    cfg.nested<double>(ak.enable, "akf_q/enable", "akf_q/bounds/min_ratio", ak.min_ratio, 0.01);
+    cfg.nested<double>(ak.enable, "akf_q/enable", "akf_q/bounds/max_ratio", ak.max_ratio, 100.0);
+    std::string pn_model = "fixed";
+    pnh.param<std::string>("imu/process_noise/model", pn_model, std::string("fixed"));
+    if ((ak.enable || dopts_.adaptive_q.enable) && pn_model != "fixed")
+      throw std::invalid_argument(
+          "akf_q/enable and adaptive_q/enable write StateGroup::setNoiseParams, which only imu/process_noise/model=fixed "
+          "reads; refused under model=" + pn_model + " (the adaptation would be inert)");
+    if (ak.enable && dopts_.adaptive_q.enable)
+      throw std::invalid_argument("akf_q/enable and adaptive_q/enable both write the process noise; enable one");
+    if (ak.enable && (!(ak.forgetting >= 0.0 && ak.forgetting < 1.0) || ak.warmup_frames < 0 ||
+                      !(ak.min_ratio > 0.0) || !(ak.max_ratio >= ak.min_ratio)))
+      throw std::invalid_argument("akf_q/* values out of range (forgetting in [0,1), warmup>=0, 0<min_ratio<=max_ratio)");
+    akf_q_.configure(ak);
+  }
+
   // Every spline/* and adaptive_q/* key is read by the resolver above and by
   // nothing else, so anything left over in those namespaces is a key nobody
   // consumes -- a rename this config was never migrated through, or a typo.
@@ -464,7 +490,7 @@ std::string LioProcDecoupled::loadParameters(ros::NodeHandle& pnh)
   // read by paramWarn() in voxelmap.cpp, so they are unclaimed here and would
   // be reported as dead when they are merely read elsewhere. Widen this only
   // as those move onto a resolver.
-  return finalizeConfig(cfg, { "spline", "adaptive_q", "lio/ekf", "voxel_map" });
+  return finalizeConfig(cfg, { "spline", "adaptive_q", "akf_q", "lio/ekf", "voxel_map" });
 }
 
 // LIO Processing
@@ -1085,6 +1111,17 @@ void LioProcDecoupled::finalizeSplineAndQ(MeasureGroup& mg)
     }
   }
 
+  if (!spline_ok_ && head_pin_update_ == "always")
+  {
+    prev_scan_end_pos_ = state_->pos();
+    prev_scan_end_rot_ = state_->rot();
+    prev_scan_end_vel_ = state_->vel();
+    prev_scan_end_valid_ = true;
+    ++head_pin_forced_count_;
+    if (head_pin_forced_count_ == 1 || head_pin_forced_count_ % 100 == 0)
+      ROS_INFO_STREAM("[spline] head_pin_update=always engaged on a failed-fit frame (count " << head_pin_forced_count_ << ")");
+  }
+
   if (dopts_.adaptive_q.enable)
   {
     if (!adaptive_q_primed_)
@@ -1338,6 +1375,11 @@ std::string LioProcDecoupled::engagementReport() const
       << " of frame_count=" << spline_frame_count_ << ", by cause:";
     for (std::size_t c = 1; c < spline_fail_cause_count_.size(); ++c)
       o << "\n    " << kCauseNames[c] << '=' << spline_fail_cause_count_[c];
+    o << "\n  spline head_pin_update=" << head_pin_update_ << " forced_repin_count=" << head_pin_forced_count_;
+    if (akf_q_.enabled())
+      o << "\n  akf_q frames=" << akf_q_.frames() << " applied=" << akf_q_.appliedFrames() << " clamped="
+        << akf_q_.clampedFrames() << " applied acc [" << akf_q_.minAcc() << "," << akf_q_.maxAcc() << "] gyr ["
+        << akf_q_.minGyr() << "," << akf_q_.maxGyr() << "]";
     o << "\n  spline chart_guard_warn_count=" << spline_chart_guard_warn_count_
       << "  (fits that exceeded CHART_MAX_PHI_RAD but were NOT refused, "
          "CQ-22 item 4 -- a nonzero count here is a parameterisation finding, "
@@ -1955,6 +1997,28 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
     // see finalizeSplineAndQ()'s own doc comment for why measuring earlier
     // would contaminate the statistic with this frame's correction error.
     finalizeSplineAndQ(mg);
+
+    // R66: AKF-style Q adaptation from this frame's state correction (see lio/akf_q.h for the derivation and its
+    // limits). Reads the same correction dx as the T7-a block below but does not depend on imu/log_qhat_en.
+    if (akf_q_.enabled() && !residuals_.empty() && !mg.poses.empty())
+    {
+      if (!akf_q_.primed())
+        akf_q_.setNominal(state_->varAcc().mean(), state_->varGyr().mean());
+      const Eigen::VectorXd dxa = state_->boxminusFromPropagat(state_propagat_);
+      double sum_dt2 = 0.0;
+      for (const auto& ps : mg.poses) sum_dt2 += ps.dt * ps.dt;
+      const double dtheta_sq = dxa.segment<3>(StateGroup::idxR()).squaredNorm();
+      const double dv_sq = dxa.segment<3>(StateGroup::idxV()).squaredNorm();
+      if (akf_q_.update(static_cast<long>(voxel_map_->frame_idx_), mg.image.t + data_queues_->start_time,
+                        static_cast<int>(mg.poses.size()), sum_dt2, dtheta_sq, dv_sq))
+        state_->setNoiseParams(V3D::Constant(akf_q_.varAcc()), V3D::Constant(akf_q_.varGyr()));
+      if (akf_q_.frames() == 400 && akf_q_.appliedFrames() == 0)
+        ROS_ERROR_STREAM("[akf_q] enabled but no value was applied after 400 frames (inert-when-on)");
+      if (akf_q_.frames() % 500 == 0)
+        ROS_INFO_STREAM("[akf_q] engagement: frames=" << akf_q_.frames() << " applied=" << akf_q_.appliedFrames()
+                        << " clamped=" << akf_q_.clampedFrames() << " applied acc range [" << akf_q_.minAcc() << ","
+                        << akf_q_.maxAcc() << "] gyr range [" << akf_q_.minGyr() << "," << akf_q_.maxGyr() << "]");
+    }
 
     // T7-a. dx must be read here and not inside the loop: it is the FRAME's
     // correction, and reading it mid-iteration would report one Gauss-Newton
