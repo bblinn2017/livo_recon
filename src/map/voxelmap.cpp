@@ -212,6 +212,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   { double sigma_num; paramWarn<double>(pnh, "voxel_map/residual/sigma_num", sigma_num, 3.); opts_->sigma_num_squared = sigma_num * sigma_num; }
   paramWarn<double>(pnh, "voxel_map/residual/max_radius",  opts_->max_radius,          3.);
   paramWarn<bool>(pnh, "voxel_map/residual/pose_cov_in_sigma", opts_->pose_cov_in_sigma, false);
+  paramWarn<bool>(pnh, "voxel_map/point_cov_stats_en", opts_->point_cov_stats_en, false);   // R65
   paramWarn<bool>(pnh, "voxel_map/plane/log_debug_en", opts_->log_debug_en, false);
   paramWarn<bool>(pnh, "voxel_map/plane/plane_fit_reasons_en", opts_->plane_fit_reasons_en, false);
   paramWarn<int>(pnh, "voxel_map/plane/plane_fit_trace_frames", opts_->plane_fit_trace_frames, 0);
@@ -373,6 +374,9 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     cfg.mode("voxel_map/plane/plane_fit_pose_cov_mode",
              opts_->plane_fit_pose_cov_mode, "combined",
              { "combined", "sensor_only" });
+    // R65: eigengap-denominator rejection on the debiased path (default true = R64).
+    cfg.nested<bool>(opts_->plane_fit_mode == "debiased" && eigengap, "voxel_map/plane/plane_fit_mode=debiased,plane_var_mode=eigengap",
+                     "voxel_map/plane/debias_denominator_guard", opts_->debias_denominator_guard, true);
     // R64: debiasing arithmetic variant; only meaningful on the debiased path.
     cfg.nestedMode(opts_->plane_fit_mode == "debiased", "voxel_map/plane/plane_fit_mode=debiased",
                    "voxel_map/plane/debias_mode", opts_->debias_mode, "full",
@@ -610,10 +614,24 @@ void VoxelMap::updateMapInternal(MeasureGroup& mg, bool advance_live_frame) {
         // own residual-weighting propagation) adds `sensor_cov + pos_cov`
         // explicitly at the point of use. Matches gate()'s own
         // WorldPointCov, which already kept these separate.
-        pts_world_[i].pos_cov = state_->poseCovAt(map_pts[i].point);
+        pts_world_[i].pos_cov = state_->poseCovAtPoint(map_pts[i].point, map_pts[i].t, true);   // R65: default path == poseCovAt
         thread_keys_[omp_get_thread_num()].emplace_back(
           worldToKey(pts_world_[i].point), i);
       }
+    }
+
+    if (opts_->point_cov_stats_en && np > 0) {   // R65 (F-169): write-only per-insertion statistics of the per-point pose covariance
+      double sum = 0.0, mn = 1e300, mx = 0.0;
+      for (int i = 0; i < np; ++i) {
+        const double tr = pts_world_[i].pos_cov.trace();
+        sum += tr; mn = std::min(mn, tr); mx = std::max(mx, tr);
+      }
+      static PersistentLogStream pcs_log("point_cov_stats.csv");
+      bool pcs_first;
+      std::ofstream& pcs = pcs_log.stream(&pcs_first);
+      if (pcs_first) pcs << "frame,n_points,mean_trace_pos_cov,min_trace_pos_cov,max_trace_pos_cov\n";
+      pcs << frame_idx_ << ',' << np << ',' << std::setprecision(10) << sum / np << ',' << mn << ',' << mx << "\n";
+      pcs.flush();
     }
 
     {

@@ -269,3 +269,14 @@ add_executable(test_debias_modes tests/test_debias_modes.cpp src/lio/voxelplane.
 target_include_directories(test_debias_modes PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
 target_link_libraries(test_debias_modes ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
 add_test(NAME debias_modes COMMAND test_debias_modes)
+
+# R65 (planning agent's patch, section 4 of R65_INSTRUCTIONS.md): per-point pose covariance and
+# voxel-history unit tests.
+add_executable(test_point_cov tests/test_point_cov.cpp)
+target_link_libraries(test_point_cov state_lib)
+add_test(NAME point_cov COMMAND test_point_cov)
+
+add_executable(test_voxel_history tests/test_voxel_history.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
+target_include_directories(test_voxel_history PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+target_link_libraries(test_voxel_history ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
+add_test(NAME voxel_history COMMAND test_voxel_history)

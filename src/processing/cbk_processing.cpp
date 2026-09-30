@@ -7,6 +7,11 @@
 #include <chrono>
 #include <fstream>
 #include <iomanip>
+#include <cstdint>
+#include <functional>
+#include <mutex>
+#include <stdexcept>
+#include <random>
 #include <sstream>
 
 namespace livo_recon
@@ -100,6 +105,11 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<std::string>(pnh, "data_queues/sync_debug_log_path", opts_.sync_debug_log_path,
                           debugLogPath("livo_recon_sync_debug.txt"));
   paramWarn<bool>(pnh, "data_queues/log_raw_point_count", opts_.log_raw_point_count, false);
+  paramWarn<bool>(pnh, "data_queues/log_sensor_stamps", opts_.log_sensor_stamps, false);   // R65
+  paramWarn<double>(pnh, "cbk/lidar/perturb_std_m", opts_.perturb_std_m, 0.0);               // R65
+  paramWarn<int>(pnh, "cbk/lidar/perturb_seed", opts_.perturb_seed, 0);                       // R65
+  if (!(opts_.perturb_std_m >= 0.0))
+    throw std::invalid_argument("cbk/lidar/perturb_std_m must be >= 0");
   paramWarn<int>(pnh, "preprocess/image_subsample_n", opts_.image_subsample_n, 1);
 
   // Ground-truth topic ingestion -- see CbkProcOptions::evo_enable's doc
@@ -145,6 +155,33 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
 
 const CbkProcOptions& CbkProc::opts() const { return opts_; }
 
+namespace
+{
+// R65: write-only stamp/count log (see CbkProcOptions::log_sensor_stamps).
+void logSensorStamp(char kind, double stamp, std::size_t n_raw, std::size_t n_kept)
+{
+  static std::mutex mtx;
+  std::lock_guard<std::mutex> lock(mtx);
+  static PersistentLogStream log("sensor_stamps.csv");
+  bool first;
+  std::ofstream& ofs = log.stream(&first);
+  if (first) ofs << "kind,stamp,n_raw,n_kept\n";
+  ofs << kind << ',' << std::setprecision(17) << stamp << ',' << n_raw << ',' << n_kept << "\n";
+  ofs.flush();
+}
+
+// R65: seeded sub-noise perturbation of kept points (see CbkProcOptions::perturb_std_m).
+void perturbPoints(std::vector<PointXYZT>& points, double scan_time, double std_m, int seed)
+{
+  if (!(std_m > 0.0)) return;
+  const std::size_t stamp_bits = std::hash<double>()(scan_time);
+  std::mt19937_64 rng(static_cast<std::uint64_t>(seed) * 0x9E3779B97F4A7C15ULL ^ static_cast<std::uint64_t>(stamp_bits));
+  std::normal_distribution<double> nd(0.0, std_m);
+  for (auto& pt : points)
+    pt.p += V3D(nd(rng), nd(rng), nd(rng));
+}
+}  // namespace
+
 void CbkProc::imageCallback(const sensor_msgs::ImageConstPtr& msg)
 {
   // Generalized frame-rate subsampling -- ported from FAST-LIVO2's
@@ -165,6 +202,7 @@ void CbkProc::imageCallback(const sensor_msgs::ImageConstPtr& msg)
     return;
   }
 
+  if (opts_.log_sensor_stamps) logSensorStamp('I', img_time, 0, 0);   // R65
   if (opts_.log_sync_debug && !logged_first_img_arrival_)
   {
     logged_first_img_arrival_ = true;
@@ -213,6 +251,8 @@ void CbkProc::lidarCallbackMsg(const livox_ros_driver::CustomMsg::ConstPtr& msg)
   std::vector<PointXYZT> points = pointsFromLivoxMsg(
       *msg, scan_time, opts_.tag_mask, opts_.tag_max_keep, opts_.blind_sqr, measures_,
       opts_.point_filter_num);
+  if (opts_.log_sensor_stamps) logSensorStamp('L', scan_time, static_cast<std::size_t>(msg->point_num), points.size());   // R65
+  perturbPoints(points, scan_time, opts_.perturb_std_m, opts_.perturb_seed);                                               // R65
 
   // See CbkProcOptions::dry_run_point_filter_num's doc comment -- reuses
   // the SAME raw msg, decimated a second time at a different rate.
@@ -263,6 +303,9 @@ void CbkProc::lidarCallbackPcl(const sensor_msgs::PointCloud2::ConstPtr& msg)
 
   std::vector<PointXYZT> points = pointsFromPointCloud2(
       *msg, scan_time, opts_.blind_sqr, measures_, opts_.point_filter_num);
+  if (opts_.log_sensor_stamps)
+    logSensorStamp('L', scan_time, static_cast<std::size_t>(msg->width) * static_cast<std::size_t>(msg->height), points.size());   // R65
+  perturbPoints(points, scan_time, opts_.perturb_std_m, opts_.perturb_seed);                                                     // R65
 
   // See lidarCallbackMsg()'s matching comment.
   if (opts_.dry_run_point_filter_num > 0)

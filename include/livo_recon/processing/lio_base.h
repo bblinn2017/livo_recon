@@ -87,6 +87,12 @@ struct LioProcOptions
   // = off, bit-identical. Tests whether the first LiDAR updates cause the scan 1-10 excursion.
   int startup_hold_scans = 0;
 
+  // R65 (F-128/F-135). For LIO scans with frame index 1..bootstrap_inflate_scans every admitted residual's sigma_squared is
+  // multiplied by bootstrap_inflate_factor (measurement noise inflated while the map is only a few scans old). 0 scans (default)
+  // = off, bit-identical. factor must be >= 1.
+  int    bootstrap_inflate_scans  = 0;
+  double bootstrap_inflate_factor = 1.0;
+
   // The residual model has one independent control and one direct
   // per-VoxelPlane covariance marginalization. Failed collapse, count, and
   // conditioning heuristics were removed; see docs/RESIDUAL_MODE_AUDIT.md.

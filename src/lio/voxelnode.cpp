@@ -142,6 +142,15 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       // VoxelPlane::addPoints()'s trust_sensor_noise docs); don't trust
       // those points' sensor_cov for the debiasing correction.
       plane_.addPoints(points_world, -1, distinct_frames_, g_current_frame_idx >= 1, g_current_frame_idx);
+      // R65 (F-158): keep the raw history exactly as the pca path does, so a later subdivision hands
+      // the children every point this voxel has seen. Same bound as pca: a batch is appended whole
+      // while points_ holds fewer than max_points; once at or above max_points no further batch is
+      // stored (the O(1) sums above still take every point). The fit itself never reads points_.
+      batch_stored_in_points_ = false;
+      if (static_cast<int>(points_.size()) < opts_->max_points) {
+        points_.insert(points_.end(), points_world.begin(), points_world.end());
+        batch_stored_in_points_ = true;
+      }
       // History (135-153): see docs/livo_recon_changelog.md#src-lio-voxelnode.cpp-135
       //
       // n_planes accounting fix.  addPoints() (via refitDebiased()) can
@@ -283,11 +292,18 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     if (was_plane) updates.push_back({node_id_, true, {}});
     plane_retired_ = true;
     if (debiased) {
-      // No raw-point history to hand off (VoxelPlane::addPoints() keeps
-      // only O(1) accumulators, by design) -- fall back to just this
-      // batch, same accepted-approximation spirit as the bins_ path below
-      // for this already-rare non-planar/give-up case.
-      passToChildren(points_world, updates);
+      // R65 (F-158): children receive the stored history (points_, bounded by max_points as in the pca
+      // path). If this batch was not stored (points_ already at the bound) it is added so the newest
+      // points are never lost. No refit from scratch: the parent's O(1) sums are simply retired.
+      if (batch_stored_in_points_) {
+        passToChildren(points_, updates);
+      } else {
+        std::vector<PointXYZCov> hist(points_);
+        hist.insert(hist.end(), points_world.begin(), points_world.end());
+        passToChildren(hist, updates);
+      }
+      points_.clear();
+      running_moments_.reset(voxel_center_);
     } else if (useBins()) {
       // points_ stays empty whenever useBins() is true (see insertPoints()
       // above) -- children need bins_'s current contents instead, collapsed to one

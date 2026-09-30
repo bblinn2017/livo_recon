@@ -1,4 +1,5 @@
 #include "livo_recon/processing/imu_processing.h"
+#include "livo_recon/utils/state/rel_cov.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/state/state.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
@@ -323,6 +324,7 @@ void ImuProc::propagate(MeasureGroup& mg)
 
   mg.poses.reserve(mg.imu_samples.size());
   mg.pose_covariances.clear();
+  if (state_->pointCovPropagated()) state_->setRelCovProfile({}, {});   // R65 (F-169): cleared each scan
   mg.imu_state_transitions.clear();
   mg.imu_process_covariances.clear();
   mg.pose_covariances.reserve(mg.imu_samples.size());
@@ -577,11 +579,27 @@ void ImuProc::propagate(MeasureGroup& mg)
       mg.imu_samples_raw.push_back(head);
   }
 
+  // R65 (F-169): noise accrued from each IMU step's head to the scan end, restricted to the (R,P) block, by one backward
+  // sweep over the stored per-step transitions F_k and process covariances Q_k:  R_k = R_{k+1} + M_{k+1} Q_k M_{k+1}^T,
+  // M_k = M_{k+1} F_k  (M_n = I).  Used by StateGroup::poseCovAtPoint(); off (no cost) unless lio/point_cov/mode=propagated.
+  if (state_->pointCovPropagated())
+  {
+    const std::size_t n_steps = mg.poses.size();
+    if (n_steps > 0 && mg.imu_state_transitions.size() == n_steps && mg.imu_process_covariances.size() == n_steps)
+    {
+      std::vector<double> head_times(n_steps);
+      for (std::size_t k = 0; k < n_steps; ++k) head_times[k] = mg.poses[k].t;
+      auto blocks = relCovBlocksBackward(mg.imu_state_transitions, mg.imu_process_covariances, StateGroup::idxR());
+      state_->setRelCovProfile(std::move(head_times), std::move(blocks));
+    }
+  }
+
   last_imu_sample_ = head;
   mg.n_imu_samples = static_cast<int>(mg.imu_samples.size());
   mg.imu_samples.clear();
 
   state_->setPropagatedState(rot_imu, pos_imu, vel_imu);
+  state_->setPriorPoseBlock(state_->cov());   // R65 (F-169): this scan's propagated (prior) (R,P) block; read only if insertion_source=prior
   writeImuCovGrowthRow(propagation_index_, mg.image.t + data_queues_->start_time, r61_P_start, state_->cov(), r61_Q_acc);
 
   // One compact row per scan; the first post-calibration scan is also logged

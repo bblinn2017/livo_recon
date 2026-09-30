@@ -1551,7 +1551,7 @@ void VoxelPlane::refitDebiased()
   // plane_var_ is assembled directly in the (theta1, theta2, d) chart and
   // never divides by lambda0 - lambda_m.  This guard, plane_var_denom_floor_en
   // and kPlaneVarCeiling below are all artefacts of the incumbent form.
-  const bool denom_rejected = !info_mode &&
+  const bool denom_rejected = !info_mode && opts_->debias_denominator_guard &&   // R65: key debias_denominator_guard (default true)
       (std::fabs(denom1) < eps_denom || std::fabs(denom2) < eps_denom);
   if (opts_->log_debug_en) {
     std::ostringstream dbg;

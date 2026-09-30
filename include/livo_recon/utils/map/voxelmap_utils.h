@@ -299,6 +299,10 @@ struct VoxelOpts
   // risk of using pose_cov to do it.
   bool pose_cov_in_sigma           = false;
 
+  // R65 (F-169). Write-only: one row per map insertion in point_cov_stats.csv (frame, n_points, mean/min/max of
+  // trace(pos_cov) over the inserted points). Off by default; no effect on the estimator.
+  bool point_cov_stats_en          = false;
+
   // History (177-181): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-177
   bool log_debug_en                = false;
 
@@ -454,6 +458,10 @@ struct VoxelOpts
   // R64. Multiplier on plane_threshold applied only when a debiased voxel that WAS a plane is refit (1.0 = off,
   // bit-identical). > 1 makes an existing plane harder to revoke than a new one is to create.
   double plane_threshold_hysteresis = 1.0;
+  // R65 (F-159). Debiased path only, eigengap variance only: true (default, R64 behaviour) rejects a fit whose eigengap
+  // denominators are within max(1e-8, 0.1*plane_threshold) of zero; false disables that rejection (the finiteness and
+  // ceiling guards remain).
+  bool debias_denominator_guard = true;
   // R64. Plane-fit diagnostics (write-only, default off). plane_fit_reasons_en: per-frame counts of fit outcomes by
   // reason for both fit paths -> plane_fit_reasons.csv. plane_fit_trace_frames > 0: one row per fit attempt for
   // frames 0..plane_fit_trace_frames (frame 0 = bootstrap window) -> plane_fit_trace.csv, at most

@@ -85,6 +85,16 @@ struct CbkProcOptions
   // default -- zero behavioral effect, purely an ofstream write.
   bool log_raw_point_count = false;
 
+  // R65 (F-164/F-173). Write-only log sensor_stamps.csv (kind,stamp,n_raw,n_kept): one row per LiDAR message (n_raw = points in
+  // the message, n_kept = points after the blind/tag/point_filter_num filters) and one row per image message (n_raw = n_kept
+  // = 0). Off by default; no effect on the estimator.
+  bool log_sensor_stamps = false;
+  // R65 (F-170 repeats). Sub-noise seeded perturbation of every kept LiDAR point (isotropic Gaussian, std in metres, per-scan
+  // deterministic stream from perturb_seed and the scan stamp). 0 (default) = off, bit-identical. Used only to create
+  // distinct-but-equivalent inputs for repeat runs, because identical inputs give bit-identical runs.
+  double perturb_std_m = 0.0;
+  int    perturb_seed  = 0;
+
   // History (86-98): see docs/livo_recon_changelog.md#include-livo_recon-processing-cbk_processing.h-86
   int image_subsample_n = 1;
 

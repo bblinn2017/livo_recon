@@ -145,6 +145,8 @@ private:
   VoxelNode *leaves_[8];
   int update_count_ = 0;
   std::vector<PointXYZCov> points_;
+  // R65 (F-158): true when the most recent debiased insertion appended its batch to points_.
+  bool batch_stored_in_points_ = false;
 
   // Running sufficient statistics paralleling points_ (see RunningMoments'
   // docs) -- added to whenever a point is appended to points_, reset

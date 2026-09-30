@@ -242,6 +242,25 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   cfg.nested<double>(opts_.open_loop.mode == "propagate_only", "lio/open_loop/mode=propagate_only",
                      "lio/open_loop/reset_period_s", opts_.open_loop.reset_period_s, 0.0);
 
+  // R65 (F-169): per-point pose covariance model. end_pose (default) = R64 behaviour, bit-identical. propagated adds, per
+  // point, the noise accrued from the point's time to the scan end. insertion_source=prior makes map insertion use the
+  // frame's prior (R,P) block, the same basis the residual gate sees; posterior (default) = R64.
+  {
+    std::string pc_mode, pc_ins;
+    cfg.mode("lio/point_cov/mode", pc_mode, "end_pose", { "end_pose", "propagated" });
+    cfg.mode("lio/point_cov/insertion_source", pc_ins, "posterior", { "posterior", "prior" });
+    state_->setPointCovModel(pc_mode == "propagated", pc_ins == "prior");
+  }
+
+  // R65 (F-128): measurement-noise inflation for the first N LIO scans (see LioProcOptions::bootstrap_inflate_scans).
+  cfg.get<int>("lio/bootstrap_inflate/scans", opts_.bootstrap_inflate_scans, 0);
+  if (opts_.bootstrap_inflate_scans < 0)
+    throw std::invalid_argument("lio/bootstrap_inflate/scans must be >= 0");
+  cfg.nested<double>(opts_.bootstrap_inflate_scans > 0, "lio/bootstrap_inflate/scans>0", "lio/bootstrap_inflate/factor",
+                     opts_.bootstrap_inflate_factor, 1.0);
+  if (!(opts_.bootstrap_inflate_factor >= 1.0))
+    throw std::invalid_argument("lio/bootstrap_inflate/factor must be >= 1");
+
   // R64: startup hold (see LioProcOptions::startup_hold_scans). 0 = off.
   cfg.get<int>("lio/startup_hold/scans", opts_.startup_hold_scans, 0);
   if (opts_.startup_hold_scans < 0)
@@ -396,7 +415,7 @@ void LioProcBase::buildResiduals(
         if (pose_cov_overrides && i < static_cast<int>(pose_cov_overrides->size()))
           pose_cov = (*pose_cov_overrides)[i];
         else
-          pose_cov = state_->poseCovAt(pts[i].point);
+          pose_cov = state_->poseCovAtPoint(pts[i].point, pts[i].t, false);   // R65: default path == poseCovAt
       }
       WorldPointCov pt_world{sensor_world.point, sensor_world.sensor_cov, pose_cov};
       pt_world.include_pose_cov_in_gate = include_state_uncertainty_in_gate;
@@ -423,6 +442,9 @@ void LioProcBase::buildResiduals(
         res.point_cross_normal = pts[i].point.cross(state_->rot().transpose() * res.normal);
         res.world_point = pt_world.point;
         res.sigma_squared += res.plane_var_term;
+        if (opts_.bootstrap_inflate_scans > 0 && voxel_map_->frame_idx_ >= 1 &&
+            voxel_map_->frame_idx_ <= static_cast<decltype(voxel_map_->frame_idx_)>(opts_.bootstrap_inflate_scans))
+          res.sigma_squared *= opts_.bootstrap_inflate_factor;   // R65 (F-128)
         res.t = pts[i].t;   // for the spline control-point refinement
         res.raw_body_point = pts[i].raw_body_point;  // CQ-50
         build_thread_residuals_[omp_get_thread_num()].push_back(res);
