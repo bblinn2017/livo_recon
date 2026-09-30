@@ -57,6 +57,12 @@ void deskewPoints(
   points_out.resize(points.size());
 
   if (poses.empty()) {
+    // R67 (F-265, inert): this fallback leaves sensor_cov at zero. Report the first use so a run log shows whether live scans reach it.
+    static bool warned_poses_empty = false;
+    if (!warned_poses_empty) {
+      warned_poses_empty = true;
+      std::fprintf(stderr, "[deskew] poses-empty fallback used: %zu points get zero sensor_cov (R67 F-265 check)\n", points.size());
+    }
     for (size_t i = 0; i < points.size(); ++i) {
       points_out[i] = PointXYZCov{ state->lidarToImu(points[i].p), M3D::Zero() };
       points_out[i].t = points[i].t;

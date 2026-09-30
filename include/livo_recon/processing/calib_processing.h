@@ -13,6 +13,18 @@ struct CalibProcOptions
   std::string ds_mode = "first";
   double ds_leaf_size = 0.15;
 
+  // R67 (F-265). Sensor covariance of the bootstrap (calibration) points.
+  //   "sensor_model" (default): the same model the live scans use in deskewPoints(): getBodyCov(p_lidar, sigma_r2, sigma_a2)
+  //                             rotated to the IMU frame with the LiDAR-IMU extrinsic. There is no motion inside a stationary
+  //                             calibration window, so the deskew rotation is the identity and no time-based term applies.
+  //   "zero":                   the R53-R66 behaviour (M3D::Zero()); kept ONLY as the byte-identity control of the R67 patch.
+  //                             To be removed after R67 (rule 3.3), not a tuning option.
+  // sigma_r2 / sigma_a2 are parsed from imu/sensor/range_err and imu/sensor/angle_err_deg with the same defaults and the same
+  // formula as LioProcBase (lio_base.cpp), so the two paths cannot disagree.
+  std::string bootstrap_point_cov = "sensor_model";
+  double sensor_sigma_r2 = 0.05 * 0.05;
+  double sensor_sigma_a2 = 0.0;
+
   // Calibration used to have no way to fail. collectSamples() returns false
   // whenever the buffer is short, estimateFromBuffer() reports "Calibrating
   // IMU... N samples collected." and the node calls it again next frame --

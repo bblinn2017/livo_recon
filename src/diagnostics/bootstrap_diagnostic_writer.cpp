@@ -2,6 +2,7 @@
 
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 
+#include <algorithm>
 #include <iomanip>
 
 namespace livo_recon
@@ -49,7 +50,18 @@ void writeBootstrapPreparationDiagnostic(
     flattened.insert(flattened.end(), obs.begin(), obs.end());
   for (const auto& obs : raw_observations) total_raw += obs.size();
 
-  out << "schema bootstrap_preparation_v1\n"
+  // R67 (F-265): sensor covariance actually carried by the prepared population (trace/3, m^2); all zeros = the R53-R66 bug.
+  double tr_min = 1e300, tr_max = 0.0, tr_sum = 0.0;
+  size_t n_zero = 0;
+  for (const PointXYZCov& p : flattened) {
+    const double t = p.sensor_cov.trace() / 3.0;
+    tr_sum += t; tr_min = std::min(tr_min, t); tr_max = std::max(tr_max, t);
+    if (t == 0.0) ++n_zero;
+  }
+  const double tr_mean = flattened.empty() ? 0.0 : tr_sum / static_cast<double>(flattened.size());
+  if (flattened.empty()) tr_min = 0.0;
+
+  out << "schema bootstrap_preparation_v2\n"
       << "num_observations " << raw_observations.size() << '\n';
   for (size_t i = 0; i < raw_observations.size(); ++i) {
     const size_t prepared_count = i < prepared_observations.size() ? prepared_observations[i].size() : 0;
@@ -59,7 +71,11 @@ void writeBootstrapPreparationDiagnostic(
   out << "total_raw_point_count " << total_raw << '\n'
       << "total_prepared_point_count " << total_prepared << '\n'
       << "flattened_prepared_population_hash " << hashBootstrapPopulation(flattened) << '\n'
-      << "end_bootstrap_preparation_v1\n";
+      << "sensor_cov_trace_over_3_mean " << tr_mean << '\n'
+      << "sensor_cov_trace_over_3_min " << tr_min << '\n'
+      << "sensor_cov_trace_over_3_max " << tr_max << '\n'
+      << "sensor_cov_zero_point_count " << n_zero << '\n'
+      << "end_bootstrap_preparation_v2\n";
   out.flush();
 }
 

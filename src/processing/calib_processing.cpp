@@ -7,6 +7,7 @@
 #include <Eigen/Eigenvalues>
 #include "livo_recon/diagnostics/calibration_p0_writer.h"
 #include "livo_recon/diagnostics/bootstrap_diagnostic_writer.h"
+#include "livo_recon/lio/deskew.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/algo/hashing.h"
 #include "livo_recon/utils/state/state.h"
@@ -34,6 +35,19 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
   if (opts_.ds_mode != "off" && opts_.ds_mode != "first" && opts_.ds_mode != "average")
     throw std::runtime_error("imu/ds/mode must be off, first, or average");
   paramWarn<double>(pnh, "imu/ds/ds_leaf_size", opts_.ds_leaf_size, 0.15);
+  // R67 (F-265): same parse and formula as lio_base.cpp (imu/sensor/range_err, imu/sensor/angle_err_deg).
+  paramWarn<std::string>(pnh, "calib/bootstrap/point_cov", opts_.bootstrap_point_cov, std::string("sensor_model"));
+  if (opts_.bootstrap_point_cov != "sensor_model" && opts_.bootstrap_point_cov != "zero")
+    throw std::invalid_argument("calib/bootstrap/point_cov must be sensor_model or zero");
+  {
+    double range_err = 0.05;
+    paramWarn<double>(pnh, "imu/sensor/range_err", range_err, 0.05);
+    opts_.sensor_sigma_r2 = range_err * range_err;
+    double angle_err_deg = 0.2;
+    paramWarn<double>(pnh, "imu/sensor/angle_err_deg", angle_err_deg, 0.2);
+    const double sin_angle_err = std::sin(std::max(1e-6, angle_err_deg * M_PI / 180.0));
+    opts_.sensor_sigma_a2 = sin_angle_err * sin_angle_err;
+  }
   if (opts_.ds_mode != "off" && !(opts_.ds_leaf_size > 0.0))
     throw std::runtime_error("imu/ds/ds_leaf_size must be > 0 when downsampling is enabled");
   paramWarn<int>(pnh, "calib/stationary/stall_calls_max", opts_.stall_calls_max, 300);
@@ -85,6 +99,8 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
       << (opts_.apply_gyro_bias ? "true" : "false")
       << "\n  apply_to_state/accel_bias: "
       << (opts_.apply_accel_bias ? "true" : "false");
+  oss << "\n  bootstrap/point_cov: " << opts_.bootstrap_point_cov
+      << "\n  sensor sigma_r2, sigma_a2: " << opts_.sensor_sigma_r2 << ", " << opts_.sensor_sigma_a2;
   oss << "\n  p0/mode:       " << opts_.p0_mode
       << "\n  p0/autocov_lags: " << opts_.p0_autocov_lags
       << "\n  p0/known_pos_variance: " << opts_.p0_known_pos_variance
@@ -531,7 +547,11 @@ void CalibProc::prepareBootstrapObservations()
     std::vector<PointXYZCov> prepared;
     prepared.reserve(raw.size());
     for (const auto& p : raw) {
-      PointXYZCov q{state_->lidarToImu(p.p), M3D::Zero()};
+      // R67 (F-265): R53-R66 built these points with M3D::Zero(). "sensor_model" uses the live-scan formula (deskew.cpp).
+      const M3D cov_imu = (opts_.bootstrap_point_cov == "zero")
+          ? M3D(M3D::Zero())
+          : M3D(state_->lidarToImu(getBodyCov(p.p, opts_.sensor_sigma_r2, opts_.sensor_sigma_a2)));
+      PointXYZCov q{state_->lidarToImu(p.p), cov_imu};
       q.t = 0.0;
       q.raw_body_point = q.point;
       prepared.push_back(q);
