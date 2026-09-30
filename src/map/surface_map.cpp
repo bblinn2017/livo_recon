@@ -72,8 +72,8 @@ std::string SurfaceMap::loadParameters(ros::NodeHandle& pnh)
   cfg.get<int>("voxel_map/surface/snapshot_period_frames", opts_.snapshot_period_frames, 0);
   cfg.get<int>("voxel_map/surface/viz_period_frames", opts_.viz_period_frames, 20);
   // Enumerated with ONE allowed value each: the surface backend implements only these (rule 3.4: anything else is
-  // refused, not silently replaced). plane_fit_pose_cov_mode's compiled default in the octree is "combined"; here it is
-  // sensor_only by design.
+  // refused, not silently replaced). The octree backend also defaults plane_fit_pose_cov_mode to sensor_only; "combined"
+  // remains available there for investigation, the surface backend supports only sensor_only.
   {
     std::string pose_mode, var_mode;
     cfg.mode("voxel_map/plane/plane_fit_pose_cov_mode", pose_mode, "sensor_only", {"sensor_only"});

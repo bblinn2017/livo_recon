@@ -5,7 +5,6 @@
 
 #include "livo_recon/utils/data/data_wrappers.h"
 #include "livo_recon/utils/state/state.h"
-#include "livo_recon/lio/spline.h"
 
 // History (9-22): see docs/livo_recon_changelog.md#include-livo_recon-lio-deskew.h-9
 namespace livo_recon
@@ -53,61 +52,6 @@ void deskewPoints(
     const std::vector<Pose6D>& poses,
     double scan_end_time,
     const std::vector<PointXYZT>& points,
-    const DeskewOptions& opts,
-    std::vector<PointXYZCov>& points_out);
-
-// Spline deskew.  Places every point at the pose the spline gives for the
-// point's OWN timestamp, expressed in the scan-end IMU frame, and rotates
-// its sensor covariance by the same relative rotation.  Unlike
-// deskewPoints() this is safe -- and intended -- to call repeatedly within
-// one frame: re-anchor the spline to the corrected state (ScanSpline::
-// anchorTo()) and call this again, and every point moves with the
-// correction instead of only the scan-end pose moving.
-//
-// The time_based_process_noise inflation is deliberately NOT applied here.
-// That term exists to stand in for trajectory uncertainty that the one-shot
-// deskew cannot express, and it does so by putting a PROCESS-noise quantity
-// (state->varAcc(), the same variable cov_w's accelerometer block is built
-// from) inside a MEASUREMENT covariance -- the same number on both sides of
-// S = H P H^T + R.  With the spline carrying intra-scan trajectory shape
-// explicitly, the term has nothing left to stand in for, and dropping it
-// restores a clean separation between Q and R.  That separation is a
-// precondition for AdaptiveQ meaning anything: with var_acc in R as well as
-// in Q, "measure the noise, apply it as process noise" would feed back into
-// its own measurement.  The legacy term is GONE as of the spline restructure
-// (Bryce, 2026-09-06): the escape hatch that restored it is removed with it,
-// so the Q/R separation is now a property of the code rather than a default.
-void deskewPointsSpline(
-    const StateGroupPtr& state,
-    const ScanSpline& spline,
-    double scan_end_time,
-    const std::vector<PointXYZT>& points,
-    const DeskewOptions& opts,
-    std::vector<PointXYZCov>& points_out);
-
-// As above, but only for the points at `indices` into `points`, writing into
-// points_out[i] for i in [0, indices.size()).  Used for the per-IEKF-
-// iteration re-deskew: the voxel downsample runs ONCE (on iteration 0) and
-// its surviving raw indices are reused every iteration afterwards, so the
-// re-deskew costs one spline evaluation per kept point and no re-hashing.
-// Re-running the downsample itself each iteration would also let the KEPT
-// SET change between iterations, which would make the residual count --
-// and therefore the update -- move for reasons unrelated to the state.
-// Over the CSR membership set that
-// voxelDownsampleIndexedCsr() produces, so it covers ds_mode:=average as
-// well as first.  points_out[i] is rebuilt from the members of output point
-// i: each member is re-placed from its RAW coordinates against the current
-// spline, and the results are then averaged exactly as
-// voxelDownsample(AVERAGE) averages them.  A single-member cell -- every
-// cell in FIRST mode -- takes the same code path as the old subset call and
-// is bit-identical to it.
-void deskewPointsSplineCsr(
-    const StateGroupPtr& state,
-    const ScanSpline& spline,
-    double scan_end_time,
-    const std::vector<PointXYZT>& points,
-    const std::vector<int>& offsets,
-    const std::vector<int>& members,
     const DeskewOptions& opts,
     std::vector<PointXYZCov>& points_out);
 

@@ -35,10 +35,9 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
   if (opts_.ds_mode != "off" && opts_.ds_mode != "first" && opts_.ds_mode != "average")
     throw std::runtime_error("imu/ds/mode must be off, first, or average");
   paramWarn<double>(pnh, "imu/ds/ds_leaf_size", opts_.ds_leaf_size, 0.15);
-  // R67 (F-265): same parse and formula as lio_base.cpp (imu/sensor/range_err, imu/sensor/angle_err_deg).
-  paramWarn<std::string>(pnh, "calib/bootstrap/point_cov", opts_.bootstrap_point_cov, std::string("sensor_model"));
-  if (opts_.bootstrap_point_cov != "sensor_model" && opts_.bootstrap_point_cov != "zero")
-    throw std::invalid_argument("calib/bootstrap/point_cov must be sensor_model or zero");
+  // Bootstrap points carry the sensor model covariance (same formula as the live deskew path: imu/sensor/range_err, imu/sensor/angle_err_deg).
+  if (pnh.hasParam("calib/bootstrap/point_cov"))
+    throw std::invalid_argument("removed key: calib/bootstrap/point_cov (bootstrap points always use the sensor model covariance)");
   {
     double range_err = 0.05;
     paramWarn<double>(pnh, "imu/sensor/range_err", range_err, 0.05);
@@ -99,7 +98,7 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
       << (opts_.apply_gyro_bias ? "true" : "false")
       << "\n  apply_to_state/accel_bias: "
       << (opts_.apply_accel_bias ? "true" : "false");
-  oss << "\n  bootstrap/point_cov: " << opts_.bootstrap_point_cov
+  oss << "\n  bootstrap point covariance: sensor model"
       << "\n  sensor sigma_r2, sigma_a2: " << opts_.sensor_sigma_r2 << ", " << opts_.sensor_sigma_a2;
   oss << "\n  p0/mode:       " << opts_.p0_mode
       << "\n  p0/autocov_lags: " << opts_.p0_autocov_lags
@@ -547,10 +546,7 @@ void CalibProc::prepareBootstrapObservations()
     std::vector<PointXYZCov> prepared;
     prepared.reserve(raw.size());
     for (const auto& p : raw) {
-      // R67 (F-265): R53-R66 built these points with M3D::Zero(). "sensor_model" uses the live-scan formula (deskew.cpp).
-      const M3D cov_imu = (opts_.bootstrap_point_cov == "zero")
-          ? M3D(M3D::Zero())
-          : M3D(state_->lidarToImu(getBodyCov(p.p, opts_.sensor_sigma_r2, opts_.sensor_sigma_a2)));
+      const M3D cov_imu = state_->lidarToImu(getBodyCov(p.p, opts_.sensor_sigma_r2, opts_.sensor_sigma_a2));
       PointXYZCov q{state_->lidarToImu(p.p), cov_imu};
       q.t = 0.0;
       q.raw_body_point = q.point;

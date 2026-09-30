@@ -372,7 +372,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     cfg.nested<bool>(eigengap, kEigScope, "voxel_map/plane/plane_var_denom_floor_en",
                      opts_->plane_var_denom_floor_en, false);
     cfg.mode("voxel_map/plane/plane_fit_pose_cov_mode",
-             opts_->plane_fit_pose_cov_mode, "combined",
+             opts_->plane_fit_pose_cov_mode, "sensor_only",
              { "combined", "sensor_only" });
     // R65: eigengap-denominator rejection on the debiased path (default true = R64).
     cfg.nested<bool>(opts_->plane_fit_mode == "debiased" && eigengap, "voxel_map/plane/plane_fit_mode=debiased,plane_var_mode=eigengap",

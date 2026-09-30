@@ -225,54 +225,6 @@ static void logDecoupledFirstFrame(const char* phase, int scan_id, int iteration
   ofs.flush();
 }
 
-static void logDecoupledFirstFrameSpline(const char* phase, int scan_id, int iteration, double t_abs_frame_end,
-                                         int control_index, double control_t, const V3D& p, const V3D& phi)
-{
-  if(scan_id!=0) return;
-  static PersistentLogStream log("pose_control_first_frame_spline.csv");
-  bool first; std::ofstream& ofs=log.stream(&first);
-  if(first) ofs<<"architecture,phase,scan_id,iteration,t_abs_frame_end,control_point_index,control_t_abs,p_x,p_y,p_z,rlog_x,rlog_y,rlog_z\n";
-  ofs<<"decoupled,"<<phase<<","<<scan_id<<","<<iteration<<","<<std::setprecision(12)<<t_abs_frame_end<<","<<control_index<<","<<control_t<<","<<p.x()<<","<<p.y()<<","<<p.z()<<","<<phi.x()<<","<<phi.y()<<","<<phi.z()<<"\n"; ofs.flush();
-}
-
-// Round-17 common-time trajectory comparison (item 9): evaluates ANY spline
-// type exposing posAt/rotAt/velAt/omegaBodyAt (ScanSpline here,
-// PoseControlSpline in lio_coupled.cpp -- no shared base class exists, so
-// this is duplicated per-file rather than shared, matching this codebase's
-// existing convention for the first-frame hash helpers) at a fixed set of
-// FRACTIONS of [t0,t1], not raw control-point indices, so two runs with
-// different control-point layouts land on the same physical instants
-// whenever their scan boundaries (t0/t1, determined by the LiDAR driver,
-// not the estimator) agree -- verified downstream by comparing the logged
-// t_abs values across architectures' own CSVs, not assumed. Angular
-// velocity uses the spline's own analytic omegaBodyAt(), never a
-// finite-difference substitute.
-template <typename SplineT>
-static void logFirstFrameCommonTimeSpline(const char* architecture, int frame_idx, int scan_id,
-                                          int iteration, double start_time, const SplineT& spline)
-{
-  if (frame_idx != 1 || scan_id != 0) return;
-  static const std::array<double, 5> kFracs{0.0, 0.25, 0.5, 0.75, 1.0};
-  static PersistentLogStream log("pose_control_first_frame_common_time_spline.csv");
-  bool first;
-  std::ofstream& ofs = log.stream(&first);
-  if (first) ofs << "architecture,frame_idx,scan_id,iteration,frac,t_abs,p_x,p_y,p_z,rlog_x,rlog_y,rlog_z,"
-                    "v_x,v_y,v_z,omega_x,omega_y,omega_z\n";
-  const double t0 = spline.t0(), t1 = spline.t1();
-  for (double frac : kFracs) {
-    const double t = t0 + frac * (t1 - t0);
-    const V3D p = spline.posAt(t);
-    const V3D rlog = Log(spline.rotAt(t));
-    const V3D v = spline.velAt(t);
-    const V3D omega = spline.omegaBodyAt(t);
-    ofs << architecture << ',' << frame_idx << ',' << scan_id << ',' << iteration << ',' << frac << ','
-        << std::setprecision(17) << (t + start_time) << ',' << p.x() << ',' << p.y() << ',' << p.z() << ','
-        << rlog.x() << ',' << rlog.y() << ',' << rlog.z() << ',' << v.x() << ',' << v.y() << ',' << v.z() << ','
-        << omega.x() << ',' << omega.y() << ',' << omega.z() << '\n';
-  }
-  ofs.flush();
-}
-
 // Debug trace of LIO's per-measure-group state correction and covariance,
 // for diagnosing where trajectory divergence originates (see imu_processing
 // .cpp's debugLogImu() for the IMU-side counterpart). Truncated at the
@@ -360,106 +312,13 @@ std::string LioProcDecoupled::loadParameters(ros::NodeHandle& pnh)
   loadSharedParameters(cfg, pnh);
   decoupled_tier1_nees_ = Tier1NeesBuffer(opts_.nees_per_dof_en ? opts_.nees_tier1_window_scans : 0);
 
-  // ── scan spline ──────────────────────────────────────────────────────
-  // Everything from here down goes through ConfigResolver, not paramWarn:
-  // nested keys are read only inside a live scope and REFUSED if set into a
-  // dead one, modes are validated against a named set, and what gets printed
-  // is the effective configuration.  See config_resolve.h for why.
-  // ── THE ONE MODE KNOB.  Bryce, 2026-09-06. ───────────────────────────────
-  // Replaces spline/enable, spline/per_iteration/mode (five levels) and
-  // spline/boundary_anchor_mode (three levels).  At "raw_imu" every other
-  // spline/* key -- and every adaptive_q/* key -- is REFUSED at startup
-  // rather than silently ignored, which is what `sp` gates below.
-  cfg.mode("spline/mode", dopts_.spline.mode, "spline",
-           { "raw_imu", "spline", "spline+refine" });
-  const bool sp = dopts_.spline.splineOn();
-  // R66 (S-D1): head pin after a failed fit. "on_ok" (default, existing behaviour, bit-identical) updates the
-  // pin only after a successful fit, so after one failure the next head is pinned to a stale earlier pose;
-  // "always" updates it from the current state every frame.
-  cfg.nestedMode(sp, "spline/mode", "spline/head_pin_update", head_pin_update_, "on_ok", { "on_ok", "always" });
-  if (state_->gravityS2() && dopts_.spline.mode != "raw_imu")
-    cfg.requireCombination(
-        "state/gravity_model=s2 is implemented only with spline/mode=raw_imu: "
-        "the spline paths read and write gravity as a 3-vector");
-
-  // Control-point RATE is the only control-point knob: n_cp is derived from
-  // it and the scan duration, so the axis is comparable across sequences.
-  cfg.nested<double>(sp, "spline/mode", "spline/control_points/hz",
-                     dopts_.spline.control_point_hz, 100.0);
-
-  cfg.nested<int>(sp && dopts_.spline.refineOn(), "spline/mode=spline+refine",
-                  "spline/refine/iters",
-                  dopts_.spline.lidar_refine_iters, 1);
-  // CQ-41 follow-up: see SplineOptions::refine_curvature_weight's own doc
-  // comment for the A/B numbers. Default 0.0 (off) preserves prior behavior.
-  cfg.nested<double>(sp && dopts_.spline.refineOn(), "spline/mode=spline+refine",
-                     "spline/refine/curvature_weight",
-                     dopts_.spline.refine_curvature_weight, 0.0);
-  // CQ-41 follow-up, third term: see SplineOptions::refine_imu_acc_weight's
-  // own doc comment. Default 0.0 (off) preserves prior behavior.
-  cfg.nested<double>(sp && dopts_.spline.refineOn(), "spline/mode=spline+refine",
-                     "spline/refine/imu_acc_weight",
-                     dopts_.spline.refine_imu_acc_weight, 0.0);
-  // Bryce, 2026-09-18: diagnostic experiment -- see
-  // SplineOptions::refine_imu_acc_solve_bias's own doc comment.
-  cfg.nested<bool>(sp && dopts_.spline.refineOn() && dopts_.spline.refine_imu_acc_weight > 0.0,
-                   "spline/refine/imu_acc_weight>0",
-                   "spline/refine/imu_acc_solve_bias",
-                   dopts_.spline.refine_imu_acc_solve_bias, false);
-  // CQ-43 item (2): see SplineOptions::final_pass's own doc comment.
-  // DEFAULT false, per item (6) -- do not change this from this card's
-  // own numbers, whatever they show.
-  cfg.nested<bool>(sp && dopts_.spline.refineOn(), "spline/mode=spline+refine",
-                   "spline/refine/final_pass",
-                   dopts_.spline.final_pass, false);
-  // TQ-38 item (4): see SplineOptions::diag_free_tail_imu_acc_weight's own
-  // doc comment -- diagnostic only, never read by the real refinement path.
-  cfg.nested<double>(sp, "spline/mode",
-                     "spline/refine/diag_free_tail_imu_acc_weight",
-                     dopts_.spline.diag_free_tail_imu_acc_weight, 1.0);
-
-  cfg.nested<bool>(sp, "spline/mode", "spline/log_en", dopts_.spline.log_en, false);
-  // CQ-41, Bryce 2026-09-18: DEFAULT true, authorised by Bryce in the
-  // message that requested this item -- see SplineOptions::
-  // end_constraint_velocity's own doc comment. Rule 26 item 1 (a numerics
-  // default change) normally NEEDS BRYCE; the flag is set here BY Bryce
-  // naming the default he wants, so no further authorization is needed for
-  // this one default -- do not extend that to any other default.
-  cfg.nested<bool>(sp, "spline/mode", "spline/end_constraint/velocity",
-                   dopts_.spline.end_constraint_velocity, true);
-  // Analysis-only dense trajectory dump -- see SplineOptions::traj_log_mode.
-  cfg.nestedMode(sp, "spline/mode", "spline/trajectory_log/mode",
-                 dopts_.spline.traj_log_mode, "off", { "off", "dense" });
-  cfg.nested<double>(sp && dopts_.spline.trajLogOn(),
-                     "spline/trajectory_log/mode=dense",
-                     "spline/trajectory_log/hz", dopts_.spline.traj_log_hz, 200.0);
-
-  // ── live process-noise estimation ────────────────────────────────────
-  // The statistic IS the spline-vs-IMU residual, so this scope is nested
-  // under the spline rather than merely warned about.
-  cfg.nested<bool>(sp, "spline/mode", "adaptive_q/enable",
-                   dopts_.adaptive_q.enable, false);
-  const bool aq = sp && dopts_.adaptive_q.enable;
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/beta_acc", dopts_.adaptive_q.beta_acc, 0.3);
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/beta_gyr", dopts_.adaptive_q.beta_gyr, 0.3);
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/z_rate_limit", dopts_.adaptive_q.z_rate_limit, 0.02);
-  // CQ-35: kept in sync with AdaptiveQOptions::acf1_max's own default
-  // (adaptive_q.h) -- this call's own literal is the REAL effective default
-  // whenever the YAML doesn't set the key (the common case), since it
-  // overwrites whatever the struct member was already initialised to.
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/acf1_max", dopts_.adaptive_q.acf1_max, 1.00);
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/bounds/max_ratio", dopts_.adaptive_q.max_ratio, 100.0);
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/bounds/min_ratio", dopts_.adaptive_q.min_ratio, 0.01);
-  cfg.nested<int>(aq, "adaptive_q/enable", "adaptive_q/warmup_frames", dopts_.adaptive_q.warmup_frames, 20);
-  cfg.nested<double>(aq, "adaptive_q/enable", "adaptive_q/ema", dopts_.adaptive_q.ema, 0.9);
-  cfg.nestedMode(aq, "adaptive_q/enable", "adaptive_q/noise_floor/mode",
-                 adaptive_q_floor_mode_, "allan", { "allan", "off" });
-  dopts_.adaptive_q.use_noise_floor = (adaptive_q_floor_mode_ == "allan");
-  cfg.nested<double>(aq && dopts_.adaptive_q.use_noise_floor,
-                     "adaptive_q/noise_floor/mode=allan",
-                     "adaptive_q/noise_floor/scale", dopts_.adaptive_q.noise_floor_scale, 1.0);
-  cfg.nested<bool>(aq, "adaptive_q/enable", "adaptive_q/log_en", dopts_.adaptive_q.log_en, false);
-  adaptive_q_.configure(dopts_.adaptive_q);
+  // The decoupled spline and AdaptiveQ were removed (Bryce, 2026-09-30). spline/mode is kept as a one-value
+  // enumeration so existing configs that pin raw_imu still load; every other spline/* and adaptive_q/* key is left
+  // unconsumed and refused by finalizeConfig() below.
+  {
+    std::string spline_mode;
+    cfg.mode("spline/mode", spline_mode, "raw_imu", { "raw_imu" });
+  }
 
   // ── R66: AKF-style process-noise adaptation (opt-in) ─────────────────
   {
@@ -471,21 +330,17 @@ std::string LioProcDecoupled::loadParameters(ros::NodeHandle& pnh)
     cfg.nested<double>(ak.enable, "akf_q/enable", "akf_q/bounds/max_ratio", ak.max_ratio, 100.0);
     std::string pn_model = "fixed";
     pnh.param<std::string>("imu/process_noise/model", pn_model, std::string("fixed"));
-    if ((ak.enable || dopts_.adaptive_q.enable) && pn_model != "fixed")
+    if (ak.enable && pn_model != "fixed")
       throw std::invalid_argument(
-          "akf_q/enable and adaptive_q/enable write StateGroup::setNoiseParams, which only imu/process_noise/model=fixed "
+          "akf_q/enable writes StateGroup::setNoiseParams, which only imu/process_noise/model=fixed "
           "reads; refused under model=" + pn_model + " (the adaptation would be inert)");
-    if (ak.enable && dopts_.adaptive_q.enable)
-      throw std::invalid_argument("akf_q/enable and adaptive_q/enable both write the process noise; enable one");
     if (ak.enable && (!(ak.forgetting >= 0.0 && ak.forgetting < 1.0) || ak.warmup_frames < 0 ||
                       !(ak.min_ratio > 0.0) || !(ak.max_ratio >= ak.min_ratio)))
       throw std::invalid_argument("akf_q/* values out of range (forgetting in [0,1), warmup>=0, 0<min_ratio<=max_ratio)");
     akf_q_.configure(ak);
   }
 
-  // Every spline/* and adaptive_q/* key is read by the resolver above and by
-  // nothing else, so anything left over in those namespaces is a key nobody
-  // consumes -- a rename this config was never migrated through, or a typo.
+  // Anything left over in the spline/* and adaptive_q/* namespaces (both removed) is a key nobody consumes.
   // Deliberately NOT extended to voxel_map/: several of its keys are still
   // read by paramWarn() in voxelmap.cpp, so they are unclaimed here and would
   // be reported as dead when they are merely read elsewhere. Widen this only
@@ -499,127 +354,14 @@ void LioProcDecoupled::deskewAndDownsample(MeasureGroup& mg)
 {
   TimedScope ts(profiler_, "lio/deskew");
 
-  // ── fit this frame's trajectory spline ────────────────────────────────
-  // The window runs from the first IMU pose to the frame reference time so
-  // that every LiDAR return in the scan lands inside the fitted domain --
-  // ScanSpline refuses to extrapolate, and a point outside the window would
-  // otherwise be silently clamped to an endpoint.
-  spline_ok_ = false;
-  ds_offsets_.clear();
-  ds_members_.clear();
-  spline_refits_ = 0;
-  redeskew_calls_ = 0;
-  redeskew_dp_rms_ = 0.0;
-  refit_dtraj_rms_ = 0.0;
-  refit_dtraj_max_ = 0.0;
-  refit_drot_deg_ = 0.0;
-  // Captured HERE, before anything this frame can correct state_'s bias/
-  // gravity (the IEKF loop hasn't started) -- see the member doc comments.
-  spline_frame_bias_acc_ = state_->biasAcc();
-  spline_frame_bias_gyr_ = state_->biasGyr();
-  spline_frame_gravity_  = state_->gravity();
-  spline_.resetRefineStats();
-  if (dopts_.spline.splineOn() && !mg.poses.empty())
-  {
-    TimedScope ts_fit(profiler_, "lio/spline/fit");
-    spline_frame_count_++;
-    // BOTH ENDPOINTS ARE CLAMPED.  Head = the previous scan's own final
-    // pose; tail = the PROPAGATED scan-end pose, because the IEKF's
-    // corrected one does not exist yet -- the loop is about to compute it,
-    // and moveTailClamp() carries it in on every iteration afterwards.
-    //
-    // The very first spline scan of a run has no previous boundary to
-    // freeze to, so it fits unconstrained (n_frozen = 0).
-    spline_.setFrozenBoundary(
-        prev_scan_end_valid_ ? SplineOptions::N_FROZEN_CP : 0,
-        prev_scan_end_pos_, prev_scan_end_rot_, prev_scan_end_vel_,
-        state_->pos(), state_->rot(), state_->vel());
-    spline_ok_ = spline_.fit(mg.poses, mg.poses.front().t, mg.image.t, dopts_.spline);
-    if (!spline_ok_)
-    {
-      // Never substitute a bad spline for a working deskew.  Count the
-      // failures loudly (reported in finalizeSplineAndQ()) rather than
-      // degrading silently -- a run where the fit failed on most frames is
-      // not the experiment anyone thinks they ran.
-      spline_fit_fail_count_++;
-      // CQ-22 item (4): attribute this failure to its specific cause, so
-      // "1 refusal" can no longer mean any of nine different things.
-      // CQ-23: kChartGuard (the hard ceiling) lands here too, generically --
-      // it is one of the nine causes now, not a separate mechanism.
-      spline_fail_cause_count_[static_cast<int>(spline_.lastFitFailCause())]++;
-    }
-    // Independent of spline_ok_: chart_guard_warned_ only fires from inside
-    // the chart-guard loop, which a fit that failed at an earlier site never
-    // reaches, so this is correctly 0 for those frames without a separate
-    // gate here. A HARD-refused fit reaches the loop too (the value is
-    // stored before either threshold is checked) but chartGuardWarned()
-    // stays false for it -- warn and hard are mutually exclusive per fit(),
-    // the hard count is spline_fail_cause_count_[kChartGuard] above.
-    if (spline_.chartGuardWarned()) spline_chart_guard_warn_count_++;
-
-    // CQ-41 follow-up: does the large endpoint acceleration come from
-    // refinement, or is it already present in the very first fit?  Logged
-    // HERE, immediately after fit() and before the IEKF loop's first
-    // redeskewFromSpline()/refineSplineFromResiduals() call -- this is the
-    // boundary-CONSTRAINED (setFrozenBoundary() above already ran) but
-    // UNREFINED spline. Comparing this against spline_endpoint_debug.txt's
-    // same-scan_id row (logged post-refinement in finalizeSplineAndQ())
-    // isolates refinement's own contribution. It does NOT isolate the
-    // boundary constraint's contribution -- that's baked into fit() itself
-    // via setFrozenBoundary() above, present in this row exactly as much as
-    // in the final one -- a genuinely unconstrained-fit comparison would
-    // need a separate ablation.
-    if (opts_.log_debug_en && spline_ok_) {
-      static PersistentLogStream log("spline_firstfit_debug.txt");
-      std::ofstream& ofs = log.stream();
-      ofs << "scan_id=" << voxel_map_->frame_idx_
-          << " acc_t0=" << spline_.accAt(spline_.t0()).norm()
-          << " acc_t1=" << spline_.accAt(spline_.t1()).norm()
-          << " omega_t0=" << spline_.omegaBodyAt(spline_.t0()).norm()
-          << " omega_t1=" << spline_.omegaBodyAt(spline_.t1()).norm()
-          << " n_cp=" << spline_.nControlPoints()
-          << "\n";
-      ofs.flush();
-    }
-
-    // TQ-38 item 1: snapshot the UNREFINED control points, unconditionally
-    // (not gated on log_debug_en -- this is a cheap 3xn_cp copy, and the
-    // TQ-38 diagnostic below needs it every frame it runs, not only frames
-    // where firstfit debug logging happened to also be on).
-    cp_p_unrefined_snapshot_ = spline_.cpPos();
-  }
-
   std::vector<PointXYZCov> deskewed;
-  if (spline_ok_)
-    deskewPointsSpline(state_, spline_, mg.image.t, mg.lidar_points,
-                       opts_.deskew, deskewed);
-  else
-    deskewPoints(state_, mg.poses, mg.image.t, mg.lidar_points, opts_.deskew, deskewed);
+  deskewPoints(state_, mg.poses, mg.image.t, mg.lidar_points, opts_.deskew, deskewed);
 
   if (opts_.dsOn()) {
     DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
-    // Track which raw points each surviving output point was built from, so
-    // the per-iteration re-deskew can re-place exactly this set from their raw
-    // coordinates.  Both modes: FIRST gives one member per cell, AVERAGE gives
-    // the whole cell and the re-deskew re-averages it.  Output is bit-identical
-    // to voxelDownsample() in the matching mode -- see
-    // voxelDownsampleIndexedCsr()'s doc comment.
-    if (spline_ok_ && dopts_.spline.splineOn())
-      voxelDownsampleIndexedCsr(deskewed, mg.points, ds_offsets_, ds_members_,
-                                PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
-    else
-      voxelDownsample(deskewed, mg.points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
+    voxelDownsample(deskewed, mg.points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
   } else {
     mg.points = std::move(deskewed);
-    if (spline_ok_ && dopts_.spline.splineOn()) {
-      ds_members_.resize(mg.points.size());
-      ds_offsets_.resize(mg.points.size() + 1);
-      for (size_t i = 0; i < ds_members_.size(); ++i) {
-        ds_members_[i] = static_cast<int>(i);
-        ds_offsets_[i] = static_cast<int>(i);
-      }
-      ds_offsets_.back() = static_cast<int>(ds_members_.size());
-    }
   }
 
   // See LioProcOptions::dry_run_point_filter_num's doc comment. Identical
@@ -640,699 +382,12 @@ void LioProcDecoupled::deskewAndDownsample(MeasureGroup& mg)
 }
 
 
-bool LioProcDecoupled::redeskewFromSpline(MeasureGroup& mg)
-{
-  if (!spline_ok_ || !dopts_.spline.splineOn()) return false;
-
-  // CARRY THE IEKF'S CORRECTION IN BY MOVING THE TAIL CLAMP, not by rigidly
-  // transforming the spline.  anchorTo() applied ONE correction to the point
-  // at t0 and the point at t1 alike -- but the correction is drift
-  // accumulated across THIS scan, and at t0 the state was already corrected
-  // by the previous scan's own update, so it moved a point that was already
-  // right.  CQ-41: moveTailClamp() now distributes it via a constraint-
-  // increment KKT solve (see spline.cpp), not the old time-proportional
-  // ramp -- zero at the head by construction, and any refinement already
-  // applied to the interior survives as far as the fit's own metric allows.
-  spline_.moveTailClamp(state_->pos(), state_->rot(), state_->vel());
-
-  // How far the re-deskew actually moved the points it re-placed.  This is
-  // the only quantity that says whether the per-iteration mechanism is doing
-  // anything at all.
-  redeskew_prev_ = mg.points;
-  deskewPointsSplineCsr(state_, spline_, mg.image.t, mg.lidar_points,
-                        ds_offsets_, ds_members_, opts_.deskew, mg.points);
-  ++redeskew_calls_;
-  if (redeskew_prev_.size() == mg.points.size() && !mg.points.empty())
-  {
-    double sum_sq = 0.0;
-    for (size_t k = 0; k < mg.points.size(); ++k)
-    {
-      const double d = (mg.points[k].point - redeskew_prev_[k].point).norm();
-      if (std::isfinite(d)) sum_sq += d * d;
-    }
-    redeskew_dp_rms_ = std::max(
-        redeskew_dp_rms_,
-        std::sqrt(sum_sq / static_cast<double>(mg.points.size())));
-  }
-  return true;
-}
-
-// SHAPE, from the map.  Called from inside the IEKF loop with the residuals
-// the solve is ABOUT TO USE, so the refinement and the state update are
-// linearised at the SAME trajectory -- neither is stale (Bryce, 2026-09-06).
-// The old placement, at the top of the next iteration against the previous
-// iteration's residuals, was linearised at a trajectory that no longer
-// existed by the time the step was applied.
-//
-// Both clamps are frozen in the solve, so this owns the interior shape and
-// only the interior shape; it reaches the endpoint only indirectly, by
-// changing where the points land and therefore what the next residual build
-// reports.
-bool LioProcDecoupled::refineSplineFromResiduals(const MeasureGroup& mg)
-{
-  if (!spline_ok_ || !dopts_.spline.refineOn() || residuals_.empty()) return false;
-
-  TimedScope ts_ref(profiler_, "lio/spline/refine");
-  lidar_obs_.clear();
-  lidar_obs_.reserve(residuals_.size());
-  for (const auto& r : residuals_)
-  {
-    // Inside the fitted window, not "> 0": frame times are start_time-
-    // relative, so a scan straddling the end of calibration has genuinely
-    // NEGATIVE point times and a sentinel test would reject real returns.
-    if (r.t < spline_.t0() - 1e-9 || r.t > spline_.t1() + 1e-9) continue;
-    SplineLidarObs o;
-    o.t      = r.t;
-    o.normal = r.normal;
-    o.r      = r.r;
-    o.sigma2 = r.sigma_squared;
-    lidar_obs_.push_back(o);
-  }
-  // CQ-39 item (1): threads this LioProc's existing log_debug_en straight
-  // through -- not a new config key -- to gate refineWithLidar()'s
-  // per-pass proof log.
-  // CQ-41 follow-up: imu_samples_raw/spline_frame_bias_acc_/
-  // spline_frame_gravity_/varAccFloor() are the same four inputs
-  // computeSplineImuResidual() already uses -- only consulted by
-  // refineWithLidar() when dopts_.spline.refine_imu_acc_weight > 0.
-  return spline_.refineWithLidar(lidar_obs_, dopts_.spline, mg.imu_samples_raw,
-                                 spline_frame_bias_acc_, spline_frame_gravity_,
-                                 state_->varAccFloor().mean(), state_->covBiasAcc(),
-                                 opts_.log_debug_en);
-}
-
-void LioProcDecoupled::finalizeSplineAndQ(MeasureGroup& mg)
-{
-  if (!dopts_.spline.splineOn()) return;
-
-  last_spline_stats_ = SplineImuResidualStats{};
-
-  boundary_dpos_ = -1.0;
-  boundary_drot_deg_ = -1.0;
-  if (spline_ok_)
-  {
-    // CQ-22 item (5): last thing before anything else in this block reads
-    // fitResidualPos()/fitResidualRot() -- redeskewFromSpline()'s final
-    // call (see LioProc's main loop, right before this function runs) has
-    // already moved the tail clamp to the converged state, so this is the
-    // first point in the frame where the residual reflects that move.
-    spline_.updateFitResiduals(mg.poses);
-
-    // CQ-41 items 5a/5c: the endpoint-derivative proof. Debug-gated (same
-    // convention as CQ-39's per-pass log), one line per scan, evaluated on
-    // the FINAL converged spline (after this frame's last moveTailClamp()
-    // -- see the comment immediately below for why that's already true
-    // here). HEAD~1 must report exactly 0 for all four; HEAD (either new
-    // mode) must not.
-    if (opts_.log_debug_en) {
-      static PersistentLogStream log("spline_endpoint_debug.txt");
-      std::ofstream& ofs = log.stream();
-      // Diagnostic addendum (not in CQ-39/41's original DELIVERS list):
-      // how well the constraint the KKT solve was actually asked to meet
-      // IS met, alongside the (unconstrained, and therefore far more
-      // sensitive to boundary data sparsity) acceleration reading -- lets
-      // a large acc_t0/acc_t1 be told apart from "the constraint itself
-      // isn't holding" (a real bug) vs. "the constraint holds fine, the
-      // curvature implied by 13 control points over a ~0.1s window with a
-      // 1/delta^2 ~ 1e4 amplification is just large" (expected, item 3b).
-      const V3D vel_err0 = spline_.velAt(spline_.t0()) - prev_scan_end_vel_;
-      const V3D vel_err1 = spline_.velAt(spline_.t1()) - state_->vel();
-      const V3D pos_err0 = spline_.posAt(spline_.t0()) - prev_scan_end_pos_;
-      const V3D pos_err1 = spline_.posAt(spline_.t1()) - state_->pos();
-
-      // Bryce, 2026-09-18: free-tail diagnostic -- see
-      // ScanSpline::diagnosticFreeTailFit()'s own doc comment. pos1_free/
-      // vel1_free/acc1_free are what the LiDAR-only-informed trajectory
-      // naturally wants at t1 with the boundary constraint relaxed to
-      // head-only; comparing against state_->pos()/vel() (what the tail is
-      // actually pinned to) and against acc_t1 above (the actual, boundary-
-      // constrained acceleration) is how "the target itself is wrong" gets
-      // told apart from "forcing exact equality is what creates curvature".
-      V3D pos1_free = V3D::Zero(), vel1_free = V3D::Zero(), acc1_free = V3D::Zero();
-      M3D cov_pos1_free = M3D::Zero();
-      Eigen::MatrixXd cp_free_unused;
-      double fit_res_pos_free_unused = 0.0;
-      const bool free_tail_ok = spline_.diagnosticFreeTailFit(
-          lidar_obs_, dopts_.spline, mg.imu_samples_raw, spline_frame_bias_acc_,
-          spline_frame_gravity_, state_->varAccFloor().mean(), mg.poses,
-          pos1_free, vel1_free, acc1_free, cov_pos1_free,
-          cp_free_unused, fit_res_pos_free_unused);
-
-      ofs << "scan_id=" << voxel_map_->frame_idx_
-          << " acc_t0=" << spline_.accAt(spline_.t0()).norm()
-          << " acc_t1=" << spline_.accAt(spline_.t1()).norm()
-          << " omega_t0=" << spline_.omegaBodyAt(spline_.t0()).norm()
-          << " omega_t1=" << spline_.omegaBodyAt(spline_.t1()).norm()
-          << " vel_err0=" << vel_err0.norm() << " vel_err1=" << vel_err1.norm()
-          << " pos_err0=" << pos_err0.norm() << " pos_err1=" << pos_err1.norm()
-          << " n_cp=" << spline_.nControlPoints()
-          << " delta=" << (spline_.t1() - spline_.t0()) / std::max(1, spline_.nControlPoints() - 3)
-          << " delta_ba_norm=" << spline_.lastDeltaBiasAcc().norm()
-          << " delta_ba_x=" << spline_.lastDeltaBiasAcc().x()
-          << " delta_ba_y=" << spline_.lastDeltaBiasAcc().y()
-          << " delta_ba_z=" << spline_.lastDeltaBiasAcc().z()
-          << " free_tail_ok=" << (free_tail_ok ? 1 : 0)
-          << " pos1_free_err=" << (free_tail_ok ? (pos1_free - state_->pos()).norm() : -1.0)
-          << " vel1_free_err=" << (free_tail_ok ? (vel1_free - state_->vel()).norm() : -1.0)
-          << " acc1_free=" << (free_tail_ok ? acc1_free.norm() : -1.0);
-      if (free_tail_ok) {
-        // Bryce, 2026-09-18: bias_acc lives in BODY frame (see
-        // refineWithLidar()'s R^T*(...)+bias_acc convention) -- a genuine
-        // constant body-frame bias, viewed through this WORLD-frame
-        // velocity error, would appear to ROTATE as the platform's
-        // orientation changes scan to scan, not stay constant. Log both:
-        // world-frame (vel1_free_err_w*) for reference, and the SAME
-        // vector rotated into this scan's own body frame at t1
-        // (vel1_free_err_b*, via rotAt(t1)^T) so a persistence check can be
-        // done in the frame the bias itself actually lives in.
-        const V3D vel_err_w = vel1_free - state_->vel();
-        const V3D vel_err_b = spline_.rotAt(spline_.t1()).transpose() * vel_err_w;
-        ofs << " vel1_free_err_wx=" << vel_err_w.x() << " vel1_free_err_wy=" << vel_err_w.y()
-            << " vel1_free_err_wz=" << vel_err_w.z()
-            << " vel1_free_err_bx=" << vel_err_b.x() << " vel1_free_err_by=" << vel_err_b.y()
-            << " vel1_free_err_bz=" << vel_err_b.z();
-      }
-      ofs << "\n";
-      ofs.flush();
-    }
-
-    // TQ-35, Bryce 2026-09-18: "is P honest?" -- per-scan NEES-vs-ground-
-    // truth diagnostic, plus the free-tail statistic calibrated against it.
-    // READ-ONLY: reads state_->cov()/pos() (already posterior -- this runs
-    // after ekf_.applyCovarianceUpdate(), see the main loop above) and
-    // writes to nees_diag.txt; nothing here can feed back into state_ or
-    // any other spline/EKF machinery, so it cannot alter the filter (the
-    // md5-unchanged proof this card requires is a property of the code
-    // shape, not something that needs separate runtime verification beyond
-    // confirming no assignment targets state_/spline_/prior_cov_).
-    // GT join is NOT done in C++ -- no GT access exists inside LioProc, and
-    // wiring it in is out of this diagnostic's scope -- eps_pos/eps_rot are
-    // computed post-hoc in Python from this log joined against the GT
-    // source, per TQ-35 item (2)'s own instruction to report the join
-    // details explicitly before any epsilon.
-    if (opts_.log_debug_en) {
-      static PersistentLogStream log("nees_diag.txt");
-      std::ofstream& ofs = log.stream();
-      const Eigen::MatrixXd& P = state_->cov();
-      const int iP = StateGroup::idxP(), iR = StateGroup::idxR();
-      const bool have_p = P.rows() >= iP + 3 && P.cols() >= iP + 3;
-      const bool have_r = P.rows() >= iR + 3 && P.cols() >= iR + 3;
-      const M3D P_pp = have_p ? M3D(P.block<3, 3>(iP, iP)) : M3D::Zero();
-      const M3D P_rr = have_r ? M3D(P.block<3, 3>(iR, iR)) : M3D::Zero();
-      const double t_abs = mg.image.t + data_queues_->start_time;
-
-      // Motion-onset investigation (2026-09-19): velocity + bias/gravity
-      // state and covariance blocks, previously not logged at all for
-      // either estimator -- needed to compare decoupled vs coupled beyond
-      // position/rotation. idxV() is always valid (velocity is always
-      // estimated); idxBG()/idxBA()/idxG() are -1 when that state isn't
-      // estimated, same have_* guard convention as have_p/have_r above.
-      const int iV = StateGroup::idxV();
-      const bool have_v = P.rows() >= iV + 3 && P.cols() >= iV + 3;
-      const M3D P_vv = have_v ? M3D(P.block<3, 3>(iV, iV)) : M3D::Zero();
-      const int iBG = state_->idxBG(), iBA = state_->idxBA(), iGr = state_->idxG();
-      const bool have_bg = iBG >= 0 && P.rows() >= iBG + 3 && P.cols() >= iBG + 3;
-      const bool have_ba = iBA >= 0 && P.rows() >= iBA + 3 && P.cols() >= iBA + 3;
-      const int gd = state_->gravDim();
-      const bool have_gr = iGr >= 0 && P.rows() >= iGr + gd && P.cols() >= iGr + gd;
-      const double trP_bg = have_bg ? P.block<3, 3>(iBG, iBG).trace() : -1.0;
-      const double trP_ba = have_ba ? P.block<3, 3>(iBA, iBA).trace() : -1.0;
-      const double trP_grav = have_gr ? P.block(iGr, iGr, gd, gd).trace() : -1.0;
-
-      // item (5): free_tail_d, using diagnosticFreeTailFit() with the
-      // regularizers FORCED ON (curvature_weight=1.0, imu_acc_weight=1.0)
-      // regardless of this run's own dopts_.spline -- the card's own
-      // instruction ("with the regularisers on"), decoupled from whatever
-      // the main fit's shipped config happens to use (still 0.0/off by
-      // default as of CQ-41's own filing).
-      // TQ-38 item (4): diag_free_tail_imu_acc_weight overrides the forced
-      // imu_acc_weight below, default 1.0 (identical to the hardcoded
-      // value TQ-35/TQ-36 already shipped with -- this override is inert
-      // at its default). Lets the imu_acc_weight sweep vary ONLY this
-      // diagnostic's forced weight without touching the run's own shipped
-      // refine_imu_acc_weight (a different field, read by the REAL
-      // refinement path, refineWithLidar()).
-      SplineOptions forced_opts = dopts_.spline;
-      forced_opts.refine_curvature_weight = 1.0;
-      forced_opts.refine_imu_acc_weight   = dopts_.spline.diag_free_tail_imu_acc_weight;
-      V3D ft_pos1 = V3D::Zero(), ft_vel1 = V3D::Zero(), ft_acc1 = V3D::Zero();
-      M3D ft_cov = M3D::Zero();
-      Eigen::MatrixXd ft_cp_free;
-      double ft_fit_res_pos_free = 0.0;
-      const bool ft_ok = spline_.diagnosticFreeTailFit(
-          lidar_obs_, forced_opts, mg.imu_samples_raw, spline_frame_bias_acc_,
-          spline_frame_gravity_, state_->varAccFloor().mean(), mg.poses,
-          ft_pos1, ft_vel1, ft_acc1, ft_cov, ft_cp_free, ft_fit_res_pos_free);
-      double free_tail_d = -1.0;
-      if (ft_ok && have_p) {
-        const V3D d = ft_pos1 - state_->pos();
-        const M3D S = P_pp + ft_cov;
-        const Eigen::LDLT<M3D> ldlt_s(S);
-        if (ldlt_s.info() == Eigen::Success) {
-          const V3D x = ldlt_s.solve(d);
-          if (x.allFinite()) free_tail_d = d.dot(x);
-        }
-      }
-
-      // CQ-43 item (4d): state rotation as a quaternion, so rot_drift_deg
-      // (= ||Log(R(t0)^T R(t))|| against a chosen reference scan, truth 0
-      // at rest) can be computed post-hoc without re-deriving it here --
-      // this diagnostic has no notion of "the stationary window's first
-      // scan" (that is TQ-34's own scan-id convention, established in
-      // Python), so the reference choice stays a post-processing decision.
-      const Eigen::Quaterniond state_q(state_->rot());
-
-      ofs << std::setprecision(12)
-          << "scan_id=" << voxel_map_->frame_idx_ << " t_abs=" << t_abs
-          << " state_px=" << state_->pos().x() << " state_py=" << state_->pos().y()
-          << " state_pz=" << state_->pos().z()
-          << " state_qw=" << state_q.w() << " state_qx=" << state_q.x()
-          << " state_qy=" << state_q.y() << " state_qz=" << state_q.z()
-          << " total_dtheta_deg=" << last_total_dtheta_deg_
-          << " trP_pos_pre=" << trP_pos_pre_
-          << " trP_pos_post=" << (have_p ? P_pp.trace() : -1.0)
-          << " Ppp_xx=" << P_pp(0, 0) << " Ppp_xy=" << P_pp(0, 1) << " Ppp_xz=" << P_pp(0, 2)
-          << " Ppp_yy=" << P_pp(1, 1) << " Ppp_yz=" << P_pp(1, 2) << " Ppp_zz=" << P_pp(2, 2)
-          << " Prr_xx=" << P_rr(0, 0) << " Prr_xy=" << P_rr(0, 1) << " Prr_xz=" << P_rr(0, 2)
-          << " Prr_yy=" << P_rr(1, 1) << " Prr_yz=" << P_rr(1, 2) << " Prr_zz=" << P_rr(2, 2)
-          << " have_Ppp=" << (have_p ? 1 : 0) << " have_Prr=" << (have_r ? 1 : 0)
-          << " free_tail_d=" << free_tail_d
-          << " state_vx=" << state_->vel().x() << " state_vy=" << state_->vel().y()
-          << " state_vz=" << state_->vel().z()
-          << " Pvv_xx=" << P_vv(0, 0) << " Pvv_xy=" << P_vv(0, 1) << " Pvv_xz=" << P_vv(0, 2)
-          << " Pvv_yy=" << P_vv(1, 1) << " Pvv_yz=" << P_vv(1, 2) << " Pvv_zz=" << P_vv(2, 2)
-          << " have_Pvv=" << (have_v ? 1 : 0)
-          << " state_bgx=" << state_->biasGyr().x() << " state_bgy=" << state_->biasGyr().y()
-          << " state_bgz=" << state_->biasGyr().z()
-          << " state_bax=" << state_->biasAcc().x() << " state_bay=" << state_->biasAcc().y()
-          << " state_baz=" << state_->biasAcc().z()
-          << " state_gx=" << state_->gravity().x() << " state_gy=" << state_->gravity().y()
-          << " state_gz=" << state_->gravity().z()
-          << " trP_bg=" << trP_bg << " trP_ba=" << trP_ba << " trP_grav=" << trP_grav
-          << " have_Pbg=" << (have_bg ? 1 : 0) << " have_Pba=" << (have_ba ? 1 : 0)
-          << " have_Pgrav=" << (have_gr ? 1 : 0)
-          << "\n";
-      ofs.flush();
-
-      // TQ-36, Bryce 2026-09-18: is the free-tail correction DRIFT or
-      // NOISE, along the WHOLE scan, not just at the endpoint? Per
-      // control point i, d_i = cp_free[i] - cp_pinned[i] (cp_pinned is
-      // spline_.posAt-equivalent's own cp_p_ -- the REAL, tail-
-      // constrained refinement this frame actually used; cp_free is
-      // ft_cp_free from the SAME forced-on-regularizer call used for
-      // free_tail_d above). Travel direction is a single per-scan
-      // reference (state_->vel(), normalized) -- decomposing every d_i
-      // against a per-control-point direction would make the profile
-      // depend on a quantity (local heading) the card doesn't ask for.
-      if (ft_ok && ft_cp_free.cols() == spline_.nControlPoints()) {
-        static PersistentLogStream log("tq36_profile.txt");
-        std::ofstream& pofs = log.stream();
-        const int n_cp = spline_.nControlPoints();
-        const Eigen::Matrix<double, 3, Eigen::Dynamic>& cp_pinned = spline_.cpPos();
-        const double speed = state_->vel().norm();
-        const V3D travel_dir = (speed > 1e-6) ? V3D(state_->vel() / speed) : V3D::Zero();
-        pofs << std::setprecision(9)
-             << "scan_id=" << voxel_map_->frame_idx_ << " n_cp=" << n_cp
-             << " fit_res_pos_pinned=" << spline_.fitResidualPos()
-             << " fit_res_pos_free=" << ft_fit_res_pos_free;
-        V3D d_last_world = V3D::Zero();
-        for (int i = 0; i < n_cp; ++i) {
-          const V3D d = ft_cp_free.col(i) - cp_pinned.col(i);
-          const double d_travel = d.dot(travel_dir);
-          pofs << " d_norm_" << i << "=" << d.norm()
-               << " d_travel_" << i << "=" << d_travel;
-          if (i == n_cp - 1) d_last_world = d;
-        }
-        // TQ-36 item (4): body-frame per-axis mean/std needs the FULL
-        // vector at the last free control point, not just its travel-
-        // direction scalar -- rotated into this scan's own body frame at
-        // t1 the same way CQ-41's follow-on did for vel1_free_err.
-        const V3D d_last_body = spline_.rotAt(spline_.t1()).transpose() * d_last_world;
-        pofs << " d_last_bx=" << d_last_body.x() << " d_last_by=" << d_last_body.y()
-             << " d_last_bz=" << d_last_body.z();
-        pofs << "\n";
-        pofs.flush();
-      }
-
-      // TQ-38 item (1): delta_a(t) = R(t)^T * (accAt_refined(t) -
-      // accAt_unrefined(t)), at every raw IMU sample in the scan window --
-      // the IMU correction the refinement is implicitly asking for.
-      // delta_w is 0 by construction (refineWithLidar() touches cp_p_
-      // only, never cp_phi_ -- standing/refine-cannot-reach), so it is not
-      // computed here, per the card's own instruction.
-      //
-      // Two "refined" variants against the SAME unrefined baseline
-      // (cp_p_unrefined_snapshot_, captured right after fit()):
-      //   pinned -- the LIVE cp_p_ (this run's own config: V1 if
-      //     curvature_weight=imu_acc_weight=0, V2 if both=1.0)
-      //   free   -- ft_cp_free (V3: free tail, regularizers FORCED on,
-      //     same diagnosticFreeTailFit() call above used for free_tail_d
-      //     and TQ-36's profile -- so V3's own numbers do not depend on
-      //     this run's own curvature_weight/imu_acc_weight config at all)
-      // accAt() reads whatever cp_p_ currently holds, so evaluating three
-      // variants means swapping ScanSpline::cpPosMut() in and back out --
-      // read-only: the live value is always the last one restored.
-      if (ft_ok && ft_cp_free.cols() == spline_.nControlPoints() &&
-          cp_p_unrefined_snapshot_.cols() == spline_.nControlPoints()) {
-        static PersistentLogStream log("tq38_delta_a.txt");
-        std::ofstream& ofs = log.stream();
-        const Eigen::Matrix<double, 3, Eigen::Dynamic> cp_live = spline_.cpPos();
-        for (const auto& samp : mg.imu_samples_raw) {
-          if (samp.t < spline_.t0() - 1e-9 || samp.t > spline_.t1() + 1e-9) continue;
-          const M3D R = spline_.rotAt(samp.t);  // cp_phi_ untouched by any swap below
-
-          const V3D acc_pinned_refined = spline_.accAt(samp.t);  // live cp_p_
-
-          spline_.cpPosMut() = cp_p_unrefined_snapshot_;
-          const V3D acc_unrefined = spline_.accAt(samp.t);
-
-          spline_.cpPosMut() = ft_cp_free;
-          const V3D acc_free_refined = spline_.accAt(samp.t);
-
-          spline_.cpPosMut() = cp_live;  // restore before anything else reads cp_p_
-
-          const V3D delta_a_pinned = R.transpose() * (acc_pinned_refined - acc_unrefined);
-          const V3D delta_a_free   = R.transpose() * (acc_free_refined   - acc_unrefined);
-          ofs << std::setprecision(9)
-              << "scan_id=" << voxel_map_->frame_idx_
-              << " t_abs=" << (samp.t + data_queues_->start_time)
-              << " delta_a_pinned_norm=" << delta_a_pinned.norm()
-              << " delta_a_free_norm=" << delta_a_free.norm()
-              << " acc_refined_pinned_norm=" << acc_pinned_refined.norm()
-              << " acc_refined_free_norm=" << acc_free_refined.norm()
-              << " acc_unrefined_norm=" << acc_unrefined.norm()
-              << " sigma_acc_floor=" << std::sqrt(state_->varAccFloor().mean())
-              << "\n";
-        }
-        ofs.flush();
-      }
-
-      // TQ-34, Bryce 2026-09-18: item (3b)'s decile profile -- per RAW IMU
-      // sample within this scan's window (not per-scan), its own
-      // normalised in-scan time u=(t-t0)/(t1-t0), and the four quantities
-      // whose truth is zero at rest: accAt/omegaBodyAt/velAt norms and
-      // pos_drift (=posAt(t)-posAt(t0)). rot_drift (degrees, vs rotAt(t0))
-      // alongside. Binning into deciles happens downstream, in analysis --
-      // this just logs every sample at full resolution.
-      {
-        static PersistentLogStream log("tq34_samples.txt");
-        std::ofstream& sofs = log.stream();
-        const double t0 = spline_.t0(), t1 = spline_.t1();
-        const double span = std::max(1e-9, t1 - t0);
-        const V3D pos_t0 = spline_.posAt(t0);
-        const M3D rot_t0 = spline_.rotAt(t0);
-        for (const auto& samp : mg.imu_samples_raw) {
-          if (samp.t < t0 - 1e-9 || samp.t > t1 + 1e-9) continue;
-          const double u = (samp.t - t0) / span;
-          const double pos_drift = (spline_.posAt(samp.t) - pos_t0).norm();
-          const double rot_drift_deg = std::acos(std::clamp(
-              (M3D(rot_t0.transpose() * spline_.rotAt(samp.t)).trace() - 1.0) / 2.0,
-              -1.0, 1.0)) * (180.0 / M_PI);
-          sofs << std::setprecision(9)
-               << "scan_id=" << voxel_map_->frame_idx_ << " t_abs=" << (samp.t + data_queues_->start_time)
-               << " u=" << u
-               << " acc_at_norm=" << spline_.accAt(samp.t).norm()
-               << " omega_body_norm=" << spline_.omegaBodyAt(samp.t).norm()
-               << " vel_at_norm=" << spline_.velAt(samp.t).norm()
-               << " pos_drift=" << pos_drift
-               << " rot_drift_deg=" << rot_drift_deg
-               << "\n";
-        }
-        sofs.flush();
-      }
-    }
-
-    // BOTH CLAMPS ARE ALREADY EXACT: t0 was pinned before fit() ran and t1
-    // was carried in by moveTailClamp() on the last iteration, so there is
-    // nothing to re-anchor here. state_ is NOT written back from the spline's own t1: state_
-    // is one continuously-propagated object across the whole run (never
-    // reconstructed per scan), so it was never actually discontinuous at
-    // scan boundaries in the first place -- only the spline's own
-    // independently-refit-per-scan shape was. state_'s pose/vel/bias/
-    // gravity continue to come exclusively from the IEKF's own
-    // covariance-consistent point-to-plane correction, exactly as when
-    // freezing is off. The spline here is purely an internal deskewing
-    // aid; freezing only makes ITS OWN boundary consistent, not a
-    // correction source for state_.
-
-    // DX-2 preflight fix (boundary_dpos): THIS scan's own start (t0)
-    // against the PREVIOUS scan's finalized end -- the two spline
-    // evaluations this costs. Order matters: compare against the OLD
-    // prev_scan_end_* before overwriting it with this scan's own end
-    // below. Under boundary freezing this MUST come back ~0 (float
-    // roundoff only): setFrozenBoundary() always freezes THIS scan's t0 to
-    // the exact prev_scan_end_* recorded below, so the invariant holds by
-    // construction regardless of what state_'s own value happens to be.
-    if (prev_scan_end_valid_)
-    {
-      const V3D t0_pos = spline_.posAt(spline_.t0());
-      const M3D t0_rot = spline_.rotAt(spline_.t0());
-      boundary_dpos_ = (t0_pos - prev_scan_end_pos_).norm();
-      const M3D dR = t0_rot * prev_scan_end_rot_.transpose();
-      boundary_drot_deg_ = std::acos(std::clamp((dR.trace() - 1.0) / 2.0, -1.0, 1.0))
-                          * (180.0 / M_PI);
-    }
-    // This scan's own end, and the freeze target for the NEXT scan's t0:
-    // always state_'s own pose (never the spline's t1 directly). Under
-    // nFrozenCp()==0 these agree exactly (anchorTo() above just forced
-    // it); under freezing they need not agree exactly, and that's fine --
-    // the spline is not the source of truth for state_.
-    prev_scan_end_pos_ = state_->pos();
-    prev_scan_end_rot_ = state_->rot();
-    prev_scan_end_vel_ = state_->vel();
-    prev_scan_end_valid_ = true;
-
-    if (!mg.imu_samples_raw.empty())
-    {
-      TimedScope ts(profiler_, "lio/spline/imu_residual");
-      last_spline_stats_ = computeSplineImuResidual(
-          spline_, mg.imu_samples_raw,
-          state_->biasAcc(), state_->biasGyr(), state_->gravity());
-    }
-  }
-
-  if (!spline_ok_ && head_pin_update_ == "always")
-  {
-    prev_scan_end_pos_ = state_->pos();
-    prev_scan_end_rot_ = state_->rot();
-    prev_scan_end_vel_ = state_->vel();
-    prev_scan_end_valid_ = true;
-    ++head_pin_forced_count_;
-    if (head_pin_forced_count_ == 1 || head_pin_forced_count_ % 100 == 0)
-      ROS_INFO_STREAM("[spline] head_pin_update=always engaged on a failed-fit frame (count " << head_pin_forced_count_ << ")");
-  }
-
-  if (dopts_.adaptive_q.enable)
-  {
-    if (!adaptive_q_primed_)
-    {
-      // The NOMINAL is whatever the state was configured with before any
-      // adaptation -- imu/process_noise/fixed. The FLOOR is the
-      // stationary calibration window's separate measured variance.
-      // Isotropic scalars, matching the trace/3 reduction
-      // used at every other point in the pipeline.
-      adaptive_q_.setNominal(state_->varAcc().mean(), state_->varGyr().mean());
-      adaptive_q_.setFloor(state_->varAccFloor().mean(), state_->varGyrFloor().mean());
-      adaptive_q_primed_ = true;
-    }
-
-    adaptive_q_.update(last_spline_stats_);
-
-    // Push the applied values into the state, where ImuProc::propagate()
-    // reads them to build cov_w on the NEXT frame.  One physical quantity,
-    // measured as a measurement covariance and applied as process noise --
-    // see adaptive_q.h's header for why that is legitimate rather than a
-    // category error.  Note this deliberately does NOT touch the floor.
-    if (adaptive_q_.active())
-      state_->setNoiseParams(V3D::Constant(adaptive_q_.varAcc()),
-                             V3D::Constant(adaptive_q_.varGyr()));
-  }
-
-  // Dense trajectory dump: the spline evaluated as the function it is, on a
-  // fixed grid across this scan's own window.  Analysis only (see
-  // SplineOptions::traj_log_mode); scores still come from results_lio.txt.
-  // Consecutive scans' windows abut, so the last sample of one and the first
-  // of the next also MEASURE the inter-scan discontinuity -- which is the
-  // honest check on how continuous this "continuous-time" trajectory is, and
-  // nothing has ever measured it.
-  //
-  // dopts_.spline.trajLogOn() (traj_log_mode != "off") is already the real
-  // gate here; the outer log_en check this used to have was dangling (no
-  // braces) and bound only to this one inner if, not to the spline_q.csv
-  // block below -- braced explicitly so that's no longer ambiguous to read.
-  if (dopts_.spline.log_en || dopts_.adaptive_q.log_en)
-  {
-  if (spline_ok_ && dopts_.spline.trajLogOn())
-  {
-    static bool traj_first = true;
-    std::ofstream tofs(debugLogPath("spline_traj.csv"),
-                       traj_first ? std::ios::trunc : std::ios::app);
-    if (traj_first) { tofs << "scan_id,t,px,py,pz,qx,qy,qz,qw\n"; traj_first = false; }
-    const double t_off = data_queues_->start_time;
-    const double hz = std::max(1.0, dopts_.spline.traj_log_hz);
-    const double step = 1.0 / hz;
-    const double a = spline_.t0(), b = spline_.t1();
-    tofs << std::setprecision(12);
-    for (double tt = a; tt <= b + 1e-12; tt += step) {
-      const Eigen::Quaterniond q(spline_.rotAt(tt));
-      const V3D pp = spline_.posAt(tt);
-      tofs << voxel_map_->frame_idx_ << ',' << (tt + t_off) << ','
-           << pp.x() << ',' << pp.y() << ',' << pp.z() << ','
-           << q.x() << ',' << q.y() << ',' << q.z() << ',' << q.w() << '\n';
-    }
-  }
-  }
-
-  // spline_q.csv is written UNCONDITIONALLY, every scan, regardless of
-  // dopts_.spline.log_en/dopts_.adaptive_q.log_en -- deliberately, not an
-  // oversight (C-8): rule 8 already retains this file by name across every
-  // batch this project runs, and every AdaptiveQ/spline diagnostic reader
-  // (DX-2's SERIES blocks, C-7's time-axis join, D-1R) assumes it always
-  // exists. Gating it behind log_en would silently break all of them the
-  // moment log_en defaulted false, which it does.
-  {
-    // CQ-36: PersistentLogStream -- see its own doc comment for the CQ-35
-    // regression this fixes.
-    static PersistentLogStream log("spline_q.csv");
-    bool first;
-    std::ofstream& ofs = log.stream(&first);
-    if (first)
-    {
-      ofs << "scan_id," << adaptive_q_.csvHeader()
-          << ",spline_ok,n_cp,fit_res_pos,fit_res_rot,fit_reg_frac,rot_chord_deg,"
-             "fit_fail_count,frame_count,max_abs_acc,max_abs_gyr,"
-             "n_cp_req,refine_applied,refine_rejects,last_refine_step,"
-             "mode,refine_dcp_max,refine_dcp_rms,"
-             "redeskew_calls,redeskew_dp_rms,"
-             "refit_dtraj_rms,refit_dtraj_max,refit_drot_deg,cov_acc_pre,cov_gyr_pre,"
-             "d_bias_acc_norm,d_bias_gyr_norm,d_gravity_norm,max_abs_cp_phi,"
-             "dmin_p,dmax_p,dmin_r,dmax_r,mean_abs_acc,mean_abs_gyr\n";
-    }
-    const double t_abs = mg.image.t + data_queues_->start_time;
-    ofs << voxel_map_->frame_idx_ << ','
-        << adaptive_q_.csvRow(t_abs, last_spline_stats_) << ','
-        << (spline_ok_ ? 1 : 0) << ','
-        << (spline_ok_ ? spline_.nControlPoints() : 0) << ','
-        << (spline_ok_ ? spline_.fitResidualPos() : 0.0) << ','
-        << (spline_ok_ ? spline_.fitResidualRot() : 0.0) << ','
-        << (spline_ok_ ? spline_.fitRegFrac() : 0.0) << ','
-        << (spline_ok_ ? spline_.rotationChordDeg() : 0.0) << ','
-        << spline_fit_fail_count_ << ',' << spline_frame_count_ << ','
-        << last_spline_stats_.max_abs_acc << ',' << last_spline_stats_.max_abs_gyr << ','
-        << (spline_ok_ ? spline_.nControlPointsRequested() : 0) << ','
-        << (spline_ok_ ? spline_.refineApplied() : 0) << ','
-        << (spline_ok_ ? spline_.refineRejects() : 0) << ','
-        << (spline_ok_ ? spline_.lastRefineStep() : 0.0) << ','
-        // The engagement half: what each toggle was set to, and how far its
-        // mechanism actually moved things this frame.  A cell with
-        // per_iteration naming a step whose magnitude column is 0 across the
-        // whole run is an INERT cell, not a null result.
-        << dopts_.spline.mode << ','
-        << (spline_ok_ ? spline_.refineDcpMax() : 0.0) << ','
-        << (spline_ok_ ? spline_.refineDcpRms() : 0.0) << ','
-        << redeskew_calls_ << ',' << redeskew_dp_rms_ << ','
-        << refit_dtraj_rms_ << ',' << refit_dtraj_max_ << ',' << refit_drot_deg_ << ','
-        << cov_acc_pre_ << ',' << cov_gyr_pre_ << ','
-        // The imu_fit bias/gravity correction was removed with the
-        // restructure (CQ-21); these three columns are retained for
-        // spline_q.csv's schema stability and always read 0.
-        << 0.0 << ',' << 0.0 << ',' << 0.0 << ','
-        << (spline_ok_ ? spline_.maxAbsCpPhi() : 0.0) << ','
-        // CQ-24 item (1): NOT gated on spline_ok_ -- these are meaningful
-        // (and -1.0 sentinel otherwise) on a fit that failed at the pivot
-        // guard or at kSolveFailed too, which is the whole point.
-        << spline_.dminPos() << ',' << spline_.dmaxPos() << ','
-        << spline_.dminRot() << ',' << spline_.dmaxRot() << ','
-        << last_spline_stats_.mean_abs_acc << ',' << last_spline_stats_.mean_abs_gyr
-        << '\n';
-    ofs.flush();
-  }
-
-  // Run totals for the end-of-run engagement report.
-  ++run_frames_;
-  run_redeskew_calls_ += redeskew_calls_;
-  run_refits_ += spline_refits_;
-  run_redeskew_dp_max_ = std::max(run_redeskew_dp_max_, redeskew_dp_rms_);
-  if (spline_ok_)
-  {
-    run_refine_applied_ += spline_.refineApplied();
-    run_refine_rejects_ += spline_.refineRejects();
-    run_refine_dcp_max_ = std::max(run_refine_dcp_max_, spline_.refineDcpMax());
-  }
-  if (dopts_.adaptive_q.enable && adaptive_q_.active())
-  {
-    ++run_aq_ok_frames_;
-    const double aa = adaptive_q_.varAcc(), ag = adaptive_q_.varGyr();
-    if (run_aq_ok_frames_ == 1)
-    {
-      run_aq_applied_min_acc_ = run_aq_applied_max_acc_ = aa;
-      run_aq_applied_min_gyr_ = run_aq_applied_max_gyr_ = ag;
-    }
-    else
-    {
-      run_aq_applied_min_acc_ = std::min(run_aq_applied_min_acc_, aa);
-      run_aq_applied_max_acc_ = std::max(run_aq_applied_max_acc_, aa);
-      run_aq_applied_min_gyr_ = std::min(run_aq_applied_min_gyr_, ag);
-      run_aq_applied_max_gyr_ = std::max(run_aq_applied_max_gyr_, ag);
-    }
-  }
-}
-
-// ── Engagement report ──────────────────────────────────────────────────────
-// See the declaration in lio_processing.h.  One line per toggle; a flag that
-// was ON with a zero counter prints INERT.
-LioProcDecoupled::~LioProcDecoupled()
-{
-  if (!dopts_.spline.splineOn()) return;
-  const std::string rep = engagementReport();
-  ROS_WARN_STREAM("\n" << rep);
-  std::ofstream ofs(debugLogPath("engagement.txt"), std::ios::trunc);
-  if (ofs) ofs << rep << '\n';
-}
+LioProcDecoupled::~LioProcDecoupled() = default;
 
 std::string LioProcDecoupled::engagementReport() const
 {
   std::ostringstream o;
-  o << "[engagement]  did each flag actually do anything?  frames="
-    << run_frames_;
-
-  auto line = [&](const char* name, bool on, long count, const char* mag_label,
-                  double mag) {
-    o << "\n  " << name << ": " << (on ? "ON " : "off");
-    if (!on) return;
-    o << " count=" << count << ' ' << mag_label << '=' << mag;
-    if (count == 0)
-      o << "   <-- INERT: the flag is on and its mechanism never ran";
-    else if (!(mag > 0.0))
-      o << "   <-- INERT: the mechanism ran " << count
-        << " times and moved nothing";
-  };
-
-  o << "\n  spline/mode = " << dopts_.spline.mode;
-  line("  redeskew          ", dopts_.spline.splineOn(), run_redeskew_calls_,
-       "max_dp_rms_m", run_redeskew_dp_max_);
-  line("  refine            ", dopts_.spline.refineOn(), run_refine_applied_,
-       "max_dcp_m", run_refine_dcp_max_);
-  if (dopts_.spline.refineOn())
-    o << " rejects=" << run_refine_rejects_;
-
-  o << "\n  adaptive_q/enable = "
-    << (dopts_.adaptive_q.enable ? "true" : "false");
-  if (dopts_.adaptive_q.enable)
-  {
-    o << "\n    applied frames=" << run_aq_ok_frames_
-      << "  var_acc [" << run_aq_applied_min_acc_ << ", "
-      << run_aq_applied_max_acc_ << "]"
-      << "  var_gyr [" << run_aq_applied_min_gyr_ << ", "
-      << run_aq_applied_max_gyr_ << "]";
-    if (run_aq_ok_frames_ == 0)
-      o << "\n    <-- INERT: adaptive_q never left warmup/gating, so the "
-           "process noise was never touched";
-    else if (run_aq_applied_max_acc_ <= run_aq_applied_min_acc_ &&
-             run_aq_applied_max_gyr_ <= run_aq_applied_min_gyr_)
-      o << "\n    <-- INERT: the applied process noise never CHANGED, so "
-           "'engaged' here means 'reported healthy', not 'adapted'";
-  }
+  o << "[engagement]  did each flag actually do anything?";
 
   // The plane model is a VoxelMap-side flag, but its engagement belongs in
   // the same report -- a run that selected "information" and never built one
@@ -1358,33 +413,10 @@ std::string LioProcDecoupled::engagementReport() const
       << vm->opts()->weight_floor_mode;
   }
 
-  o << "\n  spline/mode = " << dopts_.spline.mode
-    << "\n  control_points/hz = " << dopts_.spline.control_point_hz;
-
-  // CQ-22 item (4): the fit-fail breakdown by cause; CQ-23 made
-  // "chart_guard" (the hard ceiling) a real, live cause again, separate
-  // from the soft warning count below -- see ScanSpline::FitFailCause.
-  if (dopts_.spline.splineOn())
-  {
-    static const char* kCauseNames[] = {
-      "none", "too_few_poses", "bad_window", "too_few_samples",
-      "n_cp_too_small", "degenerate_delta", "underdetermined",
-      "solve_failed", "non_finite", "chart_guard_hard", "pivot_guard",
-    };
-    o << "\n  spline fit_fail_count=" << spline_fit_fail_count_
-      << " of frame_count=" << spline_frame_count_ << ", by cause:";
-    for (std::size_t c = 1; c < spline_fail_cause_count_.size(); ++c)
-      o << "\n    " << kCauseNames[c] << '=' << spline_fail_cause_count_[c];
-    o << "\n  spline head_pin_update=" << head_pin_update_ << " forced_repin_count=" << head_pin_forced_count_;
-    if (akf_q_.enabled())
-      o << "\n  akf_q frames=" << akf_q_.frames() << " applied=" << akf_q_.appliedFrames() << " clamped="
-        << akf_q_.clampedFrames() << " applied acc [" << akf_q_.minAcc() << "," << akf_q_.maxAcc() << "] gyr ["
-        << akf_q_.minGyr() << "," << akf_q_.maxGyr() << "]";
-    o << "\n  spline chart_guard_warn_count=" << spline_chart_guard_warn_count_
-      << "  (fits that exceeded CHART_MAX_PHI_RAD but were NOT refused, "
-         "CQ-22 item 4 -- a nonzero count here is a parameterisation finding, "
-         "not a failure)";
-  }
+  if (akf_q_.enabled())
+    o << "\n  akf_q frames=" << akf_q_.frames() << " applied=" << akf_q_.appliedFrames() << " clamped="
+      << akf_q_.clampedFrames() << " applied acc [" << akf_q_.minAcc() << "," << akf_q_.maxAcc() << "] gyr ["
+      << akf_q_.minGyr() << "," << akf_q_.maxGyr() << "]";
 
   o << "\n[engagement] a flag marked INERT above did not test anything; the "
        "cell is invalid, not null.";
@@ -1619,22 +651,12 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
     std::string stop = "max_iter";
     int iter = 0;
 
-    // CQ-43 item 0: ONE stream for both write sites below (in-loop and
-    // post-loop) -- PersistentLogStream::stream() opens its own ofstream
-    // with std::ios::trunc on first use per INSTANCE, so two separate
-    // `static PersistentLogStream log(...)` declarations against the same
-    // basename (the bug this fixes, caught by inspecting the corrupted
-    // output before filing) truncate/interleave each other's writes rather
-    // than sharing one file position.
-    static PersistentLogStream cq43_tailmove_log("cq43_tailmove.txt");
     // pose_control_lidar_information_footprint_validation Phase 2A: per-
     // iteration physical tail state before/after this scan's REAL IEKF
     // loop (the shadow/dry-run pass above is explicitly excluded -- see
     // that pass's own doc comment, "this whole pass is discarded"). Reuses
-    // the SAME opts_.log_debug_en gate as cq43_tailmove_log immediately
-    // above -- diagnostic-only, zero cost when off, no new config key.
+    // the opts_.log_debug_en gate -- diagnostic-only, zero cost when off, no new config key.
     static PersistentLogStream gn_iter_log("decoupled_gn_iteration.csv");
-    static PersistentLogStream knot_update_log("decoupled_knot_update.csv");
 
     // Fixed IEKF prior for this frame's ENTIRE inner loop -- see ekf.h's
     // applyMeanUpdate() doc comment. Set once here, read (never rewritten)
@@ -1661,72 +683,14 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
     mg.prior_rot = state_propagat_.rot();
     mg.prior_vel = state_propagat_.vel();
     bool any_solved = false;
-    if (voxel_map_->frame_idx_ == 1 && spline_ok_ && dopts_.spline.splineOn()) {  // see the frame_idx_ fix comment above
-      const auto& cp = spline_.cpPos(); const auto& phi = spline_.cpPhi();
-      for (int kk = 0; kk < cp.cols(); ++kk)
-        logDecoupledFirstFrameSpline("initial", 0, -1, mg.image.t + data_queues_->start_time, kk, spline_.t0() + kk * spline_.delta() + data_queues_->start_time, cp.col(kk), phi.col(kk));
-    }
-    std::vector<V3D> frame_cp_pos_start, frame_cp_phi_start;
-    const bool log_frame_knot_updates = opts_.log_debug_en && spline_ok_ && dopts_.spline.splineOn();
-    if (log_frame_knot_updates) {
-      const auto& cp = spline_.cpPos();
-      const auto& phi = spline_.cpPhi();
-      frame_cp_pos_start.reserve(cp.cols());
-      frame_cp_phi_start.reserve(phi.cols());
-      for (int kk = 0; kk < cp.cols(); ++kk) {
-        frame_cp_pos_start.push_back(cp.col(kk));
-        frame_cp_phi_start.push_back(phi.col(kk));
-      }
-    }
-
     for (; iter < opts_.max_iterations; iter++) {
       const StateGroup iteration_before = *state_;
-      std::vector<V3D> cp_pos_before, cp_phi_before;
-      const bool log_knot_updates = opts_.log_debug_en && spline_ok_ && dopts_.spline.splineOn();
-      if (log_knot_updates) {
-        const auto& cp = spline_.cpPos();
-        const auto& phi = spline_.cpPhi();
-        cp_pos_before.reserve(cp.cols()); cp_phi_before.reserve(phi.cols());
-        for (int kk = 0; kk < cp.cols(); ++kk) {
-          cp_pos_before.push_back(cp.col(kk));
-          cp_phi_before.push_back(phi.col(kk));
-        }
-      }
-      // Re-place every kept point against the spline, re-anchored to
-      // whatever the previous iteration corrected the state to.  Skipped on
-      // iteration 0 (mg.points is already the freshly-deskewed set) and a
-      // no-op unless spline/redeskew_each_iteration is on.  This is the
-      // mechanism's point: the residuals the next solve sees are computed
-      // from points placed by the CURRENT trajectory estimate, not by the
-      // IMU-only propagation that produced the frame.
-      if (iter > 0) redeskewFromSpline(mg);
-
-      // CQ-43 item 0, read-only: how far THIS iteration's moveTailClamp()
-      // call (invoked from redeskewFromSpline() immediately above, for
-      // iter>0 only) actually moved the tail target. is_final=0 here --
-      // the one post-loop call below (after convergence) is is_final=1 and
-      // is what the interior never gets refitted against (the card's own
-      // finding). -1 sentinels (lastTailMoveDpNorm()'s own convention) mean
-      // this scan had no boundary (n_frozen_cp_<=0) and are left as -1
-      // rather than coerced to 0, matching that function's own distinction.
-      if (opts_.log_debug_en && spline_ok_ && dopts_.spline.splineOn() && iter > 0) {
-        std::ofstream& ofs = cq43_tailmove_log.stream();
-        const double dp = spline_.lastTailMoveDpNorm();
-        ofs << "scan_id=" << voxel_map_->frame_idx_ << " iter=" << iter
-            << " is_final=0 dp_mm=" << (dp >= 0.0 ? dp * 1000.0 : dp)
-            << " dphi_deg=" << spline_.lastTailMoveDphiNorm() << "\n";
-        ofs.flush();
-      }
-
       // Phase 2A: exact physical tail state BEFORE this iteration's own
       // solve -- state_ IS the tail/current estimator state the IEKF
       // updates directly (confirmed by source audit: solveSystem() below
       // writes ekf_.dtheta/ekf_.dt, and LioProcBase::estimateStateCorrection
       // applies them to state_ internally via the ESIKF update this
-      // codebase uses throughout) -- NOT a substitute for the deskew
-      // spline's own endpoint, which is a SEPARATE quantity
-      // (spline_.rotAt(t1)/posAt(t1), only used for re-deskewing points,
-      // per Phase 0's own architecture audit.
+      // codebase uses throughout).
       const bool log_iter = opts_.log_debug_en;
       V3D p_tail_before, v_tail_before; M3D R_tail_before;
       if (log_iter) { p_tail_before = state_->pos(); R_tail_before = state_->rot(); v_tail_before = state_->vel(); }
@@ -1747,9 +711,6 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
         logDecoupledFirstFrame("post_iteration", 0, iter, mg, *state_, mg.image.t + data_queues_->start_time, static_cast<int>(residuals_.size()), decoupledFirstFrameHashPoints(mg.points), decoupledFirstFrameHashResiduals(residuals_), voxel_map_->last_n_map_pts_, voxel_map_->last_n_active_voxels_, mg.prior_pos, mg.prior_rot);
         logFirstFrameStateChain("decoupled", "post_iteration", 0, iter, mg, *state_, mg.image.t + data_queues_->start_time);
         logFirstFrameCovarianceBudget(firstFrameArchitectureName(), "post_iteration", 0, iter, mg, *state_, mg.image.t + data_queues_->start_time);
-        if (spline_ok_)
-          logFirstFrameCommonTimeSpline(dopts_.spline.splineOn() ? "decoupled_spline" : "splineless",
-                                        voxel_map_->frame_idx_, 0, iter, data_queues_->start_time, spline_);
       }
 
       if (log_iter) {
@@ -1804,29 +765,7 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
             << ev6(0) << "," << ev6(5) << "," << rank6 << "," << cond6 << "\n";
         ofs.flush();
       }
-      // SHAPE, from the SAME residuals that solve just used.  Refinement and
-      // the state update are therefore linearised at one trajectory, which
-      // is the whole reason this sits here and not at the top of the next
-      // iteration (Bryce, 2026-09-06).
-      refineSplineFromResiduals(mg);
       if (!residuals_.empty()) any_solved = true;
-      if (log_knot_updates) {
-        bool first_knot = false;
-        std::ofstream& ofs = knot_update_log.stream(&first_knot);
-        if (first_knot) ofs << "scan_id,t_abs_frame_end,iteration,scope,architecture,control_point_index,delta_cp_x,delta_cp_y,delta_cp_z,delta_cp_norm,delta_cp_phi_x,delta_cp_phi_y,delta_cp_phi_z,delta_cp_phi_norm,delta_tail_physical_norm\n";
-        const auto& cp = spline_.cpPos();
-        const auto& phi = spline_.cpPhi();
-        for (int kk = 0; kk < cp.cols(); ++kk) {
-          const V3D dp = cp.col(kk) - cp_pos_before[kk];
-          const V3D dphi = phi.col(kk) - cp_phi_before[kk];
-          const double t_abs_frame_end = mg.image.t + data_queues_->start_time;
-          ofs << voxel_map_->frame_idx_ << "," << t_abs_frame_end << "," << iter << ",iteration,decoupled," << kk << ","
-              << dp.x() << "," << dp.y() << "," << dp.z() << "," << dp.norm() << ","
-              << dphi.x() << "," << dphi.y() << "," << dphi.z() << "," << dphi.norm() << ","
-              << std::sqrt(dtheta.squaredNorm() + dt.squaredNorm()) << "\n";
-        }
-        ofs.flush();
-      }
       total_dtheta += dtheta;
       total_dt     += dt;
 
@@ -1880,24 +819,6 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
         { stop = "rel_diff"; break; }
     }
 
-    if (log_frame_knot_updates) {
-      bool first_knot = false;
-      std::ofstream& ofs = knot_update_log.stream(&first_knot);
-      if (first_knot) ofs << "scan_id,t_abs_frame_end,iteration,scope,architecture,control_point_index,delta_cp_x,delta_cp_y,delta_cp_z,delta_cp_norm,delta_cp_phi_x,delta_cp_phi_y,delta_cp_phi_z,delta_cp_phi_norm,delta_tail_physical_norm\n";
-      const auto& cp = spline_.cpPos();
-      const auto& phi = spline_.cpPhi();
-      for (int kk = 0; kk < cp.cols(); ++kk) {
-        const V3D dp = cp.col(kk) - frame_cp_pos_start[kk];
-        const V3D dphi = phi.col(kk) - frame_cp_phi_start[kk];
-        const double t_abs_frame_end = mg.image.t + data_queues_->start_time;
-        ofs << voxel_map_->frame_idx_ << "," << t_abs_frame_end << "," << (iter > 0 ? iter - 1 : 0) << ",frame_cumulative,decoupled," << kk << ","
-            << dp.x() << "," << dp.y() << "," << dp.z() << "," << dp.norm() << ","
-            << dphi.x() << "," << dphi.y() << "," << dphi.z() << "," << dphi.norm() << ","
-            << std::sqrt(total_dtheta.squaredNorm() + total_dt.squaredNorm()) << "\n";
-      }
-      ofs.flush();
-    }
-
     // Posterior covariance write happens exactly ONCE here, using the SAME
     // fixed prior_cov_ every real iteration above blended against (see
     // ekf.h) -- not per-iteration like the old applyUpdate() did. No-op
@@ -1912,7 +833,7 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
     // The covariance is intentionally updated once, after all fixed-prior
     // mean iterations.  Earlier per-iteration diagnostics therefore show
     // the unchanged prior by design.  Record the actual posterior here so
-    // every decoupled mode (raw-IMU/splineless and spline) returns a matched
+    // the decoupled estimator returns a matched
     // P_prior/P_after pair for the first post-calibration LIO frame.
     if (voxel_map_->frame_idx_ == 1) {
       mg.cov_after_lio = state_->cov();
@@ -1920,83 +841,6 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
           firstFrameArchitectureName(), "post_covariance", 0, iter,
           mg, *state_, mg.image.t + data_queues_->start_time);
     }
-
-    // CQ-43 item (4d-ii): save this frame's own EKF rotation correction
-    // (total_dtheta is local to this scope) for finalizeSplineAndQ() to
-    // log alongside the rest of the rotation consistency read.
-    last_total_dtheta_deg_ = total_dtheta.norm() * (180.0 / M_PI);
-
-    // FINAL re-deskew, against the converged state.  redeskewFromSpline()
-    // runs at the TOP of each iteration, so without this call the last
-    // solve's correction never reaches mg.points -- and the node calls
-    // VoxelMap::updateMap() on exactly those points once processLIO()
-    // returns.  The map would be built, permanently, from points placed by
-    // the second-to-last state.
-    //
-    // CQ-43 item 1, Bryce 2026-09-18: this comment used to end "Also runs
-    // one last shape refinement against the final residual set." THAT WAS
-    // FALSE -- redeskewFromSpline() calls only moveTailClamp() then
-    // deskewPointsSplineCsr(), and refineSplineFromResiduals() (line 1650
-    // above) has no second call site anywhere in this function. So the
-    // interior control-point SHAPE is fitted only to the pre-this-
-    // iteration's-own-correction residuals inside the loop -- the
-    // converged state's own final correction reaches the interior solely
-    // as this call's moveTailClamp() RAMP, never as a fit. See CQ-43's own
-    // card for the measurement this discrepancy motivated.
-    redeskewFromSpline(mg);
-
-    // CQ-43 item 0, read-only: this is the is_final=1 counterpart to the
-    // in-loop log above -- the one moveTailClamp() call whose dp/dphi is
-    // never followed by a refit, which is the card's own headline
-    // question. iter (loop-scope, still in scope here) is this scan's
-    // total iteration count, for the "distribution of iteration count per
-    // scan" part of item 0.
-    if (opts_.log_debug_en && spline_ok_ && dopts_.spline.splineOn()) {
-      std::ofstream& ofs = cq43_tailmove_log.stream();
-      const double dp = spline_.lastTailMoveDpNorm();
-      ofs << "scan_id=" << voxel_map_->frame_idx_ << " iter=" << iter
-          << " is_final=1 dp_mm=" << (dp >= 0.0 ? dp * 1000.0 : dp)
-          << " dphi_deg=" << spline_.lastTailMoveDphiNorm()
-          << " n_iters=" << iter << "\n";
-      ofs.flush();
-    }
-
-    // CQ-43 item (2): the gated post-convergence refinement pass. Rebuilds
-    // residuals against the FULLY CONVERGED trajectory (buildResiduals()
-    // is const w.r.t. state_ -- it never calls solveSystem()/
-    // applyMeanUpdate(), unlike estimateStateCorrection()) and refits the
-    // spline interior to them, then re-deskews once more so the shape
-    // change reaches mg.points before VoxelMap::updateMap() sees them.
-    // Read-only w.r.t. state_ by construction: buildResiduals() is const,
-    // refineSplineFromResiduals() only ever touches spline_'s cp_p_, and
-    // redeskewFromSpline()'s own moveTailClamp() call is a no-op here
-    // (frozen_pos1_/frozen_rot1_/frozen_vel1_ already equal state_'s
-    // current pos()/rot()/vel(), set by THIS frame's last real
-    // moveTailClamp() call two lines above -- dp/dphi come back ~0, not
-    // skipped, so item (0)'s own log gets one more is_final=1-shaped row
-    // for this scan if log_debug_en is on; harmless, and left visible
-    // rather than special-cased out).
-    if (dopts_.spline.splineOn() && dopts_.spline.final_pass && spline_ok_) {
-      const V3D pos_before = state_->pos();
-      buildResiduals(mg.points, residuals_, /*allow_consistency_log=*/false);
-      refineSplineFromResiduals(mg);
-      redeskewFromSpline(mg);
-      const double moved_mm = (state_->pos() - pos_before).norm() * 1000.0;
-      if (opts_.log_debug_en) {
-        static PersistentLogStream log("cq43_finalpass_assert.txt");
-        std::ofstream& ofs = log.stream();
-        ofs << "scan_id=" << voxel_map_->frame_idx_
-            << " state_moved_mm=" << moved_mm << "\n";
-        ofs.flush();
-      }
-    }
-
-    // Measure the IMU against the converged spline and, if enabled, update
-    // the applied process noise for the NEXT frame.  Placed after the
-    // covariance update so the spline is anchored to the final state --
-    // see finalizeSplineAndQ()'s own doc comment for why measuring earlier
-    // would contaminate the statistic with this frame's correction error.
-    finalizeSplineAndQ(mg);
 
     // R66: AKF-style Q adaptation from this frame's state correction (see lio/akf_q.h for the derivation and its
     // limits). Reads the same correction dx as the T7-a block below but does not depend on imu/log_qhat_en.
@@ -2154,15 +998,6 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
       diag.n_miss_mismatch = n_miss_mismatch_;
       diag.n_tier0_miss_coverage = n_tier0_miss_coverage_;
       diag.n_tier0_miss_mismatch = n_tier0_miss_mismatch_;
-      // CQ-87 item 8: only meaningful when the spline is actually in use
-      // this scan (spline.mode != raw_imu) -- left at their -1 defaults
-      // otherwise, matching this struct's own "not applicable" convention.
-      if (dopts_.spline.splineOn() && spline_ok_) {
-        diag.n_c_requested = spline_.nControlPointsRequested();
-        diag.n_c_actual    = spline_.nControlPoints();
-        diag.n_c_clamped   = spline_.nControlPointsClamped() ? 1 : 0;
-      }
-
       // CQ-19(a): P's own decomposition (prior_cov_, pre-update -- state_->
       // cov()'s POST-update counterpart is read further below, once the
       // covariance update has actually run). Computed unconditionally, NOT
@@ -2366,37 +1201,6 @@ std::string LioProcDecoupled::processLIO(MeasureGroup& mg)
           diag.p_rot_eig_mid_post = es_r_post.eigenvalues()(1);
           diag.p_rot_eig_max_post = es_r_post.eigenvalues()(2);
         }
-      }
-      // Captured in finalizeSplineAndQ(), which already ran earlier this
-      // same processLIO() call (see that function's own doc comment).
-      diag.boundary_dpos     = boundary_dpos_;
-      diag.boundary_drot_deg = boundary_drot_deg_;
-      // CQ-19(c): AdaptiveQ's own gate state -- adaptive_q_.update() (also
-      // above this diag block, earlier in this same processLIO() call) has
-      // already run this frame whenever dopts_.adaptive_q.enable is set, so
-      // its state is current here regardless of residuals_. Left at their
-      // NaN/false defaults when disabled, per LioFrameDiag's own doc
-      // comment -- cov_acc/cov_gyr stay config-invariant either way, but
-      // these five are the columns that actually distinguish live from off.
-      if (dopts_.adaptive_q.enable) {
-        // CQ-26: NaN until the channel's gate has actually passed once (see
-        // zAccOrNaN()/zGyrOrNaN()'s doc comment) -- was zAcc()/zGyr()
-        // directly, which default to 0.0 (a real excursion value) and so
-        // could not distinguish "never updated" from "updated to zero".
-        diag.q_z_acc    = adaptive_q_.zAccOrNaN();
-        diag.q_z_gyr    = adaptive_q_.zGyrOrNaN();
-        diag.q_acf1_acc = last_spline_stats_.acf1_acc;
-        diag.q_acf1_gyr = last_spline_stats_.acf1_gyr;
-        diag.q_active   = adaptive_q_.active();
-        diag.q_clamped  = adaptive_q_.clamped();
-        // CQ-26: update()'s own per-frame decision, previously computed and
-        // discarded -- see LioFrameDiag's doc comment on these six fields.
-        diag.q_status          = adaptive_q_.lastStatus();
-        diag.q_white_acc       = adaptive_q_.whiteAcc();
-        diag.q_white_gyr       = adaptive_q_.whiteGyr();
-        diag.q_above_floor_acc = adaptive_q_.aboveFloorAcc();
-        diag.q_above_floor_gyr = adaptive_q_.aboveFloorGyr();
-        diag.q_active_frame    = adaptive_q_.activeThisFrame();
       }
       // CQ-34: redundancy_stats_ is written by solveSystem()/
       // solveSystem_cuda() earlier this same processLIO() call by an

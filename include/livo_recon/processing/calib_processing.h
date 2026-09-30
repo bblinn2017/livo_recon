@@ -21,7 +21,6 @@ struct CalibProcOptions
   //                             To be removed after R67 (rule 3.3), not a tuning option.
   // sigma_r2 / sigma_a2 are parsed from imu/sensor/range_err and imu/sensor/angle_err_deg with the same defaults and the same
   // formula as LioProcBase (lio_base.cpp), so the two paths cannot disagree.
-  std::string bootstrap_point_cov = "sensor_model";
   double sensor_sigma_r2 = 0.05 * 0.05;
   double sensor_sigma_a2 = 0.0;
 

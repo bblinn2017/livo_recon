@@ -38,15 +38,6 @@ struct MeasureGroup
   std::vector<Eigen::MatrixXd> imu_state_transitions;
   std::vector<Eigen::MatrixXd> imu_process_covariances;
 
-  // A copy of this frame's raw IMU samples, kept ONLY when the scan-spline
-  // mechanism is on (SplineOptions::enable).  ImuProc::propagate() clears
-  // imu_samples once it has consumed them, but the spline-vs-IMU residual
-  // -- which is the whole basis of the live Q estimate -- needs the raw,
-  // unaveraged, un-bias-corrected stream afterwards.  Empty (and never
-  // populated, zero cost) with the feature off.  Includes the interpolated
-  // final sample at mg.image.t so the residual covers the full scan.
-  std::vector<ImuSample> imu_samples_raw;
-
   // CQ-85 item 2: imu_samples.size() right before ImuProc::propagate()
   // clears it -- the only place this count is ever available, since
   // imu_samples itself doesn't survive past that function. Read at

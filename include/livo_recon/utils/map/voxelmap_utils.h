@@ -445,7 +445,7 @@ struct VoxelOpts
   std::string plane_fit_mode        = "pca";
 
   // History (348-361): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-348
-  std::string plane_fit_pose_cov_mode = "combined";
+  std::string plane_fit_pose_cov_mode = "sensor_only";
 
   // R64. How the debiased fit applies the sensor-noise correction (only read when plane_fit_mode == "debiased").
   // "full" (default, bit-identical to R63): subtract the accumulated sensor covariance from the whole 3x3

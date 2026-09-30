@@ -214,32 +214,9 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // Read directly rather than being wired from LioProcOptions: the two
   // classes are constructed independently and this keeps the single source
   // of truth in the parameter server, where the sweep harness writes it.
-  // The copy is skipped entirely when the spline is off.
-  //
-  // BUG FIX (found 2026-09-15, during a TQ-14 item-8 investigation into why
-  // q_active read exactly 0.0 on every frame across the entire TQ-12/TQ-6/
-  // TQ-7 dataset): this used to read the boolean "spline/enable" key, which
-  // the spline restructure DELETED -- replaced by the string "spline/mode".
-  // Since "spline/enable" is never set on the param server anymore, this
-  // paramWarn<bool> silently fell back to its default (false) on every
-  // single run, so imu_samples_raw was NEVER retained regardless of
-  // spline/mode -- finalizeSplineAndQ()'s `if (!mg.imu_samples_raw.empty())`
-  // guard was always false, last_spline_stats_ stayed default-constructed
-  // (n=0), SplineImuResidualStats::valid() (n>=8) was always false, and
-  // AdaptiveQ::update() hit its very first check ("no_residual") on every
-  // call, before warmup/whiteness/floor were ever evaluated -- active_
-  // never became true anywhere, so state_->setNoiseParams() (gated on
-  // adaptive_q_.active()) was NEVER called, meaning adaptive_q/enable=true
-  // had ZERO effect on any run's actual trajectory: it silently ran
-  // identically to adaptive_q/enable=false. Fixed by reading the current
-  // "spline/mode" string directly (mirroring LioProcOptions::splineOn()'s
-  // own "mode != raw_imu" definition) instead of the deleted boolean key.
+  // spline/mode is read only so that configs pinning raw_imu (the only mode left) are not flagged unconsumed.
   std::string spline_mode = "raw_imu";
   paramWarn<std::string>(pnh, "spline/mode", spline_mode, std::string("raw_imu"));
-  // The joint-knot coupled estimator consumes the propagation record in
-  // mg.poses and has no private raw-IMU/coefficient mode.  Raw samples are
-  // therefore retained only for the decoupled spline/Adaptive-Q pipeline.
-  opts_.keep_raw_samples = (spline_mode != "raw_imu");
   { std::lock_guard<std::mutex> lock(g_qhat_mtx); g_qhat_enabled = opts_.log_qhat_en; }
 
   std::ostringstream oss;
@@ -260,8 +237,7 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
       << "  gm gyro tau/sigma=" << opts_.gm_gyr_tau << "/" << opts_.gm_gyr_sigma
       << "  gm accel tau/sigma=" << opts_.gm_acc_tau << "/" << opts_.gm_acc_sigma
       << "\n  first_scan_head:      always seeded from first sample (R63)"
-      << "\n  log_qhat_en:          " << (opts_.log_qhat_en ? "true" : "false")
-      << "\n  keep_raw_samples:     " << (opts_.keep_raw_samples ? "true" : "false");
+      << "\n  log_qhat_en:          " << (opts_.log_qhat_en ? "true" : "false");
   return oss.str();
 }
 
@@ -327,20 +303,6 @@ void ImuProc::propagate(MeasureGroup& mg)
   V3D debiased_acc_energy_sum = V3D::Zero();
   V3D debiased_gyr_energy_sum = V3D::Zero();
   double acc_motion_sum = 0.0, gyr_motion_sum = 0.0;
-
-  // Snapshot the raw stream BEFORE the loop consumes it -- the spline-vs-
-  // IMU residual (lio/spline.h) needs the unaveraged, un-bias-corrected
-  // samples, and mg.imu_samples is cleared at the end of this function.
-  // The loop below also interpolates the final sample onto t_curr; that
-  // interpolated tail is appended after the loop so the residual covers
-  // the whole scan window rather than stopping at the last raw sample.
-  if (opts_.keep_raw_samples)
-  {
-    mg.imu_samples_raw.clear();
-    mg.imu_samples_raw.reserve(mg.imu_samples.size() + 1);
-    for (const auto& s : mg.imu_samples)
-      if (s.t <= t_curr) mg.imu_samples_raw.push_back(s);
-  }
 
   // R63 (F-118): the very first interval's head sample is the first IMU
   // sample of the first non-empty measure group. (Before R63 the head was a
@@ -666,13 +628,6 @@ void ImuProc::propagate(MeasureGroup& mg)
       break;
   }
 
-  if (opts_.keep_raw_samples)
-  {
-    // `head` is the loop's final tail, already interpolated onto t_curr on
-    // the is_last path.  Append it only if it actually extends the window.
-    if (mg.imu_samples_raw.empty() || head.t > mg.imu_samples_raw.back().t + 1e-12)
-      mg.imu_samples_raw.push_back(head);
-  }
 
   // R65 (F-169): noise accrued from each IMU step's head to the scan end, restricted to the (R,P) block, by one backward
   // sweep over the stored per-step transitions F_k and process covariances Q_k:  R_k = R_{k+1} + M_{k+1} Q_k M_{k+1}^T,

@@ -57,14 +57,9 @@ void deskewPoints(
   points_out.resize(points.size());
 
   if (poses.empty()) {
-    // R67 (F-265, inert): this fallback leaves sensor_cov at zero. Report the first use so a run log shows whether live scans reach it.
-    static bool warned_poses_empty = false;
-    if (!warned_poses_empty) {
-      warned_poses_empty = true;
-      std::fprintf(stderr, "[deskew] poses-empty fallback used: %zu points get zero sensor_cov (R67 F-265 check)\n", points.size());
-    }
+    // No IMU poses to deskew against: points keep their sensor model covariance (never zero).
     for (size_t i = 0; i < points.size(); ++i) {
-      points_out[i] = PointXYZCov{ state->lidarToImu(points[i].p), M3D::Zero() };
+      points_out[i] = PointXYZCov{ state->lidarToImu(points[i].p), state->lidarToImu(getBodyCov(points[i].p, opts.sigma_r2, opts.sigma_a2)) };
       points_out[i].t = points[i].t;
       points_out[i].raw_body_point = points_out[i].point;  // no motion to compensate
     }
@@ -150,141 +145,6 @@ void deskewPoints(
         pt_idx + 1, poses.front().t, poses.back().t, poses.size(),
         points[pt_idx].t, points.back().t, points.front().t, points.size());
     std::abort();
-  }
-}
-
-namespace
-{
-
-// One point against the spline.  There is exactly one definition of what
-// "spline deskew" means and every entry point below goes through it.
-//
-// STRUCTURED LIKE deskewPoints(): that function hoists everything depending
-// only on the POSE BRACKET out of its per-point body and refreshes it when
-// the bracket changes.  The spline's bracket is the SEGMENT -- within one,
-// the four control points and the three relative rotations are fixed and
-// only the local coordinate u moves.  `v` is that hoist, owned by the
-// CALLER's loop and refreshed by buildSegView() only when the segment
-// actually changes.
-inline PointXYZCov deskewOnePointSpline(
-    const StateGroupPtr& state, const ScanSpline& spline,
-    const M3D& R_end_T, const V3D& p_end,
-    const PointXYZT& pt, const DeskewOptions& opts,
-    ScanSpline::SegView& v)
-{
-  int s = 0; double u = 0.0;
-  spline.locate(pt.t, s, u);
-  spline.buildSegView(s, v);
-  M3D R_i; V3D p_i;
-  spline.poseAtSeg(v, u, R_i, p_i);
-  const M3D R_rel = R_end_T * R_i;
-  const V3D t_rel = R_end_T * (p_i - p_end);
-
-  const V3D p_imu_i   = state->lidarToImu(pt.p);
-  const V3D p_imu_end = R_rel * p_imu_i + t_rel;
-
-  const M3D cov_lidar_i   = getBodyCov(pt.p, opts.sigma_r2, opts.sigma_a2);
-  const M3D cov_lidar_end = R_rel * cov_lidar_i * R_rel.transpose();
-  M3D cov_imu_end = state->lidarToImu(cov_lidar_end);
-
-  PointXYZCov out{ p_imu_end, cov_imu_end };
-  out.t = pt.t;
-  return out;
-}
-
-
-}  // namespace
-
-void deskewPointsSpline(
-    const StateGroupPtr& state,
-    const ScanSpline& spline,
-    double scan_end_time,
-    const std::vector<PointXYZT>& points,
-    const DeskewOptions& opts,
-    std::vector<PointXYZCov>& points_out)
-{
-  points_out.resize(points.size());
-  if (points.empty()) return;
-
-  const M3D R_end_T = spline.rotAt(scan_end_time).transpose();
-  const V3D p_end   = spline.posAt(scan_end_time);
-
-  // One view for the whole sweep.  A scan's points are in time order, so
-  // this refreshes once per SEGMENT (about ten times) rather than once per
-  // point -- which is the deskewPoints() bracket loop, in spline form.
-  ScanSpline::SegView v;
-  for (size_t i = 0; i < points.size(); ++i)
-    points_out[i] = deskewOnePointSpline(state, spline, R_end_T, p_end,
-                                         points[i], opts, v);
-}
-
-void deskewPointsSplineCsr(
-    const StateGroupPtr& state,
-    const ScanSpline& spline,
-    double scan_end_time,
-    const std::vector<PointXYZT>& points,
-    const std::vector<int>& offsets,
-    const std::vector<int>& members,
-    const DeskewOptions& opts,
-    std::vector<PointXYZCov>& points_out)
-{
-  if (offsets.size() < 2) { points_out.clear(); return; }
-  const size_t n_out = offsets.size() - 1;
-  points_out.resize(n_out);
-
-  const M3D R_end_T = spline.rotAt(scan_end_time).transpose();
-  const V3D p_end   = spline.posAt(scan_end_time);
-
-  // Voxel-major traversal is not monotone in t, so this refreshes more often
-  // than the linear sweep above -- but never more than once per point, which
-  // is what the unhoisted code paid unconditionally.
-  ScanSpline::SegView v;
-  for (size_t i = 0; i < n_out; ++i)
-  {
-    const int b = offsets[i], e = offsets[i + 1];
-    if (e <= b) continue;
-
-    // Single-member cell: the plain one-point path.  This is every cell in
-    // FIRST mode, so that mode stays bit-for-bit what it was.
-    if (e - b == 1)
-    {
-      const int idx = members[b];
-      if (idx < 0 || idx >= static_cast<int>(points.size())) continue;
-      points_out[i] = deskewOnePointSpline(state, spline, R_end_T, p_end,
-                                           points[idx], opts, v);
-      continue;
-    }
-
-    // Multi-member cell: re-place each member from its RAW coordinates, then
-    // average exactly as voxelDownsample(AVERAGE) does -- literal mean
-    // position, literal mean of each covariance component kept separate, and
-    // mean capture time to match the mean position.
-    V3D sum_point = V3D::Zero();
-    M3D sum_sensor_cov = M3D::Zero();
-    M3D sum_pos_cov    = M3D::Zero();
-    double sum_t = 0.0;
-    int n = 0;
-    for (int k = b; k < e; ++k)
-    {
-      const int idx = members[k];
-      if (idx < 0 || idx >= static_cast<int>(points.size())) continue;
-      const PointXYZCov d = deskewOnePointSpline(state, spline, R_end_T, p_end,
-                                                 points[idx], opts, v);
-      sum_point      += d.point;
-      sum_sensor_cov += d.sensor_cov;
-      sum_pos_cov    += d.pos_cov;
-      sum_t          += d.t;
-      ++n;
-    }
-    if (n == 0) continue;
-
-    PointXYZCov out{};
-    const double dn = static_cast<double>(n);
-    out.point      = sum_point / dn;
-    out.sensor_cov = sum_sensor_cov / dn;
-    out.pos_cov    = sum_pos_cov / dn;
-    out.t          = sum_t / dn;
-    points_out[i]  = out;
   }
 }
 
