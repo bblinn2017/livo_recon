@@ -62,7 +62,7 @@ int main()
     Eigen::VectorXd dx; Eigen::MatrixXd Pn;
     zuptVelocityUpdate(P, v, iv, 1e-7, dx, Pn);
     CHECK((v + dx.segment<3>(iv)).norm() < 1e-6 * v.norm(), "ZU2 sigma -> 0: velocity driven to zero");
-    CHECK(Pn.block<3, 3>(iv, iv).cwiseAbs().maxCoeff() < 1e-9, "ZU2 sigma -> 0: velocity block of P' vanishes");
+    CHECK((Pn.block<3, 3>(iv, iv).cwiseAbs().maxCoeff() < 1e-9), "ZU2 sigma -> 0: velocity block of P' vanishes");
     zuptVelocityUpdate(P, v, iv, 1e6, dx, Pn);
     CHECK(dx.cwiseAbs().maxCoeff() < 1e-9 && (Pn - P).norm() < 1e-9 * P.norm(), "ZU5 sigma -> infinity: no change");
     // ZU6 control
