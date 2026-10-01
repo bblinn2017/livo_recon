@@ -1,7 +1,6 @@
 # Tests
 
-`test_spline` (scan spline and AdaptiveQ) was removed together with that code on 2026-09-30. `test_ds_csr` and
-`test_bootstrap_observation_moments` are built through `tests/active/CMakeLists.txt`.
+`test_spline` (scan spline and AdaptiveQ) and `test_ds_csr` (the unused indexed CSR downsample) were removed together with that code on 2026-09-30. `test_bootstrap_observation_moments` is built through `tests/active/CMakeLists.txt`.
 
 ## Joint-knot coupled estimator
 

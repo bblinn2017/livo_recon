@@ -273,7 +273,7 @@ void PubProc::publishOdometry(const MeasureGroup& mg)
     // AFTER updateMaps() has already incremented voxel_map_->frame_idx_ (see
     // livo_recon_node.cpp's drainOnce(): estimateState() -> updateMaps()
     // [frame_idx_++] -> publishResults() [here]), while
-    // frame_stats.txt/scan.csv/corr_scan.csv/spline_q.csv all log the
+    // frame_stats.txt/scan.csv/corr_scan.csv all log the
     // PRE-increment value (voxelmap.cpp's updateMap() calls
     // debugLogFrameStats(..., frame_idx_ - 1, ...) at its own exit). Using
     // the raw counter here was off by one against every other per-scan file

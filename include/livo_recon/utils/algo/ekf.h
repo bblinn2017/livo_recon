@@ -6,7 +6,7 @@ namespace livo_recon {
 
 // CQ-57 item 4: ONE COVARIANCE UPDATE, NOT TWO COPIES. The shared "solve
 // A^-1 directly, then symmetrize" core both EkfUpdate::applyCovarianceUpdate()
-// (decoupled) and LioProcCoupled's own posterior18 construction (coupled)
+// (iekf) and LioProcCoupled's own posterior18 construction (coupled)
 // need -- computing the inverse directly rather than P -= G*P avoids the
 // catastrophic cancellation that yields non-SPD covariances when G
 // approaches identity (EkfUpdate::applyCovarianceUpdate()'s own original
@@ -16,8 +16,7 @@ namespace livo_recon {
 // state). Callers are responsible for their OWN rank-deficiency guard
 // before calling this (see LioProcCoupled's own vectorD().minCoeff() check
 // -- NOT added here, since adding it to this shared path would also change
-// decoupled's existing behaviour, and item 4's own 4/4 decoupled-md5
-// requirement means decoupled's output must stay byte-identical).
+// the iekf estimator's existing behaviour, which must stay byte-identical).
 inline Eigen::MatrixXd solveCovarianceFromA(const Eigen::MatrixXd& A,
                                              const Eigen::MatrixXd* M = nullptr)
 {
@@ -136,7 +135,7 @@ struct EkfUpdate
     // the pre-CQ-70 formula, guarded to skip the division entirely at
     // discount==1.0 rather than relying on x/1.0==x -- see
     // solveCovarianceFromA()'s own doc comment for why this shared path's
-    // byte-for-byte behavior at the default is load-bearing (decoupled-md5).
+    // byte-for-byte behavior at the default is load-bearing (iekf byte-identity).
     void applyCovarianceUpdate(const StateGroupPtr& state, const Eigen::MatrixXd& prior_cov,
                                 double H_full_discount = 1.0)
     {

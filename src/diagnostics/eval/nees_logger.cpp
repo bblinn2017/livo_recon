@@ -51,7 +51,7 @@ NeesResult computeNeesPerDof(const M3D& R_est, const V3D& p_est,
   //
   // This is a REAL property of the CURRENT (pre-CQ-57) binary's covariance
   // construction, not a bug in this logger to paper over -- CQ-57 item 4
-  // (adopting decoupled's applyCovarianceUpdate() scheme in coupled too)
+  // (adopting iekf's applyCovarianceUpdate() scheme in coupled too)
   // is the actual fix, and it is EXPLICITLY BLOCKED until CQ-60 item 2
   // captures its baseline on THIS binary, so this logger must not "fix"
   // what it is supposed to be measuring.

@@ -42,7 +42,7 @@ struct MeasureGroup
   // clears it -- the only place this count is ever available, since
   // imu_samples itself doesn't survive past that function. Read at
   // frame_stats.txt's diag-population sites (lio_coupled.cpp/
-  // lio_decoupled.cpp), which run much later in the same scan's
+  // lio_iekf.cpp), which run much later in the same scan's
   // processing. -1 (unset) is the "never populated" sentinel, matching
   // this struct's own convention elsewhere.
   int n_imu_samples = -1;

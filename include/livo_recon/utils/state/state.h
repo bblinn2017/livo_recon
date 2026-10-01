@@ -59,10 +59,8 @@ public:
   // roughly two orders of magnitude inside the region that sweep found
   // catastrophic (it fails below ~90x the datasheet sigma and runs at
   // >=150x).  So the two are deliberately different quantities: this is a
-  // BOUND, consumed by AdaptiveQ (lio/adaptive_q.h) as the lower anchor
-  // that makes its estimate well-posed.  Zero until CalibProc sets it
-  // and AdaptiveQ treats a zero floor as "no floor available" rather than
-  // as "floor of zero").
+  // BOUND, kept from the removed AdaptiveQ (the lower
+  // anchor of its estimate).  Zero until CalibProc sets it.
   void setNoiseFloor(const V3D& var_acc_floor, const V3D& var_gyr_floor);
   void captureInitialCovariance(const std::string& mode)
   {

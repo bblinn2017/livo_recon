@@ -20,14 +20,10 @@ namespace livo_recon
 
 class ConfigResolver;
 
-// CQ-49: the options genuinely SHARED between the decoupled and coupled
-// estimators -- residual matching, the EKF accumulation, the redundancy/
-// weighting/sigma-scale axes, deskew/downsample. spline/adaptive_q moved
-// OUT to LioProcDecoupledOptions (lio_decoupled.h): a coupled config may
-// carry NO spline/* or adaptive_q/* key at all (requireCombination in
-// LioProcCoupled::loadParameters() enforces this), and object identity
-// -- which loadParameters() override even LOOKS for those keys -- is what
-// makes that enforcement structural rather than a runtime flag (item 3d).
+// CQ-49: the options SHARED between the iekf and coupled estimators --
+// residual matching, the EKF accumulation, the redundancy/weighting/
+// sigma-scale axes, deskew/downsample. The spline/adaptive_q keys no longer
+// exist (removed 2026-09-30); finalizeConfig() refuses any left in a config.
 struct LioProcOptions
 {
   int    max_iterations        = 5;
@@ -37,6 +33,14 @@ struct LioProcOptions
 
   // History (24-27): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-24
   bool   log_debug_en          = false;
+
+  // R69 (F-300): write-only diagnostics, default off / unchanged.
+  // update_diag_en: lio_update_diag.csv, one row per (frame, iteration): HtH upper triangle, Htz, residual variance
+  // decomposition, step. live_point_cov_en: live_point_cov.csv, one row per frame. first_frame_dump_frames K:
+  // the existing pose_control_first_frame_solve{.csv,_matrices.txt} dump is written for frames 1..K (1 = as before).
+  bool   update_diag_en        = false;
+  bool   live_point_cov_en     = false;
+  int    first_frame_dump_frames = 1;
 
   // CQ-46: dumps raw per-accepted-residual fields (world point, normal,
   // rotation-Jacobian column, plane_id, r, and the four sigma_squared
@@ -59,7 +63,7 @@ struct LioProcOptions
 
   // CQ-60 item 5: the shared per-dof NEES logger (utils/eval/nees_logger.h)
   // -- report-only, default false, shared by both estimator paths (unlike
-  // most of this struct's coupled-vs-decoupled-specific fields, this one
+  // most of this struct's coupled-vs-iekf-specific fields, this one
   // key is genuinely common, hence read once here via loadSharedParameters()
   // rather than duplicated into each path's own options struct).
   bool nees_per_dof_en = false;
@@ -132,12 +136,12 @@ struct LioProcOptions
 // for the shared half would be even safer, but the shared methods below
 // are NON-VIRTUAL -- nothing can override buildResiduals()/solveSystem()/
 // accumulateForCombined(), so a derived class cannot
-// silently break the decoupled path's byte-identity through a well-meaning
+// silently break the iekf path's byte-identity through a well-meaning
 // partial override, which is the same protection the card's own
 // ResidualEngine-by-composition design gives, without a second indirection
-// layer). LioProcDecoupled and LioProcCoupled each own ALL of their own
+// layer). LioProcIekf and LioProcCoupled each own ALL of their own
 // estimator-specific state; neither may hold a member the other also
-// holds (verified: no coupled_*/spline_* member exists on this class).
+// holds (verified: no coupled_* member exists on this class).
 class LioProcBase
 {
 public:
@@ -154,11 +158,8 @@ public:
   // Stage 1 (see include/livo_recon/lio/deskew.h's module doc comment):
   // deskew + downsample, populating mg.points. Called ONCE per frame, from
   // LivoReconNode::estimateState() right after imu_proc_.processIMU(mg).
-  // VIRTUAL: this is the OTHER place the spline leaks into coupled mode if
-  // left non-virtual on the base (CQ-44 bug 4's second consequence) --
-  // LioProcDecoupled fits the spline here and deskews against it when the
-  // fit succeeds; LioProcCoupled deskews from the raw IMU chain only, never
-  // referencing a spline at all.
+  // VIRTUAL: LioProcIekf deskews from the IMU poses; LioProcCoupled deskews
+  // from the raw IMU chain.
   virtual void deskewAndDownsample(MeasureGroup& mg) = 0;
 
 
@@ -180,7 +181,7 @@ public:
   void solveSystem(const std::vector<Residual>& residuals) const;
   void solveSystem_cuda(const std::vector<Residual>& residuals) const;
 
-  // Used only by the decoupled estimator's own iteration loop, but the
+  // Used only by the iekf estimator's own iteration loop, but the
   // residual-build + EKF-accumulate machinery it wraps is shared, so it
   // lives here rather than being duplicated. NOT called by the coupled
   // estimator (item 3's own assertion: estimateCoupledCorrection() is the
@@ -226,7 +227,7 @@ protected:
   // CQ-74 item 5a: full 18x18 POST-update covariance eigenspectrum --
   // shared between both estimator paths so it's implemented once. No-op
   // unless opts_.log_eigenspectrum_en. mode_label distinguishes coupled
-  // vs decoupled rows in the one shared log file (cq74_eigenspectrum.txt).
+  // vs iekf rows in the one shared log file (cq74_eigenspectrum.txt).
   void logEigenspectrum18(int scan_id, double t_abs, const char* mode_label) const;
   // The shared finish: refuseUnclaimed(allowed_unclaimed_namespaces), the
   // build/accumulation_precision derived line, the ok()-or-throw gate, and

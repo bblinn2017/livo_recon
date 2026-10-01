@@ -23,19 +23,18 @@
 // in a comment.  Three consequences, all of them observed rather than
 // hypothesised:
 //
-//   NESTING.  spline/lidar_refine_cp and spline/reintegrate_each_iteration
-//   read as peers of spline/redeskew_each_iteration and are in fact steps
-//   INSIDE it.  A 276-job grid crossed them as orthogonal factors; 32 cells
+//   NESTING.  Two sub-options of a scan-spline refinement (since removed)
+//   read as peers of the option that in fact contained them.  A 276-job grid crossed them as orthogonal factors; 32 cells
 //   per arm per sequence came back ATE-identical, and the only reason anyone
 //   noticed was that two engagement counters had been added one batch earlier
 //   for an unrelated reason.
 //
-//   MUTUAL EXCLUSION.  spline/n_control_points and spline/control_point_hz
-//   parameterise one quantity.  Precedence resolved it (hz won whenever it was
+//   MUTUAL EXCLUSION.  Two spline keys (since removed) parameterised one
+//   quantity.  Precedence resolved it (hz won whenever it was
 //   > 0) and nothing was printed, so a config that set both was legal, ran one
 //   of them, and said nothing about which.
 //
-//   ENUMERATION.  spline/rot_mode was compared against "tangent" with
+//   ENUMERATION.  A spline rotation-mode key (since removed) was compared against "tangent" with
 //   everything else falling through to "cumulative", so a typo selected an
 //   arm rather than failing.
 //
@@ -126,7 +125,7 @@ public:
   //
   // Everything above validates the keys this resolver READS.  Nothing
   // validated a key the config SETS that no reader ever asks for -- and
-  // 5c93cc6 renamed every spline/* and adaptive_q/* key at once.  An override
+  // a past commit renamed a whole family of keys at once.  An override
   // YAML still written against the old names (which is every cell the sweep
   // runner generates) sets keys nobody consumes, and the run silently takes
   // defaults.  paramWarn's "not found, falling back to default" line is the

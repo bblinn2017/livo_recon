@@ -235,7 +235,7 @@ void CalibProc::computeBiasAndNoise(V3D& acc_bias, V3D& gyro_bias,
   // the REAL per-axis diagonal instead of an isotropic V3D::Constant(mean)
   // broadcast. This is behavior-PRESERVING for every existing consumer --
   // grepped every varAccFloor()/varGyrFloor() call site (lio_coupled.cpp,
-  // lio_decoupled.cpp, adaptive_q.h's own caller): all of them immediately
+  // lio_iekf.cpp): all of them immediately
   // call .mean() on the result, and mean([d0,d1,d2]) == trace/3 exactly,
   // so nothing downstream changes unless it reads the raw V3D directly --
   // which only the new prior_per_axis_sigma path (estimateCoupledCorrection())

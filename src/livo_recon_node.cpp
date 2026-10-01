@@ -26,14 +26,19 @@ std::unique_ptr<livo_recon::LioProcBase> makeLioProc(ros::NodeHandle& pnh, livo_
         "-- it selects which LioProc is constructed and is read at the "
         "node, not inside LioProc.");
   std::string mode;
-  livo_recon::paramWarn<std::string>(pnh, "estimator/mode", mode, "decoupled");
+  livo_recon::paramWarn<std::string>(pnh, "estimator/mode", mode, "iekf");
   if (mode == "coupled")
     return std::make_unique<livo_recon::LioProcCoupled>(ctx);
-  if (mode != "decoupled")
+  if (mode == "decoupled")
+    throw std::runtime_error(
+        "[config] refused: estimator/mode='decoupled' was RENAMED to 'iekf' "
+        "(the plain IEKF on IMU-deskewed points; the spline is gone) -- "
+        "must be 'iekf' or 'coupled'");
+  if (mode != "iekf")
     throw std::runtime_error(
         "[config] refused: estimator/mode='" + mode + "' -- must be "
-        "'decoupled' or 'coupled'");
-  return std::make_unique<livo_recon::LioProcDecoupled>(ctx);
+        "'iekf' or 'coupled'");
+  return std::make_unique<livo_recon::LioProcIekf>(ctx);
 }
 }  // namespace
 

@@ -469,7 +469,7 @@ int main()
     return fail("non-uniform plane_var_term group is admitted, not rejected as degenerate",
         nonuniform.redundancy_stats.redund_groups, 1.0);
 
-  // The legacy splineless/decoupled 6-DOF path must implement the identical
+  // The legacy iekf 6-DOF path must implement the identical
   // covariance model and sign convention for Htz=+H^T C^-1 r.
   std::vector<Residual> legacy_residuals(4);
   Eigen::Matrix<double,4,6> H_legacy;

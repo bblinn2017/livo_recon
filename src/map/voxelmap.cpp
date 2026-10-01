@@ -39,7 +39,6 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            ",n_residuals,n_planes,h_pp_min_eig,h_rr_min_eig,sum_weight"
            ",h_rr_trace,htz_rot_norm,htz_pos_norm,ask,got,refusal"
            ",iters,dx_rot_deg,dx_pos_mm,trP_pos_pre"
-           ",boundary_dpos,boundary_drot_deg"
            // P-F (BASE, 2026-09-04): L1 (DECIMATION) -- see LioFrameDiag's
            // doc comment. n_points_raw is NOT here yet (needs a queue-level
            // accumulator, not captured this pass).
@@ -66,13 +65,6 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            ",p_pos_vel_fro_pre,p_pos_bias_fro_pre"
            // CQ-19(b): the dot product that signs rho_ref.
            ",cos_pmin_hmin"
-           // CQ-19(c): AdaptiveQ's own gate state.
-           ",q_z_acc,q_z_gyr,q_acf1_acc,q_acf1_gyr,q_active,q_clamped"
-           // CQ-26: update()'s per-frame decision (status + the four gate
-           // reads it already computes and previously discarded) plus
-           // q_active_frame, the per-frame counterpart to the latched
-           // q_active above -- see LioFrameDiag's doc comment.
-           ",q_status,q_white_acc,q_white_gyr,q_above_floor_acc,q_above_floor_gyr,q_active_frame"
            // CQ-28: residual-redundancy-correction engagement/magnitude --
            // see LioFrameDiag's own doc comment.
            ",redund_groups,redund_n_raw,redund_info_ratio,information_increase_groups"
@@ -112,10 +104,6 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            // the standing 39-vs-20 samples-per-scan discrepancy. Appended,
            // not interleaved, per this file's own convention.
            ",n_imu_samples"
-           // CQ-87 item 8: ScanSpline::fit()'s silent clamp, reported on
-           // both arms. Appended, not interleaved, per this file's own
-           // convention.
-           ",n_c_requested,n_c_actual,n_c_clamped"
            // Phase-6A diagnostic campaign (2026-09-22): correspondence
            // miss-classification counters, straight from LioProcBase --
            // see LioFrameDiag's own doc comment. Appended, not
@@ -125,7 +113,7 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
   // t_abs is an epoch-scale double (~1.6e9) -- default ostream formatting
   // (6 significant figures) collapses every frame in a run to the same
   // printed value without an explicit precision. Matches the setprecision(9)
-  // convention already used by pose_pair.csv/spline_q.csv's own t columns.
+  // convention already used by the other per-frame logs' t columns.
   ofs << std::fixed << std::setprecision(9) << t_abs << std::defaultfloat
       << "," << frame_idx << "," << denom_rejected_count << "," << max_plane_var_trace
       << "," << lio.n_residuals << "," << n_planes
@@ -134,7 +122,6 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.ask << "," << lio.got << "," << lio.refusal
       << "," << lio.iters << "," << lio.dx_rot_deg << "," << lio.dx_pos_mm
       << "," << lio.trP_pos_pre
-      << "," << lio.boundary_dpos << "," << lio.boundary_drot_deg
       << "," << lio.n_points_after_pfn << "," << lio.n_points_after_ds
       << "," << n_voxels << "," << n_voxels_is_plane << "," << n_voxels_converged
       << "," << lio.sum_S << "," << lio.floor_share << "," << lio.sdiag_share
@@ -145,12 +132,6 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.p_rot_trace_pre << "," << lio.p_rot_eig_min_pre
       << "," << lio.p_pos_vel_fro_pre << "," << lio.p_pos_bias_fro_pre
       << "," << lio.cos_pmin_hmin
-      << "," << lio.q_z_acc << "," << lio.q_z_gyr << "," << lio.q_acf1_acc << "," << lio.q_acf1_gyr
-      << "," << (lio.q_active ? 1 : 0) << "," << (lio.q_clamped ? 1 : 0)
-      << "," << lio.q_status
-      << "," << (lio.q_white_acc ? 1 : 0) << "," << (lio.q_white_gyr ? 1 : 0)
-      << "," << (lio.q_above_floor_acc ? 1 : 0) << "," << (lio.q_above_floor_gyr ? 1 : 0)
-      << "," << (lio.q_active_frame ? 1 : 0)
       << "," << lio.redund_groups << "," << lio.redund_n_raw
       << "," << lio.redund_info_ratio << "," << lio.information_increase_groups
       << "," << lio.redund_groups_seen << "," << lio.redund_groups_degenerate_pv
@@ -172,7 +153,6 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
       << "," << lio.p_rot_eig_min_post << "," << lio.p_rot_eig_mid_post << "," << lio.p_rot_eig_max_post
       << "," << lio.h_pp_max_eig
       << "," << lio.n_imu_samples
-      << "," << lio.n_c_requested << "," << lio.n_c_actual << "," << lio.n_c_clamped
       << "," << lio.n_miss_coverage << "," << lio.n_miss_mismatch
       << "," << lio.n_tier0_miss_coverage << "," << lio.n_tier0_miss_mismatch
       << "\n";

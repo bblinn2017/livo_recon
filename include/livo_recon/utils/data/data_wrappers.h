@@ -48,12 +48,8 @@ struct PointXYZCov {
 
   // Capture time of the LiDAR return, on the SAME base as PointXYZT::t
   // (frame-relative, mg.image.t == scan end).  Carried through deskew and
-  // downsample so a residual can be evaluated against the scan spline at
-  // the instant the point was actually measured, and so the spline's
-  // control points can be refined by the points in their own temporal
-  // neighbourhood.  Zero for points produced before this existed and for
-  // the poses-empty fallback path; ScanSpline evaluation clamps, so a zero
-  // here degrades to "scan start", never to undefined behaviour.
+  // downsample.  Zero for points produced before this existed and for the
+  // poses-empty fallback path.
   double t = 0.0;
 
   // PURE sensor+deskew measurement-noise covariance (independent per
@@ -90,7 +86,7 @@ struct PointXYZCov {
   // Jacobian evaluated honestly at that capture time (rather than at t1)
   // needs. Zero for any path that predates this field or never calls
   // deskewPoints() (mirrors `t`'s own zero-default convention). Unused by
-  // the decoupled estimator and by buildResiduals()'s existing (t1) H --
+  // the iekf estimator and by buildResiduals()'s existing (t1) H --
   // only a future per-point-time coupled Jacobian reads it.
   V3D raw_body_point = V3D::Zero();
 

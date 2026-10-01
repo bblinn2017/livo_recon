@@ -30,13 +30,9 @@ struct Residual
   V3D world_point = V3D::Zero();
 
   // Capture time of the point this residual came from, copied straight from
-  // PointXYZCov::t in LioProc::buildResiduals().  Only the scan-spline
-  // control-point refinement reads it (lio/spline.h, refineWithLidar): a
-  // residual's time is what selects the four control points it acts on, and
-  // without it the refinement cannot be built from the residual set the IEKF
-  // already accumulated.  0.0 on any path that does not set it, which
-  // ScanSpline treats as "outside the window" and skips rather than
-  // mis-attributing to the scan start.
+  // PointXYZCov::t in LioProc::buildResiduals().  Diagnostic only
+  // now that the scan-spline refinement that consumed it is gone.  0.0 on any
+  // path that does not set it.
   double t = 0.0;
   // Rotation Jacobian: point.cross(R1^T*normal), the R1 (rotation)
   // Jacobian column (lio_accumulator.cpp's accumulateLioResiduals()).
@@ -50,7 +46,7 @@ struct Residual
   // for chaining honestly with a per-point-time Jacobian rather than
   // mismatching a t1 derivative against a t_k sensitivity. Zero on any path
   // that predates this field. Not read by buildResiduals()'s own H or by
-  // the decoupled estimator -- see PointXYZCov::raw_body_point's doc.
+  // the iekf estimator -- see PointXYZCov::raw_body_point's doc.
   V3D raw_body_point = V3D::Zero();
   // VARIANCE (not standard deviation), despite the name -- independent
   // (sensor+pose) noise, plus this plane's own fit uncertainty
@@ -715,12 +711,6 @@ struct LioFrameDiag
   double dx_rot_deg   = 0.0;
   double dx_pos_mm    = 0.0;
   double trP_pos_pre  = -1.0; // BEFORE the update -- turns a level into a delta
-  // DX-2 preflight fix.  THIS scan's spline-window start (t0) vs the
-  // PREVIOUS scan's finalized end (t1) -- the inter-scan discontinuity
-  // nothing had measured before. -1 if unavailable (first spline scan,
-  // spline disabled, or previous scan's spline failed).
-  double boundary_dpos     = -1.0;  // metres
-  double boundary_drot_deg = -1.0;  // degrees
   // P-F (BASE, 2026-09-04): L1 (DECIMATION) had no column at all -- n_residuals
   // above is L2 (ASSOCIATION). n_points_after_pfn = mg.lidar_points.size() (post
   // cbk/lidar/point_filter_num, pre imu/ds); n_points_after_ds = mg.points.size()
@@ -736,27 +726,13 @@ struct LioFrameDiag
   // standing 39-vs-20 samples-per-scan discrepancy directly rather than
   // leaving it uncounted.
   int n_imu_samples = -1;
-  // CQ-87 item 8: ScanSpline::fit() silently clamps n_cp below the
-  // requested count when a scan has too few pose samples in its window --
-  // documented behaviour, but nothing downstream reported it, so a
-  // pose-arm filing saying "n_c=4" could actually mean something else
-  // (CQ-86 item 0's own n_c=4->actual=7 was caught only by accident).
-  // Logged on BOTH arms: raw_imu's own n_c never clamps (n_c_actual==
-  // n_c_requested, n_c_clamped=0 always -- that arm has no per-scan
-  // ScanSpline::fit() call the way the pose/decoupled-spline paths do),
-  // reported anyway so every filing can read this column without first
-  // checking which arm produced it.
-  int n_c_requested = -1;
-  int n_c_actual = -1;
-  int n_c_clamped = -1;  // 0/1, -1 = not applicable/not populated
-
   // Phase-6A diagnostic campaign (2026-09-22, user request): straight
   // through from LioProcBase::n_miss_coverage_/n_miss_mismatch_/
   // n_tier0_miss_coverage_/n_tier0_miss_mismatch_ (already computed by
   // buildResiduals(), never logged before) -- lets a correspondence-
   // starvation failure (few/degenerate residuals) be distinguished from a
   // conditioning failure on an otherwise-healthy correspondence set,
-  // shared across raw_imu/decoupled/pose_knots since buildResiduals() is
+  // shared across the IEKF and coupled estimators since buildResiduals() is
   // common machinery. -1 = not populated (caller didn't set it).
   int n_miss_coverage = -1;
   int n_miss_mismatch = -1;
@@ -811,33 +787,6 @@ struct LioFrameDiag
   // are orthogonal (a miscalibration, tight where the data is weak). -1.0
   // = unavailable (no residuals this frame, or P's position block missing).
   double cos_pmin_hmin = -1.0;
-
-  // CQ-19(c).  AdaptiveQ's own gate state -- cov_acc/cov_gyr (already
-  // logged elsewhere) are the raw residual and are config-invariant by
-  // construction (adaptive_q.cpp's update() returns before touching any of
-  // these when enable=false), so they cannot tell a live module from a
-  // disabled one. These five can. NaN/false = adaptive_q disabled or not
-  // yet run this frame.
-  double q_z_acc    = std::numeric_limits<double>::quiet_NaN();
-  double q_z_gyr    = std::numeric_limits<double>::quiet_NaN();
-  double q_acf1_acc = std::numeric_limits<double>::quiet_NaN();
-  double q_acf1_gyr = std::numeric_limits<double>::quiet_NaN();
-  bool   q_active   = false;
-  bool   q_clamped  = false;
-
-  // CQ-26: AdaptiveQ::update()'s own per-frame decision, previously computed
-  // and discarded. q_status is the exact lastStatus() string (off/
-  // no_residual/bad_residual/not_white/below_floor/no_window/warmup/
-  // nonfinite/ok). The four booleans are the per-channel whiteness/floor
-  // gate reads; q_active_frame is whether THIS frame reached active_=true
-  // (active_ itself is a one-way latch -- see adaptive_q.h's activeThisFrame()
-  // doc comment for why that distinction matters).
-  std::string q_status         = "off";
-  bool        q_white_acc      = false;
-  bool        q_white_gyr      = false;
-  bool        q_above_floor_acc = false;
-  bool        q_above_floor_gyr = false;
-  bool        q_active_frame   = false;
 
   // CQ-28: residual-redundancy-correction engagement/magnitude, from
   // ResidualRedundancyStats (see residual_redundancy.h) -- 0/0/0/1.0 both

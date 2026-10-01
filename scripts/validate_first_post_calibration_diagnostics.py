@@ -30,7 +30,7 @@ DECOUPLED_FILES = {
 
 FORBIDDEN_ALL_FRAME_FILES = {
     "odometry.txt", "frame_stats.txt", "pose_pair.csv",
-    "decoupled_gn_iteration.csv", "decoupled_knot_update.csv",
+    "iekf_gn_iteration.csv",
 }
 
 
@@ -94,26 +94,26 @@ def validate_coupled(path: Path) -> None:
                 f"knot-specific-bias covariance evidence missing: {marker}")
 
 
-def validate_decoupled(path: Path) -> None:
+def validate_iekf(path: Path) -> None:
     for name in DECOUPLED_FILES:
         require(path / name)
     with (path / "pose_control_first_frame_covariance_budget.csv").open(newline="") as stream:
         rows = list(csv.DictReader(stream))
     if not any(row.get("phase") == "post_covariance" for row in rows):
-        raise RuntimeError("decoupled posterior covariance row is missing")
+        raise RuntimeError("iekf posterior covariance row is missing")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("directory", type=Path)
-    parser.add_argument("--architecture", choices=("coupled", "decoupled"), required=True)
+    parser.add_argument("--architecture", choices=("coupled", "iekf"), required=True)
     args = parser.parse_args()
     forbidden = sorted(name for name in FORBIDDEN_ALL_FRAME_FILES
                        if (args.directory / name).exists())
     if forbidden:
         raise RuntimeError(
             f"all-frame outputs must not be packaged: {forbidden}")
-    (validate_coupled if args.architecture == "coupled" else validate_decoupled)(
+    (validate_coupled if args.architecture == "coupled" else validate_iekf)(
         args.directory)
     print(f"PASS: {args.architecture} first-post-calibration diagnostics: {args.directory}")
     return 0

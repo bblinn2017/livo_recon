@@ -54,24 +54,6 @@ except ImportError:
 # against the .h/.cpp sources if either drifts).
 # ---------------------------------------------------------------------------
 DEFAULTS = {
-    "spline/mode": "spline",
-    "spline/control_points/hz": 100.0,
-    "spline/refine/iters": 1,
-    "spline/log_en": False,
-    "spline/trajectory_log/mode": "off",
-    "spline/trajectory_log/hz": 200.0,
-    "adaptive_q/enable": False,
-    "adaptive_q/beta_acc": 0.3,
-    "adaptive_q/beta_gyr": 0.3,
-    "adaptive_q/z_rate_limit": 0.02,
-    "adaptive_q/acf1_max": 1.00,  # CQ-35
-    "adaptive_q/bounds/max_ratio": 100.0,
-    "adaptive_q/bounds/min_ratio": 0.01,
-    "adaptive_q/warmup_frames": 20,
-    "adaptive_q/ema": 0.9,
-    "adaptive_q/noise_floor/mode": "allan",
-    "adaptive_q/noise_floor/scale": 1.0,
-    "adaptive_q/log_en": False,
     "lio/residual_redundancy/mode": "off",
     "lio/residual_redundancy/rho": 1.0,
     "imu/ds/mode": "first",
@@ -97,47 +79,12 @@ DEFAULTS = {
 # later predicate can read an earlier key's OWN resolved (possibly-forced)
 # value. `live_predicate` takes the cell's resolved-so-far dict.
 #
-# Source: src/processing/lio_processing.cpp (spline/adaptive_q/redundancy/ds
+# Source: src/processing/lio_processing.cpp (redundancy/ds
 # block, ~line 142-218) and src/map/voxelmap.cpp (weight_floor/plane_var/
 # use_bins block, ~line 190-322). Re-grep both files for "cfg.nested" before
 # trusting this on a design that crosses a key not listed here.
 # ---------------------------------------------------------------------------
 NESTING_TABLE = [
-    ("spline/control_points/hz", "spline/mode",
-     lambda r: r["spline/mode"] != "raw_imu", 100.0),
-    ("spline/refine/iters", "spline/mode=spline+refine",
-     lambda r: r["spline/mode"] == "spline+refine", 1),
-    ("spline/log_en", "spline/mode",
-     lambda r: r["spline/mode"] != "raw_imu", False),
-    ("spline/trajectory_log/mode", "spline/mode",
-     lambda r: r["spline/mode"] != "raw_imu", "off"),
-    ("spline/trajectory_log/hz", "spline/trajectory_log/mode=dense",
-     lambda r: r["spline/mode"] != "raw_imu" and r["spline/trajectory_log/mode"] == "dense", 200.0),
-    ("adaptive_q/enable", "spline/mode",
-     lambda r: r["spline/mode"] != "raw_imu", False),
-    ("adaptive_q/beta_acc", "adaptive_q/enable",
-     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 0.3),
-    ("adaptive_q/beta_gyr", "adaptive_q/enable",
-     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 0.3),
-    ("adaptive_q/z_rate_limit", "adaptive_q/enable",
-     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 0.02),
-    ("adaptive_q/acf1_max", "adaptive_q/enable",
-     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 1.00),
-    ("adaptive_q/bounds/max_ratio", "adaptive_q/enable",
-     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 100.0),
-    ("adaptive_q/bounds/min_ratio", "adaptive_q/enable",
-     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 0.01),
-    ("adaptive_q/warmup_frames", "adaptive_q/enable",
-     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 20),
-    ("adaptive_q/ema", "adaptive_q/enable",
-     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], 0.9),
-    ("adaptive_q/noise_floor/mode", "adaptive_q/enable",
-     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], "allan"),
-    ("adaptive_q/noise_floor/scale", "adaptive_q/noise_floor/mode=allan",
-     lambda r: (r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"]
-                and r["adaptive_q/noise_floor/mode"] == "allan"), 1.0),
-    ("adaptive_q/log_en", "adaptive_q/enable",
-     lambda r: r["spline/mode"] != "raw_imu" and r["adaptive_q/enable"], False),
     ("lio/residual_redundancy/rho", "lio/residual_redundancy/mode!=off",
      lambda r: r["lio/residual_redundancy/mode"] != "off", 1.0),
     ("imu/ds/ds_leaf_size", "imu/ds/mode != off",

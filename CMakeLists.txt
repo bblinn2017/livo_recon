@@ -138,7 +138,7 @@ add_executable(livo_recon_node
   src/processing/imu_processing.cpp
   src/processing/vio_processing.cpp
   src/processing/lio_base.cpp
-  src/processing/lio_decoupled.cpp
+  src/processing/lio_iekf.cpp
   src/processing/lio_coupled.cpp
   src/processing/lio_coupled_process.cpp
   src/processing/combined_processing.cpp

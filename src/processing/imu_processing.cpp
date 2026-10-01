@@ -214,9 +214,6 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // Read directly rather than being wired from LioProcOptions: the two
   // classes are constructed independently and this keeps the single source
   // of truth in the parameter server, where the sweep harness writes it.
-  // spline/mode is read only so that configs pinning raw_imu (the only mode left) are not flagged unconsumed.
-  std::string spline_mode = "raw_imu";
-  paramWarn<std::string>(pnh, "spline/mode", spline_mode, std::string("raw_imu"));
   { std::lock_guard<std::mutex> lock(g_qhat_mtx); g_qhat_enabled = opts_.log_qhat_en; }
 
   std::ostringstream oss;

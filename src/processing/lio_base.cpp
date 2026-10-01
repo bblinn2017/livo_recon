@@ -108,16 +108,17 @@ void writeFirstFrameSolveVector(std::ofstream& ofs, const char* name, const Eige
   ofs << '\n';
 }
 
-void logFirstFrameDecoupledSolve(
+void logFirstFrameIekfSolve(
     int frame_idx, int scan_id, int iteration, double t_abs,
     const char* architecture, const std::vector<PointXYZCov>& pts,
     const std::vector<Residual>& residuals, const StateGroup& before,
     const StateGroup& after, const StateGroup& propagat,
     const Eigen::MatrixXd& prior_cov, const EkfUpdate& ekf,
     const Eigen::Matrix<double,6,6>& HtH,
-    const Eigen::Matrix<double,6,1>& Htz)
+    const Eigen::Matrix<double,6,1>& Htz,
+    int max_frame)
 {
-  if (frame_idx != 1) return;
+  if (frame_idx < 1 || frame_idx > max_frame) return;
   static PersistentLogStream csv_log("pose_control_first_frame_solve.csv");
   bool first = false;
   std::ofstream& csv = csv_log.stream(&first);
@@ -139,7 +140,7 @@ void logFirstFrameDecoupledSolve(
   csv.flush();
   static PersistentLogStream dump_log("pose_control_first_frame_solve_matrices.txt");
   std::ofstream& dump = dump_log.stream();
-  dump << "=== decoupled_solve_snapshot ===\n"
+  dump << "=== iekf_solve_snapshot ===\n"
        << "architecture=" << architecture << "\n"
        << "frame_idx=" << frame_idx << "\n"
        << "scan_id=" << scan_id << "\n"
@@ -183,8 +184,67 @@ void logFirstFrameDecoupledSolve(
          << " world_point=" << r.world_point.transpose()
          << " raw_body_point=" << r.raw_body_point.transpose() << '\n';
   }
-  dump << "=== end_decoupled_solve_snapshot ===\n";
+  dump << "=== end_iekf_solve_snapshot ===\n";
   dump.flush();
+}
+
+
+// R69 (F-300): write-only per-iteration record of the LiDAR information actually used by the update.
+// One row per (frame, iteration). HtH is the 6x6 (rot, pos) information, upper triangle row-major; Htz its right-hand side.
+// sigma_squared is the admitted residual variance as used (after any bootstrap_inflate factor); plane_var_term is the
+// plane-fit part of it, so base = sigma_squared - plane_var_term.
+void logUpdateDiag(int frame_idx, int iteration, double t_abs, const std::vector<Residual>& residuals, const EkfUpdate& ekf)
+{
+  static PersistentLogStream log("lio_update_diag.csv");
+  bool first = false;
+  std::ofstream& o = log.stream(&first);
+  if (first) {
+    o << "frame,iter,t_abs,n_resid,sum_inv_sigma2,mean_sigma2,mean_plane_var_term,mean_base_sigma2,mean_r,mean_r2_over_sigma2";
+    for (int i = 0; i < 6; ++i) for (int j = i; j < 6; ++j) o << ",HtH_" << i << j;
+    for (int i = 0; i < 6; ++i) o << ",Htz_" << i;
+    o << ",dtheta_x,dtheta_y,dtheta_z,dt_x,dt_y,dt_z\n";
+  }
+  const double n = static_cast<double>(residuals.size());
+  double s_inv = 0.0, s_sig = 0.0, s_pv = 0.0, s_r = 0.0, s_chi = 0.0;
+  for (const auto& r : residuals) {
+    s_inv += 1.0 / r.sigma_squared; s_sig += r.sigma_squared; s_pv += r.plane_var_term;
+    s_r += r.r; s_chi += r.r * r.r / r.sigma_squared;
+  }
+  const double dn = n > 0.0 ? n : 1.0;
+  o << std::setprecision(10) << frame_idx << ',' << iteration << ',' << std::setprecision(17) << t_abs << ',' << residuals.size()
+    << ',' << s_inv << ',' << s_sig / dn << ',' << s_pv / dn << ',' << (s_sig - s_pv) / dn << ',' << s_r / dn << ',' << s_chi / dn;
+  for (int i = 0; i < 6; ++i) for (int j = i; j < 6; ++j) o << ',' << ekf.HtH(i, j);
+  for (int i = 0; i < 6; ++i) o << ',' << ekf.Htz(i);
+  o << ',' << ekf.dtheta.x() << ',' << ekf.dtheta.y() << ',' << ekf.dtheta.z()
+    << ',' << ekf.dt.x() << ',' << ekf.dt.y() << ',' << ekf.dt.z() << '\n';
+  o.flush();
+}
+
+// R69 (F-300): write-only statistics of the live scan's per-point sensor covariance (body frame, as passed to the
+// residual builder), first iteration of every frame. sigma_trace3 = trace/3 per point.
+void logLivePointCov(int frame_idx, const std::vector<PointXYZCov>& pts)
+{
+  static PersistentLogStream log("live_point_cov.csv");
+  bool first = false;
+  std::ofstream& o = log.stream(&first);
+  if (first) {
+    o << "frame,n_pts,mean_range,min_sigma_trace3,mean_sigma_trace3,max_sigma_trace3,mean_C00,mean_C01,mean_C02,mean_C11,mean_C12,mean_C22\n";
+  }
+  double mr = 0.0, mn = 1e300, mx = 0.0, sm = 0.0;
+  double c[6] = {0, 0, 0, 0, 0, 0};
+  for (const auto& p : pts) {
+    const double t3 = p.sensor_cov.trace() / 3.0;
+    mr += p.point.norm(); sm += t3; mn = std::min(mn, t3); mx = std::max(mx, t3);
+    c[0] += p.sensor_cov(0, 0); c[1] += p.sensor_cov(0, 1); c[2] += p.sensor_cov(0, 2);
+    c[3] += p.sensor_cov(1, 1); c[4] += p.sensor_cov(1, 2); c[5] += p.sensor_cov(2, 2);
+  }
+  const double n = static_cast<double>(pts.size());
+  const double dn = n > 0.0 ? n : 1.0;
+  if (pts.empty()) mn = 0.0;
+  o << frame_idx << ',' << pts.size() << ',' << std::setprecision(10) << mr / dn << ',' << mn << ',' << sm / dn << ',' << mx;
+  for (int k = 0; k < 6; ++k) o << ',' << c[k] / dn;
+  o << '\n';
+  o.flush();
 }
 
 }  // namespace
@@ -196,7 +256,7 @@ LioProcBase::LioProcBase(NodeContext& ctx)
 // CQ-49 item 1: extracted ONCE from the pre-split LioProc::loadParameters(),
 // called from both derived classes' own loadParameters() overrides against
 // their OWN ConfigResolver -- see each override for the estimator-specific
-// keys (spline/adaptive_q for decoupled, estimator/coupled/* for coupled)
+// keys (estimator/coupled/* for coupled)
 // this does NOT read. Order relative to the original function is changed
 // (this reads its keys before the derived override reads its own), which is
 // safe: item 0's byte-identical gate is on odometry.txt, and the
@@ -213,6 +273,9 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   paramWarn<bool>(pnh, "lio/log_eigenspectrum_en",  opts_.log_eigenspectrum_en, false);
   paramWarn<bool>(pnh, "lio/log_consistency_scan_en", opts_.log_consistency_scan_en, false);
   paramWarn<bool>(pnh, "lio/log_nll_en", opts_.log_nll_en, false);
+  paramWarn<bool>(pnh, "lio/update_diag_en", opts_.update_diag_en, false);          // R69: lio_update_diag.csv (write-only)
+  paramWarn<bool>(pnh, "lio/live_point_cov_en", opts_.live_point_cov_en, false);    // R69: live_point_cov.csv (write-only)
+  paramWarn<int>(pnh, "lio/first_frame_dump_frames", opts_.first_frame_dump_frames, 1);  // R69: solve dump for frames 1..K (1 = unchanged)
   paramWarn<int>(pnh, "lio/dry_run_point_filter_num", opts_.dry_run_point_filter_num, 0);
   paramWarn<bool>(pnh, "eval/nees_per_dof_en", opts_.nees_per_dof_en, false);
   paramWarn<int>(pnh, "eval/nees_tier1_window_scans", opts_.nees_tier1_window_scans, 489);
@@ -290,8 +353,8 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
 }
 
 // CQ-49: the shared finish -- refuse anything left unclaimed in the given
-// namespaces (each derived class passes its OWN set: {"spline","adaptive_q"}
-// for decoupled, {"estimator"} for coupled), record the accumulation
+// namespaces (each derived class passes its OWN set: {"spline","adaptive_q",...}
+// (removed namespaces, refused) for iekf, {"estimator"} for coupled), record the accumulation
 // precision, and either refuse (throw) or return the effective config.
 std::string LioProcBase::finalizeConfig(ConfigResolver& cfg, std::initializer_list<const char*> allowed_unclaimed_namespaces)
 {
@@ -445,7 +508,7 @@ void LioProcBase::buildResiduals(
         if (opts_.bootstrap_inflate_scans > 0 && voxel_map_->frame_idx_ >= 1 &&
             voxel_map_->frame_idx_ <= static_cast<decltype(voxel_map_->frame_idx_)>(opts_.bootstrap_inflate_scans))
           res.sigma_squared *= opts_.bootstrap_inflate_factor;   // R65 (F-128)
-        res.t = pts[i].t;   // for the spline control-point refinement
+        res.t = pts[i].t;   // diagnostic only (spline refinement removed)
         res.raw_body_point = pts[i].raw_body_point;  // CQ-50
         build_thread_residuals_[omp_get_thread_num()].push_back(res);
         if (allow_consistency_log && opts_.log_pair_corr_en)
@@ -606,16 +669,24 @@ double LioProcBase::estimateStateCorrection(
     dt     = ekf_.dt;
   }
 
-  if (voxel_map_->frame_idx_ == 1 && diagnostic_gn_iteration_ >= 0) {
+  if (voxel_map_->frame_idx_ >= 1 && voxel_map_->frame_idx_ <= opts_.first_frame_dump_frames &&
+      diagnostic_gn_iteration_ >= 0) {
     const double t_abs = pts.empty() ? data_queues_->start_time : pts.front().t + data_queues_->start_time;
-    logFirstFrameDecoupledSolve(
+    logFirstFrameIekfSolve(
         voxel_map_->frame_idx_, 0, diagnostic_gn_iteration_, t_abs,
         firstFrameArchitectureName(), pts, residuals_, state_before_update, *state_,
-        state_propagat_, prior_cov_, ekf_, ekf_.HtH, ekf_.Htz);
+        state_propagat_, prior_cov_, ekf_, ekf_.HtH, ekf_.Htz, opts_.first_frame_dump_frames);
   }
 
+  if (opts_.update_diag_en && diagnostic_gn_iteration_ >= 0) {   // R69: write-only per-iteration LiDAR update record
+    const double t_abs_ud = pts.empty() ? data_queues_->start_time : pts.front().t + data_queues_->start_time;
+    logUpdateDiag(voxel_map_->frame_idx_, diagnostic_gn_iteration_, t_abs_ud, residuals_, ekf_);
+  }
+  if (opts_.live_point_cov_en && diagnostic_gn_iteration_ == 0)   // R69: write-only live-scan sensor covariance statistics
+    logLivePointCov(voxel_map_->frame_idx_, pts);
+
   if (opts_.log_debug_en && diagnostic_gn_iteration_ >= 0) {
-    static PersistentLogStream log("decoupled_factor_iteration.csv");
+    static PersistentLogStream log("iekf_factor_iteration.csv");
     bool first_call;
     std::ofstream& ofs = log.stream(&first_call);
     if (first_call) {

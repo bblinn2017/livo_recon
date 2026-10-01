@@ -70,7 +70,7 @@ NeesResult computeNeesPerDof(const M3D& R_est, const V3D& p_est,
 // computeNeesPerDof()/logNeesPerDof() under `channel`. One-shot: inert on
 // every call after the window fills (Tier 1 measures the bag's own
 // stationary PREFIX once, not a repeating window). Shared by both the
-// coupled and decoupled paths -- each owns its own instance (this class
+// coupled and iekf paths -- each owns its own instance (this class
 // holds per-instance state, not global/static).
 class Tier1NeesBuffer
 {
@@ -94,7 +94,7 @@ private:
 // Appends one row to nees_per_dof.txt (report-only, PersistentLogStream --
 // redirected through outputs/debug_log_dir like every other diagnostic in
 // this codebase). `channel` distinguishes which tier/path/config produced
-// the row (e.g. "tier1_decoupled", "tier2_coupled_n13") since multiple
+// the row (e.g. "tier1_iekf", "tier2_coupled_n13") since multiple
 // sources can share one log file within a run. Callers gate the call to
 // this function on eval/nees_per_dof_en themselves (this function does not
 // re-check it) -- matches every other opts_-gated diagnostic in this

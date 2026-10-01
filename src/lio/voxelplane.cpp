@@ -24,8 +24,7 @@ std::atomic<int> g_denom_rejected_count{0};
 // Engagement counter for the information plane model.  A run configured with
 // plane_var_mode = "information" that never increments this built no plane
 // under the model and is an INERT cell, not a null result -- the same
-// discipline SM-1 established for the spline flags, applied at the point the
-// mechanism actually runs.
+// engagement discipline applied at the point the mechanism actually runs.
 std::atomic<long> g_info_fits{0};
 std::atomic<double> g_max_plane_var_trace{-1.0};
 // CQ-56 item 3: same pattern, tracking covariance_'s own trace (the
