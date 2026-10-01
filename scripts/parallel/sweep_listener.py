@@ -188,6 +188,9 @@ class Job:
         return tuple(items)
 
     def ready(self):
+        # R69 stage-1 fix: a job that already has committed outputs only needs its consume step; nothing is being written, so no settle wait
+        if self.sentinel() is not None and self.status() in ("committed", "dry_committed"):
+            return True
         if self.sentinel() is None:
             self.fp = None
             return False
@@ -588,6 +591,7 @@ class Listener:
                     self.log("FATAL " + self.alarm)
                     break
                 launched = 0
+                pending_settle = False
                 for k, j in self.jobs.items():
                     if k in self.busy:
                         continue
@@ -599,6 +603,8 @@ class Listener:
                     if k in self.crashed:
                         continue
                     if not j.ready():
+                        if j.sentinel() is not None:
+                            pending_settle = True   # finished but still inside its settle window: a non-follow pass must wait, not exit
                         continue
                     self.busy.add(k)
                     futs.append(ex.submit(self.run_one, j))
@@ -607,9 +613,9 @@ class Listener:
                 done = self.terminal_count()
                 if done >= self.expected() and not futs:
                     break
-                if not self.follow and not futs and launched == 0:
+                if not self.follow and not futs and launched == 0 and not pending_settle:
                     break
-                time.sleep(float(lim["poll_interval_s"]) if (self.follow or futs) else 0)
+                time.sleep(float(lim["poll_interval_s"]) if (self.follow or futs or pending_settle) else 0)
         finally:
             ex.shutdown(wait=True)
         return self.finish()
@@ -699,7 +705,7 @@ def selftest():
     spec = {
         "spec_version": 1, "round": "selftest",
         "queues": [{"dir": qdir, "results_root": rdir, "expected_jobs": len(modes)}],
-        "trigger": {"sentinels": ["DONE", "FAILED"], "settle_seconds": 0, "settle_files": ["raw.csv"], "quiet_files": ["run.log"]},
+        "trigger": {"sentinels": ["DONE", "FAILED"], "settle_seconds": 1, "settle_files": ["raw.csv"], "quiet_files": ["run.log"]},
         "on_failed_job": "skip",
         "stages": [{"name": "reduce", "cmd": [sys.executable, os.path.join(base, "stage.py"), "{job_dir}", "{out_dir}", "{stage_out}"],
                     "timeout_s": 3,
@@ -710,7 +716,7 @@ def selftest():
                                                    "{stage_out_of:reduce}/archive.csv.gz"], "timeout_s": 20}],
         "summary": {"schema_version": 1, "required_fields": ["schema_version", "n", "listener"]},
         "raw": {"delete": ["raw.csv"], "sha256": "twice"},
-        "limits": {"workers": 3, "max_failures": 50, "max_attempts": 1, "min_free_gb": 0, "poll_interval_s": 0},
+        "limits": {"workers": 3, "max_failures": 50, "max_attempts": 1, "min_free_gb": 0, "poll_interval_s": 0.5},
     }
     sp = os.path.join(base, "listener_spec.json")
     json.dump(spec, open(sp, "w"))
