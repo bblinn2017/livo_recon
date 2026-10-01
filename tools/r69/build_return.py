@@ -18,7 +18,14 @@ REQUIRED_AGENT = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md
                   "launch/launch_command.txt", "launch/containers_file.txt", "launch/launch_time.txt", "launch/checkup_cycles",
                   "P_RETURN/window_table.csv", "P_RETURN/manifest.json",
                   "listener/selftest_output.txt", "listener/smoke_dry_run/listener_ledger.jsonl", "listener/smoke_delete/listener_ledger.jsonl",
-                  "listener/smoke/listener_ledger.jsonl", "listener/smoke/listener_final.json", "stop_reasons.csv"]
+                  "listener/ef/listener_ledger.jsonl", "listener/ef/listener_final.json",
+                  "listener/sc/listener_ledger.jsonl", "listener/sc/listener_final.json",
+                  "listener/co/listener_ledger.jsonl", "listener/co/listener_final.json",
+                  "listener/p/listener_ledger.jsonl", "listener/p/listener_final.json", "stop_reasons.csv"]
+                  # R72 fix: this list previously named a single "listener/smoke/..." (R69) /
+                  # "listener/main/..." (R71)-style combined-queue ledger, which does not exist
+                  # for R72 -- stage 2 has 4 separate queues (ef, sc, co, p), no single "main"
+                  # batch. Updated to the real per-queue ledger paths actually produced.
 REQUIRED_DIRS_NONEMPTY = ["listener", "checks/param_dumps", "checks/smoke_arm_files", "launch/checkup_cycles", "P_RETURN"]
 GENERATED = ["phase_summary.csv", "arm_scan_all.csv.gz", "arm_ol_tau_all.csv.gz", "plane_fit_reasons_all.csv.gz", "plane_fit_trace_counts_all.csv.gz",
              "coupled_vs_iekf_windows.csv", "completeness.csv", "identity_controls.txt", "r72_gates.txt", "duplicates.tsv", "summaries_all.json",
