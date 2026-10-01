@@ -63,6 +63,12 @@ struct ResidualRedundancyOptions
   // knob #1 -- report the curve, do not pick a value here.
   double rho = 1.0;
 
+  // R70 (F-317): "off" (default) | "hold_pos_min_eig". After the Woodbury correction, HtH and Htz are multiplied by
+  // c = lambda_min(naive HtH_pp) / lambda_min(corrected HtH_pp) when that is > 1, so the weakest position direction keeps the
+  // information the independent accumulator gave it (the failure the 2026-08 count_weighted scheme named: the discount starved
+  // h_pp_min_eig by 4-4.6x). Only meaningful with mode == "woodbury"; applied in LioProcBase::solveSystem*.
+  std::string renorm = "off";
+
   bool on() const { return mode != "off"; }
 };
 

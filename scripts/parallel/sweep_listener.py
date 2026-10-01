@@ -128,11 +128,26 @@ class Job:
     def __init__(self, spec, queue, name):
         self.spec, self.queue, self.name = spec, queue, name
         self.job_dir = os.path.join(absp(spec, queue["dir"]), name)
-        self.out_dir = self._find_out_dir()
-        self.state_dir = os.path.join(self.out_dir, ".listener")
-        self.lo = os.path.join(self.out_dir, "listener_out")
+        self._out = self._find_out_dir()
         self.fp = None
         self.fp_time = 0.0
+
+    # R69C fix (suspected cause of the R69B startup hangs, UNVERIFIED): the out dir used to be resolved once, at discovery. A listener started
+    # BEFORE the dispatcher discovers jobs whose out dir does not exist yet, so it cached a path that never became the real one.
+    # Now the path is re-resolved whenever the cached one is not a directory.
+    @property
+    def out_dir(self):
+        if not os.path.isdir(self._out):
+            self._out = self._find_out_dir()
+        return self._out
+
+    @property
+    def state_dir(self):
+        return os.path.join(self.out_dir, ".listener")
+
+    @property
+    def lo(self):
+        return os.path.join(self.out_dir, "listener_out")
 
     def _find_out_dir(self):
         cands = []
@@ -473,6 +488,26 @@ class Listener:
             shutil.move(p, dst)
             osums.append({"stage": sname, "path": os.path.join(sname, d["path"]), "bytes": os.path.getsize(dst),
                           "sha256": sha256_file(dst)})
+        # R69C fix: R69B showed that only the DECLARED outputs were moved, so the archive blobs (archive/*.gz) died with tmp/ when the job was consumed.
+        # A stage may now list `persist` (paths relative to its stage dir): every file under them is moved to listener_out/<stage>/ and recorded
+        # (bytes, sha256) in summary.json, so recheck_outputs() covers them before any raw is deleted.
+        done = {os.path.realpath(p) for _, _, p in outs}
+        for sg in spec["stages"]:
+            for rel in sg.get("persist", []):
+                base = os.path.join(stage_dirs[sg["name"]], rel)
+                if not os.path.exists(base):
+                    raise StageError("persist path missing: %s/%s" % (sg["name"], rel))
+                files = [base] if os.path.isfile(base) else [os.path.join(dp, n) for dp, _, fn in os.walk(base) for n in sorted(fn)]
+                if not files:
+                    raise StageError("persist path empty: %s/%s" % (sg["name"], rel))
+                for p in files:
+                    if os.path.realpath(p) in done or not os.path.exists(p):
+                        continue
+                    sub = os.path.relpath(p, stage_dirs[sg["name"]])
+                    dst = os.path.join(job.lo, sg["name"], sub)
+                    os.makedirs(os.path.dirname(dst), exist_ok=True)
+                    shutil.move(p, dst)
+                    osums.append({"stage": sg["name"], "path": os.path.join(sg["name"], sub), "bytes": os.path.getsize(dst), "sha256": sha256_file(dst)})
         for vf in spec["verify"]:   # keep the verify logs: they are the control numbers
             lp = os.path.join(job.state_dir, "tmp", "verify_" + vf["name"] + ".log")
             if os.path.exists(lp):
@@ -609,7 +644,13 @@ class Listener:
                     self.busy.add(k)
                     futs.append(ex.submit(self.run_one, j))
                     launched += 1
+                for f in futs:
+                    if f.done() and f.exception() is not None:
+                        self.log("WORKER EXCEPTION (not caught by run_one): %r" % (f.exception(),))
                 futs = [f for f in futs if not f.done()]
+                if now() - getattr(self, "_hb", 0.0) >= 60.0:   # R69C: heartbeat, so a silent loop is visible in the log
+                    self._hb = now()
+                    self.log("poll: jobs %d/%d busy %d states %s" % (len(self.jobs), self.expected(), len(self.busy), json.dumps(self.counts(), sort_keys=True)))
                 done = self.terminal_count()
                 if done >= self.expected() and not futs:
                     break
@@ -711,7 +752,8 @@ def selftest():
                     "timeout_s": 3,
                     "outputs": [{"path": "s.json", "kind": "json", "required_fields": ["n", "ok"], "merge_into_summary": True},
                                 {"path": "table.csv", "kind": "csv", "required_columns": ["a", "b"], "min_rows": 10},
-                                {"path": "archive.csv.gz", "kind": "gz", "min_bytes": 10}]}],
+                                ],
+                    "persist": ["archive.csv.gz"]}],
         "verify": [{"name": "roundtrip", "cmd": [sys.executable, os.path.join(base, "verify.py"), "{out_dir}/raw.csv",
                                                    "{stage_out_of:reduce}/archive.csv.gz"], "timeout_s": 20}],
         "summary": {"schema_version": 1, "required_fields": ["schema_version", "n", "listener"]},
@@ -732,6 +774,8 @@ def selftest():
         other_there = os.path.exists(os.path.join(rdir, m, "other.txt"))
         committed = os.path.exists(os.path.join(rdir, m, "listener_out", "summary.json"))
         want_deleted = m in ("good", "good_resume")
+        if want_deleted:   # R69C: the archive must survive consumption of the job
+            ok = ok and os.path.exists(os.path.join(rdir, m, "listener_out", "reduce", "archive.csv.gz"))
         good = (raw_there != want_deleted) and other_there and (committed == want_deleted or m in ("raw_changed",))
         if m == "raw_changed":
             good = raw_there and other_there   # raw must survive; its summary may exist but must not be consumed
@@ -741,6 +785,15 @@ def selftest():
     sys.stdout.write("%-20s %-10s %-11s %s\n" % ("job", "raw", "summary", "result"))
     for r in res:
         sys.stdout.write("%-20s %-10s %-11s %s\n" % r)
+    # R69C: a Job built before its out dir exists must find the dir once it appears (listener started before the dispatcher)
+    late = os.path.join(base, "late_out")
+    ljob = os.path.join(base, "late_job"); os.makedirs(ljob)
+    open(os.path.join(ljob, "job.env"), "w").write("OUT_DIR=%s\n" % late)
+    lj = Job(sp_loaded, {"dir": os.path.dirname(ljob), "results_root": os.path.join(base, "late_results")}, "late_job")
+    os.makedirs(late)
+    late_ok = os.path.realpath(lj.out_dir) == os.path.realpath(late)
+    ok = ok and late_ok
+    sys.stdout.write("late out dir resolved: %s\n" % ("PASS" if late_ok else "FAIL"))
     sys.stdout.write("first pass rc %d (nonzero expected: broken jobs), second pass rc %d\n" % (rc1, rc2))
     sys.stdout.write("SELFTEST %s\n" % ("PASS" if ok and rc1 != 0 else "FAIL"))
     return 0 if ok and rc1 != 0 else 1

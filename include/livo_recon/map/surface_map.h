@@ -61,12 +61,18 @@ private:
   };
 
   void updateMapInternal(const std::vector<PointXYZCov>& pts_body, bool advance_live_frame, bool bootstrap_phase);
+  // fail (optional, R70 F-340): 0 none, 1 range gate (max_radius), 2 non-finite or non-positive variance / residual,
+  // 3 statistical gate (r^2 > sigma_num^2 * sigma_gate^2). On a code-3 failure `gate_ratio` receives r^2 / (sigma_num^2 *
+  // sigma_gate^2) (> 1).
   bool residualAgainst(const WorldPointCov& pt, const surface::Fit& fit, const void* owner, std::uint64_t node_id,
-                       Residual& res) const;
+                       Residual& res, int* fail = nullptr, double* gate_ratio = nullptr) const;
   // Tries the plane of cell `c` (surface plane if it belongs to a valid multi-cell surface, else its own plane).
   // `plane_exists` is set true if the cell had a plane at all.
   bool tryCell(const WorldPointCov& pt, const surface::Cell& c, Residual& res, bool& plane_exists,
-               bool& used_surface) const;
+               bool& used_surface, int* fail = nullptr, double* gate_ratio = nullptr) const;
+  // R70 (F-340): why a tier attempt failed. reason: 0 no cell at the key, 1 cell has no valid plane, 2 range gate, 3 statistical
+  // gate, 4 invalid variance, 5 no neighbour cell was selected (tier 1 only).
+  void countMiss(int tier, int reason, double gate_ratio) const;
   void writeSnapshot(const std::string& tag) const;
   void writeFrameRow(int frame, bool bootstrap_phase, std::size_t n_points, const surface::UpdateStats& us,
                      double ms_transform, double ms_insert, double ms_update);
@@ -81,6 +87,10 @@ private:
   // Residual-query counters since the last frame row (relaxed atomics; queries run under OMP).
   mutable std::atomic<std::uint64_t> q_total_{0}, q_hit_surface0_{0}, q_hit_cell0_{0}, q_hit_surface1_{0},
       q_hit_cell1_{0}, q_miss_{0};
+  // R70 (F-340): failed attempts by tier (0 base cell, 1 directional neighbour) and reason (see countMiss), plus the summed
+  // gate ratio of statistical-gate failures in fixed point (x1000, each failure's ratio capped at 1000).
+  mutable std::atomic<std::uint64_t> miss_reason_[2][6]{};
+  mutable std::atomic<std::uint64_t> gate_ratio_milli_{0};
 
   std::ofstream frame_log_;
   bool frame_log_open_ = false;

@@ -9,6 +9,7 @@
 #include "livo_recon/utils/log/profiler.h"
 #include "livo_recon/lio/deskew.h"
 #include "livo_recon/lio/residual_redundancy.h"
+#include "livo_recon/lio/info_scale.h"
 
 #include <array>
 #include <initializer_list>
@@ -101,6 +102,14 @@ struct LioProcOptions
   // per-VoxelPlane covariance marginalization. Failed collapse, count, and
   // conditioning heuristics were removed; see docs/RESIDUAL_MODE_AUDIT.md.
   ResidualRedundancyOptions residual_redundancy;
+
+  // R70 (F-320): separate rotation / position scales on the LiDAR information (see info_scale.h). mode "off" (default) is
+  // bit-identical. iekf estimator only.
+  InfoScaleOptions info_scale;
+
+  // R70 (F-340): write-only per-frame geometry of the admitted residuals (iteration 0 only): normal and lever-arm scatter
+  // eigenvalues, plane concentration, distance statistics. Backend independent, so surface and octree can be compared.
+  bool   residual_geometry_en  = false;
 
   // CQ-31 item 5: the scalar P controls, independent of residual_redundancy
   // above (these act on the prior directly, not the measurement update) --
@@ -307,6 +316,16 @@ protected:
   // counters, written by solveSystem()/solveSystem_cuda() (both const) right
   // after accumulate[Cuda]() when opts_.residual_redundancy.on().
   mutable ResidualRedundancyStats redundancy_stats_;
+
+  // R70 (F-320): engagement counters of the block information scale (written by solveSystem*, which are const).
+  mutable long info_scale_iterations_ = 0;
+  mutable long info_scale_discarded_modes_ = 0;
+  mutable double info_scale_trace_ratio_sum_ = 0.0;
+  // R70 (F-317): redundancy renormalisation engagement (iterations where c > 1 was applied, sum and max of c).
+  mutable long renorm_iterations_ = 0, renorm_applied_ = 0;
+  mutable double renorm_c_sum_ = 0.0, renorm_c_max_ = 1.0;
+  void redundancyAndRenorm(const std::vector<Residual>& residuals) const;
+  void applyInfoScaleToEkf(const std::vector<Residual>& residuals) const;
 };
 
 }  // namespace livo_recon

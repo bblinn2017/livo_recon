@@ -11,6 +11,8 @@
 
 #include <cmath>
 #include <fstream>
+#include <map>
+#include <functional>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -247,6 +249,58 @@ void logLivePointCov(int frame_idx, const std::vector<PointXYZCov>& pts)
   o.flush();
 }
 
+// R70 (F-340): write-only per-frame geometry of the admitted residuals (iteration 0). Backend independent.
+// n_planes / top1 / top5: distinct matched planes (by plane_id) and the share of residuals owned by the largest one / five.
+// nn_eig*: eigenvalues of (1/n) sum n n^T (unweighted normal spread, ascending; a flat scene has nn_eig0 ~ 0 across x or y).
+// pos_info_eig* / rot_info_eig*: eigenvalues (ascending) of the 3x3 position and rotation blocks of sum w h h^T with
+// w = 1/sigma_squared as used (so they include any bootstrap_inflate factor but not the block information scale).
+// abs_r_med / abs_r_p90: |r| quantiles. range_med: median body-frame range of the matched points. tier1_frac: share found by the
+// neighbour fallback.
+void logResidualGeometry(int frame_idx, const std::vector<Residual>& residuals)
+{
+  static PersistentLogStream log("residual_geometry.csv");
+  bool first = false;
+  std::ofstream& o = log.stream(&first);
+  if (first)
+    o << "frame,n_resid,n_planes,top1_share,top5_share,nn_eig0,nn_eig1,nn_eig2,pos_info_eig0,pos_info_eig1,pos_info_eig2,"
+         "rot_info_eig0,rot_info_eig1,rot_info_eig2,abs_r_med,abs_r_p90,range_med,tier1_frac\n";
+  const size_t n = residuals.size();
+  o << frame_idx << ',' << n;
+  if (n == 0) { o << std::string(16, ',') << '\n'; o.flush(); return; }
+  std::map<const void*, int> owners;
+  M3D nn = M3D::Zero(), Ip = M3D::Zero(), Ir = M3D::Zero();
+  std::vector<double> ar, rg;
+  ar.reserve(n); rg.reserve(n);
+  size_t t1 = 0;
+  for (const auto& r : residuals) {
+    ++owners[r.plane_id];
+    nn += r.normal * r.normal.transpose();
+    const double w = 1.0 / r.sigma_squared;
+    Ip += w * r.normal * r.normal.transpose();
+    Ir += w * r.point_cross_normal * r.point_cross_normal.transpose();
+    ar.push_back(std::abs(r.r));
+    rg.push_back(r.raw_body_point.norm());
+    if (r.match_tier != 0) ++t1;
+  }
+  std::vector<int> cnt;
+  for (const auto& kv : owners) cnt.push_back(kv.second);
+  std::sort(cnt.begin(), cnt.end(), std::greater<int>());
+  int top5 = 0;
+  for (size_t i = 0; i < cnt.size() && i < 5; ++i) top5 += cnt[i];
+  auto quant = [](std::vector<double>& v, double q) {
+    std::sort(v.begin(), v.end());
+    return v[std::min(v.size() - 1, static_cast<size_t>(q * (v.size() - 1) + 0.5))];
+  };
+  auto eig3 = [](const M3D& m) { Eigen::SelfAdjointEigenSolver<M3D> es(m); return es.eigenvalues(); };
+  const V3D e_nn = eig3(nn / static_cast<double>(n)), e_p = eig3(Ip), e_r = eig3(Ir);
+  o << ',' << owners.size() << ',' << std::setprecision(10) << static_cast<double>(cnt[0]) / n << ',' << static_cast<double>(top5) / n;
+  for (int k = 0; k < 3; ++k) o << ',' << e_nn(k);
+  for (int k = 0; k < 3; ++k) o << ',' << e_p(k);
+  for (int k = 0; k < 3; ++k) o << ',' << e_r(k);
+  o << ',' << quant(ar, 0.5) << ',' << quant(ar, 0.9) << ',' << quant(rg, 0.5) << ',' << static_cast<double>(t1) / n << '\n';
+  o.flush();
+}
+
 }  // namespace
 
 LioProcBase::LioProcBase(NodeContext& ctx)
@@ -298,6 +352,24 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   const bool rr = opts_.residual_redundancy.mode != "off";
   cfg.nested<double>(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/rho",
                      opts_.residual_redundancy.rho, 1.0);
+  cfg.nestedMode(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/renorm",
+                 opts_.residual_redundancy.renorm, "off", { "off", "hold_pos_min_eig" });
+
+  // R70 (F-320): block information scale (rotation vs position). Sub-options are refused unless mode=block; block mode with
+  // both scales 1 would be inert and is refused (rule 2.4 / R4c).
+  cfg.mode("lio/info_scale/mode", opts_.info_scale.mode, "off", { "off", "block" });
+  {
+    const bool blk = opts_.info_scale.mode == "block";
+    cfg.nested<double>(blk, "lio/info_scale/mode=block", "lio/info_scale/rotation", opts_.info_scale.rotation, 1.0);
+    cfg.nested<double>(blk, "lio/info_scale/mode=block", "lio/info_scale/position", opts_.info_scale.position, 1.0);
+    if (blk) {
+      if (!(opts_.info_scale.rotation >= 1.0) || !(opts_.info_scale.position >= 1.0))
+        throw std::invalid_argument("lio/info_scale/rotation and /position must be >= 1");
+      if (opts_.info_scale.rotation == 1.0 && opts_.info_scale.position == 1.0)
+        throw std::invalid_argument("lio/info_scale/mode=block with rotation == position == 1 is inert (use mode=off)");
+    }
+  }
+  paramWarn<bool>(pnh, "lio/residual_geometry_en", opts_.residual_geometry_en, false);   // R70: residual_geometry.csv (write-only)
 
   // R61: open-loop IMU propagation (see OpenLoopOptions). reset_period_s is only meaningful, and only accepted,
   // under propagate_only.
@@ -618,17 +690,65 @@ void LioProcBase::solveSystem_cuda(const std::vector<Residual>& residuals) const
   // already promises this is safe at mode=="off" (the module's internal
   // gate on ekf.HtH/Htz mutation is what keeps "off" byte-identical, not
   // this call site).
+  redundancyAndRenorm(residuals);
+  applyInfoScaleToEkf(residuals);
+  ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
+}
+
+void LioProcBase::redundancyAndRenorm(const std::vector<Residual>& residuals) const
+{
+  // R70 (F-317): the redundancy correction as before, plus the optional renormalisation that holds the weakest position
+  // eigenvalue of HtH at its independent-accumulator value. renorm == "off" (default) takes exactly the previous path.
+  const bool renorm = opts_.residual_redundancy.renorm != "off" && opts_.residual_redundancy.on();
+  Eigen::Matrix<double, 3, 3> Hpp_naive;
+  if (renorm) Hpp_naive = ekf_.HtH.block<3, 3>(3, 3);
   { TimedScope ts(profiler_, "lio/ekf/redundancy");
     redundancy_stats_ = applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_); }
-  ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
+  if (!renorm) return;
+  ++renorm_iterations_;
+  const double ln = Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3, 3>>(Hpp_naive).eigenvalues()(0);
+  const double lc = Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3, 3>>(
+                        Eigen::Matrix<double, 3, 3>(ekf_.HtH.block<3, 3>(3, 3))).eigenvalues()(0);
+  double c = 1.0;
+  if (lc > 0.0 && ln > lc) {
+    c = ln / lc;
+    ekf_.HtH *= c;
+    ekf_.Htz *= c;
+    ++renorm_applied_;
+    renorm_c_sum_ += c;
+    renorm_c_max_ = std::max(renorm_c_max_, c);
+  }
+  static PersistentLogStream log("redundancy_renorm.csv");
+  bool first = false;
+  std::ofstream& o = log.stream(&first);
+  if (first) o << "frame,iter,n_resid,hpp_min_eig_naive,hpp_min_eig_corrected,c\n";
+  o << std::setprecision(10) << voxel_map_->frame_idx_ << ',' << diagnostic_gn_iteration_ << ',' << residuals.size() << ','
+    << ln << ',' << lc << ',' << c << '\n';
+}
+
+void LioProcBase::applyInfoScaleToEkf(const std::vector<Residual>& residuals) const
+{
+  if (!opts_.info_scale.on()) return;   // default: HtH/Htz untouched (bit-identical)
+  const InfoScaleStats st = applyBlockInfoScale(opts_.info_scale, ekf_.HtH, ekf_.Htz);
+  ++info_scale_iterations_;
+  info_scale_discarded_modes_ += st.discarded_modes;
+  if (st.trace_before > 0.0) info_scale_trace_ratio_sum_ += st.trace_after / st.trace_before;
+  static PersistentLogStream log("info_scale.csv");
+  bool first = false;
+  std::ofstream& o = log.stream(&first);
+  if (first) o << "frame,iter,n_resid,F_rot,F_pos,trace_before,trace_after,gnorm_before,gnorm_after,discarded_modes\n";
+  o << std::setprecision(10) << voxel_map_->frame_idx_ << ',' << diagnostic_gn_iteration_ << ',' << residuals.size() << ','
+    << opts_.info_scale.rotation << ',' << opts_.info_scale.position << ',' << st.trace_before << ',' << st.trace_after << ','
+    << st.gnorm_before << ',' << st.gnorm_after << ',' << st.discarded_modes << '\n';
 }
 
 void LioProcBase::solveSystem(const std::vector<Residual>& residuals) const {
   accumulateLioResiduals(residuals, ekf_);
 
   // CQ-34: see solveSystem_cuda()'s comment above -- same fix, same reason.
-  { TimedScope ts(profiler_, "lio/ekf/redundancy");
-    redundancy_stats_ = applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_); }
+  redundancyAndRenorm(residuals);
+
+  applyInfoScaleToEkf(residuals);   // R70 (F-320): no-op unless lio/info_scale/mode=block
 
   // Mean-only update against the frame's FIXED prior (prior_cov_/
   // state_propagat_, snapshotted once in processLIO() before this frame's
@@ -684,6 +804,8 @@ double LioProcBase::estimateStateCorrection(
   }
   if (opts_.live_point_cov_en && diagnostic_gn_iteration_ == 0)   // R69: write-only live-scan sensor covariance statistics
     logLivePointCov(voxel_map_->frame_idx_, pts);
+  if (opts_.residual_geometry_en && diagnostic_gn_iteration_ == 0)   // R70: write-only residual geometry
+    logResidualGeometry(voxel_map_->frame_idx_, residuals_);
 
   if (opts_.log_debug_en && diagnostic_gn_iteration_ >= 0) {
     static PersistentLogStream log("iekf_factor_iteration.csv");

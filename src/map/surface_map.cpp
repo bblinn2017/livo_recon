@@ -100,6 +100,12 @@ std::string SurfaceMap::loadParameters(ros::NodeHandle& pnh)
   ROS_INFO_STREAM("\n" << cfg.report());
 
   if (!(opts_.core.cell_size > 1e-3)) throw std::runtime_error("voxel_map/surface/cell_size must be > 0.001");
+  // R70 (Bryce, 2026-10-01; F-340): a 0.10 m (or smaller) cell is RETIRED (rule 3.4: refused, not silently replaced). Evidence: the
+  // R63 "best dense" arm did not hold up (R68: 0 to 7 residuals per scan in scans 1-9, aligned ATE 17,080 m at default density; dense
+  // ATE 98.2 mm with 47.7 mm settled offset in R69B).
+  if (opts_.core.cell_size <= 0.10)
+    throw std::runtime_error("[config] refused: voxel_map/surface/cell_size=" + std::to_string(opts_.core.cell_size) +
+                             " -- cell sizes <= 0.10 m are retired (R70, F-340); use 0.15 or larger");
   opts_.core.merge_gap = opts_.merge_gap_cells * opts_.core.cell_size;
   opts_.core.support_gap = opts_.support_gap_cells * opts_.core.cell_size;
   layer_.reset(new surface::SurfaceLayer(opts_.core));
@@ -215,17 +221,26 @@ void SurfaceMap::bootstrap(const std::vector<std::vector<PointXYZCov>>& observat
 // ---------------------------------------------------------------------------------------------------------------------
 // Residual query
 // ---------------------------------------------------------------------------------------------------------------------
-bool SurfaceMap::residualAgainst(const WorldPointCov& pt, const surface::Fit& fit, const void* owner,
-                                 std::uint64_t node_id, Residual& res) const
+void SurfaceMap::countMiss(int tier, int reason, double gate_ratio) const
 {
+  miss_reason_[tier][reason].fetch_add(1, std::memory_order_relaxed);
+  if (reason == 3)
+    gate_ratio_milli_.fetch_add(static_cast<std::uint64_t>(std::min(1.0e6, std::max(0.0, gate_ratio) * 1000.0)),
+                                std::memory_order_relaxed);
+}
+
+bool SurfaceMap::residualAgainst(const WorldPointCov& pt, const surface::Fit& fit, const void* owner,
+                                 std::uint64_t node_id, Residual& res, int* fail, double* gate_ratio) const
+{
+  auto bail = [&](int code) { if (fail) *fail = code; return false; };
   // VoxelPlane::gate() with plane_gate_mode=disc, weight_floor/mode=sensor_range; VoxelPlane::computeResidual()'s
   // accepted-path fields.
   const V3D n = fit.normal;
   const double r = n.dot(pt.point) + fit.d;
-  if (!std::isfinite(r)) return false;
+  if (!std::isfinite(r)) return bail(4);
   const V3D d_center = pt.point - fit.center;
   const double range_dis = std::sqrt(std::max(0.0, d_center.squaredNorm() - r * r));
-  if (range_dis > opts_.max_radius * fit.radius) return false;
+  if (range_dis > opts_.max_radius * fit.radius) return bail(2);
 
   Eigen::Matrix<double, 1, 3> J_nq;
   J_nq(0, 0) = d_center.dot(fit.y_axis);
@@ -234,18 +249,21 @@ bool SurfaceMap::residualAgainst(const WorldPointCov& pt, const surface::Fit& fi
 
   double sigma_diag_squared =
       pointPlaneGateMeasurementVariance(n, pt.sensor_cov, pt.pose_cov, opts_.pose_cov_in_sigma);
-  if (!std::isfinite(sigma_diag_squared) || sigma_diag_squared <= 0.0) return false;
+  if (!std::isfinite(sigma_diag_squared) || sigma_diag_squared <= 0.0) return bail(4);
   if (sigma_diag_squared < 1e-6) sigma_diag_squared = 1e-6;
   double sigma_gate_diag_squared = pointPlaneGateMeasurementVariance(
       n, pt.sensor_cov, pt.pose_cov, opts_.pose_cov_in_sigma || pt.include_pose_cov_in_gate);
-  if (!std::isfinite(sigma_gate_diag_squared) || sigma_gate_diag_squared <= 0.0) return false;
+  if (!std::isfinite(sigma_gate_diag_squared) || sigma_gate_diag_squared <= 0.0) return bail(4);
   if (sigma_gate_diag_squared < 1e-6) sigma_gate_diag_squared = 1e-6;
 
   const double plane_var_term = (J_nq * fit.plane_var * J_nq.transpose()).value();
   const double floor_term = opts_.weight_sigma_r2;
   const double sigma_gate_squared = floor_term + sigma_gate_diag_squared + plane_var_term;
-  if (!std::isfinite(sigma_gate_squared) || sigma_gate_squared <= 0.0) return false;
-  if (!(r * r <= opts_.sigma_num_squared * sigma_gate_squared)) return false;
+  if (!std::isfinite(sigma_gate_squared) || sigma_gate_squared <= 0.0) return bail(4);
+  if (!(r * r <= opts_.sigma_num_squared * sigma_gate_squared)) {
+    if (gate_ratio) *gate_ratio = r * r / (opts_.sigma_num_squared * sigma_gate_squared);
+    return bail(3);
+  }
 
   res.r = r;
   res.normal = n;
@@ -268,15 +286,15 @@ bool SurfaceMap::residualAgainst(const WorldPointCov& pt, const surface::Fit& fi
 }
 
 bool SurfaceMap::tryCell(const WorldPointCov& pt, const surface::Cell& c, Residual& res, bool& plane_exists,
-                         bool& used_surface) const
+                         bool& used_surface, int* fail, double* gate_ratio) const
 {
   const void* owner = nullptr;
   const surface::Fit* f = layer_->planeFor(c, &owner);
   plane_exists = (f != nullptr);
-  if (!f) return false;
+  if (!f) { if (fail) *fail = 1; return false; }   // R70: cell exists but has no valid plane
   used_surface = (owner != static_cast<const void*>(&c));
   const std::uint64_t node_id = used_surface ? c.surface_id : c.id;
-  return residualAgainst(pt, *f, owner, node_id, res);
+  return residualAgainst(pt, *f, owner, node_id, res, fail, gate_ratio);
 }
 
 bool SurfaceMap::findPlaneResidual(const WorldPointCov& pt, Residual& res, bool* tier0_had_plane,
@@ -287,11 +305,15 @@ bool SurfaceMap::findPlaneResidual(const WorldPointCov& pt, Residual& res, bool*
   bool base_plane = false;
   if (const surface::Cell* c = layer_->findCell(base)) {
     bool used_surface = false;
-    if (tryCell(pt, *c, res, base_plane, used_surface)) {
+    int fail0 = 0; double ratio0 = 0.0;
+    if (tryCell(pt, *c, res, base_plane, used_surface, &fail0, &ratio0)) {
       res.match_tier = 0;
       (used_surface ? q_hit_surface0_ : q_hit_cell0_).fetch_add(1, std::memory_order_relaxed);
       return true;
     }
+    countMiss(0, fail0 == 1 ? 1 : fail0 == 2 ? 2 : fail0 == 3 ? 3 : 4, ratio0);
+  } else {
+    countMiss(0, 0, 0.0);   // R70: no cell at the key
   }
   if (tier0_had_plane) *tier0_had_plane = base_plane;
   if (had_converged_neighbor && base_plane) *had_converged_neighbor = true;
@@ -311,14 +333,20 @@ bool SurfaceMap::findPlaneResidual(const WorldPointCov& pt, Residual& res, bool*
   if (has_neighbor) {
     if (const surface::Cell* nc = layer_->findCell(nk)) {
       bool plane_exists = false, used_surface = false;
-      const bool hit = tryCell(pt, *nc, res, plane_exists, used_surface);
+      int fail1 = 0; double ratio1 = 0.0;
+      const bool hit = tryCell(pt, *nc, res, plane_exists, used_surface, &fail1, &ratio1);
       if (had_converged_neighbor && plane_exists) *had_converged_neighbor = true;
       if (hit) {
         res.match_tier = 1;
         (used_surface ? q_hit_surface1_ : q_hit_cell1_).fetch_add(1, std::memory_order_relaxed);
         return true;
       }
+      countMiss(1, fail1 == 1 ? 1 : fail1 == 2 ? 2 : fail1 == 3 ? 3 : 4, ratio1);
+    } else {
+      countMiss(1, 0, 0.0);
     }
+  } else {
+    countMiss(1, 5, 0.0);   // R70: the point sat within a quarter cell of the centre on every axis: no neighbour tried
   }
   q_miss_.fetch_add(1, std::memory_order_relaxed);
   return false;
@@ -349,7 +377,9 @@ void SurfaceMap::writeFrameRow(int frame, bool bootstrap_phase, std::size_t n_po
     frame_log_ << "frame,phase,points,dirty_cells,dirty_valid,cells,cells_valid,surfaces,surfaces_multi,largest,"
                   "patches_in_multi,points_valid_frac,merges,splits,merges_total,splits_total,pair_tests,gate_rejects,"
                   "support_rejects,combined_rejects,denom_rejected,ms_transform,ms_insert,ms_update,"
-                  "resid_queries,resid_hit_surface0,resid_hit_cell0,resid_hit_surface1,resid_hit_cell1,resid_miss\n";
+                  "resid_queries,resid_hit_surface0,resid_hit_cell0,resid_hit_surface1,resid_hit_cell1,resid_miss,"
+                  "t0_no_cell,t0_no_plane,t0_range,t0_gate,t0_invalid,t1_no_cell,t1_no_plane,t1_range,t1_gate,t1_invalid,"
+                  "t1_no_neighbour,gate_ratio_mean,n_cells_lt_min_points,n_cells_fit_invalid\n";
     frame_log_open_ = true;
   }
   const surface::Summary m = layer_->summary();
@@ -361,7 +391,24 @@ void SurfaceMap::writeFrameRow(int frame, bool bootstrap_phase, std::size_t n_po
              << us.gate_rejects << ',' << us.support_rejects << ',' << us.combined_rejects << ',' << us.denom_rejected
              << ',' << ms_transform << ',' << ms_insert << ',' << ms_update << ',' << q_total_.exchange(0) << ','
              << q_hit_surface0_.exchange(0) << ',' << q_hit_cell0_.exchange(0) << ',' << q_hit_surface1_.exchange(0)
-             << ',' << q_hit_cell1_.exchange(0) << ',' << q_miss_.exchange(0) << '\n';
+             << ',' << q_hit_cell1_.exchange(0) << ',' << q_miss_.exchange(0);
+  {
+    // R70 (F-340): failed attempts by tier and reason since the last row, mean gate ratio of statistical-gate failures
+    // (r^2 / (sigma_num^2 sigma_gate^2), each capped at 1000), and the cell census (too few points / fit invalid).
+    std::uint64_t m[2][6];
+    for (int t = 0; t < 2; ++t) for (int k = 0; k < 6; ++k) m[t][k] = miss_reason_[t][k].exchange(0);
+    const std::uint64_t gate_n = m[0][3] + m[1][3];
+    const std::uint64_t gate_milli = gate_ratio_milli_.exchange(0);
+    const double gate_mean = gate_n ? gate_milli / 1000.0 / static_cast<double>(gate_n) : 0.0;
+    frame_log_ << ',' << m[0][0] << ',' << m[0][1] << ',' << m[0][2] << ',' << m[0][3] << ',' << m[0][4] << ',' << m[1][0]
+               << ',' << m[1][1] << ',' << m[1][2] << ',' << m[1][3] << ',' << m[1][4] << ',' << m[1][5] << ',' << gate_mean;
+    std::size_t few = 0, invalid = 0;
+    layer_->forEachCell([&](const surface::Cell& c) {
+      if (c.fit.valid) return;
+      if (static_cast<int>(c.st.n) < opts_.core.min_points) ++few; else ++invalid;
+    });
+    frame_log_ << ',' << few << ',' << invalid << '\n';
+  }
   frame_log_.flush();
 }
 

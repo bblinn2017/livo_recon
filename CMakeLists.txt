@@ -148,6 +148,7 @@ add_executable(livo_recon_node
   src/lio/lio_accumulator.cpp
   src/lio/deskew.cpp
   src/lio/residual_redundancy.cpp
+  src/lio/info_scale.cpp
   src/lio/joint_knot_estimator.cpp
   src/diagnostics/joint_knots/joint_knot_diagnostic_writer.cpp
   src/map/voxelmap.cpp
@@ -267,3 +268,9 @@ add_executable(test_voxel_history tests/test_voxel_history.cpp src/lio/voxelnode
 target_include_directories(test_voxel_history PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
 target_link_libraries(test_voxel_history ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
 add_test(NAME voxel_history COMMAND test_voxel_history)
+
+# R70 (planning agent's patch): block information scale identities (ROS-free, Eigen only).
+add_executable(test_info_scale tests/test_info_scale.cpp src/lio/info_scale.cpp)
+target_include_directories(test_info_scale PUBLIC include ${EIGEN3_INCLUDE_DIRS})
+target_link_libraries(test_info_scale Eigen3::Eigen)
+add_test(NAME info_scale COMMAND test_info_scale)

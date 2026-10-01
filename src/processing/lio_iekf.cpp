@@ -413,6 +413,23 @@ std::string LioProcIekf::engagementReport() const
       << akf_q_.clampedFrames() << " applied acc [" << akf_q_.minAcc() << "," << akf_q_.maxAcc() << "] gyr ["
       << akf_q_.minGyr() << "," << akf_q_.maxGyr() << "]";
 
+  if (opts_.residual_redundancy.on() && opts_.residual_redundancy.renorm != "off")
+  {
+    o << "\n  lio/residual_redundancy/renorm=" << opts_.residual_redundancy.renorm << " iterations=" << renorm_iterations_
+      << " applied=" << renorm_applied_ << " mean_c(applied)=" << (renorm_applied_ > 0 ? renorm_c_sum_ / renorm_applied_ : 1.0)
+      << " max_c=" << renorm_c_max_;
+    if (renorm_applied_ == 0)
+      o << "   <-- INERT: renormalisation selected and c > 1 never occurred";
+  }
+  if (opts_.info_scale.on())
+  {
+    o << "\n  lio/info_scale mode=block F_rot=" << opts_.info_scale.rotation << " F_pos=" << opts_.info_scale.position
+      << " iterations=" << info_scale_iterations_ << " discarded_modes=" << info_scale_discarded_modes_
+      << " mean_trace_ratio=" << (info_scale_iterations_ > 0 ? info_scale_trace_ratio_sum_ / info_scale_iterations_ : 0.0);
+    if (info_scale_iterations_ == 0)
+      o << "   <-- INERT: block information scale selected and never applied";
+  }
+
   o << "\n[engagement] a flag marked INERT above did not test anything; the "
        "cell is invalid, not null.";
   return o.str();

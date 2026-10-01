@@ -47,6 +47,14 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
     cfg.requireCombination("estimator/coupled/step_scale must be in (0, 1]");
   if (copts_.knot_count < 2)
     cfg.requireCombination("estimator/coupled/knot_count must be at least 2");
+  if (opts_.residual_redundancy.renorm != "off")
+    cfg.requireCombination(
+        "lio/residual_redundancy/renorm is implemented for estimator/mode=iekf only (the coupled estimator builds joint-knot "
+        "information inside solveJointKnotInformation)");
+  if (opts_.info_scale.on())
+    cfg.requireCombination(
+        "lio/info_scale/mode=block is implemented for estimator/mode=iekf only (the coupled estimator accumulates "
+        "joint-knot information, not the 6x6 HtH the block scale acts on)");
   if (state_->gravityS2())
     cfg.requireCombination(
         "state/gravity_model=s2 is not implemented for the coupled estimator "

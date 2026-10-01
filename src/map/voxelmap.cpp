@@ -171,6 +171,10 @@ VoxelMap::VoxelMap(StateGroupPtr state, ProfilerPtr profiler, DataQueuesPtr data
 std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
 {
   paramWarn<double>(pnh, "voxel_map/map/voxel_size",   opts_->voxel_size,  0.5);
+  // R70 (Bryce, 2026-10-01; F-340): 0.10 m as a voxel size is retired; refused, not silently replaced (rule 3.4).
+  if (opts_->voxel_size <= 0.10)
+    throw std::runtime_error("[config] refused: voxel_map/map/voxel_size=" + std::to_string(opts_->voxel_size) +
+                             " -- voxel sizes <= 0.10 m are retired (R70, F-340)");
   paramWarn<int>(pnh, "voxel_map/map/max_layer",       opts_->max_layer,    2);
   paramWarn<bool>(pnh, "voxel_map/plane/sensor_noise_floor_eig0", opts_->sensor_noise_floor_eig0, false);
   paramWarn<bool>(pnh, "voxel_map/plane/centred_accumulation", opts_->centred_accumulation, false);
