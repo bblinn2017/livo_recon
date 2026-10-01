@@ -25,10 +25,11 @@ import numpy as np
 import pandas as pd
 
 AX = ["Rx", "Ry", "Rz", "px", "py", "pz", "vx", "vy", "vz"]
-BASE = {"full": "r72_00_id_baseline_full", "60": "r72_00_id_baseline_60s", "48": "r72_00_id_baseline_48s"}   # R72: names of the in-round identity arms (48 s does not exist in R72)
-R71_DIGESTS = {"r72_00_id_baseline_60s": "8cb066436baaedb45f2af20921ff56337a1b553e1aa2d8fafe9d4170a9043f19",     # state_trace.csv digest (run_id blanked) of the same job in R71 (R71 identity_controls.txt / bootstrap_summary.csv)
-               "r72_00_id_baseline_full": "8bc89b6bb69aaf32d2283a969ad6cffad798836cf40ccf0def2fe9712d14e5c2",
-               "r72_00_id_motionq_full": "98f3855cb2146bb06e9dc15b101a8699804a395b4807144323f99e2e509dbad1"}
+REF60 = "r73_00_id_baseline_60s"
+BASE = {"full": "r73_00_id_baseline_full", "60": "r73_00_id_baseline_60s", "48": "r73_00_id_baseline_48s"}   # R72: names of the in-round identity arms (48 s does not exist in R72)
+R72_DIGESTS = {"r73_00_id_baseline_60s": "8cb066436baaedb45f2af20921ff56337a1b553e1aa2d8fafe9d4170a9043f19",     # R72 digests of the same jobs (identical to R71)
+               "r73_00_id_baseline_full": "8bc89b6bb69aaf32d2283a969ad6cffad798836cf40ccf0def2fe9712d14e5c2",
+               "r73_00_id_motionq_full": "98f3855cb2146bb06e9dc15b101a8699804a395b4807144323f99e2e509dbad1"}
 LEVELS = {0: (25, None, 0), 1: (25, 5, 0), 2: (50, 10, 0), 3: (100, 25, 45)}   # (step, keep-arm step (None = every scan), onset-window trim after onset+70)
 
 def g(d, *ks):
@@ -146,7 +147,7 @@ def main():
     for key, nm in BASE.items():
         base_tabs[key] = load_base(nm)
     for sq in sorted(set(plan.seq) - {"eee_01"}):
-        base_tabs["seq:" + sq] = load_base("r72_p_%s_fq_p0d" % sq)
+        base_tabs["seq:" + sq] = load_base("r73_p2_%s_mq_a0p3_g10" % sq)
     for _, p in plan.iterrows():
         D = os.path.join(a.runs, p.arm)
         sj = os.path.join(D, "arm_summary.json")
@@ -154,7 +155,7 @@ def main():
         shp = os.path.join(D, "state_trace_blank_runid.sha256")
         sha[p.arm] = open(shp).read().strip() if os.path.exists(shp) else ""
         comp.append({"arm": p.arm, "tier": p.tier, "kind": p.kind, "duration_s": p.duration_s, "has_dir": os.path.isdir(D), "has_summary": os.path.exists(sj),
-                     "exit_code": meta.get("exit_code"), "wall_s": meta.get("wall_s"), "missing": " ".join(meta.get("missing", [])),
+                     "exit_code": meta.get("exit_code"), "wall_s": meta.get("wall_s"), "missing": " ".join(meta.get("missing", [])), "requires_missing": " ".join(meta.get("requires_missing", [])), "arm": p.arm,
                      "state_trace_sha256_run_id_blanked": sha[p.arm]})
         cm = os.path.join(D, "compress_manifest.json")
         if os.path.exists(cm):
@@ -163,7 +164,7 @@ def main():
         cdir = os.path.join(a.out, "compact", p.arm)
         for pat in ("*_compact.csv.gz", "*_windows.csv.gz", "*_blocks.csv", "*_all.csv.gz", "plane_trace_window.csv.gz", "sensor_stamps_summary.json", "compress_manifest.json",
                     "residual_info_*", "crossframe_*", "knot_windows.csv", "knot_trend_stationary.csv",
-                    "r72_*"):   # R71 + R72 analysis outputs (early frames, dump summaries)
+                    "r72_*", "r73_*", "shadow_*_all.csv.gz", "scan_log_all.csv.gz", "residual_dump_*all.csv.gz", "coupled_update_*_all.csv.gz", "pos_trace_all.csv.gz"):   # R71-R73 analysis outputs
             for fp in glob.glob(os.path.join(D, pat)):
                 os.makedirs(cdir, exist_ok=True)
                 shutil.copy(fp, cdir)
@@ -196,31 +197,29 @@ def main():
         rows.append(row)
     pd.DataFrame(rows).to_csv(os.path.join(a.out, "phase_summary.csv"), index=False)
     pd.DataFrame(comp).to_csv(os.path.join(a.out, "completeness.csv"), index=False)
-    for nm, acc in (("arm_scan_all", scans), ("arm_ol_tau_all", ols), ("plane_fit_reasons_all", reasons), ("plane_fit_trace_counts_all", tcounts)):
+    for nm, acc in (("arm_scan_all", scans),):   # R73 (F-409): the open-loop / plane-fit aggregate tables of R69 are retired (nothing requests them)
         if acc:
             big = pd.concat(acc)
             big.to_csv(os.path.join(a.out, nm + ".csv.gz"), index=False, float_format="%.5g", compression="gzip")   # t is a pre-formatted string column (4 decimals)
     json.dump(summaries_all, open(os.path.join(a.out, "summaries_all.json"), "w"), default=lambda o: None)
     json.dump(manifests, open(os.path.join(a.out, "compress_manifests.json"), "w"), indent=1)
     json.dump(stamps, open(os.path.join(a.out, "sensor_stamps_summaries.json"), "w"), indent=1)
-    groups = [
-        ("r72_00_id_baseline_60s", ["r72_id_stepcap_wide_60s"], "step cap with caps 1e6 never binds (F-403)"),
-        ("r72_00_id_baseline_60s", ["r72_id_zupt_detect_60s"], "ZUPT detect_only does not touch the state (F-401)"),
-        ("r72_00_id_baseline_60s", ["r72_id_nisgate_dead_60s"], "nis_gate with nis_hi 1e9 cannot inflate (F-401)"),
-        ("r72_00_id_baseline_60s", ["r72_id_diag_on_60s"], "write-only diagnostics on (F-396 logs)"),
-        ("r72_00_id_baseline_full", ["r72_p_eee_01_fq_p0d", "r72_sc_fq_full"], "full-bag baseline vs the in-round p0d reference (determinism) and vs the step-cap arm (the latter is EXPECTED to differ if the cap ever binds)"),
-        ("r72_00_id_motionq_full", ["r72_p_eee_01_mq_p0d"], "full-bag motion-Q vs the in-round p0d reference (determinism)"),
-    ]
+    groups = [(REF60, [x], "identity: " + x) for x in ("r73_id_stepcap_wide_60s", "r73_id_zupt_detect_60s", "r73_id_nisgate_dead_60s", "r73_id_diag_on_60s", "r73_id_scanlog_60s",
+                                                       "r73_id_dump_lastiter_60s", "r73_id_shadow_same_60s")]
+    groups += [("r73_00_id_baseline_full", ["r73_sh_sbs03_ctl_fq"], "(different bag: expected DIFFERENT; listed so that the digest of every reference arm is in this file)")]
     with open(os.path.join(a.out, "identity_controls.txt"), "w") as f:
         f.write("sha256 of state_trace.csv with the run_id column blanked (empty = file missing)\n")
-        for ref, others, why in groups:
+        f.write("R73 REFERENCE digests (F-419: the symmetrisation changed the arithmetic, so these are NEW; the R72 metrics are compared at 0.005 mm by r73_gates.py)\n")
+        for arm in ("r73_00_id_baseline_60s", "r73_00_id_baseline_full", "r73_00_id_motionq_full"):
+            f.write("  %s  %s\n" % (sha.get(arm, "") or "(missing)", arm))
+        for ref, others, why in groups[:-1]:
             f.write("%s | %s\n" % (why, ref))
             f.write("  %s  %s\n" % (sha.get(ref, "") or "(missing)", ref))
             for o in others:
                 f.write("  %s  %s  -> %s\n" % (sha.get(o, "") or "(missing)", o, "IDENTICAL" if sha.get(ref) and sha.get(ref) == sha.get(o) else "DIFFERENT or missing"))
-        f.write("\nR71 digests of the same jobs against this batch's identity arms (code at defaults must reproduce them)\n")
-        for arm, dg in R71_DIGESTS.items():
-            f.write("  %s  R71 %s  R72 %s  -> %s\n" % (arm, dg[:16], (sha.get(arm, "") or "(missing)")[:16], "IDENTICAL" if sha.get(arm) == dg else "DIFFERENT or missing"))
+        f.write("\nR72 digests of the same three jobs (expected DIFFERENT after F-419; the verdict is the 0.005 mm metric gate in r73_gates.txt)\n")
+        for arm, dg in R72_DIGESTS.items():
+            f.write("  %s  R72 %s  R73 %s  -> %s\n" % (arm, dg[:16], (sha.get(arm, "") or "(missing)")[:16], "IDENTICAL" if sha.get(arm) == dg else "DIFFERENT or missing"))
     print("collected %d/%d arms" % (len(rows), len(plan)))
 
 if __name__ == "__main__":

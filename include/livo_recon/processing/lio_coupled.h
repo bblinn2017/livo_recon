@@ -35,6 +35,14 @@ struct LioProcCoupledOptions
   bool failure_dump = false;
   int record_frames = 0;
 
+  // R73 (F-415). update_log_en: write coupled_update_iter.csv (per iteration: the step norms of delta, lidar_delta and prior_delta per
+  // state block, with units, and the conditioning of A and Gamma_L) and coupled_update_scan.csv (per scan: prior and posterior
+  // covariance traces, tail and per knot). Write-only; default off is bit-identical. imu_prior_info_scale s: the IMU prior's information
+  // P^-1 is multiplied by s inside A = s P^-1 + Gamma_L and in the prior right-hand side. 1.0 (default) is bit-identical; s != 1 is an
+  // experiment, not a correction (the posterior covariance then is the covariance of the scaled problem).
+  bool update_log = false;
+  double imu_prior_info_scale = 1.0;
+
   JointKnotResidualTime residualTime() const {
     return residual_evaluation_time == "tail"
         ? JointKnotResidualTime::Tail
@@ -58,9 +66,15 @@ private:
   // R72 (F-398): write-only diagnostics, see LioProcCoupledOptions::failure_dump / record_frames.
   void writeFailureDump(const MeasureGroup& mg, const std::string& what, int completed_iterations);
   void writeIterationRecord(const MeasureGroup& mg, int iteration, const JointKnotTrajectory& before);
+  // R73 (F-415): see LioProcCoupledOptions::update_log.
+  void writeUpdateLogIteration(const MeasureGroup& mg, int iteration, int n_residuals) const;
+  void writeUpdateLogScan(const MeasureGroup& mg, const std::string& stop, int completed) const;
   int iterations_this_scan_ = 0;   // completed GN iterations of the scan being processed (for the failure dump)
   std::string failure_note_;       // appended to engagementReport() after a failure
   long solver_errors_skipped_ = 0;
+  bool joint_prior_built_ = false;      // R73 (F-410)
+  long prior_built_scans_ = 0;          // scans on which the joint prior was built
+  long prior_skipped_scans_ = 0;        // scans with zero LiDAR residuals at iteration 0: prior not built, nothing solved
   const char* firstFrameArchitectureName() const override { return "coupled_joint_knots"; }
   void makeEvaluationPoints(const MeasureGroup& mg,
                             std::vector<PointXYZCov>& points,

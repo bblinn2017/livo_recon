@@ -7,6 +7,9 @@
 #include "livo_recon/diagnostics/eval/nees_logger.h"
 
 #include <array>
+#include <string>
+#include <vector>
+#include "livo_recon/lio/shadow_lio.h"
 
 namespace livo_recon
 {
@@ -34,6 +37,34 @@ private:
   // See LioProcOptions::dry_run_point_filter_num's doc comment.
   void runDryRunShadowPass(const MeasureGroup& mg);
 
+  // R73 (F-414, F-415): everything one update (driver or shadow) of one scan produced, for the per-scan logs. Write-only.
+  struct UpdateRecord
+  {
+    bool valid = false;
+    V3D start_pos = V3D::Zero(), start_rv = V3D::Zero();   // state before this scan's propagation (the previous scan's posterior)
+    V3D prop_pos = V3D::Zero(), prop_rv = V3D::Zero();     // propagated (prior) state
+    Eigen::MatrixXd prior_cov;                              // the prior covariance the solve used (after the scalar P controls)
+    V3D post_pos = V3D::Zero(), post_rv = V3D::Zero();     // posterior state
+    Eigen::MatrixXd post_cov;
+    int n_iter = 0, n_resid0 = 0;
+    double chi2_iter0 = 0.0;                                // mean r^2 / sigma^2 over the iteration-0 residuals
+    std::vector<double> step_rot, step_pos;                 // |dtheta| (rad) and |dt| (m) of every executed iteration
+    std::vector<int> n_resid_iter;
+    Eigen::Matrix<double, 6, 6> HtH0 = Eigen::Matrix<double, 6, 6>::Zero(), HtHlast = Eigen::Matrix<double, 6, 6>::Zero();
+    Eigen::Matrix<double, 6, 1> Htz0 = Eigen::Matrix<double, 6, 1>::Zero(), Htzlast = Eigen::Matrix<double, 6, 1>::Zero();
+    std::string stop;
+    void reset() { *this = UpdateRecord(); }
+  };
+  UpdateRecord drv_rec_, shadow_rec_;
+  void recordIteration(UpdateRecord& rec, int iter, const V3D& dtheta, const V3D& dt) const;
+  void runShadowUpdate(const MeasureGroup& mg);                       // fills shadow_rec_ (see shadow_options.h)
+  void writeShadowRows(const MeasureGroup& mg, unsigned long long digest_before, unsigned long long digest_after);
+  void writeScanLogRow(const MeasureGroup& mg, const VoxelMapScanStats& st) const;
+  long shadow_scans_ = 0, shadow_scans_no_residuals_ = 0, shadow_map_changed_scans_ = 0;
+  unsigned long long shadow_digest_before_ = 0, shadow_digest_after_ = 0;
+  VoxelMapScanStats scan_stats_;
+  bool scan_stats_valid_ = false;
+
   // CQ-60 item 5, Tier 1: see lio_coupled.h's own copy of this field for
   // the full doc comment -- constructed with opts_.nees_tier1_window_scans
   // once loadParameters() has run.
@@ -41,7 +72,7 @@ private:
 
   AkfQ       akf_q_;   // R66 opt-in AKF-style Q adaptation (akf_q/enable, default false)
 
-  // R72 (F-401): innovation-driven gain on the IMU step variance (lio/q_adapt/*) and zero-velocity pseudo-update (lio/zupt/*).
+  // R72 (F-401): innovation-driven gain on the IMU step variance (imu/process_noise/gain/*) and zero-velocity pseudo-update (lio/zupt/*).
   // Both default off (bit-identical); engagement counters below feed engagementReport().
   QGainOptions q_gain_opts_;
   QGain        q_gain_;

@@ -1,4 +1,5 @@
 #include "livo_recon/diagnostics/eval/nees_logger.h"
+#include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 
 #include <Eigen/Eigenvalues>
@@ -22,7 +23,7 @@ NeesResult computeNeesPerDof(const M3D& R_est, const V3D& p_est,
   // Force EXACT symmetry (see the earlier fix's own comment history) --
   // still worth doing so SelfAdjointEigenSolver operates on the matrix the
   // caller actually intended, not an accidental near-symmetric one.
-  const Eigen::Matrix<double, 6, 6> Psym = 0.5 * (P + P.transpose());
+  const Eigen::Matrix<double, 6, 6> Psym = symmetrized(P);
 
   Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es(Psym);
   const Eigen::Matrix<double, 6, 1> raw_eigvals = es.eigenvalues();

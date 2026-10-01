@@ -224,6 +224,19 @@ struct VoxelPlaneSnapshot
   double plane_conf_factor = 1.0;
 };
 
+// R73 (F-414): whole-map statistics and order-independent digests, computed on demand (never inside the residual loop).
+//   digest_exact:   sum over every octree node of a 64-bit mix of (root key, layer, status, retired, is_plane, point_count,
+//                   distinct_frames, plane center, normal, d) with the doubles hashed by bit pattern. Order independent (sum), so the
+//                   hash map's iteration order does not matter. Equal digests mean bit-identical plane parameters.
+//   digest_rounded: the same with center, normal, d rounded to 1e-3 and node_id left out: equal digests mean agreement to 1 mm.
+//   planes_changed: nodes whose rounded hash differs from the previous call (or are new); voxels_created: change in n_root_voxels.
+struct VoxelMapScanStats
+{
+  long n_root_voxels = 0, n_nodes = 0, n_plane_nodes = 0, n_retired = 0;
+  long voxels_created = 0, planes_changed = 0;
+  unsigned long long digest_exact = 0, digest_rounded = 0;
+};
+
 // Running sufficient statistics for VoxelNode's DEFAULT (unweighted,
 // equal-weight-per-point) points_ accumulation path, maintained
 // incrementally in O(1) per inserted point (see VoxelNode::insertPoints())
@@ -670,6 +683,11 @@ struct VoxelOpts
   // One-shot diagnostic dump after frame 0 has seeded the map. This is the
   // exact map queried by the first post-calibration LIO frame.
   bool snapshot_post_calibration = false;
+
+  // R73 (F-414 secondary control): when true, live frames (advance_live_frame) advance frame_idx_ but insert NOTHING, so the map stays
+  // exactly the calibration (bootstrap) map for the whole run. Default false is bit-identical. A frozen map removes the map-feedback
+  // path from a comparison; it is only a valid control between runs whose end-of-calibration map digests agree (see scan_log.csv).
+  bool freeze_after_calibration = false;
 };
 using VoxelOptsPtr = std::shared_ptr<VoxelOpts>;
 

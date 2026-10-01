@@ -4,6 +4,8 @@
 #include "livo_recon/lio/voxelnode.h"
 #include "livo_recon/map/map_backend.h"
 
+#include <unordered_map>
+
 namespace livo_recon
 {
 
@@ -71,6 +73,12 @@ public:
   // distinct-frame-count tracking (see voxelnode.h). All three are plain
   // fields inherited from MapBackend now, not redeclared here.
   VoxelKey worldToKey(const V3D &p_world) const;
+  // R73 (F-414): whole-map statistics + digests. computeScanStats() also updates the "previous call" state used for voxels_created /
+  // planes_changed, so call it at ONE site once per scan; mapDigestExact() is stateless (used to prove the shadow pass left the map
+  // untouched). Both are O(nodes) and read-only on the map.
+  VoxelMapScanStats computeScanStats();
+  unsigned long long mapDigestExact() const;
+  long frozenScans() const { return frozen_scans_; }
   bool vizDirty() const override { return !viz_dirty_.empty(); }
   // Read-only, for the engagement report: LioProc has to be able to say
   // which plane model a run selected, and an INERT cell has to be visible in
@@ -93,6 +101,9 @@ public:
 
 private:
   void updateMapInternal(MeasureGroup& mg, bool advance_live_frame);
+  long frozen_scans_ = 0;   // R73: live frames skipped by voxel_map/map/freeze_after_calibration
+  long prev_root_voxels_ = 0;
+  std::unordered_map<long long, unsigned long long> prev_node_hash_;   // node key -> rounded hash at the previous computeScanStats() call
   std::string bootstrap_mode_ = "aggregate";
   // See setAllowConsistencyLog()'s doc comment above.
   bool allow_consistency_log_ = true;

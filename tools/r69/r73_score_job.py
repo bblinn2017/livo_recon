@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""r72_score_job.py (= r69_score_job.py + R72 changes: new logs, EF tier skips windows/reducers, early-frame and dump analyses) -- the listener's `reduce` stage for ONE finished job (planning agent's, R69; not built or run on real data by me).
+"""r73_score_job.py (= r72_score_job.py + R73 changes: shadow / scan / coupled-update logs, requires column, pos_trace, _all return files) -- the listener's `reduce` stage for ONE finished job (planning agent's, R69; not built or run on real data by me).
 
     python3 tools/r69/r69_score_job.py --job-dir <queue/job> --out-dir <results/job> --stage-out <tmp> --job-id <id>
             --spec <listener_spec.json> --arm-table <arm_table.tsv> --params <bag_params.json> [--tools-dir tools/r69]
@@ -18,11 +18,14 @@ Exit code 0 only if the reducers ran, the window check passed and every archived
 import argparse, csv, fnmatch, glob, gzip, hashlib, json, lzma, os, shutil, subprocess, sys, zipfile
 
 SCHEMA = 3
-R72_OPTIONAL = {"step_cap.csv", "q_adapt.csv", "zupt.csv", "coupled_failure_dump.txt"} | {"coupled_record_f%d.txt" % i for i in range(1, 6)}   # written only when their flag / failure applies
+R73_NEW = ["scan_log.csv", "shadow_scan.csv", "shadow_cov.csv", "shadow_residual_dump.csv", "shadow_residual_dump_state.csv", "coupled_update_iter.csv", "coupled_update_scan.csv"]
+# Written only when their flag / failure applies. "Optional" here means ONLY "the scorer does not demand it of an arm that did not ask for it": an arm that asked for a file lists it in the
+# requires column of arm_table.tsv (derived from its overrides) and the scorer FAILS the arm when it is absent (F-409/F-420: a requested log is never optional).
+R73_OPTIONAL = {"step_cap.csv", "q_adapt.csv", "zupt.csv", "coupled_failure_dump.txt"} | {"coupled_record_f%d.txt" % i for i in range(1, 6)} | set(R73_NEW)
 SMALL = ["bootstrap_preparation.txt", "bootstrap_map_seed.txt", "state_reference.txt", "results_lio.txt", "gravity_alignment.txt",
          "imu_first_scans.csv", "calibration_p0.txt", "config.yaml", "engagement.txt", "run.log", "pose_control_first_frame_solve.csv",
          "plane_fit_reasons.csv",
-         "engagement_imu.txt"]   # R72: IMU-side engagement counters (written by ~ImuProc)
+         "engagement_imu.txt", "engagement_imu_shadow.txt"]   # R72: IMU-side engagement counters (written by ~ImuProc); R73: the shadow ImuProc's
 BIG = ["state_trace.csv", "lio_gt_matched.csv", "imu_cov_growth.csv", "frame_stats.txt", "plane_fit_trace.csv",
        "sensor_stamps.csv", "point_cov_stats.csv", "surface_map_frames.csv", "frame_window.csv", "akf_q.csv", "coupled_scan_status.csv",
        "motion_q_scan.csv", "post_calibration_voxelmap.csv", "lio_update_diag.csv", "live_point_cov.csv",
@@ -31,7 +34,7 @@ BIG = ["state_trace.csv", "lio_gt_matched.csv", "imu_cov_growth.csv", "frame_sta
        "residual_dump.csv", "residual_dump_state.csv",                        # R71 per-residual dump (selected frames)
        "joint_knot_all_scans.csv", "joint_knot_scan_summary.csv",           # coupled knot diagnostics (full diag only)
        "step_cap.csv", "q_adapt.csv", "zupt.csv",                             # R72 write-only logs (present only when the flag is on)
-       "coupled_failure_dump.txt"] + ["coupled_record_f%d.txt" % i for i in range(1, 6)]   # R72 F-398 (present only on failure / when record_frames > 0)
+       "coupled_failure_dump.txt"] + ["coupled_record_f%d.txt" % i for i in range(1, 6)] + R73_NEW   # R72 F-398 (present only on failure / when record_frames > 0); R73 logs (only when their flag is on)
 
 
 def find(name, roots):
@@ -166,14 +169,58 @@ def r71_analyses(D, T):
     return res
 
 
-def r72_analyses(D, T, is_ef):
-    """R72: early-frame table (EF arms), coupled dump reduction (when dump files exist). Failures are returned, not swallowed."""
-    res = {}
-    if is_ef:
-        res["early_frames"] = run([sys.executable, os.path.join(T, "r72_early_frames.py"), "--dir", D, "--out", D], os.path.join(D, "score.log"))
+def gz_copy(D, name, new, keep_rows=None):
+    """Lossless (or row-filtered) gzip of one small raw CSV into the arm dir under the `*_all.csv.gz` name that r69_collect.py copies into compact/. Returns rows written."""
+    import pandas as pd
+    p = os.path.join(D, name)
+    if not os.path.exists(p):
+        return None
+    df = pd.read_csv(p, dtype=str)       # strings: digests and 17-digit times stay byte-exact
+    if keep_rows is not None:
+        df = df[keep_rows(df)]
+    df.to_csv(os.path.join(D, new), index=False, compression="gzip")
+    return int(len(df))
+
+
+def r73_analyses(D, T, row, keep):
+    """R73: per-arm outputs of the new logs. Failures are returned (rc != 0 becomes a problem), never swallowed."""
+    import pandas as pd
+    res, info = {}, {}
+    log = os.path.join(D, "score.log")
+    sys.path.insert(0, T)
+    grp = (row or {}).get("group", "")
+    if os.path.exists(os.path.join(D, "state_trace.csv")):
+        res["pos_trace"] = run([sys.executable, os.path.join(T, "r73_frame_errors.py"), "--dir", D, "--out", D, "--no-errors"], log)
+    if os.path.exists(os.path.join(D, "shadow_scan.csv")):
+        res["shadow_reduce"] = run([sys.executable, os.path.join(T, "r73_shadow_reduce.py"), "arm", "--dir", D, "--out", D], log)
+        info["shadow_scan_all_rows"] = gz_copy(D, "shadow_scan.csv", "shadow_scan_all.csv.gz")
+        info["shadow_cov_all_rows"] = gz_copy(D, "shadow_cov.csv", "shadow_cov_all.csv.gz")
+        res["residual_report_shadow"] = run([sys.executable, os.path.join(T, "r73_residual_report.py"), "--dir", D, "--out", D, "--shadow", "--resid-frames", "all"], log) \
+            if os.path.exists(os.path.join(D, "residual_dump.csv")) else 0
+    elif os.path.exists(os.path.join(D, "residual_dump.csv")) and os.path.exists(os.path.join(D, "lio_update_diag.csv")):
+        res["residual_report"] = run([sys.executable, os.path.join(T, "r73_residual_report.py"), "--dir", D, "--out", D, "--resid-frames", "all" if grp in ("SH", "SM", "ID") else "1,2,3,4,5"], log)
+    if os.path.exists(os.path.join(D, "scan_log.csv")):
+        info["scan_log_all_rows"] = gz_copy(D, "scan_log.csv", "scan_log_all.csv.gz")
+    # residual dumps of the sh / smoke arms, every dumped frame, with weight and class (F-414, F-417)
+    for src, dst in (("residual_dump.csv", "residual_dump_all.csv.gz"), ("shadow_residual_dump.csv", "shadow_residual_dump_all.csv.gz")):
+        p = os.path.join(D, src)
+        if os.path.exists(p) and grp in ("SH", "SM", "ID"):
+            import r73_residual_report as RR
+            RR.per_residual(pd.read_csv(p)).to_csv(os.path.join(D, dst), index=False, float_format="%.9g", compression="gzip")
+            info[dst + "_rows"] = int(sum(1 for _ in open(p)) - 1)
+    for src, dst in (("residual_dump_state.csv", "residual_dump_state_all.csv.gz"), ("shadow_residual_dump_state.csv", "shadow_residual_dump_state_all.csv.gz")):
+        if grp in ("SH", "SM", "ID"):
+            gz_copy(D, src, dst)
+    if os.path.exists(os.path.join(D, "coupled_update_iter.csv")):
+        res["coupled_update_reduce"] = run([sys.executable, os.path.join(T, "r73_coupled_update_reduce.py"), "--dir", D, "--out", D], log)
+        def thin(df):
+            f = pd.to_numeric(df["frame"], errors="coerce")
+            return (f <= 700) | (f >= f.max() - 100)
+        info["coupled_update_iter_all_rows"] = gz_copy(D, "coupled_update_iter.csv", "coupled_update_iter_all.csv.gz", thin)
+        info["coupled_update_scan_all_rows"] = gz_copy(D, "coupled_update_scan.csv", "coupled_update_scan_all.csv.gz", lambda df: pd.to_numeric(df["frame"], errors="coerce").notna())
     if os.path.exists(os.path.join(D, "coupled_failure_dump.txt")) or glob.glob(os.path.join(D, "coupled_record_f*.txt")):
-        res["dump_reduce"] = run([sys.executable, os.path.join(T, "r72_dump_reduce.py"), "--dir", D, "--out", D], os.path.join(D, "score.log"))
-    return res
+        res["dump_reduce"] = run([sys.executable, os.path.join(T, "r73_dump_reduce.py"), "--dir", D, "--out", D], log)
+    return res, info
 
 
 def main():
@@ -195,13 +242,13 @@ def main():
         s = find(n, roots)
         if s:
             shutil.copy(s, os.path.join(D, n))
-        elif n not in ("engagement.txt", "pose_control_first_frame_solve.csv", "plane_fit_reasons.csv", "engagement_imu.txt"):
+        elif n not in ("engagement.txt", "pose_control_first_frame_solve.csv", "plane_fit_reasons.csv", "engagement_imu.txt", "engagement_imu_shadow.txt"):
             missing.append(n)
     for n in BIG:
         s = find(n, roots)
         if s:
             os.symlink(os.path.abspath(s), os.path.join(D, n))
-        elif n not in R72_OPTIONAL:
+        elif n not in R73_OPTIONAL:
             missing.append(n)
     sent = "FAILED" if os.path.exists(os.path.join(a.job_dir, "FAILED")) else "DONE"
     rc_run = 1 if sent == "FAILED" else 0
@@ -239,6 +286,16 @@ def main():
     onset = int(want["onset_scan"]) if want else 485
     T = a.tools_dir
     rcs = {}
+    # ---- 1b. R73 (F-409, F-420): every file the arm REQUESTED (arm_table.tsv `requires`, derived from its overrides) must exist; a missing one fails the arm's stage by name
+    req_missing = []
+    if row is not None and rc_run == 0:
+        for n in (row.get("requires") or "").split():
+            if not find(n, roots):
+                req_missing.append(n)
+        if req_missing:
+            problems.append("REQUIRED FILE(S) ABSENT: %s (the arm's overrides ask for them; arm_table.tsv requires column)" % " ".join(req_missing)); ok = False
+    meta["requires_missing"] = req_missing
+    json.dump(meta, open(os.path.join(D, "arm.json"), "w"))
     # ---- 2. reducers (successful runs only, as post_queue did)
     if rc_run == 0 and not is_ef:
         rcs["reduce"] = run([sys.executable, os.path.join(T, "r69_reduce.py"), D, "--params", a.params], log)
@@ -274,14 +331,16 @@ def main():
             pass
     try:
         dg = compact_diag(D, keep)
-        for k_, rc_ in ({} if is_ef else r71_analyses(D, T)).items():
+        for k_, rc_ in ({} if (is_ef or (row or {}).get("group") == "SH") else r71_analyses(D, T)).items():   # R73: SH arms use r73_residual_report.py instead (the R71 split-half analysis is not defined for last-iteration dumps)
             dg["analysis_" + k_ + "_rc"] = rc_
             if rc_ != 0:
                 problems.append("R71 analysis %s failed rc=%s (see score.log)" % (k_, rc_)); ok = False
-        for k_, rc_ in r72_analyses(D, T, is_ef).items():
+        rcs73, info73 = r73_analyses(D, T, row, keep) if rc_run == 0 else ({}, {})
+        dg.update(info73)
+        for k_, rc_ in rcs73.items():
             dg["analysis_" + k_ + "_rc"] = rc_
             if rc_ != 0:
-                problems.append("R72 analysis %s failed rc=%s (see score.log)" % (k_, rc_)); ok = False
+                problems.append("R73 analysis %s failed rc=%s (see score.log)" % (k_, rc_)); ok = False
     except Exception as e:
         dg = {}
         problems.append("compact_diag failed: %s" % e); ok = False
@@ -338,7 +397,7 @@ def main():
             "last_scan": S.get("last_scan"), "windows_used": defs, "windows_expected": wc["expected"], "window_check_ok": wok,
             "p_reduce_ok": True if is_ef else (rcs.get("p_reduce", 1) == 0 and os.path.exists(os.path.join(D, "P", "p_window.json"))),
             "reducer_exit_codes": rcs, "ate_m": ate, "sentinel": sent, "exit_code": rc_run, "wall_s": wall, "missing_files": missing,
-            "diag": dg, "archive_files": len(index), "archive_raw_bytes": sum(e["raw_bytes"] for e in index),
+            "requires_missing": req_missing, "diag": dg, "archive_files": len(index), "archive_raw_bytes": sum(e["raw_bytes"] for e in index),
             "archive_gz_bytes": sum(e["gz_bytes"] for e in index), "problems": problems,
             "stage_ok": ok}
     json.dump(summ, open(os.path.join(a.stage_out, "summary_stage.json"), "w"), indent=1)

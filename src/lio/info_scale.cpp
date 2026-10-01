@@ -1,4 +1,5 @@
 #include "livo_recon/lio/info_scale.h"
+#include "livo_recon/utils/algo/symmetrize.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,7 +24,7 @@ InfoScaleStats applyBlockInfoScale(const InfoScaleOptions& opts,
   s.tail<3>().setConstant(1.0 / std::sqrt(opts.position));
 
   // pinv(Lambda) g through the symmetric eigendecomposition.
-  const Eigen::Matrix<double, 6, 6> Lam = 0.5 * (HtH + HtH.transpose());
+  const Eigen::Matrix<double, 6, 6> Lam = symmetrized(HtH);
   Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 6, 6>> es(Lam);
   const Eigen::Matrix<double, 6, 1> ev = es.eigenvalues();
   const double lmax = ev.maxCoeff();

@@ -1,4 +1,5 @@
 #include "livo_recon/utils/algo/covariance_math.h"
+#include "livo_recon/utils/algo/symmetrize.h"
 
 namespace livo_recon
 {
@@ -9,7 +10,7 @@ void eigCheck(const Eigen::MatrixXd& M, double tol, bool& sym, bool& psd,
 {
   asym = (M - M.transpose()).norm();
   sym = asym < tol * std::max(1.0, M.norm());
-  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (M + M.transpose()));
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(symmetrized(M));
   min_eig = es.eigenvalues().minCoeff();
   max_eig = es.eigenvalues().maxCoeff();
   psd = min_eig > -tol * std::max(1.0, max_eig);
@@ -26,7 +27,7 @@ bool covarianceInformationUpdate(
   eigCheck(Lambda_meas, tol, diag.meas_symmetric, diag.meas_psd,
            diag.min_eig_meas, diag.max_eig_meas, diag.asymmetry_meas);
   Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(
-      0.5 * (Lambda_meas + Lambda_meas.transpose()));
+      symmetrized(Lambda_meas));
   const Eigen::VectorXd d = es.eigenvalues().cwiseMax(0.0);
   const Eigen::MatrixXd S = d.cwiseSqrt().asDiagonal() * es.eigenvectors().transpose();
   const Eigen::MatrixXd SP = S * P_prior;
@@ -36,7 +37,7 @@ bool covarianceInformationUpdate(
   const Eigen::MatrixXd Y = ldlt.solve(SP);
   if (!Y.allFinite()) return false;
   P_post = P_prior - SP.transpose() * Y;
-  P_post = 0.5 * (P_post + P_post.transpose());
+  P_post = symmetrized(P_post);
   diag.post_finite = P_post.allFinite();
   if (!diag.post_finite) return false;
   bool ignored = false;
@@ -50,7 +51,7 @@ Eigen::MatrixXd generalPseudoInverse(const Eigen::MatrixXd& M,
                                      double relative_threshold)
 {
   const int n = static_cast<int>(M.rows());
-  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (M + M.transpose()));
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(symmetrized(M));
   const double threshold = relative_threshold *
       std::max(es.eigenvalues().maxCoeff(), 0.0);
   Eigen::MatrixXd out = Eigen::MatrixXd::Zero(n,n);

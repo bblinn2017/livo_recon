@@ -1,4 +1,5 @@
 #include "livo_recon/processing/lio_coupled.h"
+#include "livo_recon/utils/algo/symmetrize.h"
 
 #include "livo_recon/diagnostics/init_consistency.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
@@ -101,9 +102,22 @@ std::string LioProcCoupled::processLIOBody(MeasureGroup& mg)
   // scan-head snapshot, creating two different meanings of "fixed prior".
   Eigen::MatrixXd controlled_head_covariance = mg.pose_covariances.front();
   applyPriorScalarControls(controlled_head_covariance, opts_.prior_scalar);
-  joint_prior_ = buildJointKnotImuPrior(
-      imu_prior_mean_, state_propagat_, mg.poses, mg.imu_state_transitions,
-      mg.imu_process_covariances, controlled_head_covariance);
+  // R73 (F-410): the joint IMU prior (a 114-dim covariance, built and inverted) is needed only to SOLVE. A scan with no LiDAR residual has
+  // no H^T H, no H^T z and nothing to solve, so the prior is not built: the propagated covariance stays as the scan's covariance and the
+  // prior inversion cannot throw. It is built after the first iteration's residual count is known to be positive. The one exception is
+  // estimator/coupled/gating_state_uncertainty=true, whose residual admission reads joint_prior_.P: there it is built up front (no R73
+  // arm sets that key).
+  joint_prior_built_ = false;
+  const auto buildPrior = [&]() {
+    joint_prior_ = buildJointKnotImuPrior(
+        imu_prior_mean_, state_propagat_, mg.poses, mg.imu_state_transitions,
+        mg.imu_process_covariances, controlled_head_covariance);
+    if (copts_.imu_prior_info_scale != 1.0)   // R73 (F-415): experimental scale of the IMU prior's information (see the option's comment)
+      joint_prior_.P_inverse *= copts_.imu_prior_info_scale;
+    joint_prior_built_ = true;
+    ++prior_built_scans_;
+  };
+  if (copts_.gating_state_uncertainty) buildPrior();
 
   bool any_solved = false;
   std::string stop = "max_iter";
@@ -137,8 +151,10 @@ std::string LioProcCoupled::processLIOBody(MeasureGroup& mg)
             n_miss_coverage_, n_miss_mismatch_, mean_gating_cov_trace,
             max_gating_cov_trace, residuals_);
       stop = "no_residuals";
+      if (iteration == 0) ++prior_skipped_scans_;   // R73 (F-410): nothing solved, nothing built, covariance left as propagated
       break;
     }
+    if (!joint_prior_built_) buildPrior();
 
     // The accepted residual covariance is consumed directly. Deprecated
     // global density/chi2 scalers and per-residual reweighting are absent.
@@ -172,6 +188,7 @@ std::string LioProcCoupled::processLIOBody(MeasureGroup& mg)
     if (copts_.record_frames > 0 && static_cast<long>(voxel_map_->frame_idx_) >= 1 &&
         static_cast<long>(voxel_map_->frame_idx_) <= copts_.record_frames)
       writeIterationRecord(mg, iteration, before);   // R72 (F-398): write-only
+    if (copts_.update_log) writeUpdateLogIteration(mg, iteration, static_cast<int>(residuals_.size()));   // R73 (F-415): write-only
 
     if (!copts_.minimal_diagnostics) {
       writeJointKnotLidarInformationDiagnostics(
@@ -204,9 +221,10 @@ std::string LioProcCoupled::processLIOBody(MeasureGroup& mg)
   }
 
   if (any_solved) {
-    state_->covMut() = extractTailStateCovariance(
-        trajectory_, last_solve_.posterior, *state_);
+    state_->covMut() = symmetrized(extractTailStateCovariance(
+        trajectory_, last_solve_.posterior, *state_));   // R73 F-419
     writeFinalDeskew(mg);
+    if (copts_.update_log) writeUpdateLogScan(mg, stop, completed);   // R73 (F-415): write-only
     if (!copts_.minimal_diagnostics)
       writeJointKnotCovarianceDiagnostics(
           copts_.test_id, voxel_map_->frame_idx_,
@@ -278,7 +296,7 @@ Eigen::MatrixXd biasMatrix(const JointKnotTrajectory& tr)
 
 Eigen::VectorXd ascendingEigenvalues(const Eigen::MatrixXd& M)
 {
-  const Eigen::MatrixXd S = 0.5 * (M + M.transpose());
+  const Eigen::MatrixXd S = symmetrized(M);
   Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(S, Eigen::EigenvaluesOnly);
   return es.eigenvalues();
 }

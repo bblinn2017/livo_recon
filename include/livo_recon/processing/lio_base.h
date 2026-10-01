@@ -11,9 +11,11 @@
 #include "livo_recon/lio/residual_redundancy.h"
 #include "livo_recon/lio/info_scale.h"
 #include "livo_recon/lio/step_cap.h"
+#include "livo_recon/lio/shadow_options.h"
 
 #include <array>
 #include <initializer_list>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -119,6 +121,17 @@ struct LioProcOptions
   // R71 (F-363): write-only per-residual dump (residual_dump.csv, residual_dump_state.csv) for the listed frame indices at
   // iteration 0. Empty (default) writes nothing and is bit-identical.
   std::vector<int> residual_dump_frames;
+  // R73 (F-417): also dump the residuals of the LAST executed iteration of each listed frame (iteration index recorded in the
+  // iter column). Sub-key of lio/residual_dump_frames (refused when that list is empty). Default false is bit-identical.
+  bool residual_dump_last_iter = false;
+
+  // R73 (F-414): shadow LIO update (see lio/shadow_options.h). mode off (default) is bit-identical. iekf estimator only.
+  ShadowOptions shadow;
+
+  // R73 (F-414, F-415): scan_log.csv, one row per map-backed scan: whole-map statistics and digests (voxel count, voxels created,
+  // plane nodes, planes changed, exact and 1e-3-rounded digests), residual count, reduced chi2 at iteration 0, the step norm of every
+  // iteration, posterior covariance traces. Write-only; default off is bit-identical. iekf estimator only.
+  bool scan_log_en = false;
 
   // CQ-31 item 5: the scalar P controls, independent of residual_redundancy
   // above (these act on the prior directly, not the measurement update) --
@@ -186,6 +199,10 @@ public:
   // internally here.
   virtual std::string processLIO(MeasureGroup& mg) = 0;
 
+  // R73 (F-414): the node hands the shadow instance to the estimator after construction.
+  const ShadowOptions& shadowOptions() const { return opts_.shadow; }
+  void setShadow(std::shared_ptr<class ShadowLio> s) { shadow_ = std::move(s); }
+
   // allow_consistency_log: T0-D's corr.csv wants the FIRST-iteration
   // (pre-update, un-relinearized) innovation only. NON-VIRTUAL: shared
   // machinery, identical for both estimators (item 1 of the split card).
@@ -251,6 +268,13 @@ protected:
   // build/accumulation_precision derived line, the ok()-or-throw gate, and
   // returning cfg.report().
   std::string finalizeConfig(ConfigResolver& cfg, std::initializer_list<const char*> allowed_unclaimed_namespaces);
+
+  // R73 (F-414): while true, every diagnostic file and engagement counter written by the shared residual machinery is suppressed
+  // (the numerics are not), because the pass in progress is the shadow's.
+  bool shadow_active_ = false;
+  std::shared_ptr<class ShadowLio> shadow_;
+  // R73: per-residual dump of the CURRENT residuals_ (and state_) when the current map frame is in lio/residual_dump_frames.
+  void dumpResidualsIfListed(int iteration, bool shadow) const;
 
   StateGroupPtr state_;
   MapBackendPtr voxel_map_;

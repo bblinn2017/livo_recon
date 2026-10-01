@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include "livo_recon/utils/algo/symmetrize.h"
 #include <string>
 
 // ============================================================================
@@ -67,7 +68,7 @@ inline void zuptVelocityUpdate(const Eigen::MatrixXd& P, const Eigen::Vector3d& 
   Eigen::MatrixXd IKH = Eigen::MatrixXd::Identity(dim, dim);
   IKH.block(0, idx_v, dim, 3) -= K;                                             // K H has K in the velocity columns
   P_new = IKH * P * IKH.transpose() + s2 * K * K.transpose();
-  P_new = 0.5 * (P_new + P_new.transpose());
+  P_new = symmetrized(P_new);
 }
 
 }  // namespace livo_recon

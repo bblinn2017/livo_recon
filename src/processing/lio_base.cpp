@@ -1,4 +1,5 @@
 #include "livo_recon/processing/lio_base.h"
+#include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/config_resolve.h"
 #include "livo_recon/utils/algo/omp_utils.h"
@@ -308,13 +309,15 @@ void logResidualGeometry(int frame_idx, const std::vector<Residual>& residuals)
 // propagated state), plus the linearisation state. Lets the information each residual claims (w_i h_i h_i^T) be compared
 // offline with what the residuals jointly deliver (leverage, per-plane groups, split-half and cross-frame solutions).
 // h_rot / h_pos are the rotation and position Jacobian rows (point_cross_normal, normal); w_i = 1 / sigma_squared.
-void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const std::vector<Residual>& residuals)
+void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const std::vector<Residual>& residuals, bool shadow = false)
 {
   static PersistentLogStream log("residual_dump.csv");
   static PersistentLogStream slog("residual_dump_state.csv");
+  static PersistentLogStream shlog("shadow_residual_dump.csv");        // R73 (F-414): same columns, the shadow pass's residuals
+  static PersistentLogStream shslog("shadow_residual_dump_state.csv");
   bool first = false, sfirst = false;
-  std::ofstream& o = log.stream(&first);
-  std::ofstream& so = slog.stream(&sfirst);
+  std::ofstream& o = shadow ? shlog.stream(&first) : log.stream(&first);
+  std::ofstream& so = shadow ? shslog.stream(&sfirst) : slog.stream(&sfirst);
   if (first)
     o << "frame,iter,idx,source_index,t,r,sigma_squared,plane_var_term,plane_key,node_id,tier,vis,"
          "hrot_x,hrot_y,hrot_z,hpos_x,hpos_y,hpos_z,wx,wy,wz,bx,by,bz\n";
@@ -335,6 +338,15 @@ void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const s
   o.flush(); so.flush();
 }
 }  // namespace
+
+void LioProcBase::dumpResidualsIfListed(int iteration, bool shadow) const
+{
+  if (opts_.residual_dump_frames.empty()) return;
+  if (std::find(opts_.residual_dump_frames.begin(), opts_.residual_dump_frames.end(), voxel_map_->frame_idx_) ==
+      opts_.residual_dump_frames.end())
+    return;
+  logResidualDump(voxel_map_->frame_idx_, iteration, *state_, residuals_, shadow);
+}
 
 LioProcBase::LioProcBase(NodeContext& ctx)
   : state_(ctx.state), voxel_map_(ctx.voxel_map), profiler_(ctx.profiler), data_queues_(ctx.data_queues)
@@ -414,6 +426,29 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
       throw std::invalid_argument("lio/ekf/step_cap/mode=hard is not implemented with cuda/enable=true");
     ekf_.step_cap = opts_.step_cap;   // off: EkfUpdate never evaluates it (bit-identical)
   }
+  // R73 (F-414): shadow LIO update. Sub-keys exist only under mode=on; the motion-Q keys only under process_noise_model=isotropic.
+  cfg.mode("lio/shadow/mode", opts_.shadow.mode, "off", { "off", "on" });
+  {
+    const bool son = opts_.shadow.on();
+    int ws = 0, we = 0;
+    cfg.nested<int>(son, "lio/shadow/mode=on", "lio/shadow/window_start", ws, 0);
+    cfg.nested<int>(son, "lio/shadow/mode=on", "lio/shadow/window_end", we, 0);
+    opts_.shadow.window_start = ws;
+    opts_.shadow.window_end = we;
+    cfg.nestedMode(son, "lio/shadow/mode=on", "lio/shadow/process_noise_model", opts_.shadow.process_noise_model, "same",
+                   { "same", "fixed", "isotropic" });
+    const bool iso = son && opts_.shadow.process_noise_model == "isotropic";
+    const std::string sc = "lio/shadow/process_noise_model=isotropic";
+    cfg.nested<double>(iso, sc, "lio/shadow/motion_beta", opts_.shadow.motion_beta, 0.9);
+    cfg.nested<double>(iso, sc, "lio/shadow/motion_acc_scale", opts_.shadow.motion_acc_scale, 0.3);
+    cfg.nested<double>(iso, sc, "lio/shadow/motion_gyr_scale", opts_.shadow.motion_gyr_scale, 10.0);
+    cfg.nested<double>(iso, sc, "lio/shadow/motion_acc_cap", opts_.shadow.motion_acc_cap, 1.0e6);
+    cfg.nested<double>(iso, sc, "lio/shadow/motion_gyr_cap", opts_.shadow.motion_gyr_cap, 1.0e6);
+    const std::string shadow_err = shadowOptionsError(opts_.shadow);
+    if (!shadow_err.empty()) throw std::invalid_argument(shadow_err);
+    if (son && cuda_enable_) throw std::invalid_argument("lio/shadow/mode=on is not implemented with cuda/enable=true");
+  }
+  cfg.get<bool>("lio/scan_log_en", opts_.scan_log_en, false);   // R73 (F-414, F-415)
   {   // R71: per-residual dump frames, a comma-separated list of frame indices in ONE string key (job overrides carry scalars only); empty = off
     std::string dump_frames;
     paramWarn<std::string>(pnh, "lio/residual_dump_frames", dump_frames, std::string());
@@ -428,6 +463,9 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
         throw std::invalid_argument("lio/residual_dump_frames: '" + tok + "' is not a positive integer frame index (comma-separated list, e.g. \"1,2,3,10\")");
       opts_.residual_dump_frames.push_back(static_cast<int>(v));
     }
+    // R73 (F-417): last-iteration dump; refused unless a frame list is given.
+    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "lio/residual_dump_frames is non-empty", "lio/residual_dump_last_iter",
+                     opts_.residual_dump_last_iter, false);
   }
   paramWarn<bool>(pnh, "lio/residual_geometry_en", opts_.residual_geometry_en, false);   // R70: residual_geometry.csv (write-only)
 
@@ -547,7 +585,7 @@ std::string LioProcBase::openLoopFinishScan(MeasureGroup& mg)
   // The post_imu row was already written by the caller for the CURRENT window. Reset (if due) starts the next one.
   if (opts_.open_loop.reset_period_s > 0.0 && (t_abs - ol_window_t0_) >= opts_.open_loop.reset_period_s) {
     state_->setPropagatedState(stationary_reference_R_, stationary_reference_p_, stationary_reference_v_);
-    state_->covMut() = ol_P0_;
+    state_->covMut() = symmetrized(ol_P0_);   // R73 F-419
     ++ol_window_;
     ol_window_t0_ = t_abs;
     ol_reset_now_ = 1;
@@ -696,7 +734,7 @@ void LioProcBase::buildResiduals(
   // byte-for-byte free of this potentially point-level diagnostic.
   const auto* snapshot_vm = dynamic_cast<const VoxelMap*>(voxel_map_.get());
   if (snapshot_vm && snapshot_vm->opts()->snapshot_post_calibration &&
-      voxel_map_->frame_idx_ == 1) {
+      voxel_map_->frame_idx_ == 1 && !shadow_active_) {
     static PersistentLogStream log("first_post_calibration_plane_associations.csv");
     bool first_call = false;
     std::ofstream& out = log.stream(&first_call);
@@ -778,6 +816,7 @@ void LioProcBase::redundancyAndRenorm(const std::vector<Residual>& residuals) co
     renorm_c_sum_ += c;
     renorm_c_max_ = std::max(renorm_c_max_, c);
   }
+  if (shadow_active_) return;   // R73: the shadow pass writes no driver file
   static PersistentLogStream log("redundancy_renorm.csv");
   bool first = false;
   std::ofstream& o = log.stream(&first);
@@ -793,6 +832,7 @@ void LioProcBase::applyInfoScaleToEkf(const std::vector<Residual>& residuals) co
   ++info_scale_iterations_;
   info_scale_discarded_modes_ += st.discarded_modes;
   if (st.trace_before > 0.0) info_scale_trace_ratio_sum_ += st.trace_after / st.trace_before;
+  if (shadow_active_) return;   // R73
   static PersistentLogStream log("info_scale.csv");
   bool first = false;
   std::ofstream& o = log.stream(&first);
@@ -814,6 +854,7 @@ void LioProcBase::recordStepCap() const
     step_cap_scale_sum_ += r.scale;
     step_cap_scale_min_ = std::min(step_cap_scale_min_, r.scale);
   }
+  if (shadow_active_) return;   // R73
   static PersistentLogStream log("step_cap.csv");
   bool first = false;
   std::ofstream& o = log.stream(&first);
@@ -908,7 +949,7 @@ double LioProcBase::estimateStateCorrection(
     Eigen::AngleAxisd aa(dR);
     const V3D dtheta_phys = aa.angle() * aa.axis();
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,6,6>> es(
-        0.5 * (ekf_.HtH + ekf_.HtH.transpose()));
+        symmetrized(ekf_.HtH));
     int rank = 0;
     double lmin = 0.0, lmax = 0.0;
     if (es.info() == Eigen::Success && es.eigenvalues().size() > 0) {

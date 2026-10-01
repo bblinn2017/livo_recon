@@ -132,6 +132,14 @@ void LivoReconNode::loadParameters()
   ctx_.printer->print(PrintCategory::PARAMS, calib_proc_.loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, imu_proc_.loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, lio_proc_->loadParameters(pnh_));
+  if (lio_proc_->shadowOptions().on())   // R73 (F-414)
+  {
+    shadow_ = std::make_shared<ShadowLio>(ctx_, imu_proc_, lio_proc_->shadowOptions());
+    lio_proc_->setShadow(shadow_);
+    ctx_.printer->print(PrintCategory::PARAMS, std::string("[params/shadow]  lio/shadow/mode=on window=[") +
+        std::to_string(lio_proc_->shadowOptions().window_start) + "," + std::to_string(lio_proc_->shadowOptions().window_end) +
+        "] process_noise_model=" + lio_proc_->shadowOptions().process_noise_model);
+  }
   ctx_.printer->print(PrintCategory::PARAMS, evo_proc_.loadParameters(pnh_));
 
   paramWarn<bool>(pnh_, "outputs/auto_terminate_on_idle", auto_terminate_on_idle_, false);
@@ -185,6 +193,8 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
   mg.vel_before_imu = ctx_.state->vel();
   mg.cov_before_imu = ctx_.state->cov();
 
+  // R73 (F-414): the shadow starts from the driver's posterior of the previous scan (its state right now), BEFORE the driver propagates.
+  if (shadow_) shadow_->propagateFromDriver(mg, *ctx_.state);
   { TimedScope ts(ctx_.profiler, "imu"); imu_proc_.processIMU(mg); }
   mg.pos_after_imu = ctx_.state->pos();
   mg.rot_after_imu = ctx_.state->rot();

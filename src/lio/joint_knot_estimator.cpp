@@ -1,4 +1,5 @@
 #include "livo_recon/lio/joint_knot_estimator.h"
+#include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/lio/failure_capture.h"
 
 #include <Eigen/Cholesky>
@@ -36,7 +37,7 @@ JointKnot samplePropagation(const std::vector<Pose6D>& poses, double t)
 
 Eigen::MatrixXd symmetricInverse(const Eigen::MatrixXd& matrix, const char* where)
 {
-  const Eigen::MatrixXd S = 0.5 * (matrix + matrix.transpose());
+  const Eigen::MatrixXd S = symmetrized(matrix);
   Eigen::LDLT<Eigen::MatrixXd> ldlt(S);
   if (ldlt.info() != Eigen::Success || !ldlt.isPositive())
   {
@@ -238,7 +239,7 @@ JointKnotPrior buildJointKnotImuPrior(
   // mode pose uncertainty and leave only tiny within-scan process noise.
   // That mistake made the first LiDAR correction orders of magnitude too
   // small even though the production filter still carried head uncertainty.
-  P[0] = 0.5 * (scan_head_covariance + scan_head_covariance.transpose());
+  P[0] = symmetrized(scan_head_covariance);
   Eigen::LDLT<Eigen::Matrix<double,E,E>> head_ldlt(P[0]);
   if (head_ldlt.info() != Eigen::Success || !head_ldlt.isPositive())
   {
@@ -262,14 +263,14 @@ JointKnotPrior buildJointKnotImuPrior(
       // Q_bg,bg and Q_ba,ba now create uncertainty in the next knot's bias
       // state instead of being projected out to support a constant-bias
       // approximation.
-      Q = Fm * Q * Fm.transpose() + Qm;
+      Q = symmetrized(Eigen::Matrix<double,E,E>(Fm * Q * Fm.transpose() + Qm));   // R73 F-419
       F = Fm * F;
       ++used;
     }
     if (used == 0)
       throw std::runtime_error("no production IMU intervals found between adjacent knots");
     Phi_from_prev[k] = F;
-    P[k] = F * P[k - 1] * F.transpose() + Q;
+    P[k] = symmetrized(Eigen::Matrix<double,E,E>(F * P[k - 1] * F.transpose() + Q));   // R73 F-419
   }
 
   // Select the retained variables from the full Markov chain. This is a
@@ -310,7 +311,7 @@ JointKnotPrior buildJointKnotImuPrior(
     }
   }
   JointKnotPrior out;
-  out.P = 0.5 * (joint + joint.transpose());
+  out.P = symmetrized(joint);
   out.P_inverse = symmetricInverse(out.P, "prior_P");
   return out;
 }
@@ -478,7 +479,7 @@ JointLidarInformation accumulateJointLidarInformation(
   if (delta_gamma.rows() > 0)
   {
     const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> correction_es(
-        0.5 * (delta_gamma + delta_gamma.transpose()));
+        symmetrized(delta_gamma));
     if (correction_es.info() == Eigen::Success)
     {
       out.redundancy_stats.gamma_correction_min_eigenvalue =
@@ -588,7 +589,7 @@ Eigen::MatrixXd extractTailStateCovariance(const JointKnotTrajectory& trajectory
       if (state_idx[i] >= 0 && state_idx[j] >= 0)
         out.block<3,3>(state_idx[i],state_idx[j]) =
             joint_cov.block<3,3>(joint_idx[i],joint_idx[j]);
-  return 0.5 * (out + out.transpose());
+  return symmetrized(out);
 }
 
 }  // namespace livo_recon

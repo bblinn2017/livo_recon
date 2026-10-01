@@ -9,6 +9,8 @@
 #include <cmath>
 #include <algorithm>
 #include <numeric>
+#include <cstring>
+#include <unordered_map>
 #include <random>
 #include <fstream>
 #include <iomanip>
@@ -441,6 +443,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   // opt-in and silently off for every run unless a manifest explicitly
   // set it).
   paramWarn<bool>(pnh, "voxel_map/map/log_frame_stats_en", opts_->log_frame_stats_en, true);
+  paramWarn<bool>(pnh, "voxel_map/map/freeze_after_calibration", opts_->freeze_after_calibration, false);   // R73
 
   std::ostringstream oss;
   oss << "[params/voxel_map]"
@@ -472,6 +475,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/plane_var_denom_floor_en:  " << (opts_->plane_var_denom_floor_en ? "true" : "false")
       << "\n  map/shuffle_insertion_seed:      " << opts_->shuffle_insertion_seed
       << "\n  map/log_frame_stats_en:          " << (opts_->log_frame_stats_en ? "true" : "false")
+      << "\n  map/freeze_after_calibration:    " << (opts_->freeze_after_calibration ? "true" : "false")
       << "\n  points/min_init:  " << opts_->min_init_points
       << "\n  points/max:       " << opts_->max_points
       << "\n  points/min_update:" << opts_->min_update_points
@@ -544,6 +548,14 @@ void VoxelMap::updateMapInternal(MeasureGroup& mg, bool advance_live_frame) {
   const int insertion_frame = frame_idx_;
   setCurrentFrame(insertion_frame);
   if (advance_live_frame) ++frame_idx_;
+  if (advance_live_frame && opts_->freeze_after_calibration)
+  {
+    // R73 (F-414 control): the frame counter advances, nothing is inserted; the map stays the calibration map.
+    ++frozen_scans_;
+    last_n_map_pts_ = 0;
+    last_n_active_voxels_ = 0;
+    return;
+  }
   if (opts_->log_frame_stats_en) voxelPlaneFrameStatsReset();
   // The single point set (point_filter_num + ds_leaf_size, see measures.h's
   // docs on MeasureGroup::points) used for both voxel-map insertion and
@@ -694,6 +706,87 @@ void VoxelMap::updateMapInternal(MeasureGroup& mg, bool advance_live_frame) {
   }
   if (advance_live_frame && opts_->snapshot_post_calibration && frame_idx_ == 1)
     writePostCalibrationSnapshot();
+}
+
+namespace
+{
+inline unsigned long long mix64(unsigned long long h, unsigned long long v)
+{
+  h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+  h *= 0xff51afd7ed558ccdULL;
+  h ^= h >> 33;
+  return h;
+}
+inline unsigned long long bits64(double d)
+{
+  unsigned long long u;
+  static_assert(sizeof(u) == sizeof(d), "double must be 64 bit");
+  std::memcpy(&u, &d, sizeof(u));
+  return u;
+}
+inline unsigned long long roundedBits(double d)
+{
+  const long long q = static_cast<long long>(std::llround(d * 1000.0));   // 1e-3 grid
+  return static_cast<unsigned long long>(q);
+}
+unsigned long long nodeHash(const VoxelPlaneSnapshot& s, bool rounded)
+{
+  unsigned long long h = 1469598103934665603ULL;
+  h = mix64(h, static_cast<unsigned long long>(static_cast<long long>(s.root_key.x)));
+  h = mix64(h, static_cast<unsigned long long>(static_cast<long long>(s.root_key.y)));
+  h = mix64(h, static_cast<unsigned long long>(static_cast<long long>(s.root_key.z)));
+  h = mix64(h, static_cast<unsigned long long>(s.layer));
+  h = mix64(h, static_cast<unsigned long long>(s.status));
+  h = mix64(h, s.retired ? 1ULL : 0ULL);
+  h = mix64(h, s.is_plane ? 1ULL : 0ULL);
+  if (!rounded)
+  {
+    h = mix64(h, static_cast<unsigned long long>(static_cast<long long>(s.node_id)));
+    h = mix64(h, static_cast<unsigned long long>(s.point_count));
+    h = mix64(h, static_cast<unsigned long long>(s.distinct_frames));
+  }
+  for (int k = 0; k < 3; ++k) h = mix64(h, rounded ? roundedBits(s.center[k]) : bits64(s.center[k]));
+  for (int k = 0; k < 3; ++k) h = mix64(h, rounded ? roundedBits(s.normal[k]) : bits64(s.normal[k]));
+  h = mix64(h, rounded ? roundedBits(s.d) : bits64(s.d));
+  return h;
+}
+}  // namespace
+
+unsigned long long VoxelMap::mapDigestExact() const
+{
+  std::vector<VoxelPlaneSnapshot> rows;
+  for (const auto& entry : voxel_map_)
+    if (entry.second) entry.second->appendPlaneSnapshots(entry.first, rows);
+  unsigned long long sum = 0;
+  for (const auto& r : rows) sum += nodeHash(r, false);   // commutative: independent of the hash map's iteration order
+  return sum;
+}
+
+VoxelMapScanStats VoxelMap::computeScanStats()
+{
+  VoxelMapScanStats st;
+  std::vector<VoxelPlaneSnapshot> rows;
+  for (const auto& entry : voxel_map_)
+    if (entry.second) { ++st.n_root_voxels; entry.second->appendPlaneSnapshots(entry.first, rows); }
+  st.n_nodes = static_cast<long>(rows.size());
+  std::unordered_map<long long, unsigned long long> now;
+  now.reserve(rows.size() * 2);
+  for (const auto& r : rows)
+  {
+    st.digest_exact += nodeHash(r, false);
+    const unsigned long long hr = nodeHash(r, true);
+    st.digest_rounded += hr;
+    if (r.is_plane) ++st.n_plane_nodes;
+    if (r.retired) ++st.n_retired;
+    const long long key = static_cast<long long>(r.node_id);
+    now[key] = hr;
+    auto it = prev_node_hash_.find(key);
+    if (it == prev_node_hash_.end() || it->second != hr) ++st.planes_changed;
+  }
+  st.voxels_created = st.n_root_voxels - prev_root_voxels_;
+  prev_root_voxels_ = st.n_root_voxels;
+  prev_node_hash_.swap(now);
+  return st;
 }
 
 void VoxelMap::writePostCalibrationSnapshot() const

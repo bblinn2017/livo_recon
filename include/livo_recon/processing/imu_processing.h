@@ -145,6 +145,21 @@ private:
   double wnoa_vv_sum_ = 0.0;
 public:
   std::string engagementReport() const;
+
+  // R73 (F-414): a SHADOW instance runs the same propagation with a different process-noise configuration on a state copy that the
+  // shadow owns. It must not write any file the driver instance writes: the shared per-scan IMU diagnostics are skipped, its engagement
+  // report goes to engagement_imu_<tag>.txt, and the per-scan mean process variances it applied are exposed here instead.
+  void markShadow(const std::string& tag) { is_shadow_ = true; shadow_tag_ = tag; }
+  bool isShadow() const { return is_shadow_; }
+  ImuProcOptions& optsMut() { return opts_; }
+  const ImuProcOptions& opts() const { return opts_; }
+  struct ScanQ { V3D q_acc = V3D::Zero(), q_gyr = V3D::Zero(); size_t samples = 0; size_t acc_clamped_axes = 0, gyr_clamped_axes = 0; };
+  const ScanQ& lastScanQ() const { return last_scan_q_; }
+
+private:
+  bool is_shadow_ = false;
+  std::string shadow_tag_;
+  ScanQ last_scan_q_;
 };
 
 }  // namespace livo_recon

@@ -52,7 +52,7 @@ public:
   void setCalibResult(const M3D& rot, const V3D& bias_gyr, const V3D& bias_acc);
   void setNoiseParams(const V3D& var_acc, const V3D& var_gyr);
 
-  // R72 (F-401): bounded scalar gain on the per-step IMU variance, written once per scan by lio/q_adapt (never by anything else).
+  // R72 (F-401): bounded scalar gain on the per-step IMU variance, written once per scan by imu/process_noise/gain (never by anything else).
   // 1.0 (default) means ImuProc::propagate does not touch var_*_step at all (bit-identical).
   void setQGain(double acc, double gyr) { q_gain_acc_ = acc; q_gain_gyr_ = gyr; }
   double qGainAcc() const { return q_gain_acc_; }

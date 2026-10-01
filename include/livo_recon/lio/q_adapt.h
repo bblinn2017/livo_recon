@@ -10,7 +10,7 @@
 // R72 (F-401): process-noise alternatives to the motion-dependent Q, as small ROS-free pure functions so each can be tested
 // for algebraic identities in isolation (tests/test_q_adapt.cpp).  Four mechanisms live here:
 //
-//  (1) innovationStats()   per-scan LiDAR innovation statistics against the propagated prior (used by lio/q_adapt/mode =
+//  (1) innovationStats()   per-scan LiDAR innovation statistics against the propagated prior (used by imu/process_noise/gain/mode =
 //                          innovation_scale and nis_gate).
 //  (2) QGain               a bounded scalar gain on the IMU step variance, updated once per scan from (1).  The gain is applied
 //                          by ImuProc::propagate on the NEXT scan's steps (a one-scan lag, by construction).
@@ -18,7 +18,7 @@
 //                          (imu/process_noise/motion/energy_source = local_poly): replaces the instantaneous "excitation
 //                          energy" fed to the unchanged motion-Q filter/debias/scale/cap pipeline.
 //  (4) wnoaBlocks()        the exact discrete covariance of a continuous white-noise-on-acceleration (WNOA) disturbance over dt
-//                          (imu/process_noise/continuous_prior/mode = wnoa), added to the step process covariance.
+//                          (imu/process_noise/disturbance/mode = wnoa), added to the step process covariance.
 //
 // Every mechanism is OFF by default and off is bit-identical (the integration never evaluates any of this when off).
 // Numeric defaults of the options below are PROVISIONAL (rule 1.7): they are starting values for the R72 experiment arms, not

@@ -1,4 +1,5 @@
 #include "livo_recon/processing/calib_processing.h"
+#include "livo_recon/utils/algo/symmetrize.h"
 
 #include <algorithm>
 #include <cmath>
@@ -116,7 +117,7 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
 void CalibProc::stabilizeP0()
 {
   Eigen::MatrixXd& P = state_->covMut();
-  P = 0.5 * (P + P.transpose());
+  P = symmetrized(P);
   Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(P);
   if (es.info() != Eigen::Success)
     throw std::runtime_error("P0 stabilization eigensolve failed");
@@ -126,7 +127,7 @@ void CalibProc::stabilizeP0()
     const Eigen::VectorXd values =
         es.eigenvalues().cwiseMax(opts_.p0_numerical_eigenvalue_floor);
     P = es.eigenvectors() * values.asDiagonal() * es.eigenvectors().transpose();
-    P = 0.5 * (P + P.transpose());
+    P = symmetrized(P);
   }
   Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> check(P);
   if (check.info() != Eigen::Success)
@@ -289,7 +290,7 @@ M3D CalibProc::covarianceOfMean(bool accelerometer) const
       spectral += w * (gamma + gamma.transpose());
     }
   }
-  M3D cov_mean = 0.5 * (spectral + spectral.transpose()) /
+  M3D cov_mean = symmetrized(spectral) /
                  static_cast<double>(n);
   Eigen::SelfAdjointEigenSolver<M3D> es(cov_mean);
   if (es.info() != Eigen::Success) throw std::runtime_error("P0 mean covariance eigensolve failed");
@@ -327,7 +328,7 @@ void CalibProc::applyCalibrationDerivedP0(
   }
 
   Eigen::Matrix<double, 6, 6> P_acc = J * acc_mean_cov * J.transpose();
-  P_acc = 0.5 * (P_acc + P_acc.transpose());
+  P_acc = symmetrized(P_acc);
   const double bg_floor = opts_.p0_bg_model_floor >= 0.0
       ? opts_.p0_bg_model_floor : state_->initCovBg();
   const double ba_radial_floor = opts_.p0_ba_radial_model_floor >= 0.0
@@ -393,7 +394,7 @@ void CalibProc::applyCalibrationDerivedP0(
 
   // Gravity magnitude/direction is deliberately left at state/cov/gravity:
   // one stationary accelerometer mean cannot separate gravity from b_a.
-  P = 0.5 * (P + P.transpose());
+  P = symmetrized(P);
 
   ROS_INFO_STREAM("[calib/P0] balanced tilt-b_a ambiguity: accel_std="
       << ambiguity_std << " m/s^2, equivalent_each_accel_std="

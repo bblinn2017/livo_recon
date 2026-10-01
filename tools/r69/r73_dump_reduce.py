@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""R72 (F-398): reduce coupled_record_f<N>.txt and coupled_failure_dump.txt (lossless matrix dumps, see matrix_dump.h) to compact JSON + a text table.
+"""R73 (F-398, carried from R72): reduce coupled_record_f<N>.txt and coupled_failure_dump.txt (lossless matrix dumps, see matrix_dump.h) to compact JSON + a text table.
 
-    python3 r72_dump_reduce.py --dir <arm dir> --out <arm dir>      (reads coupled_record_f*.txt and coupled_failure_dump.txt if present)
+    python3 r73_dump_reduce.py --dir <arm dir> --out <arm dir>      (reads coupled_record_f*.txt and coupled_failure_dump.txt if present)
 
 Block format:  "## <name> <rows> <cols>" then <rows> lines of <cols> numbers;  "# key: text" lines are metadata.
-Pure numpy; planning-agent tool, checked only on synthetic round trips (selftest_r72.py) before the real files exist.
+Pure numpy; planning-agent tool, checked only on synthetic round trips (selftest_r73.py) before the real files exist.
 """
 import argparse, glob, json, os, re, sys
 import numpy as np
@@ -155,8 +155,8 @@ def main():
             res["errors"].append("failure dump: %s" % e)
     if not res["records"] and res["failure"] is None and not res["errors"]:
         print("no dump files in", a.dir); return 0
-    json.dump(res, open(os.path.join(a.out, "r72_dump_summary.json"), "w"), indent=1)
-    with open(os.path.join(a.out, "r72_dump_summary.txt"), "w") as f:
+    json.dump(res, open(os.path.join(a.out, "r73_dump_summary.json"), "w"), indent=1)
+    with open(os.path.join(a.out, "r73_dump_summary.txt"), "w") as f:
         f.write("frame iter n_resid  A_min_eig  A_cond  |delta|  |lidar|  |prior|  knot_max_change  post/prior_trace\n")
         for r in res["records"]:
             fr = r["meta"].get("frame", "?")

@@ -5,6 +5,8 @@
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/diagnostics/motion_q_writer.h"
 #include "livo_recon/lio/q_adapt.h"
+#include "livo_recon/utils/log/renamed_keys.h"
+#include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/diagnostics/state_trace.h"
 
 #include <fstream>
@@ -143,7 +145,7 @@ std::string ImuProc::engagementReport() const
   }
   if (opts_.continuous_prior_mode == "wnoa")
   {
-    o << "\n  continuous_prior=wnoa qc_acc=" << opts_.continuous_prior_qc_acc << " qc_gyr=" << opts_.continuous_prior_qc_gyr
+    o << "\n  disturbance=wnoa qc_acc=" << opts_.continuous_prior_qc_acc << " qc_gyr=" << opts_.continuous_prior_qc_gyr
       << " steps=" << wnoa_steps_ << " mean_vv_added=" << (wnoa_steps_ > 0 ? wnoa_vv_sum_ / wnoa_steps_ : 0.0);
     if (wnoa_steps_ == 0) o << "   <-- INERT: wnoa selected and no step received the disturbance";
   }
@@ -154,14 +156,16 @@ std::string ImuProc::engagementReport() const
 
 ImuProc::~ImuProc()
 {
-  if (opts_.energy_source == "instant" && opts_.continuous_prior_mode == "off" && gain_steps_applied_ == 0) return;
-  std::ofstream out(debugLogPath("engagement_imu.txt"), std::ios::trunc);
+  // R73 (F-407): always written, including when no alternative engaged (R72 returned no engagement_imu.txt for the arms where the
+  // counters were all zero, and the gate could not tell "inert" from "never written"). A zero-engagement run states its zeros.
+  std::ofstream out(debugLogPath(is_shadow_ ? "engagement_imu_" + shadow_tag_ + ".txt" : std::string("engagement_imu.txt")), std::ios::trunc);
   if (out) out << engagementReport() << '\n';
 }
 
 std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
 {
   // History (61-65): see docs/livo_recon_changelog.md#src-processing-imu_processing.cpp-61
+  refuseRenamedKeys(pnh);   // R73 F-404
   paramWarn<bool>(pnh, "imu/second_order",   opts_.second_order, true);
   paramWarn<double>(pnh, "imu/q_alpha_acc", opts_.q_alpha_acc, 1.0);
   paramWarn<double>(pnh, "imu/q_alpha_gyr", opts_.q_alpha_gyr, 1.0);
@@ -262,26 +266,26 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   else if (pnh.hasParam("imu/process_noise/motion/local_poly/order"))
     throw std::invalid_argument(
         "imu/process_noise/motion/local_poly/order is set but imu/process_noise/motion/energy_source=instant");
-  paramWarn<std::string>(pnh, "imu/process_noise/continuous_prior/mode", opts_.continuous_prior_mode, std::string("off"));
-  markParamConsumed("imu/process_noise/continuous_prior/qc_acc");
-  markParamConsumed("imu/process_noise/continuous_prior/qc_gyr");
+  paramWarn<std::string>(pnh, "imu/process_noise/disturbance/mode", opts_.continuous_prior_mode, std::string("off"));
+  markParamConsumed("imu/process_noise/disturbance/qc_acc");
+  markParamConsumed("imu/process_noise/disturbance/qc_gyr");
   if (opts_.continuous_prior_mode != "off" && opts_.continuous_prior_mode != "wnoa")
-    throw std::invalid_argument("imu/process_noise/continuous_prior/mode must be off or wnoa");
+    throw std::invalid_argument("imu/process_noise/disturbance/mode must be off or wnoa");
   if (opts_.continuous_prior_mode == "wnoa")
   {
-    paramWarn<double>(pnh, "imu/process_noise/continuous_prior/qc_acc", opts_.continuous_prior_qc_acc, 0.0);
-    paramWarn<double>(pnh, "imu/process_noise/continuous_prior/qc_gyr", opts_.continuous_prior_qc_gyr, 0.0);
+    paramWarn<double>(pnh, "imu/process_noise/disturbance/qc_acc", opts_.continuous_prior_qc_acc, 0.0);
+    paramWarn<double>(pnh, "imu/process_noise/disturbance/qc_gyr", opts_.continuous_prior_qc_gyr, 0.0);
     if (!std::isfinite(opts_.continuous_prior_qc_acc) || !std::isfinite(opts_.continuous_prior_qc_gyr) ||
         opts_.continuous_prior_qc_acc < 0.0 || opts_.continuous_prior_qc_gyr < 0.0)
-      throw std::invalid_argument("imu/process_noise/continuous_prior/qc_acc and qc_gyr must be finite and >= 0");
+      throw std::invalid_argument("imu/process_noise/disturbance/qc_acc and qc_gyr must be finite and >= 0");
     if (opts_.continuous_prior_qc_acc == 0.0 && opts_.continuous_prior_qc_gyr == 0.0)
-      throw std::invalid_argument("imu/process_noise/continuous_prior/mode=wnoa with qc_acc == qc_gyr == 0 is inert (use mode=off)");
+      throw std::invalid_argument("imu/process_noise/disturbance/mode=wnoa with qc_acc == qc_gyr == 0 is inert (use mode=off)");
   }
   else
   {
-    for (const char* k : {"imu/process_noise/continuous_prior/qc_acc", "imu/process_noise/continuous_prior/qc_gyr"})
+    for (const char* k : {"imu/process_noise/disturbance/qc_acc", "imu/process_noise/disturbance/qc_gyr"})
       if (pnh.hasParam(k))
-        throw std::invalid_argument(std::string(k) + " is set but imu/process_noise/continuous_prior/mode=off");
+        throw std::invalid_argument(std::string(k) + " is set but imu/process_noise/disturbance/mode=off");
   }
   // Read directly rather than being wired from LioProcOptions: the two
   // classes are constructed independently and this keeps the single source
@@ -320,6 +324,7 @@ void ImuProc::propagate(MeasureGroup& mg)
   {
     last_imu_sample_.acc  = -state_->rot().transpose() * state_->gravity();
     last_imu_sample_.gyro = V3D::Zero();
+    last_scan_q_ = ScanQ{};   // R73: no samples, no process variance applied this call
     return;
   }
 
@@ -555,7 +560,7 @@ void ImuProc::propagate(MeasureGroup& mg)
       var_acc_step = state_->varAccFloor() * opts_.motion_acc_floor_scale + acc_dynamic_variance;
       var_gyr_step = state_->varGyrFloor() * opts_.motion_gyr_floor_scale + gyr_dynamic_variance;
     }
-    // R72 (F-401): lio/q_adapt gain (written once per scan by the LIO side; 1.0 = untouched, bit-identical).
+    // R72 (F-401): imu/process_noise/gain gain (written once per scan by the LIO side; 1.0 = untouched, bit-identical).
     ++gain_steps_;
     if (state_->qGainAcc() != 1.0 || state_->qGainGyr() != 1.0)
     {
@@ -572,10 +577,11 @@ void ImuProc::propagate(MeasureGroup& mg)
     debiased_gyr_energy_sum += debiased_gyr_energy;
     acc_motion_sum += dynamic_acc.norm();
     gyr_motion_sum += dynamic_gyr.norm();
-    writeMotionQSampleDiagnostic(
-        propagation_index_, q_samples - 1, tail.t + data_queues_->start_time,
-        opts_.process_noise_model, dynamic_acc, dynamic_gyr,
-        debiased_acc_energy, debiased_gyr_energy, var_acc_step, var_gyr_step);
+    if (!is_shadow_)   // R73: a shadow instance never writes the driver's files
+      writeMotionQSampleDiagnostic(
+          propagation_index_, q_samples - 1, tail.t + data_queues_->start_time,
+          opts_.process_noise_model, dynamic_acc, dynamic_gyr,
+          debiased_acc_energy, debiased_gyr_energy, var_acc_step, var_gyr_step);
 
     // ---- save head state for pose storage ----
     const M3D rot_at_head = rot_imu;
@@ -695,8 +701,8 @@ void ImuProc::propagate(MeasureGroup& mg)
     // T0-E/T7 step 2: each block above is already pre-scaled by its own
     // q_alpha_{acc,gyr,bias} -- cov_w is added unscaled here. All three
     // at 1.0 (default) is bit-identical to the pre-split formula.
-    state_->covMut() = F_x * state_->cov() * F_x.transpose() + cov_w;
-    r61_Q_acc = F_x * r61_Q_acc * F_x.transpose() + cov_w;
+    state_->covMut() = symmetrized(F_x * state_->cov() * F_x.transpose() + cov_w);   // R73 F-419: never store the plain product
+    r61_Q_acc = symmetrized(F_x * r61_Q_acc * F_x.transpose() + cov_w);
 
     if (opts_.log_qhat_en) {
       std::lock_guard<std::mutex> lock(g_qhat_mtx);
@@ -787,13 +793,18 @@ void ImuProc::propagate(MeasureGroup& mg)
 
   state_->setPropagatedState(rot_imu, pos_imu, vel_imu);
   state_->setPriorPoseBlock(state_->cov());   // R65 (F-169): this scan's propagated (prior) (R,P) block; read only if insertion_source=prior
-  writeImuCovGrowthRow(propagation_index_, mg.image.t + data_queues_->start_time, r61_P_start, state_->cov(), r61_Q_acc);
+  if (!is_shadow_) writeImuCovGrowthRow(propagation_index_, mg.image.t + data_queues_->start_time, r61_P_start, state_->cov(), r61_Q_acc);
 
   // One compact row per scan; the first post-calibration scan is also logged
   // sample-by-sample above. Both are intentionally small enough for campaign
   // returns.
   const double inv_n = q_samples ? 1.0 / static_cast<double>(q_samples) : 0.0;
-  writeMotionQScanDiagnostic(
+  last_scan_q_.q_acc = q_acc_sum * inv_n;   // R73: the per-scan mean process variance actually applied (both driver and shadow instances)
+  last_scan_q_.q_gyr = q_gyr_sum * inv_n;
+  last_scan_q_.samples = q_samples;
+  last_scan_q_.acc_clamped_axes = acc_clamped;
+  last_scan_q_.gyr_clamped_axes = gyr_clamped;
+  if (!is_shadow_) writeMotionQScanDiagnostic(
       propagation_index_, mg.image.t + data_queues_->start_time,
       opts_.process_noise_model, opts_.motion_beta,
       opts_.motion_acc_scale, opts_.motion_gyr_scale, q_samples,

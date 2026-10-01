@@ -1,8 +1,10 @@
 #include "livo_recon/processing/lio_iekf.h"
+#include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/diagnostics/stationary_diagnostic_writer.h"
 #include "livo_recon/processing/imu_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/config_resolve.h"
+#include "livo_recon/utils/log/renamed_keys.h"
 #include "livo_recon/diagnostics/log/consistency_log.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 #include "livo_recon/utils/algo/hashing.h"
@@ -74,13 +76,13 @@ static std::string iekfFirstFrameHex(uint64_t h) { std::ostringstream oss; oss <
 static double firstFrameCovMinEig(const Eigen::MatrixXd& X)
 {
   if (X.rows() == 0 || X.cols() == 0 || X.rows() != X.cols()) return std::numeric_limits<double>::quiet_NaN();
-  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (X + X.transpose()));
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(symmetrized(X));
   return es.info() == Eigen::Success ? es.eigenvalues().minCoeff() : std::numeric_limits<double>::quiet_NaN();
 }
 static double firstFrameCovMaxEig(const Eigen::MatrixXd& X)
 {
   if (X.rows() == 0 || X.cols() == 0 || X.rows() != X.cols()) return std::numeric_limits<double>::quiet_NaN();
-  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (X + X.transpose()));
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(symmetrized(X));
   return es.info() == Eigen::Success ? es.eigenvalues().maxCoeff() : std::numeric_limits<double>::quiet_NaN();
 }
 static void logFirstFrameCovarianceBudget(const char* architecture, const char* phase, int scan_id, int iteration,
@@ -307,6 +309,7 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
   // set, nested keys read only inside a live scope and REFUSED if set into a
   // dead one, and the EFFECTIVE configuration returned rather than the
   // requested one.  See config_resolve.h.
+  refuseRenamedKeys(pnh);   // R73 F-404: old Q-mode key names are refused with a rename message
   ConfigResolver cfg(pnh);
 
   loadSharedParameters(cfg, pnh);
@@ -337,43 +340,43 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
 
   // ── R72 (F-401): innovation-driven Q gain (opt-in). Sub-keys are refused unless their mode is selected; a configuration that
   // could not change anything (gain bounds both 1, forgetting 1, inflate 1) is refused as inert. ──
-  cfg.mode("lio/q_adapt/mode", q_gain_opts_.mode, "off", { "off", "innovation_scale", "nis_gate" });
+  cfg.mode("imu/process_noise/gain/mode", q_gain_opts_.mode, "off", { "off", "innovation_scale", "nis_gate" });
   {
     const bool ia = q_gain_opts_.mode == "innovation_scale";
     const bool ng = q_gain_opts_.mode == "nis_gate";
     const bool any = ia || ng;
-    cfg.nestedMode(any, "lio/q_adapt/mode!=off", "lio/q_adapt/apply", q_gain_opts_.apply, "both", { "both", "acc", "gyr" });
-    cfg.nested<double>(any, "lio/q_adapt/mode!=off", "lio/q_adapt/min_gain", q_gain_opts_.min_gain, 1.0);
-    cfg.nested<double>(any, "lio/q_adapt/mode!=off", "lio/q_adapt/max_gain", q_gain_opts_.max_gain, 100.0);
-    cfg.nested<double>(ia, "lio/q_adapt/mode=innovation_scale", "lio/q_adapt/forgetting", q_gain_opts_.forgetting, 0.9);
-    cfg.nested<double>(ia, "lio/q_adapt/mode=innovation_scale", "lio/q_adapt/rho_clamp", q_gain_opts_.rho_clamp, 4.0);
-    cfg.nested<double>(ng, "lio/q_adapt/mode=nis_gate", "lio/q_adapt/nis_hi", q_gain_opts_.nis_hi, 1.5);
-    cfg.nested<double>(ng, "lio/q_adapt/mode=nis_gate", "lio/q_adapt/inflate", q_gain_opts_.inflate, 1.25);
-    cfg.nested<double>(ng, "lio/q_adapt/mode=nis_gate", "lio/q_adapt/decay", q_gain_opts_.decay, 0.95);
-    cfg.nested<double>(ng, "lio/q_adapt/mode=nis_gate", "lio/q_adapt/whiteness_max", q_gain_opts_.whiteness_max, 0.0);
+    cfg.nestedMode(any, "imu/process_noise/gain/mode!=off", "imu/process_noise/gain/apply", q_gain_opts_.apply, "both", { "both", "acc", "gyr" });
+    cfg.nested<double>(any, "imu/process_noise/gain/mode!=off", "imu/process_noise/gain/min_gain", q_gain_opts_.min_gain, 1.0);
+    cfg.nested<double>(any, "imu/process_noise/gain/mode!=off", "imu/process_noise/gain/max_gain", q_gain_opts_.max_gain, 100.0);
+    cfg.nested<double>(ia, "imu/process_noise/gain/mode=innovation_scale", "imu/process_noise/gain/forgetting", q_gain_opts_.forgetting, 0.9);
+    cfg.nested<double>(ia, "imu/process_noise/gain/mode=innovation_scale", "imu/process_noise/gain/rho_clamp", q_gain_opts_.rho_clamp, 4.0);
+    cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/nis_hi", q_gain_opts_.nis_hi, 1.5);
+    cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/inflate", q_gain_opts_.inflate, 1.25);
+    cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/decay", q_gain_opts_.decay, 0.95);
+    cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/whiteness_max", q_gain_opts_.whiteness_max, 0.0);
     if (any)
     {
       if (akf_q_.enabled())
-        throw std::invalid_argument("lio/q_adapt/mode != off and akf_q/enable=true both write the IMU process noise; refused");
+        throw std::invalid_argument("imu/process_noise/gain/mode != off and akf_q/enable=true both write the IMU process noise; refused");
       if (!(q_gain_opts_.min_gain > 0.0) || !(q_gain_opts_.max_gain >= q_gain_opts_.min_gain))
-        throw std::invalid_argument("lio/q_adapt/min_gain must be > 0 and <= max_gain");
+        throw std::invalid_argument("imu/process_noise/gain/min_gain must be > 0 and <= max_gain");
       if (q_gain_opts_.min_gain == 1.0 && q_gain_opts_.max_gain == 1.0)
-        throw std::invalid_argument("lio/q_adapt gain bounds min_gain == max_gain == 1 are inert (use mode=off)");
+        throw std::invalid_argument("imu/process_noise/gain gain bounds min_gain == max_gain == 1 are inert (use mode=off)");
     }
     if (ia)
     {
       if (!(q_gain_opts_.forgetting >= 0.0 && q_gain_opts_.forgetting <= 1.0) || !(q_gain_opts_.rho_clamp >= 1.0))
-        throw std::invalid_argument("lio/q_adapt/forgetting must be in [0,1] and rho_clamp >= 1");
+        throw std::invalid_argument("imu/process_noise/gain/forgetting must be in [0,1] and rho_clamp >= 1");
       if (q_gain_opts_.forgetting == 1.0)
-        throw std::invalid_argument("lio/q_adapt/mode=innovation_scale with forgetting == 1 never moves the gain (inert)");
+        throw std::invalid_argument("imu/process_noise/gain/mode=innovation_scale with forgetting == 1 never moves the gain (inert)");
     }
     if (ng)
     {
       if (!(q_gain_opts_.nis_hi > 0.0) || !(q_gain_opts_.inflate >= 1.0) || !(q_gain_opts_.decay >= 0.0 && q_gain_opts_.decay <= 1.0) ||
           !(q_gain_opts_.whiteness_max >= 0.0 && q_gain_opts_.whiteness_max <= 1.0))
-        throw std::invalid_argument("lio/q_adapt nis_gate: nis_hi > 0, inflate >= 1, decay in [0,1], whiteness_max in [0,1]");
+        throw std::invalid_argument("imu/process_noise/gain nis_gate: nis_hi > 0, inflate >= 1, decay in [0,1], whiteness_max in [0,1]");
       if (q_gain_opts_.inflate == 1.0)
-        throw std::invalid_argument("lio/q_adapt/mode=nis_gate with inflate == 1 never moves the gain (inert)");
+        throw std::invalid_argument("imu/process_noise/gain/mode=nis_gate with inflate == 1 never moves the gain (inert)");
     }
     q_gain_.configure(q_gain_opts_);
   }
@@ -456,7 +459,7 @@ void LioProcIekf::applyZuptIfStationary(MeasureGroup& mg)
     Eigen::MatrixXd P_new;
     zuptVelocityUpdate(state_->cov(), state_->vel(), StateGroup::idxV(), zupt_opts_.sigma_v, dx, P_new);
     state_->applyDelta(dx);
-    state_->covMut() = P_new;
+    state_->covMut() = symmetrized(P_new);   // R73 F-419
     applied = true;
     ++zupt_applied_;
     zupt_vnorm_sum_ += vnorm;
@@ -566,7 +569,7 @@ std::string LioProcIekf::engagementReport() const
 
   if (q_gain_opts_.on())
   {
-    o << "\n  lio/q_adapt mode=" << q_gain_opts_.mode << " apply=" << q_gain_opts_.apply << " scans=" << qa_scans_
+    o << "\n  imu/process_noise/gain mode=" << q_gain_opts_.mode << " apply=" << q_gain_opts_.apply << " scans=" << qa_scans_
       << " scans_with_gain_ne_1=" << qa_scans_gain_ne_1_ << " max_gain=" << q_gain_.maxSeen()
       << " mean_nis=" << (qa_scans_ > 0 ? qa_nis_sum_ / qa_scans_ : 0.0) << " mean_rho=" << (qa_scans_ > 0 ? qa_rho_sum_ / qa_scans_ : 0.0)
       << " mean_abs_lag1=" << (qa_scans_ > 0 ? qa_lag1_abs_sum_ / qa_scans_ : 0.0) << " inflating_scans=" << q_gain_.inflating()
@@ -604,6 +607,16 @@ std::string LioProcIekf::engagementReport() const
       o << "   <-- NOT ENGAGED: every step stayed inside the caps (a valid null: the cap never bound)";
   }
 
+  if (opts_.shadow.on())   // R73 (F-414)
+  {
+    o << "\n  lio/shadow mode=on window=[" << opts_.shadow.window_start << "," << opts_.shadow.window_end << "] process_noise_model="
+      << opts_.shadow.process_noise_model << " scans_run=" << shadow_scans_ << " scans_without_residuals=" << shadow_scans_no_residuals_
+      << " scans_where_the_map_digest_changed=" << shadow_map_changed_scans_
+      << " shadow_propagations=" << (shadow_ ? shadow_->propagations() : 0L);
+    if (shadow_scans_ == 0) o << "   <-- INERT: shadow selected and no scan inside the window was processed";
+    if (shadow_map_changed_scans_ > 0) o << "   <-- INVALID: the shadow pass changed the voxel map";
+  }
+  if (opts_.scan_log_en) o << "\n  lio/scan_log_en=true  (scan_log.csv written)";
   o << "\n[engagement] a flag marked INERT above did not test anything; the "
        "cell is invalid, not null.";
   return o.str();
@@ -829,6 +842,17 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
   logStateTrace("post_imu", mg, 0, 0);
   if (openLoopActive() || startupHoldActive(static_cast<long>(voxel_map_->frame_idx_))) return openLoopFinishScan(mg);
 
+  // R73 (F-414, F-415): per-scan map statistics (before this scan's passes, i.e. the map as inserted through the previous scan), the
+  // shadow update for scans in its window (it runs BEFORE the driver's own update and restores everything it touched), and the
+  // driver's update record. All write-only; default off is bit-identical.
+  const bool shadow_window = shadow_ && shadow_->opts().inWindow(voxel_map_->frame_idx_);
+  const bool capture_update = opts_.scan_log_en || shadow_window;
+  drv_rec_.reset();
+  shadow_rec_.reset();
+  if (opts_.scan_log_en)
+    if (auto* vm_stats = dynamic_cast<VoxelMap*>(voxel_map_.get())) { scan_stats_ = vm_stats->computeScanStats(); scan_stats_valid_ = true; }
+  if (shadow_window) runShadowUpdate(mg);
+
   {
     TimedScope ts(profiler_, "lio/ekf");
     V3D dtheta, dt;
@@ -860,6 +884,15 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
     // this frame actually blends against.
     applyPriorScalarControls(prior_cov_, opts_.prior_scalar);
     state_propagat_ = *state_;
+    if (capture_update)   // R73: the driver's update record, same fields as the shadow's
+    {
+      drv_rec_.valid = true;
+      drv_rec_.start_pos = mg.pos_before_imu;
+      drv_rec_.start_rv = Log(mg.rot_before_imu);
+      drv_rec_.prop_pos = state_->pos();
+      drv_rec_.prop_rv = Log(state_->rot());
+      drv_rec_.prior_cov = prior_cov_;
+    }
     // P1.  Captured here, before this frame's update runs at all -- pairs
     // with the POST value already computed further down (see that block's
     // "const auto& P = state_->cov()") to give the covariance delta, i.e.
@@ -891,6 +924,7 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
       // is defined over.
       setDiagnosticGnIteration(iter);
       double error = estimateStateCorrection(mg.points, dtheta, dt, /*allow_consistency_log=*/iter == 0);
+      if (capture_update) recordIteration(drv_rec_, iter, dtheta, dt);   // R73
       if (iter == 0 && q_gain_opts_.on() && !residuals_.empty()) updateQGainFromResiduals();   // R72 (F-401)
       writeStationaryIterationDiagnostics(
           firstFrameArchitectureName(), firstFrameArchitectureName(),
@@ -937,7 +971,7 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
         // the prior task's build_final_csv.py) are unaffected.
         const V3D dv_tail_vec = v_tail_after - v_tail_before;
         const Eigen::Matrix<double,6,6> H6 = ekf_.HtH;
-        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,6,6>> es6(0.5 * (H6 + H6.transpose()));
+        Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double,6,6>> es6(symmetrized(H6));
         const Eigen::VectorXd ev6 = es6.eigenvalues();
         const double thresh6 = 1e-12 * std::max(std::abs(ev6(5)), 1e-300);
         int rank6 = 0;
@@ -1020,6 +1054,18 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
     //
     if (any_solved)
       ekf_.applyCovarianceUpdate(state_, prior_cov_, 1.0);
+    if (capture_update)   // R73
+    {
+      drv_rec_.stop = stop;
+      drv_rec_.post_pos = state_->pos();
+      drv_rec_.post_rv = Log(state_->rot());
+      drv_rec_.post_cov = state_->cov();
+    }
+    if (opts_.residual_dump_last_iter)   // R73 (F-417): the residuals of the last executed iteration
+    {
+      const int last_iter_dump = std::min(iter, opts_.max_iterations - 1);
+      if (last_iter_dump > 0) dumpResidualsIfListed(last_iter_dump, /*shadow=*/false);
+    }
 
     // The covariance is intentionally updated once, after all fixed-prior
     // mean iterations.  Earlier per-iteration diagnostics therefore show
@@ -1078,7 +1124,7 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
             const Eigen::MatrixXd P_after_imu = phi_p_phit + accum_cov_w;
             auto eigStats = [](const Eigen::MatrixXd& M, double& trP, double& logdetP,
                                 double& lam_min, double& lam_max) {
-              Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (M + M.transpose()));
+              Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(symmetrized(M));
               const Eigen::VectorXd ev = es.eigenvalues();
               trP = M.trace();
               logdetP = ev.array().log().sum();
@@ -1644,6 +1690,9 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
 
       debugLogLio(dbg.str());
     }
+
+    if (shadow_window) writeShadowRows(mg, shadow_digest_before_, shadow_digest_after_);   // R73
+    if (opts_.scan_log_en && scan_stats_valid_) writeScanLogRow(mg, scan_stats_);          // R73
 
     logStateTrace("post_lio", mg, static_cast<int>(residuals_.size()), iter);
 

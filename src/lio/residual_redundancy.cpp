@@ -1,4 +1,5 @@
 #include "livo_recon/lio/residual_redundancy.h"
+#include "livo_recon/utils/algo/symmetrize.h"
 
 #include <Eigen/Eigenvalues>
 #include <algorithm>
@@ -193,7 +194,7 @@ ResidualRedundancyStats applyResidualRedundancyCorrection(
   stats.gamma_correction_frobenius = delta_HtH_total.norm();
   stats.b_correction_norm = delta_Htz_total.norm();
   const Eigen::SelfAdjointEigenSolver<M66> correction_es(
-      0.5 * (delta_HtH_total + delta_HtH_total.transpose()));
+      symmetrized(delta_HtH_total));
   if (correction_es.info() == Eigen::Success) {
     stats.gamma_correction_min_eigenvalue =
         correction_es.eigenvalues().minCoeff();

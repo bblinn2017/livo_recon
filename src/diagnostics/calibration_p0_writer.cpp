@@ -1,4 +1,5 @@
 #include "livo_recon/diagnostics/calibration_p0_writer.h"
+#include "livo_recon/utils/algo/symmetrize.h"
 
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/utils/algo/math.h"
@@ -19,7 +20,7 @@ void writeCalibrationP0Diagnostic(
   std::ofstream& out = log.stream();
   out << std::setprecision(17);
 
-  const Eigen::MatrixXd P = 0.5 * (state.cov() + state.cov().transpose());
+  const Eigen::MatrixXd P = symmetrized(state.cov());
   const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eig(P);
 
   out << "schema calibration_p0_v1\n"

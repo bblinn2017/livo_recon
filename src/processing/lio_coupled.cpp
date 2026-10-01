@@ -1,5 +1,7 @@
 #include "livo_recon/processing/lio_coupled.h"
 
+#include <stdexcept>
+
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/utils/log/config_resolve.h"
 #include "livo_recon/utils/log/param_warn.h"
@@ -24,6 +26,10 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
 {
   ConfigResolver cfg(pnh);
   loadSharedParameters(cfg, pnh);
+  if (opts_.shadow.on())
+    throw std::invalid_argument("lio/shadow/mode=on is implemented for estimator/mode=iekf only (R73 F-414); refused under coupled");
+  if (opts_.scan_log_en)
+    throw std::invalid_argument("lio/scan_log_en is implemented for estimator/mode=iekf only (R73); refused under coupled");
 
   cfg.nested<int>(true, "estimator/mode=coupled",
                   "estimator/coupled/knot_count", copts_.knot_count, 4);
@@ -45,6 +51,10 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/step_scale", copts_.step_scale, 1.0);
   cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/failure_dump", copts_.failure_dump, false);
   cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/record_frames", copts_.record_frames, 0);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/update_log_en", copts_.update_log, false);                 // R73
+  cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/imu_prior_info_scale", copts_.imu_prior_info_scale, 1.0);   // R73
+  if (!(copts_.imu_prior_info_scale > 0.0) || !std::isfinite(copts_.imu_prior_info_scale))
+    cfg.requireCombination("estimator/coupled/imu_prior_info_scale must be finite and > 0");
   if (copts_.record_frames < 0)
     cfg.requireCombination("estimator/coupled/record_frames must be >= 0");
   if (!(copts_.step_scale > 0.0 && copts_.step_scale <= 1.0))
@@ -108,7 +118,9 @@ std::string LioProcCoupled::engagementReport() const
       << " clipping=none"
       << " on_solver_error=" << copts_.on_solver_error
       << " solver_errors_skipped=" << solver_errors_skipped_
+      << " prior_built_scans=" << prior_built_scans_ << " prior_skipped_no_residual_scans=" << prior_skipped_scans_
       << " step_scale=" << copts_.step_scale
+      << " update_log_en=" << (copts_.update_log ? "true" : "false") << " imu_prior_info_scale=" << copts_.imu_prior_info_scale
       << " failure_dump=" << (copts_.failure_dump ? "true" : "false")
       << " record_frames=" << copts_.record_frames;
   if (!failure_note_.empty()) out << "\n  FAILURE: " << failure_note_;

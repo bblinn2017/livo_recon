@@ -1,5 +1,6 @@
 #pragma once
 #include "livo_recon/utils/state/state.h"
+#include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/lio/step_cap.h"
 #include <limits>
 
@@ -24,7 +25,7 @@ inline Eigen::MatrixXd solveCovarianceFromA(const Eigen::MatrixXd& A,
     Eigen::LDLT<Eigen::MatrixXd> ldlt(A);
     const Eigen::MatrixXd coeff_cov = ldlt.solve(Eigen::MatrixXd::Identity(A.rows(), A.rows()));
     Eigen::MatrixXd P_new = M ? Eigen::MatrixXd((*M) * coeff_cov * M->transpose()) : coeff_cov;
-    P_new = 0.5 * (P_new + P_new.transpose());
+    P_new = symmetrized(P_new);
     return P_new;
 }
 
@@ -160,7 +161,7 @@ struct EkfUpdate
         // longer used for this step (solveCovarianceFromA builds its own
         // local LDLT), which is numerically identical, just no longer
         // caching the factorization on the instance.
-        state->covMut() = solveCovarianceFromA(A);
+        state->covMut() = symmetrized(solveCovarianceFromA(A));   // R73 F-419
     }
 
     // History (114-150): see docs/livo_recon_changelog.md#include-livo_recon-utils-algo-ekf.h-114
