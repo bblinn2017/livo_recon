@@ -384,6 +384,11 @@ def main():
                         "eR_x_mrad": El[:, 0] * 1000.0, "eR_y_mrad": El[:, 1] * 1000.0, "eR_z_mrad": El[:, 2] * 1000.0,
                         "sd_R_mrad": np.sqrt(np.maximum(Pl[:, 0, 0] + Pl[:, 1, 1] + Pl[:, 2, 2], 0)) * 1000.0,
                         "ev_norm_mm_s": np.linalg.norm(El[:, 6:9], axis=1) * 1000.0,
+                        # R71: per-axis posterior standard deviations (the norm columns above hide that the vertical-axis rotation carries almost all of the error)
+                        "sd_Rx_mrad": np.sqrt(np.maximum(Pl[:, 0, 0], 0)) * 1000.0, "sd_Ry_mrad": np.sqrt(np.maximum(Pl[:, 1, 1], 0)) * 1000.0,
+                        "sd_Rz_mrad": np.sqrt(np.maximum(Pl[:, 2, 2], 0)) * 1000.0,
+                        "sd_px_mm": np.sqrt(np.maximum(Pl[:, 3, 3], 0)) * 1000.0, "sd_py_mm": np.sqrt(np.maximum(Pl[:, 4, 4], 0)) * 1000.0,
+                        "sd_pz_mm": np.sqrt(np.maximum(Pl[:, 5, 5], 0)) * 1000.0,
                         "nees9_lio": nees_l, "nees9_imu": nees_i, "gt_err_mm": gt_err})
     for k, v in fsv.items():
         tab[k] = v

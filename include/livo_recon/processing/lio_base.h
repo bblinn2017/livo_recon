@@ -111,6 +111,10 @@ struct LioProcOptions
   // eigenvalues, plane concentration, distance statistics. Backend independent, so surface and octree can be compared.
   bool   residual_geometry_en  = false;
 
+  // R71 (F-363): write-only per-residual dump (residual_dump.csv, residual_dump_state.csv) for the listed frame indices at
+  // iteration 0. Empty (default) writes nothing and is bit-identical.
+  std::vector<int> residual_dump_frames;
+
   // CQ-31 item 5: the scalar P controls, independent of residual_redundancy
   // above (these act on the prior directly, not the measurement update) --
   // see residual_redundancy.h's PriorScalarOptions. Identity at every

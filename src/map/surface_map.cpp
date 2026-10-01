@@ -379,7 +379,9 @@ void SurfaceMap::writeFrameRow(int frame, bool bootstrap_phase, std::size_t n_po
                   "support_rejects,combined_rejects,denom_rejected,ms_transform,ms_insert,ms_update,"
                   "resid_queries,resid_hit_surface0,resid_hit_cell0,resid_hit_surface1,resid_hit_cell1,resid_miss,"
                   "t0_no_cell,t0_no_plane,t0_range,t0_gate,t0_invalid,t1_no_cell,t1_no_plane,t1_range,t1_gate,t1_invalid,"
-                  "t1_no_neighbour,gate_ratio_mean,n_cells_lt_min_points,n_cells_fit_invalid\n";
+                  "t1_no_neighbour,gate_ratio_mean,n_cells_lt_min_points,n_cells_fit_invalid,"
+                  "n_cells_pts_1_2,n_cells_pts_3_to_min,n_cells_inv_secondary_eig,n_cells_inv_plane_threshold,"
+                  "n_cells_inv_denom,n_cells_inv_var_ceiling\n";
     frame_log_open_ = true;
   }
   const surface::Summary m = layer_->summary();
@@ -403,11 +405,26 @@ void SurfaceMap::writeFrameRow(int frame, bool bootstrap_phase, std::size_t n_po
     frame_log_ << ',' << m[0][0] << ',' << m[0][1] << ',' << m[0][2] << ',' << m[0][3] << ',' << m[0][4] << ',' << m[1][0]
                << ',' << m[1][1] << ',' << m[1][2] << ',' << m[1][3] << ',' << m[1][4] << ',' << m[1][5] << ',' << gate_mean;
     std::size_t few = 0, invalid = 0;
+    // R71 (F-358 probe): why a cell has no valid plane. Cells below min_points are split by how few points they hold; cells
+    // with enough points are split by the first fit test they fail (fitStats order: secondary eigenvalue floor, planarity
+    // threshold, eigengap denominator, plane-variance ceiling). Classified from Fit's own flags and eigenvalues, so Fit
+    // and every decision path are unchanged.
+    std::size_t p12 = 0, p3m = 0, i_sec = 0, i_thr = 0, i_den = 0, i_ceil = 0;
     layer_->forEachCell([&](const surface::Cell& c) {
       if (c.fit.valid) return;
-      if (static_cast<int>(c.st.n) < opts_.core.min_points) ++few; else ++invalid;
+      if (static_cast<int>(c.st.n) < opts_.core.min_points) {
+        ++few;
+        if (c.st.n < 3.0) ++p12; else ++p3m;
+        return;
+      }
+      ++invalid;
+      if (c.fit.denom_rejected) ++i_den;
+      else if (c.fit.ceiling_rejected) ++i_ceil;
+      else if (c.fit.eig(1) < opts_.core.min_secondary_eig || c.fit.eig(2) < opts_.core.min_secondary_eig) ++i_sec;
+      else ++i_thr;
     });
-    frame_log_ << ',' << few << ',' << invalid << '\n';
+    frame_log_ << ',' << few << ',' << invalid << ',' << p12 << ',' << p3m << ',' << i_sec << ',' << i_thr << ',' << i_den
+               << ',' << i_ceil << '\n';
   }
   frame_log_.flush();
 }

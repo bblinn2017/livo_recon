@@ -15,7 +15,7 @@ Gates (R69 build vs the R67 sensor_model runs; the R69 patch removes code and mu
   G9 (R70) block information scale: 10/10 equals the global F=10 at frame 1 iteration 0; 12/2 equals S HtH(F=1) S; control: 10/10 against F=1 must differ
   G11 (R70) arms that repeat an R69B arm reproduce its digest (surface, dense octree, combined x F cells)
   G13 (R70) no engagement.txt carries an INERT flag
-  G6 r70_refuse jobs: each refused at startup and run.log contains the expected text
+  G6 r71_refuse jobs: each refused at startup and run.log contains the expected text
 """
 import argparse, csv, json, os, re, sys
 
@@ -25,27 +25,34 @@ R67_DIGEST = {"00_id_baseline_48s": "694fadd31260f9fb262e7e32690e9cc7aad80079b08
               "00_id_motionq_full": "98f3855cb2146bb06e9dc15b101a8699804a395b4807144323f99e2e509dbad1"}
 R67_HASH = "1957524258770630969"
 R69B_DIGEST = {   # R69B returned digests (bootstrap_summary.csv); the R70 changes to these paths are write-only (counters, logs), so the digests must not move
-    "r70_sf_cell0p25_default": ("r69_sf_cell0p25_default_aggregate", "a737153e343e54d16b3985bbbae140d942f3ced43570fe56cf62194c37dfab12"),
-    "r70_sf_cell0p425_default": ("r69_sf_cell0p425_default_aggregate", "07469345620246247197821e8834f83105816d3131281a9dd121e46c381f0aac"),
-    "r70_sf_cell0p425_dense": ("r69_sf_cell0p425_dense_aggregate", "56e5130a476bb553aaeb3bf7434299c76a22d8b0388157057c81006807dd6aeb"),
-    "r70_sf_pfn1_dsoff_fixedq": ("r69_sf_pfn1_dsoff_fixedq", "ce63fd4dfb6936ff64947c63394ffb143e40bfb57684d9d8f6a33392e264a7f4"),
-    "r70_sf_pfn1_dsoff_motionq": ("r69_sf_pfn1_dsoff_motionq", "8dbe66801976d63f0db08250731d6838896b3ccc60ae3eb8666c0657e5aecd63"),
-    "r70_cb_eee_01_fq_f1": ("r69_cb_eee_01_fq_f1", "df1b9f66c7fcab75d265ce536922b292f07c3b9b5f9e5ac7a8cf6d0e61db1c5a"),
-    "r70_cb_eee_01_fq_f10": ("r69_cb_eee_01_fq_f10", "157d610c87c2421d13f5608d5c43805b42fb4bfc69b058b47fa76e505b4f1287"),
-    "r70_cb_eee_01_fq_f30": ("r69_cb_eee_01_fq_f30", "59b1a11f94a77bf54f99065ee323bd889af3cb520c9aaf95fd5374e790d07b99"),
-    "r70_cb_eee_01_mq_f1": ("r69_cb_eee_01_mq_f1", "2f2e491e107719fd419b385fab6f7da656bd1daaa70756e223edcbca3aeda905"),
-    "r70_cb_eee_01_mq_f10": ("r69_cb_eee_01_mq_f10", "5a1ee08d95ceb0791e21d7ededfc786bde7a91b10d8e58a6bb3bf082a654c295"),
-    "r70_cb_eee_01_mq_f30": ("r69_cb_eee_01_mq_f30", "bbca8f11698cb2a4f141727e65b8c98f19d1de1f84911f8903fda65e2d92bda6"),
+    "r71_sf_cell0p25_default": ("r69_sf_cell0p25_default_aggregate", "a737153e343e54d16b3985bbbae140d942f3ced43570fe56cf62194c37dfab12"),
+    "r71_sf_cell0p425_default": ("r69_sf_cell0p425_default_aggregate", "07469345620246247197821e8834f83105816d3131281a9dd121e46c381f0aac"),
+    "r71_sf_cell0p425_dense": ("r69_sf_cell0p425_dense_aggregate", "56e5130a476bb553aaeb3bf7434299c76a22d8b0388157057c81006807dd6aeb"),
+    "r71_sf_pfn1_dsoff_fixedq": ("r69_sf_pfn1_dsoff_fixedq", "ce63fd4dfb6936ff64947c63394ffb143e40bfb57684d9d8f6a33392e264a7f4"),
+    "r71_sf_pfn1_dsoff_motionq": ("r69_sf_pfn1_dsoff_motionq", "8dbe66801976d63f0db08250731d6838896b3ccc60ae3eb8666c0657e5aecd63"),
+    "r71_cb_eee_01_fq_f1": ("r69_cb_eee_01_fq_f1", "df1b9f66c7fcab75d265ce536922b292f07c3b9b5f9e5ac7a8cf6d0e61db1c5a"),
+    "r71_cb_eee_01_fq_f10": ("r69_cb_eee_01_fq_f10", "157d610c87c2421d13f5608d5c43805b42fb4bfc69b058b47fa76e505b4f1287"),
+    "r71_cb_eee_01_fq_f30": ("r69_cb_eee_01_fq_f30", "59b1a11f94a77bf54f99065ee323bd889af3cb520c9aaf95fd5374e790d07b99"),
+    "r71_cb_eee_01_mq_f1": ("r69_cb_eee_01_mq_f1", "2f2e491e107719fd419b385fab6f7da656bd1daaa70756e223edcbca3aeda905"),
+    "r71_cb_eee_01_mq_f10": ("r69_cb_eee_01_mq_f10", "5a1ee08d95ceb0791e21d7ededfc786bde7a91b10d8e58a6bb3bf082a654c295"),
+    "r71_cb_eee_01_mq_f30": ("r69_cb_eee_01_mq_f30", "bbca8f11698cb2a4f141727e65b8c98f19d1de1f84911f8903fda65e2d92bda6"),
 }
-REFUSE = {"r70_refuse_point_cov_zero": "removed key: calib/bootstrap/point_cov",
-          "r70_refuse_spline_mode": ["[config/REFUSED]", "spline/mode"],
-          "r70_refuse_estimator_decoupled": "RENAMED to 'iekf'",
-          "r70_refuse_surface_cell0p10": "cell sizes <= 0.10 m are retired",
-          "r70_refuse_octree_voxel0p10": "voxel sizes <= 0.10 m are retired",
-          "r70_refuse_info_scale_inert": "is inert",
-          "r70_refuse_info_scale_suboption": ["[config/REFUSED]", "lio/info_scale/rotation"],
-          "r70_refuse_info_scale_coupled": "estimator/mode=iekf only",
-          "r70_refuse_renorm_without_woodbury": ["[config/REFUSED]", "lio/residual_redundancy/renorm"]}
+R70_DIGEST = {   # R70 returned digests of arms whose R71 counterpart differs only in write-only logs (full coupled diagnostics): G11b
+    "r71_co_tail_fulldiag_60s": ("r70_co_tail_fulldiag_60s", "a54199a34bea4347cac71566fa57d24d68a6e814495d7b174422f3bbb735e9c1"),
+    "r71_co_meas_fulldiag_60s": ("r70_co_meas_fulldiag_60s", "80434ab13524156cea5fcb95966829761e153a0a43a03d3fb5f3f1935509b685"),
+    "r71_co_tail_gateon_knots8_fq": ("r70_co_tail_gateon_knots8_iters5_fixedq (minimal diagnostics; R71 has full coupled diagnostics on: tests that they are write-only)",
+                                     "2f1f87d189cc7d814881f2e8161a828eb3bbb09bc0a5e91c930bec38f625fe72"),
+}
+REFUSE = {"r71_refuse_point_cov_zero": "removed key: calib/bootstrap/point_cov",
+          "r71_refuse_spline_mode": ["[config/REFUSED]", "spline/mode"],
+          "r71_refuse_estimator_decoupled": "RENAMED to 'iekf'",
+          "r71_refuse_surface_cell0p10": "cell sizes <= 0.10 m are retired",
+          "r71_refuse_octree_voxel0p10": "voxel sizes <= 0.10 m are retired",
+          "r71_refuse_info_scale_inert": "is inert",
+          "r71_refuse_info_scale_suboption": ["[config/REFUSED]", "lio/info_scale/rotation"],
+          "r71_refuse_info_scale_coupled": "estimator/mode=iekf only",
+          "r71_refuse_dump_frames_bad": "is not a positive integer frame index",
+          "r71_refuse_renorm_without_woodbury": ["[config/REFUSED]", "lio/residual_redundancy/renorm"]}
 
 
 def update_row(runs, arm, frame=1, it=0):
@@ -107,7 +114,7 @@ def summarize(arm_dir):
 
 def collect(runs, out, arm_table=None):
     os.makedirs(out, exist_ok=True)
-    rows = [summarize(os.path.join(runs, a)) for a in sorted(os.listdir(runs)) if os.path.isdir(os.path.join(runs, a)) and not a.startswith("r70_refuse")]
+    rows = [summarize(os.path.join(runs, a)) for a in sorted(os.listdir(runs)) if os.path.isdir(os.path.join(runs, a)) and not a.startswith("r71_refuse")]
     with open(os.path.join(out, "bootstrap_summary.csv"), "w", newline="") as f:
         w = csv.DictWriter(f, list(rows[0])); w.writeheader(); w.writerows(rows)
     by = {r["arm"]: r for r in rows}
@@ -125,7 +132,7 @@ def collect(runs, out, arm_table=None):
     if arm_table and os.path.exists(arm_table):
         for r in csv.DictReader(open(arm_table), delimiter="\t"):
             samp[r["arm"]] = (r["seq"], r.get("sampling", ""))
-    bad = [r["arm"] for r in rows if not (r["schema"] == "bootstrap_preparation_v2" and r["n_zero"] == "0")]
+    bad = [r["arm"] for r in rows if not r["arm"].startswith("_") and not (r["schema"] == "bootstrap_preparation_v2" and r["n_zero"] == "0")]   # R71: skip non-arm directories such as _matrices
     gate("G2a every arm: schema v2, sensor_cov_zero_point_count 0", not bad, "failing arms: %s" % bad[:20])
     grp = {}
     for r in rows:
@@ -143,24 +150,28 @@ def collect(runs, out, arm_table=None):
     same("G3", "00_id_default_posecov_60s", "00_id_baseline_60s")
     same("G4", "00_id_infl_whole_f1_60s", "00_id_baseline_60s")
     same("G5", "00_id_baseline_full_rerun", "00_id_baseline_full")
-    same("G8a", "r70_diag_on_baseline_60s", "00_id_baseline_60s")
-    same("G8b", "r70_mx_baseline_fq_60s", "00_id_baseline_60s")
+    same("G8a", "r71_diag_on_baseline_60s", "00_id_baseline_60s")
+    same("G8b", "r71_mx_baseline_fq_60s", "00_id_baseline_60s")
+    same("G8c", "r71_smoke_dump_on_baseline_60s", "00_id_baseline_60s")
     for arm, (prev_arm, dig) in R69B_DIGEST.items():
         r = by.get(arm)
         gate("G11 %s digest == R69B %s digest (R70 changes to this path are write-only or inert)" % (arm, prev_arm), r is not None and r["digest"] == dig,
              "got %s" % (r and r["digest"]))
+    for arm, (prev_arm, dig) in R70_DIGEST.items():
+        r = by.get(arm)
+        gate("G11b %s digest == R70 %s digest (write-only logs; not a stop condition)" % (arm, prev_arm), r is not None and r["digest"] == dig, "got %s" % (r and r["digest"]))
     # G9 (F-320): the block information scale against the global scale, frame 1 iteration 0 (same map, same residuals, nothing has diverged yet)
     hk = ["HtH_%d%d" % (i, j) for i in range(6) for j in range(i, 6)]
     zk = ["Htz_%d" % i for i in range(6)]
-    blk, glob, one = (update_row(runs, x) for x in ("r70_smoke_block_f10_10_60s", "r70_mx_cb_fq_f10_60s", "r70_mx_cb_fq_f1_60s"))
+    blk, glob, one = (update_row(runs, x) for x in ("r71_smoke_block_f10_10_60s", "r71_mx_cb_fq_f10_60s", "r71_mx_cb_fq_f1_60s"))
     if blk and glob and one:
         eh, ez = max_rel(blk, glob, hk), max_rel(blk, glob, zk)
         gate("G9a block 10/10 == global F=10 at frame 1 iteration 0 (HtH relative < 1e-9, Htz relative < 1e-6)", eh < 1e-9 and ez < 1e-6, "HtH %.3e Htz %.3e" % (eh, ez))
         ctl = max_rel(blk, one, hk)
         gate("G9c control: block 10/10 against the F=1 arm must DIFFER by a wide margin (the comparison can fail)", ctl > 0.5, "HtH relative difference %.3e" % ctl)
     else:
-        gate("G9a/G9c need frame-1 rows of r70_smoke_block_f10_10_60s, r70_mx_cb_fq_f10_60s, r70_mx_cb_fq_f1_60s", False, "missing: %s" % [n for n, v in (("block", blk), ("global", glob), ("one", one)) if not v])
-    b122 = update_row(runs, "r70_smoke_block_f12_2_60s")
+        gate("G9a/G9c need frame-1 rows of r71_smoke_block_f10_10_60s, r71_mx_cb_fq_f10_60s, r71_mx_cb_fq_f1_60s", False, "missing: %s" % [n for n, v in (("block", blk), ("global", glob), ("one", one)) if not v])
+    b122 = update_row(runs, "r71_smoke_block_f12_2_60s")
     if b122 and one:
         def ratio(k):
             i, j = int(k[4]), int(k[5])
@@ -168,9 +179,9 @@ def collect(runs, out, arm_table=None):
             fj = 12.0 if j < 3 else 2.0
             return 1.0 / ((fi * fj) ** 0.5)
         eh = max_rel(b122, one, hk, ratio)
-        gate("G9b block 12/2: HtH = S HtH(F=1) S at frame 1 iteration 0 (relative < 1e-9)", eh < 1e-9, "HtH %.3e" % eh)
+        gate("G9b block 12/2: HtH = S HtH(F=1) S at frame 1 iteration 0 (relative < 1e-5: the CSV prints 7 significant digits; R70 measured 5.5e-7)", eh < 1e-5, "HtH %.3e" % eh)
     else:
-        gate("G9b needs frame-1 rows of r70_smoke_block_f12_2_60s and r70_mx_cb_fq_f1_60s", False, "missing")
+        gate("G9b needs frame-1 rows of r71_smoke_block_f12_2_60s and r71_mx_cb_fq_f1_60s", False, "missing")
     # G13: no engagement.txt of any arm may carry an INERT flag
     inert = []
     for arm in sorted(by):
@@ -178,6 +189,9 @@ def collect(runs, out, arm_table=None):
         if os.path.exists(ep) and "<-- INERT" in open(ep, errors="replace").read():
             inert.append(arm)
     gate("G13 no arm's engagement.txt carries an INERT flag", not inert, "arms: %s" % inert[:20])
+    # G13a (R71, F-350): the iekf destructor now writes engagement.txt; if it is missing for an arm that ran to completion, G13 would again test nothing
+    noeng = [arm for arm in sorted(by) if not arm.startswith("_") and not os.path.exists(os.path.join(runs, arm, "engagement.txt"))]
+    gate("G13a every arm directory has an engagement.txt (G13 is not vacuous)", not noeng, "missing in %d arms: %s" % (len(noeng), noeng[:20]))
     for arm, txt in REFUSE.items():
         d = os.path.join(runs, arm)
         txts = txt if isinstance(txt, list) else [txt]
@@ -191,7 +205,7 @@ def collect(runs, out, arm_table=None):
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(); ap.add_argument("arm_dir", nargs="?"); ap.add_argument("--collect"); ap.add_argument("--out", default="R70_RETURN")
+    ap = argparse.ArgumentParser(); ap.add_argument("arm_dir", nargs="?"); ap.add_argument("--collect"); ap.add_argument("--out", default="R71_RETURN")
     ap.add_argument("--arm-table", default=None)
     a = ap.parse_args()
     if a.collect:

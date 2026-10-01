@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """R69: gather every reduced arm into compact return tables. Nothing here interprets results.
 
-python3 r69_collect.py --runs <runs_dir> --arms r70_manifest/arm_table.tsv --out <out_dir> [--level 0] [--params bag_params.json]
+python3 r69_collect.py --runs <runs_dir> --arms r71_manifest/arm_table.tsv --out <out_dir> [--level 0] [--params bag_params.json]
 Writes into <out_dir>:
   phase_summary.csv            one row per arm (flat reducer metrics) plus the alignment-free deviation-from-baseline columns (below)
   arm_scan_all.csv.gz          every arm's per-scan table THINNED by --level (levels below). Column dev_from_baseline_mm added. Exact scan times in column t (4 decimals).
@@ -146,7 +146,7 @@ def main():
     for key, nm in BASE.items():
         base_tabs[key] = load_base(nm)
     for sq in sorted(set(plan.seq) - {"eee_01"}):
-        base_tabs["seq:" + sq] = load_base("r70_base_%s_fq" % sq)
+        base_tabs["seq:" + sq] = load_base("r71_base_%s_fq" % sq)
     for _, p in plan.iterrows():
         D = os.path.join(a.runs, p.arm)
         sj = os.path.join(D, "arm_summary.json")
@@ -161,7 +161,8 @@ def main():
             manifests[p.arm] = json.load(open(cm))
         # compact outputs of r65_compress.py
         cdir = os.path.join(a.out, "compact", p.arm)
-        for pat in ("*_compact.csv.gz", "*_windows.csv.gz", "*_blocks.csv", "*_all.csv.gz", "plane_trace_window.csv.gz", "sensor_stamps_summary.json", "compress_manifest.json"):
+        for pat in ("*_compact.csv.gz", "*_windows.csv.gz", "*_blocks.csv", "*_all.csv.gz", "plane_trace_window.csv.gz", "sensor_stamps_summary.json", "compress_manifest.json",
+                    "residual_info_*", "crossframe_*", "knot_windows.csv", "knot_trend_stationary.csv"):   # R71 analysis outputs
             for fp in glob.glob(os.path.join(D, pat)):
                 os.makedirs(cdir, exist_ok=True)
                 shutil.copy(fp, cdir)
@@ -205,7 +206,7 @@ def main():
         ("00_id_baseline_full", ["00_id_baseline_full_rerun"], "determinism control: identical full-bag rerun"),
         ("00_id_baseline_60s", ["00_id_default_posecov_60s"], "compiled default plane_fit_pose_cov_mode (now sensor_only) equals the pinned value"),
         ("00_id_baseline_60s", ["00_id_infl_whole_f1_60s"], "whole-run inflation at factor 1 is the identity"),
-        ("00_id_baseline_60s", ["r70_diag_on_baseline_60s"], "new write-only dumps on (G8a)"),
+        ("00_id_baseline_60s", ["r71_diag_on_baseline_60s"], "new write-only dumps on (G8a)"),
     ]
     with open(os.path.join(a.out, "identity_controls.txt"), "w") as f:
         f.write("sha256 of state_trace.csv with the run_id column blanked (empty = file missing)\n")

@@ -286,7 +286,9 @@ void writeJointKnotAllScanDiagnostics(
            "before_attitude_distance,after_attitude_distance,dtheta_x,dtheta_y,dtheta_z,dtheta_norm,"
            "before_velocity_distance,after_velocity_distance,dv_x,dv_y,dv_z,dv_norm,"
            "dbg_x,dbg_y,dbg_z,dbg_norm,dba_x,dba_y,dba_z,dba_norm,"
-           "adjacent_bg_difference,adjacent_ba_difference\n";
+           "adjacent_bg_difference,adjacent_ba_difference,"
+           "after_theta_x,after_theta_y,after_theta_z,after_p_x,after_p_y,after_p_z,after_v_x,after_v_y,after_v_z,"
+           "after_bg_x,after_bg_y,after_bg_z,after_ba_x,after_ba_y,after_ba_z\n";   // R71: absolute knot state after the iteration (F-370)
   for (int k = 0; k < after.knotCount(); ++k) {
     const JointKnot& b = before.knots()[k];
     const JointKnot& a = after.knots()[k];
@@ -311,7 +313,12 @@ void writeJointKnotAllScanDiagnostics(
         << dv.x() << ',' << dv.y() << ',' << dv.z() << ',' << dv.norm() << ','
         << dbg.x() << ',' << dbg.y() << ',' << dbg.z() << ',' << dbg.norm() << ','
         << dba.x() << ',' << dba.y() << ',' << dba.z() << ',' << dba.norm() << ','
-        << adjacent_bg << ',' << adjacent_ba << '\n';
+        << adjacent_bg << ',' << adjacent_ba;
+    const V3D ath = Log(a.R);
+    out << ',' << ath.x() << ',' << ath.y() << ',' << ath.z() << ',' << a.p.x() << ',' << a.p.y() << ',' << a.p.z()
+        << ',' << a.v.x() << ',' << a.v.y() << ',' << a.v.z()
+        << ',' << after.biasGyr(k).x() << ',' << after.biasGyr(k).y() << ',' << after.biasGyr(k).z()
+        << ',' << after.biasAcc(k).x() << ',' << after.biasAcc(k).y() << ',' << after.biasAcc(k).z() << '\n';
   }
   out.flush();
 }

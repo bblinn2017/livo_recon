@@ -10,6 +10,8 @@
 #include "livo_recon/diagnostics/state_trace.h"
 
 #include <cmath>
+#include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <map>
 #include <functional>
@@ -301,6 +303,37 @@ void logResidualGeometry(int frame_idx, const std::vector<Residual>& residuals)
   o.flush();
 }
 
+
+// R71 (F-363): write-only per-residual dump for the frames listed in lio/residual_dump_frames (iteration 0, i.e. at the
+// propagated state), plus the linearisation state. Lets the information each residual claims (w_i h_i h_i^T) be compared
+// offline with what the residuals jointly deliver (leverage, per-plane groups, split-half and cross-frame solutions).
+// h_rot / h_pos are the rotation and position Jacobian rows (point_cross_normal, normal); w_i = 1 / sigma_squared.
+void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const std::vector<Residual>& residuals)
+{
+  static PersistentLogStream log("residual_dump.csv");
+  static PersistentLogStream slog("residual_dump_state.csv");
+  bool first = false, sfirst = false;
+  std::ofstream& o = log.stream(&first);
+  std::ofstream& so = slog.stream(&sfirst);
+  if (first)
+    o << "frame,iter,idx,source_index,t,r,sigma_squared,plane_var_term,plane_key,node_id,tier,vis,"
+         "hrot_x,hrot_y,hrot_z,hpos_x,hpos_y,hpos_z,wx,wy,wz,bx,by,bz\n";
+  if (sfirst) so << "frame,iter,n_resid,px,py,pz,rvx,rvy,rvz\n";
+  const V3D rv = Log(st.rot());
+  so << frame_idx << ',' << iteration << ',' << residuals.size() << ',' << std::setprecision(17) << st.pos().x() << ','
+     << st.pos().y() << ',' << st.pos().z() << ',' << rv.x() << ',' << rv.y() << ',' << rv.z() << '\n';
+  o << std::setprecision(9);
+  for (size_t i = 0; i < residuals.size(); ++i) {
+    const auto& r = residuals[i];
+    o << frame_idx << ',' << iteration << ',' << i << ',' << r.source_index << ',' << r.t << ',' << r.r << ',' << r.sigma_squared << ','
+      << r.plane_var_term << ',' << reinterpret_cast<uintptr_t>(r.plane_id) << ',' << r.plane_node_id << ',' << r.match_tier << ',' << r.vis_state
+      << ',' << r.point_cross_normal.x() << ',' << r.point_cross_normal.y() << ',' << r.point_cross_normal.z()
+      << ',' << r.normal.x() << ',' << r.normal.y() << ',' << r.normal.z()
+      << ',' << r.world_point.x() << ',' << r.world_point.y() << ',' << r.world_point.z()
+      << ',' << r.raw_body_point.x() << ',' << r.raw_body_point.y() << ',' << r.raw_body_point.z() << '\n';
+  }
+  o.flush(); so.flush();
+}
 }  // namespace
 
 LioProcBase::LioProcBase(NodeContext& ctx)
@@ -367,6 +400,21 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
         throw std::invalid_argument("lio/info_scale/rotation and /position must be >= 1");
       if (opts_.info_scale.rotation == 1.0 && opts_.info_scale.position == 1.0)
         throw std::invalid_argument("lio/info_scale/mode=block with rotation == position == 1 is inert (use mode=off)");
+    }
+  }
+  {   // R71: per-residual dump frames, a comma-separated list of frame indices in ONE string key (job overrides carry scalars only); empty = off
+    std::string dump_frames;
+    paramWarn<std::string>(pnh, "lio/residual_dump_frames", dump_frames, std::string());
+    opts_.residual_dump_frames.clear();
+    std::stringstream ss(dump_frames);
+    std::string tok;
+    while (std::getline(ss, tok, ',')) {
+      if (tok.empty()) continue;
+      char* end = nullptr;
+      const long v = std::strtol(tok.c_str(), &end, 10);
+      if (end == tok.c_str() || *end != '\0' || v < 1)
+        throw std::invalid_argument("lio/residual_dump_frames: '" + tok + "' is not a positive integer frame index (comma-separated list, e.g. \"1,2,3,10\")");
+      opts_.residual_dump_frames.push_back(static_cast<int>(v));
     }
   }
   paramWarn<bool>(pnh, "lio/residual_geometry_en", opts_.residual_geometry_en, false);   // R70: residual_geometry.csv (write-only)
@@ -806,6 +854,9 @@ double LioProcBase::estimateStateCorrection(
     logLivePointCov(voxel_map_->frame_idx_, pts);
   if (opts_.residual_geometry_en && diagnostic_gn_iteration_ == 0)   // R70: write-only residual geometry
     logResidualGeometry(voxel_map_->frame_idx_, residuals_);
+  if (!opts_.residual_dump_frames.empty() && diagnostic_gn_iteration_ == 0 &&
+      std::find(opts_.residual_dump_frames.begin(), opts_.residual_dump_frames.end(), voxel_map_->frame_idx_) != opts_.residual_dump_frames.end())
+    logResidualDump(voxel_map_->frame_idx_, diagnostic_gn_iteration_, *state_, residuals_);   // R71: write-only per-residual dump
 
   if (opts_.log_debug_en && diagnostic_gn_iteration_ >= 0) {
     static PersistentLogStream log("iekf_factor_iteration.csv");

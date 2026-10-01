@@ -377,7 +377,14 @@ void LioProcIekf::deskewAndDownsample(MeasureGroup& mg)
 }
 
 
-LioProcIekf::~LioProcIekf() = default;
+LioProcIekf::~LioProcIekf()
+{
+  // R71 (F-350): the iekf processor never wrote engagement.txt, so gates G13/H7(a) tested nothing.
+  const std::string report = engagementReport();
+  ROS_WARN_STREAM("\n" << report);
+  std::ofstream out(debugLogPath("engagement.txt"), std::ios::trunc);
+  if (out) out << report << '\n';
+}
 
 std::string LioProcIekf::engagementReport() const
 {

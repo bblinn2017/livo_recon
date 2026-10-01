@@ -1,7 +1,1 @@
-r70_diag_on_baseline_60s
-r70_mx_baseline_fq_60s
-r70_mx_baseline_mq_60s
-r70_mx_cb_fq_f1_60s
-r70_mx_cb_fq_f10_60s
-r70_mx_cb_mq_f10_60s
-r70_mx_sensor_fq_f10_60s
+r71_diag_on_baseline_60s

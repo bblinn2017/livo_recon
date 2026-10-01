@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """r69_unbundle.py -- after the listener has handled the queues: gather each job's committed, reduced outputs into <runs>/<arm>/ (planning agent's, R69).
 
-    python3 tools/r69/r69_unbundle.py --specs r70_manifest/listener_spec_smoke.json r70_manifest/listener_spec_main.json --root . --runs r70_runs
+    python3 tools/r69/r69_unbundle.py --specs r71_manifest/listener_spec_smoke.json r71_manifest/listener_spec_main.json --root . --runs r71_runs
             [--matrices-arms tools/r69/matrices_arms.txt]
 
 For every job in every queue of the specs:
@@ -71,7 +71,7 @@ def main():
                         # "[config] refused: ..." line fires early, then roslaunch's own
                         # trailing [params] dump + shutdown banner pushes it out of the last
                         # 40 lines) -- confirmed live: bootstrap_reduce.py's G6 gate failed for
-                        # all 3 r70_refuse_* arms even though the full run.log (in the queue
+                        # all 3 r71_refuse_* arms even though the full run.log (in the queue
                         # dir) does contain the expected text, just not within its own last 40
                         # lines. Same class of bug hit and fixed in R68 (run_log_tail.txt there
                         # had the identical problem). Copy the full run.log instead of a tail;

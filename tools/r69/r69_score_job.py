@@ -25,7 +25,9 @@ BIG = ["state_trace.csv", "lio_gt_matched.csv", "imu_cov_growth.csv", "frame_sta
        "sensor_stamps.csv", "point_cov_stats.csv", "surface_map_frames.csv", "frame_window.csv", "akf_q.csv", "coupled_scan_status.csv",
        "motion_q_scan.csv", "post_calibration_voxelmap.csv", "lio_update_diag.csv", "live_point_cov.csv",
        "pose_control_first_frame_solve_matrices.txt",
-       "residual_geometry.csv", "info_scale.csv", "redundancy_renorm.csv"]   # R70 write-only logs
+       "residual_geometry.csv", "info_scale.csv", "redundancy_renorm.csv",   # R70 write-only logs
+       "residual_dump.csv", "residual_dump_state.csv",                        # R71 per-residual dump (selected frames)
+       "joint_knot_all_scans.csv", "joint_knot_scan_summary.csv"]            # coupled knot diagnostics (full diag only)
 
 
 def find(name, roots):
@@ -62,7 +64,15 @@ def archive(src, dst_dir, name):
             "head_lzma_ratio": round(len(head) / max(1, xz), 3) if xz else None}
 
 
-def compact_diag(D):
+def sel_frames(df):
+    """Frames of the per-residual dump that are RETURNED whole (return budget, rule 5.12a): 1, 2, 3, 5, 100, 480 for sparse maps, 2 and 100 when a frame has
+    more than 8,000 residuals (dense maps). Every frame is analysed in every arm and every frame is in the lossless archive."""
+    per = df.groupby("frame").size()
+    want = [2, 100] if per.max() > 8000 else [1, 2, 3, 5, 100, 480]
+    return [f for f in want if f in per.index]
+
+
+def compact_diag(D, keep_arm=False):
     """Return-sized, numeric-only reductions of the two new per-frame dumps (rule 5.12b; the full files are archived losslessly).
     lio_update_diag_compact.csv.gz: frames 1..60 every iteration, then every 10th frame, last iteration only.
     live_point_cov_compact.csv.gz : frames 1..60 every frame, then every 10th frame."""
@@ -72,9 +82,14 @@ def compact_diag(D):
     if os.path.exists(p):
         df = pd.read_csv(p)
         last = df.groupby("frame", as_index=False).tail(1)
+        first_it = df.groupby("frame", as_index=False).head(1)
         keep = df[df.frame <= 60]
-        late = last[(last.frame > 60) & (last.frame % 10 == 0)]
-        c = pd.concat([keep, late]).sort_values(["frame", "iter"])
+        # R71: the whole stationary window (frames <= 500) keeps iteration 0 and the last iteration of every frame; the R70 thinning
+        # (every 10th frame above 60) left 11 stationary frames and made per-frame LiDAR-only increments untestable.
+        mid = pd.concat([first_it, last]).drop_duplicates(["frame", "iter"])
+        mid = mid[(mid.frame > 60) & (mid.frame <= 500)]
+        late = last[(last.frame > 500) & (last.frame % 10 == 0)]
+        c = pd.concat([keep, mid, late]).sort_values(["frame", "iter"])
         c.to_csv(os.path.join(D, "lio_update_diag_compact.csv.gz"), index=False, float_format="%.7g", compression="gzip")
         out["update_diag_rows"] = int(len(df)); out["update_diag_frames"] = int(df.frame.nunique()); out["update_diag_compact_rows"] = int(len(c))
     p = os.path.join(D, "live_point_cov.csv")
@@ -89,10 +104,62 @@ def compact_diag(D):
         if os.path.exists(p):
             df = pd.read_csv(p)
             fcol = "frame" if "frame" in df.columns else df.columns[0]
-            c = df[(df[fcol] <= 60) | (df[fcol] % 10 == 0)]
+            c = df[(df[fcol] <= 500) | (df[fcol] % 10 == 0)]   # R71: all frames of the stationary window
+            c.to_csv(os.path.join(D, nm + "_compact.csv.gz"), index=False, float_format="%.7g", compression="gzip")
+            out[nm + "_rows"] = int(len(df)); out[nm + "_compact_rows"] = int(len(c))
+    # R71: per-residual dump (selected frames, small) is kept whole; coupled knot diagnostics keep the last iteration of every
+    # scan up to 500 (the stationary window), then every 10th scan.
+    # R71 (F-377): surface census, small and always returned: every 10th frame to 480, every frame 485..620 (the onset window), every 50th after; plus window means.
+    p = os.path.join(D, "surface_map_frames.csv")
+    if os.path.exists(p):
+        df = pd.read_csv(p)
+        if "frame" in df.columns:
+            c = df[((df.frame <= 480) & (df.frame % 10 == 0)) | ((df.frame >= 485) & (df.frame <= 620)) | ((df.frame > 620) & (df.frame % 50 == 0))]
+            c.to_csv(os.path.join(D, "surface_census_compact.csv.gz"), index=False, float_format="%.7g", compression="gzip")
+            num = df.select_dtypes("number")
+            rows = []
+            for nm, lo, hi in (("stationary_1_480", 1, 480), ("onset_485_620", 485, 620), ("motion_621_end", 621, 10 ** 9)):
+                w = num[(df.frame >= lo) & (df.frame <= hi)]
+                if len(w):
+                    r = w.mean().to_dict(); r.update(window=nm, n_frames=int(len(w))); rows.append(r)
+            if rows:
+                pd.DataFrame(rows).to_csv(os.path.join(D, "surface_census_windows.csv.gz"), index=False, float_format="%.7g", compression="gzip")
+            out["surface_census_rows"] = int(len(df))
+    # The per-residual dump is analysed in every arm (r71_analyses) and returned whole only for keep_raw arms (return budget, rule 5.12a);
+    # the lossless gzip archive keeps every dump either way.
+    p = os.path.join(D, "residual_dump.csv")
+    if os.path.exists(p):
+        df = pd.read_csv(p)
+        out["residual_dump_rows"] = int(len(df))
+        if keep_arm:
+            df = df[df.frame.isin(sel_frames(df))]
+            df.to_csv(os.path.join(D, "residual_dump_compact.csv.gz"), index=False, float_format="%.9g", compression="gzip")
+    p = os.path.join(D, "residual_dump_state.csv")
+    if os.path.exists(p) and keep_arm:
+        pd.read_csv(p).to_csv(os.path.join(D, "residual_dump_state_compact.csv.gz"), index=False, float_format="%.9g", compression="gzip")
+    for nm in ("joint_knot_all_scans", "joint_knot_scan_summary"):
+        p = os.path.join(D, nm + ".csv")
+        if os.path.exists(p):
+            df = pd.read_csv(p)
+            if "iteration" in df.columns and "scan_id" in df.columns:
+                df = df.sort_values(["scan_id", "iteration"]).groupby(["scan_id"] + (["knot_index"] if "knot_index" in df.columns else []), as_index=False).tail(1)
+            sc = "scan_id" if "scan_id" in df.columns else df.columns[0]
+            c = df[(df[sc] <= 500) | (df[sc] % 10 == 0)]
             c.to_csv(os.path.join(D, nm + "_compact.csv.gz"), index=False, float_format="%.7g", compression="gzip")
             out[nm + "_rows"] = int(len(df)); out[nm + "_compact_rows"] = int(len(c))
     return out
+
+
+def r71_analyses(D, T):
+    """R71: run the offline analysis tools on the raw logs of this arm (python only; failures are returned, not swallowed)."""
+    res = {}
+    for nm, cmd, trig in (
+        ("residual_info", [sys.executable, os.path.join(T, "r71_residual_info.py"), "dump", "--dump", os.path.join(D, "residual_dump.csv"), "--out", D], "residual_dump.csv"),
+        ("crossframe", [sys.executable, os.path.join(T, "r71_residual_info.py"), "cross", "--diag", os.path.join(D, "lio_update_diag.csv"), "--out", D], "lio_update_diag.csv"),
+        ("knots", [sys.executable, os.path.join(T, "r71_spline_tools.py"), "knots", "--knots", os.path.join(D, "joint_knot_all_scans.csv"), "--out", D], "joint_knot_all_scans.csv")):
+        if os.path.exists(os.path.join(D, trig)):
+            res[nm] = run(cmd, os.path.join(D, "score.log"))
+    return res
 
 
 def main():
@@ -191,7 +258,11 @@ def main():
         except Exception:
             pass
     try:
-        dg = compact_diag(D)
+        dg = compact_diag(D, keep)
+        for k_, rc_ in r71_analyses(D, T).items():
+            dg["analysis_" + k_ + "_rc"] = rc_
+            if rc_ != 0:
+                problems.append("R71 analysis %s failed rc=%s (see score.log)" % (k_, rc_)); ok = False
     except Exception as e:
         dg = {}
         problems.append("compact_diag failed: %s" % e); ok = False

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """stage1b_checks.py -- facts about the new files, read from the RAW files of the finished smoke jobs (planning agent's, R70). No interpretation.
 
-    python3 tools/r69/stage1b_checks.py --spec r70_manifest/listener_spec_smoke.json --root . --out R70_STAGE1B/checks
+    python3 tools/r69/stage1b_checks.py --spec r71_manifest/listener_spec_smoke.json --root . --out R71_STAGE1B/checks
 
 Run it AFTER the dry-run pass of the smoke jobs and BEFORE the deleting pass (it needs the raw files; the archives are checked by the listener's verify stage).
 Writes <out>/stage1b_checks.md and stage1b_checks.json. Each check is independent; a failing check writes `NOT PRODUCED: <reason>` and the others continue.
@@ -78,7 +78,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--spec", required=True); ap.add_argument("--root", default=".")
     ap.add_argument("--out", required=True); ap.add_argument("--listener-dir", default="scripts/parallel")
-    ap.add_argument("--diag-job", default="r70_diag_on_baseline_60s"); ap.add_argument("--k1-job", default="00_id_baseline_60s")
+    ap.add_argument("--diag-job", default="r71_diag_on_baseline_60s"); ap.add_argument("--k1-job", default="00_id_baseline_60s")
     a = ap.parse_args()
     sys.path.insert(0, os.path.join(a.root, a.listener_dir))
     import sweep_listener as sl
@@ -174,7 +174,7 @@ def main():
     def c5():
         out = {"md": []}
         for n, j in sorted(jobs.items()):
-            if not n.startswith("r70_refuse"):
+            if not n.startswith("r71_refuse"):
                 continue
             p = None
             for base in (j.out_dir, j.job_dir):
@@ -217,10 +217,10 @@ def main():
     def c8():
         out = {"md": []}
         for jn, files in ((a.diag_job, ("residual_geometry.csv",)),
-                          ("r70_smoke_block_f12_2_60s", ("info_scale.csv", "engagement.txt")),
-                          ("r70_smoke_block_f10_10_60s", ("info_scale.csv",)),
-                          ("r70_smoke_renorm_60s", ("redundancy_renorm.csv", "engagement.txt")),
-                          ("r70_smoke_surface0p425_60s", ("surface_map_frames.csv",))):
+                          ("r71_smoke_block_f12_2_60s", ("info_scale.csv", "engagement.txt")),
+                          ("r71_smoke_block_f10_10_60s", ("info_scale.csv",)),
+                          ("r71_smoke_renorm_60s", ("redundancy_renorm.csv", "engagement.txt")),
+                          ("r71_smoke_surface0p425_60s", ("surface_map_frames.csv",))):
             if jn not in jobs:
                 out["md"].append("%s: job not in the queues" % jn); continue
             for fnm in files:
@@ -236,6 +236,74 @@ def main():
                     out["md"] += ["**%s / %s** (lines mentioning info_scale / renorm / INERT):" % (jn, fnm), "```"] + [l.rstrip() for l in open(p, errors="replace") if any(k in l for k in ("info_scale", "renorm", "INERT"))][:12] + ["```"]
         return out
 
+    DUMP_FRAMES = [1, 2, 3, 5, 10, 50, 100, 200, 400, 480]    # must equal the frames set on r71_smoke_dump_on_baseline_60s in make_r71_manifest.py
+
+    def c9():
+        """R71 residual dump: requested frames present, per-frame row count, Lambda rebuilt from the dump equals HtH of lio_update_diag at iteration 0
+        (relative < 1e-5), CONTROLS: a frame list with a frame beyond the run reports it absent, the same comparison against another frame's HtH FAILS, and a
+        job with the key unset has no dump file (so the checks can fail)."""
+        import numpy as np
+        out = {"md": []}
+        jn = "r71_smoke_dump_on_baseline_60s"
+        if jn not in jobs:
+            return {"md": ["%s: job not in the queues" % jn]}
+        dump = f_in(jobs[jn], "residual_dump.csv"); st = f_in(jobs[jn], "residual_dump_state.csv"); ud = f_in(jobs[jn], "lio_update_diag.csv")
+        hdr, rows = csv_rows(dump); ci = {h: i for i, h in enumerate(hdr)}
+        frames = sorted(set(int(r[ci["frame"]]) for r in rows))
+        out["md"].append("requested %s; present %s; missing %s; rows %d" % (DUMP_FRAMES, frames, sorted(set(DUMP_FRAMES) - set(frames)), len(rows)))
+        uh, ur = csv_rows(ud); ui = {h: i for i, h in enumerate(uh)}
+        hk = ["HtH_%d%d" % (i, j) for i in range(6) for j in range(i, 6)]
+        def lam_dump(f):
+            R = [r for r in rows if int(r[ci["frame"]]) == f]
+            H = np.array([[float(r[ci[c]]) for c in ("hrot_x", "hrot_y", "hrot_z", "hpos_x", "hpos_y", "hpos_z")] for r in R]); w = 1.0 / np.array([float(r[ci["sigma_squared"]]) for r in R])
+            return (H * w[:, None]).T @ H, len(R)
+        def lam_diag(f):
+            r = next(x for x in ur if int(x[ui["frame"]]) == f and int(x[ui["iter"]]) == 0)
+            L = np.zeros((6, 6)); k = 0
+            for i in range(6):
+                for j in range(i, 6):
+                    L[i, j] = L[j, i] = float(r[ui[hk[k]]]); k += 1
+            return L, int(float(r[ui["n_resid"]]))
+        worst = 0.0; ctl = []
+        for f in frames:
+            A, n1 = lam_dump(f); B, n2 = lam_diag(f)
+            rel = float(np.abs(A - B).max() / np.abs(B).max()); worst = max(worst, rel)
+            out["md"].append("frame %d: rows in dump %d, n_resid in update diag %d, max relative |Lambda_dump - HtH| %.3e" % (f, n1, n2, rel))
+        if len(frames) >= 2:
+            A, _ = lam_dump(frames[0]); B, _ = lam_diag(frames[-1])
+            ctl = float(np.abs(A - B).max() / np.abs(B).max())
+            out["md"].append("CONTROL (must be large): Lambda of frame %d against HtH of frame %d: relative %.3e" % (frames[0], frames[-1], ctl))
+        out["worst_rel"] = worst
+        jb = "r71_smoke_dump_frame_beyond_60s"
+        if jb in jobs:
+            h2, r2 = csv_rows(f_in(jobs[jb], "residual_dump.csv")); c2 = h2.index("frame")
+            fr2 = sorted(set(int(r[c2]) for r in r2))
+            out["md"].append("CONTROL frame list [1, 99999]: frames present %s (99999 must be absent, 1 present)" % fr2)
+        for jz in ("00_id_baseline_60s",):
+            if jz in jobs:
+                present = os.path.exists(os.path.join(jobs[jz].out_dir, "residual_dump.csv")) or os.path.exists(os.path.join(jobs[jz].job_dir, "residual_dump.csv"))
+                out["md"].append("CONTROL key unset (%s): residual_dump.csv present = %s (must be False)" % (jz, present))
+        return out
+
+    def c10():
+        out = {"md": []}
+        jn = "r71_smoke_surface0p425_60s"
+        want = ["n_cells_pts_1_2", "n_cells_pts_3_to_min", "n_cells_inv_secondary_eig", "n_cells_inv_plane_threshold", "n_cells_inv_denom", "n_cells_inv_var_ceiling"]
+        if jn in jobs:
+            hdr, rows = csv_rows(f_in(jobs[jn], "surface_map_frames.csv"))
+            out["md"].append("%s surface_map_frames.csv: new census columns present %s; header ends with %s; rows %d" % (jn, [w in hdr for w in want], hdr[-6:], len(rows)))
+            ci = {h: i for i, h in enumerate(hdr)}
+            if all(w in ci for w in want) and "n_cells_lt_min_points" in ci:
+                bad1 = sum(1 for r in rows if int(r[ci["n_cells_lt_min_points"]]) != int(r[ci["n_cells_pts_1_2"]]) + int(r[ci["n_cells_pts_3_to_min"]]))
+                bad2 = sum(1 for r in rows if int(r[ci["n_cells_fit_invalid"]]) != sum(int(r[ci[w]]) for w in want[2:]))
+                out["md"].append("census identities over %d rows: lt_min_points == pts_1_2 + pts_3_to_min fails in %d rows; fit_invalid == sum of the four inv columns fails in %d rows (both must be 0)" % (len(rows), bad1, bad2))
+        jc = "r71_co_tail_fulldiag_60s"
+        if jc in jobs:
+            hdr, rows = csv_rows(f_in(jobs[jc], "joint_knot_all_scans.csv"))
+            sc = sorted(set(int(r[hdr.index("scan_id")]) for r in rows))
+            out["md"].append("%s joint_knot_all_scans.csv: absolute-state columns present %s; rows %d; distinct scans %d (first %s, last %s; must exceed 1)" % (jc, [c in hdr for c in ("after_v_x", "after_bg_x", "after_ba_x", "after_theta_x")], len(rows), len(sc), sc[:1], sc[-1:]))
+        return out
+
     run("C1", "frame_stats field counts (K=1 baseline 60 s job)", c1)
     run("C2", "first rows and counts of the new files (diagnostics-on job)", c2)
     run("C3", "frame-1 blocks of the K=5 dump against the K=1 dump", c3)
@@ -243,7 +311,9 @@ def main():
     run("C5", "refuse jobs: first error lines", c5)
     run("C6", "timing of files after the sentinel (S7)", c6)
     run("C7", "blocks per frame in the K=5 dump", c7)
-    run("C8", "new R70 files: rows, headers, engagement lines", c8)
+    run("C8", "new R71 files: rows, headers, engagement lines", c8)
+    run("C9", "residual dump: frames, Lambda against update diag, controls", c9)
+    run("C10", "surface census columns and coupled knot absolute columns", c10)
     open(os.path.join(a.out, "stage1b_checks.md"), "w").write("\n".join(md) + "\n")
     json.dump({k: {kk: vv for kk, vv in v.items() if kk != "md"} for k, v in R.items()}, open(os.path.join(a.out, "stage1b_checks.json"), "w"), indent=1, default=str)
     print("\n".join(md))
