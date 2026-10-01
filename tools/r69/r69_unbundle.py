@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """r69_unbundle.py -- after the listener has handled the queues: gather each job's committed, reduced outputs into <runs>/<arm>/ (planning agent's, R69).
 
-    python3 tools/r69/r69_unbundle.py --specs r71_manifest/listener_spec_smoke.json r71_manifest/listener_spec_main.json --root . --runs r71_runs
+    python3 tools/r69/r69_unbundle.py --specs r72_manifest/listener_spec_smoke.json r72_manifest/listener_spec_main.json --root . --runs r72_runs
             [--matrices-arms tools/r69/matrices_arms.txt]
 
 For every job in every queue of the specs:

@@ -1,6 +1,9 @@
 #include "livo_recon/processing/lio_coupled.h"
 
 #include "livo_recon/diagnostics/init_consistency.h"
+#include "livo_recon/diagnostics/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/matrix_dump.h"
+#include "livo_recon/lio/failure_capture.h"
 #include "livo_recon/diagnostics/joint_knots/joint_knot_diagnostic_writer.h"
 #include "livo_recon/diagnostics/r66_writers.h"
 #include "livo_recon/diagnostics/stationary_diagnostic_writer.h"
@@ -8,6 +11,7 @@
 #include "livo_recon/map/voxelmap.h"
 
 #include <cmath>
+#include <fstream>
 #include <limits>
 #include <sstream>
 
@@ -19,9 +23,21 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   const int iterations_before = iterations_;
   const double t_abs = mg.image.t + data_queues_->start_time;
   std::string report;
+  iterations_this_scan_ = 0;
+  if (copts_.failure_dump) lastNonPdCapture().valid = false;   // R72 (F-398): a stale capture from an earlier scan must not be mislabelled
   if (copts_.on_solver_error == "throw")
   {
-    report = processLIOBody(mg);
+    try
+    {
+      report = processLIOBody(mg);
+    }
+    catch (const std::exception& e)
+    {
+      // R72 (F-398): write and flush the dump and the engagement report BEFORE the exception continues (the node then aborts and no
+      // destructor runs, which is why R71's aborted arms left no engagement.txt).
+      if (copts_.failure_dump) writeFailureDump(mg, e.what(), iterations_this_scan_);
+      throw;
+    }
     writeCoupledScanStatus(static_cast<long>(voxel_map_->frame_idx_), t_abs, report,
                            iterations_ - iterations_before, 0, std::string());
     return report;
@@ -35,6 +51,7 @@ std::string LioProcCoupled::processLIO(MeasureGroup& mg)
   }
   catch (const std::exception& e)
   {
+    if (copts_.failure_dump) writeFailureDump(mg, e.what(), iterations_this_scan_);   // R72 (F-398): before the state is restored
     *state_ = snapshot;
     mg.pos_after_lio = state_->pos();
     mg.rot_after_lio = state_->rot();
@@ -151,6 +168,10 @@ std::string LioProcCoupled::processLIOBody(MeasureGroup& mg)
     any_solved = true;
     ++completed;
     ++iterations_;
+    iterations_this_scan_ = completed;
+    if (copts_.record_frames > 0 && static_cast<long>(voxel_map_->frame_idx_) >= 1 &&
+        static_cast<long>(voxel_map_->frame_idx_) <= copts_.record_frames)
+      writeIterationRecord(mg, iteration, before);   // R72 (F-398): write-only
 
     if (!copts_.minimal_diagnostics) {
       writeJointKnotLidarInformationDiagnostics(
@@ -223,6 +244,212 @@ std::string LioProcCoupled::processLIOBody(MeasureGroup& mg)
          << " residuals=" << residuals_.size()
          << " stop=" << stop;
   return report.str();
+}
+
+namespace
+{
+
+// One row per knot: [t, R (row-major 9), p (3), v (3)].
+Eigen::MatrixXd knotsMatrix(const JointKnotTrajectory& tr)
+{
+  Eigen::MatrixXd m(tr.knotCount(), 16);
+  for (int k = 0; k < tr.knotCount(); ++k)
+  {
+    const JointKnot& kn = tr.knots()[k];
+    m(k, 0) = kn.t;
+    for (int i = 0; i < 3; ++i)
+      for (int j = 0; j < 3; ++j) m(k, 1 + 3 * i + j) = kn.R(i, j);
+    for (int i = 0; i < 3; ++i) { m(k, 10 + i) = kn.p(i); m(k, 13 + i) = kn.v(i); }
+  }
+  return m;
+}
+
+// One row per knot: [bg (3), ba (3)]; gravity is separate.
+Eigen::MatrixXd biasMatrix(const JointKnotTrajectory& tr)
+{
+  Eigen::MatrixXd m(tr.knotCount(), 6);
+  for (int k = 0; k < tr.knotCount(); ++k)
+  {
+    m.block<1, 3>(k, 0) = tr.biasGyr(k).transpose();
+    m.block<1, 3>(k, 3) = tr.biasAcc(k).transpose();
+  }
+  return m;
+}
+
+Eigen::VectorXd ascendingEigenvalues(const Eigen::MatrixXd& M)
+{
+  const Eigen::MatrixXd S = 0.5 * (M + M.transpose());
+  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(S, Eigen::EigenvaluesOnly);
+  return es.eigenvalues();
+}
+
+}  // namespace
+
+// R72 (F-398): per-iteration record of the joint solve for map-backed frames 1..record_frames. Everything the question "what exactly
+// changes in the spline" needs: the knots before and after, the LiDAR information (Htz = b_L, HtH = Gamma_L) and the prior
+// information (P^-1, written once per frame) separately, the prior mean pull (vec, prior_rhs), the system matrix A and its spectrum
+// (the positive-definiteness check), the posterior P after this iteration, the step split into LiDAR and prior parts and per-knot
+// step norms, and the tail 18x18 posterior. Write-only; appends to one file per frame; flushed every call.
+void LioProcCoupled::writeIterationRecord(const MeasureGroup& mg, int iteration, const JointKnotTrajectory& before)
+{
+  const long frame = static_cast<long>(voxel_map_->frame_idx_);
+  std::ofstream o(debugLogPath("coupled_record_f" + std::to_string(frame) + ".txt"), std::ios::app);
+  if (!o) return;
+  const JointKnotSolve& sv = last_solve_;
+  const int D = trajectory_.dim();
+  if (iteration == 0)
+  {
+    std::ostringstream meta;
+    meta << "frame=" << frame << " t_abs=" << std::setprecision(17) << (mg.image.t + data_queues_->start_time)
+         << " knot_count=" << copts_.knot_count << " residual_evaluation_time=" << copts_.residual_evaluation_time
+         << " D=" << D << " test_id=" << copts_.test_id << " imu_steps=" << mg.poses.size();
+    dumpText(o, "meta", meta.str());
+    Eigen::MatrixXd head = mg.pose_covariances.empty() ? Eigen::MatrixXd::Zero(18, 18) : mg.pose_covariances.front();
+    applyPriorScalarControls(head, opts_.prior_scalar);
+    dumpMatrix(o, "P18_scan_head_controlled", head);
+    dumpMatrix(o, "P18_after_imu_propagation", state_propagat_.cov());
+    dumpMatrix(o, "P_joint_prior", joint_prior_.P);
+    dumpMatrix(o, "P_joint_prior_inverse", joint_prior_.P_inverse);
+    dumpVector(o, "P_joint_prior_eigenvalues", ascendingEigenvalues(joint_prior_.P));
+    dumpMatrix(o, "knots_prior_mean", knotsMatrix(imu_prior_mean_));
+    dumpMatrix(o, "bias_prior_mean", biasMatrix(imu_prior_mean_));
+    dumpVector(o, "gravity_prior_mean", imu_prior_mean_.gravity());
+    Eigen::MatrixXd steps(mg.poses.size(), 2);
+    for (size_t m = 0; m < mg.poses.size(); ++m) { steps(m, 0) = mg.poses[m].t; steps(m, 1) = mg.poses[m].dt; }
+    dumpMatrix(o, "imu_step_t_dt", steps);
+    for (size_t m = 0; m < mg.imu_state_transitions.size() && m < mg.imu_process_covariances.size(); ++m)
+    {
+      dumpMatrix(o, "imu_F_" + std::to_string(m), mg.imu_state_transitions[m]);
+      dumpMatrix(o, "imu_Q_" + std::to_string(m), mg.imu_process_covariances[m]);
+    }
+  }
+  const std::string pre = "i" + std::to_string(iteration) + "_";
+  dumpMatrix(o, pre + "knots_before", knotsMatrix(before));
+  dumpMatrix(o, pre + "knots_after", knotsMatrix(trajectory_));
+  dumpMatrix(o, pre + "bias_after", biasMatrix(trajectory_));
+  dumpVector(o, pre + "gravity_after", trajectory_.gravity());
+  dumpScalar(o, pre + "n_residuals", static_cast<double>(residuals_.size()));
+  {
+    Eigen::VectorXd by_interval(sv.residual_count_by_interval.size());
+    for (size_t i = 0; i < sv.residual_count_by_interval.size(); ++i) by_interval(i) = sv.residual_count_by_interval[i];
+    dumpVector(o, pre + "residual_count_by_interval", by_interval);
+  }
+  dumpVector(o, pre + "Htz_lidar", sv.b_L);
+  dumpMatrix(o, pre + "HtH_lidar", sv.Gamma_L);
+  dumpVector(o, pre + "vec_mean_minus_prior_mean", sv.vec);
+  dumpVector(o, pre + "prior_rhs", sv.prior_rhs);
+  dumpMatrix(o, pre + "A_system", sv.A);
+  dumpVector(o, pre + "A_eigenvalues", ascendingEigenvalues(sv.A));
+  dumpScalar(o, pre + "A_positive_definite_pass", 1.0);   // reaching this line means symmetricInverse(A) did not throw
+  dumpMatrix(o, pre + "P_joint_posterior", sv.posterior);
+  dumpVector(o, pre + "P_joint_posterior_eigenvalues", ascendingEigenvalues(sv.posterior));
+  dumpVector(o, pre + "delta", sv.delta);
+  dumpVector(o, pre + "lidar_delta", sv.lidar_delta);
+  dumpVector(o, pre + "prior_delta", sv.prior_delta);
+  dumpScalar(o, pre + "delta_norm", sv.delta.norm());
+  dumpScalar(o, pre + "step_scale_applied", copts_.step_scale);
+  {
+    Eigen::MatrixXd per_knot(std::max(0, trajectory_.knotCount() - 1), 3);
+    for (int k = 1; k < trajectory_.knotCount(); ++k)
+    {
+      const int off = trajectory_.knotOffset(k);
+      per_knot(k - 1, 0) = sv.delta.segment<3>(off).norm();       // rotation
+      per_knot(k - 1, 1) = sv.delta.segment<3>(off + 3).norm();   // position
+      per_knot(k - 1, 2) = sv.delta.segment<3>(off + 6).norm();   // velocity
+    }
+    dumpMatrix(o, pre + "delta_norm_per_knot_rot_pos_vel", per_knot);
+  }
+  dumpMatrix(o, pre + "tail_P18_posterior", extractTailStateCovariance(trajectory_, sv.posterior, *state_));
+  o.flush();
+}
+
+// R72 (F-398): everything about a failing scan, written and flushed before the exception continues. The matrix that failed (and its
+// spectrum and LDLT pivots), P before the correction (the 18x18 fixed prior and the joint prior with its inverse), every term of the
+// update that was formed (Htz, HtH, vec, the right-hand-side parts, A), the IMU F/Q records the prior was built from, the knots,
+// and, when an earlier iteration of the same scan had succeeded, that iteration's posterior and step. No size cap: the code throws
+// at the first non-PD matrix, so this is written once per run.
+void LioProcCoupled::writeFailureDump(const MeasureGroup& mg, const std::string& what, int completed_iterations)
+{
+  const long frame = static_cast<long>(voxel_map_->frame_idx_);
+  const NonPdCapture& cap = lastNonPdCapture();
+  {
+    std::ofstream o(debugLogPath("coupled_failure_dump.txt"), std::ios::trunc);
+    if (o)
+    {
+      std::ostringstream meta;
+      meta << "frame=" << frame << " t_abs=" << std::setprecision(17) << (mg.image.t + data_queues_->start_time)
+           << " completed_iterations_before_failure=" << completed_iterations << " knot_count=" << copts_.knot_count
+           << " residual_evaluation_time=" << copts_.residual_evaluation_time << " test_id=" << copts_.test_id
+           << " on_solver_error=" << copts_.on_solver_error;
+      dumpText(o, "meta", meta.str());
+      dumpText(o, "what", what);
+      dumpText(o, "capture_valid", cap.valid ? "1" : "0");
+      dumpText(o, "capture_where", cap.valid ? cap.where : std::string("none (the exception did not come from a positive-definiteness check)"));
+      if (cap.valid)
+      {
+        dumpMatrix(o, "failed_matrix_symmetrised", cap.matrix);
+        dumpVector(o, "failed_matrix_eigenvalues_ascending", cap.eigenvalues);
+        dumpVector(o, "failed_matrix_ldlt_diag", cap.ldlt_diag);
+        dumpScalar(o, "failed_matrix_ldlt_info", cap.ldlt_info);
+        dumpScalar(o, "failed_matrix_ldlt_positive", cap.ldlt_positive ? 1.0 : 0.0);
+      }
+      dumpMatrix(o, "P18_prior_cov_before_correction", prior_cov_);
+      dumpMatrix(o, "P18_after_imu_propagation", state_propagat_.cov());
+      Eigen::MatrixXd head = mg.pose_covariances.empty() ? Eigen::MatrixXd::Zero(18, 18) : mg.pose_covariances.front();
+      applyPriorScalarControls(head, opts_.prior_scalar);
+      dumpMatrix(o, "P18_scan_head_controlled", head);
+      Eigen::MatrixXd steps(mg.poses.size(), 2);
+      for (size_t m = 0; m < mg.poses.size(); ++m) { steps(m, 0) = mg.poses[m].t; steps(m, 1) = mg.poses[m].dt; }
+      dumpMatrix(o, "imu_step_t_dt", steps);
+      for (size_t m = 0; m < mg.imu_state_transitions.size() && m < mg.imu_process_covariances.size(); ++m)
+      {
+        dumpMatrix(o, "imu_F_" + std::to_string(m), mg.imu_state_transitions[m]);
+        dumpMatrix(o, "imu_Q_" + std::to_string(m), mg.imu_process_covariances[m]);
+      }
+      for (size_t m = 0; m < mg.pose_covariances.size(); ++m) dumpMatrix(o, "pose_cov_" + std::to_string(m), mg.pose_covariances[m]);
+      if (trajectory_valid_)
+      {
+        dumpMatrix(o, "knots_current", knotsMatrix(trajectory_));
+        dumpMatrix(o, "bias_current", biasMatrix(trajectory_));
+        dumpVector(o, "gravity_current", trajectory_.gravity());
+        dumpMatrix(o, "knots_imu_prior_mean", knotsMatrix(imu_prior_mean_));
+        dumpMatrix(o, "bias_imu_prior_mean", biasMatrix(imu_prior_mean_));
+      }
+      if (cap.valid && cap.where == "posterior_A")
+      {
+        const JointKnotSolve& p = jointKnotLastFailedSolve();
+        dumpMatrix(o, "P_joint_prior", joint_prior_.P);
+        dumpMatrix(o, "P_joint_prior_inverse", joint_prior_.P_inverse);
+        dumpMatrix(o, "HtH_lidar_Gamma_L", p.Gamma_L);
+        dumpVector(o, "Htz_lidar_b_L", p.b_L);
+        dumpVector(o, "vec_mean_minus_prior_mean", p.vec);
+        dumpVector(o, "prior_rhs", p.prior_rhs);
+        dumpVector(o, "lidar_rhs", p.lidar_rhs);
+        dumpVector(o, "rhs", p.rhs);
+        dumpMatrix(o, "A_system", p.A);
+        dumpScalar(o, "mean_abs_residual", p.mean_abs_residual);
+        Eigen::VectorXd by_interval(p.residual_count_by_interval.size());
+        for (size_t i = 0; i < p.residual_count_by_interval.size(); ++i) by_interval(i) = p.residual_count_by_interval[i];
+        dumpVector(o, "residual_count_by_interval", by_interval);
+        dumpScalar(o, "zero_jacobian_residual_count", p.zero_jacobian_residual_count);
+      }
+      if (completed_iterations > 0)
+      {
+        dumpMatrix(o, "P_joint_posterior_previous_iteration", last_solve_.posterior);
+        dumpVector(o, "delta_previous_iteration", last_solve_.delta);
+        dumpVector(o, "lidar_delta_previous_iteration", last_solve_.lidar_delta);
+        dumpVector(o, "prior_delta_previous_iteration", last_solve_.prior_delta);
+      }
+      o.flush();
+    }
+  }   // closed: the file is complete on disk before the exception continues
+  {
+    std::ostringstream note;
+    note << what << " (frame " << frame << ", after " << completed_iterations << " completed iterations; coupled_failure_dump.txt written)";
+    failure_note_ = note.str();
+    std::ofstream eng(debugLogPath("engagement.txt"), std::ios::trunc);
+    if (eng) { eng << engagementReport() << '\n'; eng.flush(); }
+  }
 }
 
 }  // namespace livo_recon

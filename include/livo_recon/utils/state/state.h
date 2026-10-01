@@ -52,6 +52,12 @@ public:
   void setCalibResult(const M3D& rot, const V3D& bias_gyr, const V3D& bias_acc);
   void setNoiseParams(const V3D& var_acc, const V3D& var_gyr);
 
+  // R72 (F-401): bounded scalar gain on the per-step IMU variance, written once per scan by lio/q_adapt (never by anything else).
+  // 1.0 (default) means ImuProc::propagate does not touch var_*_step at all (bit-identical).
+  void setQGain(double acc, double gyr) { q_gain_acc_ = acc; q_gain_gyr_ = gyr; }
+  double qGainAcc() const { return q_gain_acc_; }
+  double qGainGyr() const { return q_gain_gyr_; }
+
   // The sensor's OWN measured noise, from CalibProc's static window --
   // stored ALWAYS and never used directly as the operating value. Replacing
   // the operating variance with this, per the config's own sweep comment,
@@ -248,6 +254,7 @@ private:
   Eigen::Matrix<double, 6, 6> prior_pose_block_ = Eigen::Matrix<double, 6, 6>::Zero();
   bool prior_pose_block_valid_ = false;
   V3D var_acc_, var_gyr_, cov_bias_gyr_, cov_bias_acc_;
+  double q_gain_acc_ = 1.0, q_gain_gyr_ = 1.0;   // R72 (F-401), see setQGain()
   V3D var_acc_floor_ = V3D::Zero(), var_gyr_floor_ = V3D::Zero();
   // Right-perturbation attitude covariance after gravity alignment. Equal
   // values reproduce the former isotropic initialization exactly.

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """make_broken_clone.py -- stage-1b failure-path proof helper (planning agent's, R70). Touches only the LISTENER TEST, never an estimator run.
 
-    python3 tools/r69/make_broken_clone.py --spec r71_manifest/listener_spec_smoke.json --root . --src 00_id_baseline_60s --dst 00_id_broken_clone
+    python3 tools/r69/make_broken_clone.py --spec r72_manifest/listener_spec_smoke.json --root . --src 00_id_baseline_60s --dst 00_id_broken_clone
 
-Copies the FINISHED smoke job <src> (queue dir entry and out dir) to the queue `r71_smoke_broken` as <dst>, rewrites OUT_DIR in the copy's job.env, removes the
+Copies the FINISHED smoke job <src> (queue dir entry and out dir) to the queue `r72_smoke_broken` as <dst>, rewrites OUT_DIR in the copy's job.env, removes the
 copy's `.listener/` and `listener_out/`, and deletes ONLY `state_reference.txt` in the copy's out dir (the reducer needs it, so the stage must fail and the raw
-must survive). The arm-table row for <dst> exists (make_r71_manifest.py writes it), so the failure is caused by the missing file and nothing else.
+must survive). The arm-table row for <dst> exists (make_r72_manifest.py writes it), so the failure is caused by the missing file and nothing else.
 Run it AFTER the dry-run pass of the smoke jobs finished and BEFORE the deleting pass (the copy needs the raw files).
 Prints every path it created and the out dir the broken spec resolves to. Exit 0 only if that out dir exists and state_reference.txt is gone.
 """
@@ -46,7 +46,7 @@ def main():
         lines = []
         for line in open(env, errors="replace"):
             if line.startswith("OUT_DIR="):
-                new = line.replace("/%s/" % os.path.basename(os.path.dirname(sj.out_dir)), "/r71_smoke_broken/").replace(a.src, a.dst)
+                new = line.replace("/%s/" % os.path.basename(os.path.dirname(sj.out_dir)), "/r72_smoke_broken/").replace(a.src, a.dst)
                 changed += int(new != line); line = new
             lines.append(line)
         open(env, "w").write("".join(lines))

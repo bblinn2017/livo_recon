@@ -28,6 +28,13 @@ struct LioProcCoupledOptions
   // state step only; the posterior covariance is still the full-step one (a stated inconsistency of this test).
   double step_scale = 1.0;
 
+  // R72 (F-398). failure_dump: on a solver exception write coupled_failure_dump.txt (every matrix and term of the failing update,
+  // see writeFailureDump) and engagement.txt BEFORE the exception continues, so a node that then aborts still leaves both behind.
+  // Behaviour when nothing fails is unchanged. record_frames N > 0: for map-backed frames 1..N write coupled_record_f<k>.txt with the
+  // per-iteration matrices and vectors of the joint solve (writeIterationRecord); write-only, 0 (default) = off.
+  bool failure_dump = false;
+  int record_frames = 0;
+
   JointKnotResidualTime residualTime() const {
     return residual_evaluation_time == "tail"
         ? JointKnotResidualTime::Tail
@@ -48,6 +55,11 @@ public:
 
 private:
   std::string processLIOBody(MeasureGroup& mg);
+  // R72 (F-398): write-only diagnostics, see LioProcCoupledOptions::failure_dump / record_frames.
+  void writeFailureDump(const MeasureGroup& mg, const std::string& what, int completed_iterations);
+  void writeIterationRecord(const MeasureGroup& mg, int iteration, const JointKnotTrajectory& before);
+  int iterations_this_scan_ = 0;   // completed GN iterations of the scan being processed (for the failure dump)
+  std::string failure_note_;       // appended to engagementReport() after a failure
   long solver_errors_skipped_ = 0;
   const char* firstFrameArchitectureName() const override { return "coupled_joint_knots"; }
   void makeEvaluationPoints(const MeasureGroup& mg,

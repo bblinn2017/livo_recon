@@ -4,6 +4,7 @@
 #include "livo_recon/utils/state/state.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/diagnostics/motion_q_writer.h"
+#include "livo_recon/lio/q_adapt.h"
 #include "livo_recon/diagnostics/state_trace.h"
 
 #include <fstream>
@@ -126,6 +127,38 @@ ImuProc::ImuProc(NodeContext& ctx)
   : state_(ctx.state), profiler_(ctx.profiler), data_queues_(ctx.data_queues)
 {}
 
+// R72 (F-401): engagement of the IMU-side alternatives. Written in the destructor (like the estimators' engagement.txt); a
+// run that aborts before destruction writes nothing, which the agent must report rather than infer from.
+std::string ImuProc::engagementReport() const
+{
+  std::ostringstream o;
+  o << "[engagement/imu] propagations=" << propagation_index_;
+  if (opts_.energy_source == "local_poly")
+  {
+    o << "\n  motion/energy_source=local_poly order=" << opts_.local_poly_order << " scans_used=" << lp_scans_used_
+      << " scans_fallback_to_instant=" << lp_scans_fallback_
+      << " mean_fit_var_acc=" << (lp_scans_used_ > 0 ? lp_var_acc_sum_ / lp_scans_used_ : 0.0)
+      << " mean_fit_var_gyr=" << (lp_scans_used_ > 0 ? lp_var_gyr_sum_ / lp_scans_used_ : 0.0);
+    if (lp_scans_used_ == 0) o << "   <-- INERT: local_poly selected and no scan had enough samples for the fit";
+  }
+  if (opts_.continuous_prior_mode == "wnoa")
+  {
+    o << "\n  continuous_prior=wnoa qc_acc=" << opts_.continuous_prior_qc_acc << " qc_gyr=" << opts_.continuous_prior_qc_gyr
+      << " steps=" << wnoa_steps_ << " mean_vv_added=" << (wnoa_steps_ > 0 ? wnoa_vv_sum_ / wnoa_steps_ : 0.0);
+    if (wnoa_steps_ == 0) o << "   <-- INERT: wnoa selected and no step received the disturbance";
+  }
+  o << "\n  q_gain steps=" << gain_steps_ << " steps_with_gain_ne_1=" << gain_steps_applied_
+    << " max_gain_acc=" << gain_acc_max_ << " max_gain_gyr=" << gain_gyr_max_;
+  return o.str();
+}
+
+ImuProc::~ImuProc()
+{
+  if (opts_.energy_source == "instant" && opts_.continuous_prior_mode == "off" && gain_steps_applied_ == 0) return;
+  std::ofstream out(debugLogPath("engagement_imu.txt"), std::ios::trunc);
+  if (out) out << engagementReport() << '\n';
+}
+
 std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
 {
   // History (61-65): see docs/livo_recon_changelog.md#src-processing-imu_processing.cpp-61
@@ -211,6 +244,45 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
                    opts_.motion_gyr_max_dynamic_variance})
     if (!std::isfinite(v) || v < 0.0)
       throw std::invalid_argument("IMU motion-noise scales/caps must be finite and nonnegative");
+  // R72 (F-401): energy source for the motion-Q filter, and the additive WNOA disturbance. Dependency structure: sub-keys exist only
+  // under their mode; a key out of scope is an error, not ignored. Both default to the existing behaviour (bit-identical).
+  paramWarn<std::string>(pnh, "imu/process_noise/motion/energy_source", opts_.energy_source, std::string("instant"));
+  markParamConsumed("imu/process_noise/motion/local_poly/order");
+  if (opts_.energy_source != "instant" && opts_.energy_source != "local_poly")
+    throw std::invalid_argument("imu/process_noise/motion/energy_source must be instant or local_poly");
+  if (opts_.energy_source == "local_poly")
+  {
+    if (opts_.process_noise_model == "fixed")
+      throw std::invalid_argument(
+          "imu/process_noise/motion/energy_source=local_poly has no effect under process_noise/model=fixed (no energy term)");
+    paramWarn<int>(pnh, "imu/process_noise/motion/local_poly/order", opts_.local_poly_order, 2);
+    if (opts_.local_poly_order < 0 || opts_.local_poly_order > 4)
+      throw std::invalid_argument("imu/process_noise/motion/local_poly/order must be in [0, 4]");
+  }
+  else if (pnh.hasParam("imu/process_noise/motion/local_poly/order"))
+    throw std::invalid_argument(
+        "imu/process_noise/motion/local_poly/order is set but imu/process_noise/motion/energy_source=instant");
+  paramWarn<std::string>(pnh, "imu/process_noise/continuous_prior/mode", opts_.continuous_prior_mode, std::string("off"));
+  markParamConsumed("imu/process_noise/continuous_prior/qc_acc");
+  markParamConsumed("imu/process_noise/continuous_prior/qc_gyr");
+  if (opts_.continuous_prior_mode != "off" && opts_.continuous_prior_mode != "wnoa")
+    throw std::invalid_argument("imu/process_noise/continuous_prior/mode must be off or wnoa");
+  if (opts_.continuous_prior_mode == "wnoa")
+  {
+    paramWarn<double>(pnh, "imu/process_noise/continuous_prior/qc_acc", opts_.continuous_prior_qc_acc, 0.0);
+    paramWarn<double>(pnh, "imu/process_noise/continuous_prior/qc_gyr", opts_.continuous_prior_qc_gyr, 0.0);
+    if (!std::isfinite(opts_.continuous_prior_qc_acc) || !std::isfinite(opts_.continuous_prior_qc_gyr) ||
+        opts_.continuous_prior_qc_acc < 0.0 || opts_.continuous_prior_qc_gyr < 0.0)
+      throw std::invalid_argument("imu/process_noise/continuous_prior/qc_acc and qc_gyr must be finite and >= 0");
+    if (opts_.continuous_prior_qc_acc == 0.0 && opts_.continuous_prior_qc_gyr == 0.0)
+      throw std::invalid_argument("imu/process_noise/continuous_prior/mode=wnoa with qc_acc == qc_gyr == 0 is inert (use mode=off)");
+  }
+  else
+  {
+    for (const char* k : {"imu/process_noise/continuous_prior/qc_acc", "imu/process_noise/continuous_prior/qc_gyr"})
+      if (pnh.hasParam(k))
+        throw std::invalid_argument(std::string(k) + " is set but imu/process_noise/continuous_prior/mode=off");
+  }
   // Read directly rather than being wired from LioProcOptions: the two
   // classes are constructed independently and this keeps the single source
   // of truth in the parameter server, where the sweep harness writes it.
@@ -233,6 +305,10 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  bias_model:           " << opts_.bias_model
       << "  gm gyro tau/sigma=" << opts_.gm_gyr_tau << "/" << opts_.gm_gyr_sigma
       << "  gm accel tau/sigma=" << opts_.gm_acc_tau << "/" << opts_.gm_acc_sigma
+      << "\n  motion/energy_source: " << opts_.energy_source
+      << "  local_poly/order=" << opts_.local_poly_order
+      << "\n  continuous_prior:     " << opts_.continuous_prior_mode
+      << "  qc_acc=" << opts_.continuous_prior_qc_acc << "  qc_gyr=" << opts_.continuous_prior_qc_gyr
       << "\n  first_scan_head:      always seeded from first sample (R63)"
       << "\n  log_qhat_en:          " << (opts_.log_qhat_en ? "true" : "false");
   return oss.str();
@@ -328,6 +404,38 @@ void ImuProc::propagate(MeasureGroup& mg)
                     << 2.0 * opts_.gm_gyr_sigma * opts_.gm_gyr_sigma / opts_.gm_gyr_tau << " (rad/s)^2/s, accel "
                     << 2.0 * opts_.gm_acc_sigma * opts_.gm_acc_sigma / opts_.gm_acc_tau << " (m/s^2)^2/s)");
   }
+  // R72 (F-401): imu/process_noise/motion/energy_source=local_poly. One fit per call over the scan's raw samples (t <= scan end):
+  // per-axis residual variance RSS/(n-p) of a local polynomial, used in place of the instantaneous energy below. A scan with too few
+  // samples falls back to the instantaneous energy for that scan (counted). Off (instant) never enters this block.
+  const bool use_lp = dynamic_q && opts_.energy_source == "local_poly";
+  V3D lp_acc = V3D::Zero(), lp_gyr = V3D::Zero();
+  bool lp_ok = false;
+  if (use_lp)
+  {
+    std::vector<double> lp_t;
+    std::vector<Eigen::Vector3d> lp_a, lp_g;
+    for (const auto& smp : mg.imu_samples)
+    {
+      if (smp.t > t_curr) break;
+      lp_t.push_back(smp.t);
+      lp_a.push_back(smp.acc);
+      lp_g.push_back(smp.gyro);
+    }
+    Eigen::Vector3d va = Eigen::Vector3d::Zero(), vg = Eigen::Vector3d::Zero();
+    lp_ok = localPolyResidualVariance(lp_t, lp_a, opts_.local_poly_order, va) &&
+            localPolyResidualVariance(lp_t, lp_g, opts_.local_poly_order, vg);
+    if (lp_ok)
+    {
+      lp_acc = va;
+      lp_gyr = vg;
+      ++lp_scans_used_;
+      lp_var_acc_sum_ += va.mean();
+      lp_var_gyr_sum_ += vg.mean();
+    }
+    else
+      ++lp_scans_fallback_;
+  }
+  const bool lp_step = use_lp && lp_ok;
   ImuSample head = last_imu_sample_;
   auto it = mg.imu_samples.begin();
 
@@ -385,8 +493,8 @@ void ImuProc::propagate(MeasureGroup& mg)
             "motion-dependent Q requires positive stationary calibration floors");
       if (opts_.process_noise_model == "isotropic")
       {
-        const V3D acc_energy = V3D::Constant(dynamic_acc.squaredNorm() / 3.0);
-        const V3D gyr_energy = V3D::Constant(dynamic_gyr.squaredNorm() / 3.0);
+        const V3D acc_energy = lp_step ? V3D::Constant(lp_acc.mean()) : V3D::Constant(dynamic_acc.squaredNorm() / 3.0);
+        const V3D gyr_energy = lp_step ? V3D::Constant(lp_gyr.mean()) : V3D::Constant(dynamic_gyr.squaredNorm() / 3.0);
         if (!motion_noise_primed_)
         {
           filtered_acc_excitation_energy_ = acc_energy;
@@ -409,8 +517,8 @@ void ImuProc::propagate(MeasureGroup& mg)
       }
       else
       {
-        const V3D acc_energy = dynamic_acc.array().square().matrix();
-        const V3D gyr_energy = dynamic_gyr.array().square().matrix();
+        const V3D acc_energy = lp_step ? V3D(lp_acc) : V3D(dynamic_acc.array().square().matrix());
+        const V3D gyr_energy = lp_step ? V3D(lp_gyr) : V3D(dynamic_gyr.array().square().matrix());
         if (!motion_noise_primed_)
         {
           filtered_acc_excitation_energy_ = acc_energy;
@@ -446,6 +554,16 @@ void ImuProc::propagate(MeasureGroup& mg)
       }
       var_acc_step = state_->varAccFloor() * opts_.motion_acc_floor_scale + acc_dynamic_variance;
       var_gyr_step = state_->varGyrFloor() * opts_.motion_gyr_floor_scale + gyr_dynamic_variance;
+    }
+    // R72 (F-401): lio/q_adapt gain (written once per scan by the LIO side; 1.0 = untouched, bit-identical).
+    ++gain_steps_;
+    if (state_->qGainAcc() != 1.0 || state_->qGainGyr() != 1.0)
+    {
+      var_acc_step *= state_->qGainAcc();
+      var_gyr_step *= state_->qGainGyr();
+      ++gain_steps_applied_;
+      gain_acc_max_ = std::max(gain_acc_max_, state_->qGainAcc());
+      gain_gyr_max_ = std::max(gain_gyr_max_, state_->qGainGyr());
     }
     ++q_samples;
     q_acc_sum += var_acc_step;
@@ -556,6 +674,22 @@ void ImuProc::propagate(MeasureGroup& mg)
       cov_w.block<3,3>(StateGroup::idxP(), StateGroup::idxP()) = opts_.q_alpha_acc * 0.25 * dt2 * dt2 * acc_noise_world;
       cov_w.block<3,3>(StateGroup::idxP(), StateGroup::idxV()) = opts_.q_alpha_acc * 0.5  * dt  * dt2 * acc_noise_world;
       cov_w.block<3,3>(StateGroup::idxV(), StateGroup::idxP()) = opts_.q_alpha_acc * 0.5  * dt  * dt2 * acc_noise_world;
+    }
+
+    // R72 (F-401): additive continuous white-noise-on-acceleration disturbance (exact discrete blocks, see lio/q_adapt.h).
+    if (opts_.continuous_prior_mode == "wnoa")
+    {
+      const WnoaBlocks w = wnoaBlocks(opts_.continuous_prior_qc_acc, opts_.continuous_prior_qc_gyr, dt);
+      cov_w.block<3,3>(StateGroup::idxR(), StateGroup::idxR()).diagonal() += V3D::Constant(w.rr);
+      cov_w.block<3,3>(StateGroup::idxV(), StateGroup::idxV()).diagonal() += V3D::Constant(w.vv);
+      if (opts_.second_order)
+      {
+        cov_w.block<3,3>(StateGroup::idxP(), StateGroup::idxP()).diagonal() += V3D::Constant(w.pp);
+        cov_w.block<3,3>(StateGroup::idxP(), StateGroup::idxV()).diagonal() += V3D::Constant(w.pv);
+        cov_w.block<3,3>(StateGroup::idxV(), StateGroup::idxP()).diagonal() += V3D::Constant(w.pv);
+      }
+      ++wnoa_steps_;
+      wnoa_vv_sum_ += w.vv;
     }
 
     // T0-E/T7 step 2: each block above is already pre-scaled by its own

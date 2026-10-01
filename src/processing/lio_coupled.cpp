@@ -43,6 +43,10 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
   cfg.nestedMode(true, "estimator/mode=coupled", "estimator/coupled/on_solver_error",
                  copts_.on_solver_error, "throw", {"throw", "skip_scan"});
   cfg.nested<double>(true, "estimator/mode=coupled", "estimator/coupled/step_scale", copts_.step_scale, 1.0);
+  cfg.nested<bool>(true, "estimator/mode=coupled", "estimator/coupled/failure_dump", copts_.failure_dump, false);
+  cfg.nested<int>(true, "estimator/mode=coupled", "estimator/coupled/record_frames", copts_.record_frames, 0);
+  if (copts_.record_frames < 0)
+    cfg.requireCombination("estimator/coupled/record_frames must be >= 0");
   if (!(copts_.step_scale > 0.0 && copts_.step_scale <= 1.0))
     cfg.requireCombination("estimator/coupled/step_scale must be in (0, 1]");
   if (copts_.knot_count < 2)
@@ -55,6 +59,10 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
     cfg.requireCombination(
         "lio/info_scale/mode=block is implemented for estimator/mode=iekf only (the coupled estimator accumulates "
         "joint-knot information, not the 6x6 HtH the block scale acts on)");
+  if (opts_.step_cap.on())
+    cfg.requireCombination(
+        "lio/ekf/step_cap/mode=hard is implemented for estimator/mode=iekf only (the coupled estimator does not use "
+        "EkfUpdate::applyMeanUpdate; its own step knob is estimator/coupled/step_scale)");
   if (state_->gravityS2())
     cfg.requireCombination(
         "state/gravity_model=s2 is not implemented for the coupled estimator "
@@ -100,7 +108,10 @@ std::string LioProcCoupled::engagementReport() const
       << " clipping=none"
       << " on_solver_error=" << copts_.on_solver_error
       << " solver_errors_skipped=" << solver_errors_skipped_
-      << " step_scale=" << copts_.step_scale;
+      << " step_scale=" << copts_.step_scale
+      << " failure_dump=" << (copts_.failure_dump ? "true" : "false")
+      << " record_frames=" << copts_.record_frames;
+  if (!failure_note_.empty()) out << "\n  FAILURE: " << failure_note_;
   return out.str();
 }
 

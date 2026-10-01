@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 """R69: assemble the return as ONE zip and a checklist that says, item by item, what is present and what is missing. Nothing is interpreted.
 
-python3 tools/r69/build_return.py --ret R71_RETURN --runs r71_runs --arms r71_manifest/arm_table.tsv --manifest r71_manifest \
-        --queue-dir ablations/_job_queue/r71_smoke,ablations/_job_queue/r71_refuse,ablations/_job_queue/r71_main --date 2026-10-01 [--params bag_params.json]
-Before running it, YOU write into --ret (agent-authored, see R71_INSTRUCTIONS.md section 10): report.md, STATE.md, agent_edits.patch, code_answers.md,
-R71_tree.tar.gz, unit_tests/, checks/, bag_stats/, launch/ (launch_command.txt, containers_file.txt, launch_time.txt, checkup_cycles/ with every cycle's output).
+python3 tools/r69/build_return.py --ret R72_RETURN --runs r72_runs --arms r72_manifest/arm_table.tsv --manifest r72_manifest \
+        --queue-dir ablations/_job_queue/r72_smoke,ablations/_job_queue/r72_refuse,ablations/_job_queue/r72_ef,... --date 2026-10-01 [--params bag_params.json]
+Before running it, YOU write into --ret (agent-authored, see R72_INSTRUCTIONS.md section 10): report.md, STATE.md, agent_edits.patch, code_answers.md,
+R72_tree.tar.gz, unit_tests/, checks/, bag_stats/, launch/ (launch_command.txt, containers_file.txt, launch_time.txt, checkup_cycles/ with every cycle's output).
 This script adds: phase_summary.csv, arm_scan_all.csv.gz, arm_ol_tau_all.csv.gz, plane_fit_reasons_all.csv.gz, plane_fit_trace_counts_all.csv.gz,
 completeness.csv, identity_controls.txt, duplicates.tsv, summaries_all.json, compress_manifests.json, sensor_stamps_summaries.json, compact/, queue/, RETURN_CHECKLIST.md,
-then packs everything into ONE zip R71_RETURN_<date>.zip. It tries thinning levels 0..3 of arm_scan_all.csv.gz (r69_collect.py documents them; each keeps the
+then packs everything into ONE zip R72_RETURN_<date>.zip. It tries thinning levels 0..3 of arm_scan_all.csv.gz (r69_collect.py documents them; each keeps the
 sufficiency statement) and stops at the first level whose single zip is under --limit-mb (default 29.5). Only if level 3 still does not fit it prints the largest
 items and, as a LAST RESORT, splits (part files listed in SPLIT_LOG.txt; the reason and the items that forced it must be written into report.md section 8).
 Nothing agent-authored is ever dropped or thinned."""
 import argparse, glob, os, shutil, subprocess, sys, zipfile
 
-REQUIRED_AGENT = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R71_tree.tar.gz",
+REQUIRED_AGENT = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R72_tree.tar.gz",
                   "unit_tests/ctest_output.txt", "checks/smoke_table.md", "checks/build_log_tail.txt",
                   "launch/launch_command.txt", "launch/containers_file.txt", "launch/launch_time.txt", "launch/checkup_cycles",
                   "P_RETURN/window_table.csv", "P_RETURN/manifest.json",
                   "listener/selftest_output.txt", "listener/smoke_dry_run/listener_ledger.jsonl", "listener/smoke_delete/listener_ledger.jsonl",
-                  "listener/main/listener_ledger.jsonl", "listener/main/listener_final.json", "stop_reasons.csv"]
+                  "listener/smoke/listener_ledger.jsonl", "listener/smoke/listener_final.json", "stop_reasons.csv"]
 REQUIRED_DIRS_NONEMPTY = ["listener", "checks/param_dumps", "checks/smoke_arm_files", "launch/checkup_cycles", "P_RETURN"]
 GENERATED = ["phase_summary.csv", "arm_scan_all.csv.gz", "arm_ol_tau_all.csv.gz", "plane_fit_reasons_all.csv.gz", "plane_fit_trace_counts_all.csv.gz",
-             "coupled_vs_iekf_windows.csv", "completeness.csv", "identity_controls.txt", "identity_gates.txt", "bootstrap_summary.csv", "duplicates.tsv", "summaries_all.json",
+             "coupled_vs_iekf_windows.csv", "completeness.csv", "identity_controls.txt", "r72_gates.txt", "duplicates.tsv", "summaries_all.json",
              "compress_manifests.json", "sensor_stamps_summaries.json", "compact", "queue"]
 BIG_TABLES = ["arm_scan_all.csv.gz", "arm_ol_tau_all.csv.gz", "plane_fit_reasons_all.csv.gz", "plane_fit_trace_counts_all.csv.gz"]
 
@@ -93,7 +93,7 @@ def main():
             f.write("%s\t%s\n" % (os.path.basename(jd.rstrip("/")), st))
         f.write("# totals: %s\n" % n)
     lim = a.limit_mb * 1e6
-    single = "R71_RETURN_%s.zip" % a.date
+    single = "R72_RETURN_%s.zip" % a.date
     fits, level_used, mb = False, None, 0.0
     for level in (0, 1, 2, 3, 4, 5):
         cmd = [sys.executable, os.path.join(here, "r69_collect.py"), "--runs", a.runs, "--arms", a.arms, "--out", a.ret, "--level", str(level)]
@@ -108,7 +108,9 @@ def main():
         if os.path.exists(pairs_f):   # R71: coupled arm minus iekf arm per scan window (F-370 b), from the thinned-at-level-0..3 scan table
             subprocess.call([sys.executable, os.path.join(here, "r71_spline_tools.py"), "pairs", "--scan-table", os.path.join(a.ret, "arm_scan_all.csv.gz"),
                              "--pairs", open(pairs_f).read().strip(), "--out", a.ret])
-        subprocess.call([sys.executable, os.path.join(here, "bootstrap_reduce.py"), "--collect", a.runs, "--out", a.ret, "--arm-table", a.arms])   # identity gates; exit 1 on a FAIL is reported in identity_gates.txt, not fatal here
+        subprocess.call([sys.executable, os.path.join(here, "r72_gates.py"), "--runs", a.runs, "--out", os.path.join(a.ret, "r72_gates.txt")])   # R72 identity / engagement / refusal gates; exit 1 on a FAIL is reported in r72_gates.txt, not fatal here
+        if os.path.exists(os.path.join(a.ret, "phase_summary.csv")):
+            subprocess.call([sys.executable, os.path.join(here, "r72_p_table.py"), "--summary", os.path.join(a.ret, "phase_summary.csv"), "--arms", a.arms, "--out", os.path.join(a.ret, "r72_p_table")])   # F-400 Stage-1 tables (no-op when no p arm exists)
         lines = ["# R69 return checklist (generated; presence and size only)", "", "thinning level used (0-3 arm_scan_all.csv.gz, 4-5 compact trim, TRIM_LOG.txt): %d" % level, "", "| item | status | bytes |", "|---|---|---|"]
         miss = 0
         for it in REQUIRED_AGENT + REQUIRED_DIRS_NONEMPTY + GENERATED:
@@ -141,7 +143,7 @@ def main():
     compact = set(files_of(a.ret, "compact"))
     part1 = [f for f in allf if f not in big and f not in compact]
     made = []
-    p1 = "R71_RETURN_%s_part1.zip" % a.date
+    p1 = "R72_RETURN_%s_part1.zip" % a.date
     mb1 = write_zip(p1, a.ret, part1); made.append((p1, mb1))
     if mb1 * 1e6 > lim:
         print("ERROR: part 1 is %.2f MB, over the limit; nothing more can be split off. Name the largest items in report.md." % mb1)
@@ -158,7 +160,7 @@ def main():
             out.append(cur)
         names = []
         for i, fl in enumerate(out):
-            nm = "R71_RETURN_%s_%s%s.zip" % (a.date, prefix, "" if len(out) == 1 else chr(ord("a") + i))
+            nm = "R72_RETURN_%s_%s%s.zip" % (a.date, prefix, "" if len(out) == 1 else chr(ord("a") + i))
             names.append((nm, write_zip(nm, a.ret, fl)))
         return names
     made += pack("part2", sorted(big))

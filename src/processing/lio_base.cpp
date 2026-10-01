@@ -402,6 +402,18 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
         throw std::invalid_argument("lio/info_scale/mode=block with rotation == position == 1 is inert (use mode=off)");
     }
   }
+  // R72 (F-403, F-391): hard cap on the iekf step. Sub-options refused unless mode=hard. Caps must be positive.
+  cfg.mode("lio/ekf/step_cap/mode", opts_.step_cap.mode, "off", { "off", "hard" });
+  {
+    const bool hard = opts_.step_cap.mode == "hard";
+    cfg.nested<double>(hard, "lio/ekf/step_cap/mode=hard", "lio/ekf/step_cap/rotation_rad", opts_.step_cap.rotation_rad, 1e-2);
+    cfg.nested<double>(hard, "lio/ekf/step_cap/mode=hard", "lio/ekf/step_cap/position_m", opts_.step_cap.position_m, 1e-2);
+    if (hard && (!(opts_.step_cap.rotation_rad > 0.0) || !(opts_.step_cap.position_m > 0.0)))
+      throw std::invalid_argument("lio/ekf/step_cap/rotation_rad and /position_m must be > 0");
+    if (hard && cuda_enable_)
+      throw std::invalid_argument("lio/ekf/step_cap/mode=hard is not implemented with cuda/enable=true");
+    ekf_.step_cap = opts_.step_cap;   // off: EkfUpdate never evaluates it (bit-identical)
+  }
   {   // R71: per-residual dump frames, a comma-separated list of frame indices in ONE string key (job overrides carry scalars only); empty = off
     std::string dump_frames;
     paramWarn<std::string>(pnh, "lio/residual_dump_frames", dump_frames, std::string());
@@ -790,6 +802,27 @@ void LioProcBase::applyInfoScaleToEkf(const std::vector<Residual>& residuals) co
     << st.gnorm_before << ',' << st.gnorm_after << ',' << st.discarded_modes << '\n';
 }
 
+void LioProcBase::recordStepCap() const
+{
+  if (!opts_.step_cap.on()) return;   // default: nothing evaluated, nothing written (bit-identical)
+  const StepCapResult& r = ekf_.lastStepCap();
+  ++step_cap_iterations_;
+  step_cap_rot_raw_max_ = std::max(step_cap_rot_raw_max_, r.rot_norm);
+  step_cap_pos_raw_max_ = std::max(step_cap_pos_raw_max_, r.pos_norm);
+  if (r.bound) {
+    ++step_cap_bound_;
+    step_cap_scale_sum_ += r.scale;
+    step_cap_scale_min_ = std::min(step_cap_scale_min_, r.scale);
+  }
+  static PersistentLogStream log("step_cap.csv");
+  bool first = false;
+  std::ofstream& o = log.stream(&first);
+  if (first) o << "frame,iter,rot_raw,pos_raw,scale,bound,cap_rot,cap_pos\n";
+  o << std::setprecision(10) << voxel_map_->frame_idx_ << ',' << diagnostic_gn_iteration_ << ',' << r.rot_norm << ','
+    << r.pos_norm << ',' << r.scale << ',' << (r.bound ? 1 : 0) << ',' << opts_.step_cap.rotation_rad << ','
+    << opts_.step_cap.position_m << '\n';
+}
+
 void LioProcBase::solveSystem(const std::vector<Residual>& residuals) const {
   accumulateLioResiduals(residuals, ekf_);
 
@@ -802,6 +835,7 @@ void LioProcBase::solveSystem(const std::vector<Residual>& residuals) const {
   // state_propagat_, snapshotted once in processLIO() before this frame's
   // iteration loop began) -- does not touch state_->cov().
   ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
+  recordStepCap();   // R72 (F-403): no-op unless lio/ekf/step_cap/mode=hard
 }
 
 double LioProcBase::estimateStateCorrection(

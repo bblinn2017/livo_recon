@@ -1,5 +1,6 @@
 #pragma once
 #include "livo_recon/utils/state/state.h"
+#include "livo_recon/lio/step_cap.h"
 #include <limits>
 
 namespace livo_recon {
@@ -36,6 +37,11 @@ struct EkfUpdate
 
     V3D dtheta = V3D::Zero();
     V3D dt     = V3D::Zero();
+
+    // R72 (F-403): opt-in hard cap on the per-iteration step (see lio/step_cap.h). mode "off" (default) is never evaluated, so
+    // applyMeanUpdate is bit-identical. last_step_cap_ describes the most recent call (raw norms, scale, bound).
+    StepCapOptions step_cap;
+    const StepCapResult& lastStepCap() const { return last_step_cap_; }
 
     void reset() {
         HtH.setZero();
@@ -105,7 +111,12 @@ struct EkfUpdate
         // only from HtH, never from Htz/r's sign).
         const Eigen::VectorXd measurement_term = -K1_cols * Htz;
         const Eigen::VectorXd prior_term = vec - G_cols * vec.segment(StateGroup::idxR(), n);
-        const Eigen::VectorXd solution = measurement_term + prior_term;
+        Eigen::VectorXd solution = measurement_term + prior_term;
+        if (step_cap.on())
+        {
+            last_step_cap_ = stepCapScale(step_cap, solution, StateGroup::idxR(), StateGroup::idxP());
+            if (last_step_cap_.bound) solution *= last_step_cap_.scale;
+        }
 
         last_prior_cov_ = prior_cov;
         last_vec_ = vec;
@@ -217,6 +228,7 @@ private:
     Eigen::MatrixXd last_G_;
     Eigen::VectorXd last_measurement_term_;
     Eigen::VectorXd last_prior_term_;
+    StepCapResult last_step_cap_;
 };
 
 }  // namespace livo_recon

@@ -274,3 +274,13 @@ add_executable(test_info_scale tests/test_info_scale.cpp src/lio/info_scale.cpp)
 target_include_directories(test_info_scale PUBLIC include ${EIGEN3_INCLUDE_DIRS})
 target_link_libraries(test_info_scale Eigen3::Eigen)
 add_test(NAME info_scale COMMAND test_info_scale)
+
+# R72 (planning agent's patch): step cap (F-403), Q-adaptation alternatives (F-401), ZUPT (F-401), failure dump round trip (F-398).
+# ROS-free header-only modules, Eigen only. (The solver-level failure-capture test, test_joint_knot_failure_capture, is picked up by
+# tests/joint_knots/CMakeLists.txt's glob.)
+foreach(r72_test step_cap q_adapt zupt failure_capture)
+  add_executable(test_${r72_test} tests/test_${r72_test}.cpp)
+  target_include_directories(test_${r72_test} PUBLIC include ${EIGEN3_INCLUDE_DIRS})
+  target_link_libraries(test_${r72_test} Eigen3::Eigen)
+  add_test(NAME ${r72_test} COMMAND test_${r72_test})
+endforeach()

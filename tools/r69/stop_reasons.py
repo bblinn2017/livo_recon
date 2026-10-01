@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """stop_reasons.py -- one row per arm: how far it ran and how it ended (planning agent's, R69; fixes F-313). Facts only.
 
-    python3 tools/r69/stop_reasons.py --runs r71_runs --arms r71_manifest/arm_table.tsv --out R71_RETURN/stop_reasons.csv [--extra-runs r68_runs:r68_manifest/arm_table.tsv ...]
+    python3 tools/r69/stop_reasons.py --runs r72_runs --arms r72_manifest/arm_table.tsv --out R72_RETURN/stop_reasons.csv [--extra-runs r68_runs:r68_manifest/arm_table.tsv ...]
 
 Columns: arm, batch, seq, n_scans, first_scan, last_scan, seq_max_last_scan, last_scan_gap, wall_s, exit_code, sentinel, stop_reason, evidence_file.
 `first_scan`/`last_scan` are ABSOLUTE scan indices from arm_summary.json, so an arm with a longer calibration (fewer scans after it) still ends at the same last scan as a

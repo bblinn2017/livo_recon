@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """R69: gather every reduced arm into compact return tables. Nothing here interprets results.
 
-python3 r69_collect.py --runs <runs_dir> --arms r71_manifest/arm_table.tsv --out <out_dir> [--level 0] [--params bag_params.json]
+python3 r69_collect.py --runs <runs_dir> --arms r72_manifest/arm_table.tsv --out <out_dir> [--level 0] [--params bag_params.json]
 Writes into <out_dir>:
   phase_summary.csv            one row per arm (flat reducer metrics) plus the alignment-free deviation-from-baseline columns (below)
   arm_scan_all.csv.gz          every arm's per-scan table THINNED by --level (levels below). Column dev_from_baseline_mm added. Exact scan times in column t (4 decimals).
@@ -25,10 +25,10 @@ import numpy as np
 import pandas as pd
 
 AX = ["Rx", "Ry", "Rz", "px", "py", "pz", "vx", "vy", "vz"]
-BASE = {"full": "00_id_baseline_full", "60": "00_id_baseline_60s", "48": "00_id_baseline_48s"}
-R64_DIGESTS = {"00_id_baseline_48s": "694fadd31260f9fb262e7e32690e9cc7aad80079b08c22ed1d2f3f9ec321d1be",   # R67 sensor_model digests (name kept for the block below)
-               "00_id_baseline_60s": "8cb066436baaedb45f2af20921ff56337a1b553e1aa2d8fafe9d4170a9043f19",
-               "00_id_baseline_full": "8bc89b6bb69aaf32d2283a969ad6cffad798836cf40ccf0def2fe9712d14e5c2"}
+BASE = {"full": "r72_00_id_baseline_full", "60": "r72_00_id_baseline_60s", "48": "r72_00_id_baseline_48s"}   # R72: names of the in-round identity arms (48 s does not exist in R72)
+R71_DIGESTS = {"r72_00_id_baseline_60s": "8cb066436baaedb45f2af20921ff56337a1b553e1aa2d8fafe9d4170a9043f19",     # state_trace.csv digest (run_id blanked) of the same job in R71 (R71 identity_controls.txt / bootstrap_summary.csv)
+               "r72_00_id_baseline_full": "8bc89b6bb69aaf32d2283a969ad6cffad798836cf40ccf0def2fe9712d14e5c2",
+               "r72_00_id_motionq_full": "98f3855cb2146bb06e9dc15b101a8699804a395b4807144323f99e2e509dbad1"}
 LEVELS = {0: (25, None, 0), 1: (25, 5, 0), 2: (50, 10, 0), 3: (100, 25, 45)}   # (step, keep-arm step (None = every scan), onset-window trim after onset+70)
 
 def g(d, *ks):
@@ -146,7 +146,7 @@ def main():
     for key, nm in BASE.items():
         base_tabs[key] = load_base(nm)
     for sq in sorted(set(plan.seq) - {"eee_01"}):
-        base_tabs["seq:" + sq] = load_base("r71_base_%s_fq" % sq)
+        base_tabs["seq:" + sq] = load_base("r72_p_%s_fq_p0d" % sq)
     for _, p in plan.iterrows():
         D = os.path.join(a.runs, p.arm)
         sj = os.path.join(D, "arm_summary.json")
@@ -162,7 +162,8 @@ def main():
         # compact outputs of r65_compress.py
         cdir = os.path.join(a.out, "compact", p.arm)
         for pat in ("*_compact.csv.gz", "*_windows.csv.gz", "*_blocks.csv", "*_all.csv.gz", "plane_trace_window.csv.gz", "sensor_stamps_summary.json", "compress_manifest.json",
-                    "residual_info_*", "crossframe_*", "knot_windows.csv", "knot_trend_stationary.csv"):   # R71 analysis outputs
+                    "residual_info_*", "crossframe_*", "knot_windows.csv", "knot_trend_stationary.csv",
+                    "r72_*"):   # R71 + R72 analysis outputs (early frames, dump summaries)
             for fp in glob.glob(os.path.join(D, pat)):
                 os.makedirs(cdir, exist_ok=True)
                 shutil.copy(fp, cdir)
@@ -203,10 +204,12 @@ def main():
     json.dump(manifests, open(os.path.join(a.out, "compress_manifests.json"), "w"), indent=1)
     json.dump(stamps, open(os.path.join(a.out, "sensor_stamps_summaries.json"), "w"), indent=1)
     groups = [
-        ("00_id_baseline_full", ["00_id_baseline_full_rerun"], "determinism control: identical full-bag rerun"),
-        ("00_id_baseline_60s", ["00_id_default_posecov_60s"], "compiled default plane_fit_pose_cov_mode (now sensor_only) equals the pinned value"),
-        ("00_id_baseline_60s", ["00_id_infl_whole_f1_60s"], "whole-run inflation at factor 1 is the identity"),
-        ("00_id_baseline_60s", ["r71_diag_on_baseline_60s"], "new write-only dumps on (G8a)"),
+        ("r72_00_id_baseline_60s", ["r72_id_stepcap_wide_60s"], "step cap with caps 1e6 never binds (F-403)"),
+        ("r72_00_id_baseline_60s", ["r72_id_zupt_detect_60s"], "ZUPT detect_only does not touch the state (F-401)"),
+        ("r72_00_id_baseline_60s", ["r72_id_nisgate_dead_60s"], "nis_gate with nis_hi 1e9 cannot inflate (F-401)"),
+        ("r72_00_id_baseline_60s", ["r72_id_diag_on_60s"], "write-only diagnostics on (F-396 logs)"),
+        ("r72_00_id_baseline_full", ["r72_p_eee_01_fq_p0d", "r72_sc_fq_full"], "full-bag baseline vs the in-round p0d reference (determinism) and vs the step-cap arm (the latter is EXPECTED to differ if the cap ever binds)"),
+        ("r72_00_id_motionq_full", ["r72_p_eee_01_mq_p0d"], "full-bag motion-Q vs the in-round p0d reference (determinism)"),
     ]
     with open(os.path.join(a.out, "identity_controls.txt"), "w") as f:
         f.write("sha256 of state_trace.csv with the run_id column blanked (empty = file missing)\n")
@@ -215,9 +218,9 @@ def main():
             f.write("  %s  %s\n" % (sha.get(ref, "") or "(missing)", ref))
             for o in others:
                 f.write("  %s  %s  -> %s\n" % (sha.get(o, "") or "(missing)", o, "IDENTICAL" if sha.get(ref) and sha.get(ref) == sha.get(o) else "DIFFERENT or missing"))
-        f.write("\nR67 sensor_model digests against this batch's baselines\n")
-        for arm, dg in R64_DIGESTS.items():
-            f.write("  %s  R67 %s  R70 %s  -> %s\n" % (arm, dg[:16], (sha.get(arm, "") or "(missing)")[:16], "IDENTICAL" if sha.get(arm) == dg else "DIFFERENT or missing"))
+        f.write("\nR71 digests of the same jobs against this batch's identity arms (code at defaults must reproduce them)\n")
+        for arm, dg in R71_DIGESTS.items():
+            f.write("  %s  R71 %s  R72 %s  -> %s\n" % (arm, dg[:16], (sha.get(arm, "") or "(missing)")[:16], "IDENTICAL" if sha.get(arm) == dg else "DIFFERENT or missing"))
     print("collected %d/%d arms" % (len(rows), len(plan)))
 
 if __name__ == "__main__":

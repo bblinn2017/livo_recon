@@ -1,4 +1,5 @@
 #include "livo_recon/lio/joint_knot_estimator.h"
+#include "livo_recon/lio/failure_capture.h"
 
 #include <Eigen/Cholesky>
 #include <Eigen/Eigenvalues>
@@ -33,12 +34,15 @@ JointKnot samplePropagation(const std::vector<Pose6D>& poses, double t)
   return out;
 }
 
-Eigen::MatrixXd symmetricInverse(const Eigen::MatrixXd& matrix)
+Eigen::MatrixXd symmetricInverse(const Eigen::MatrixXd& matrix, const char* where)
 {
   const Eigen::MatrixXd S = 0.5 * (matrix + matrix.transpose());
   Eigen::LDLT<Eigen::MatrixXd> ldlt(S);
   if (ldlt.info() != Eigen::Success || !ldlt.isPositive())
+  {
+    captureNonPd(S, ldlt, where);   // R72 (F-398): keep what failed; the catcher dumps it. No cost on the success path.
     throw std::runtime_error("joint-knot information matrix is not positive definite");
+  }
   return ldlt.solve(Eigen::MatrixXd::Identity(S.rows(), S.cols()));
 }
 
@@ -237,7 +241,10 @@ JointKnotPrior buildJointKnotImuPrior(
   P[0] = 0.5 * (scan_head_covariance + scan_head_covariance.transpose());
   Eigen::LDLT<Eigen::Matrix<double,E,E>> head_ldlt(P[0]);
   if (head_ldlt.info() != Eigen::Success || !head_ldlt.isPositive())
+  {
+    captureNonPd(Eigen::MatrixXd(P[0]), head_ldlt, "scan_head");   // R72 (F-398)
     throw std::runtime_error("scan-head covariance is not positive definite");
+  }
 
   for (int k = 1; k < N; ++k) {
     const JointKnot& a = trajectory.knots()[k - 1];
@@ -304,7 +311,7 @@ JointKnotPrior buildJointKnotImuPrior(
   }
   JointKnotPrior out;
   out.P = 0.5 * (joint + joint.transpose());
-  out.P_inverse = symmetricInverse(out.P);
+  out.P_inverse = symmetricInverse(out.P, "prior_P");
   return out;
 }
 
@@ -491,6 +498,12 @@ JointLidarInformation accumulateJointLidarInformation(
   return out;
 }
 
+JointKnotSolve& jointKnotLastFailedSolve()
+{
+  static thread_local JointKnotSolve failed;
+  return failed;
+}
+
 JointKnotSolve solveJointKnotInformation(
     const JointKnotTrajectory& current,
     const JointKnotTrajectory& imu_prior_mean,
@@ -537,10 +550,20 @@ JointKnotSolve solveJointKnotInformation(
   out.mean_abs_residual = residuals.empty() ? 0.0 : abs_r / residuals.size();
   out.vec = current.boxminus(imu_prior_mean);
   out.A = prior.P_inverse + out.Gamma_L;
-  out.K1 = symmetricInverse(out.A);
+  // R72 (F-398): the right-hand-side terms are computed BEFORE the inversion that can throw (the same expressions as before, only
+  // moved up), so a failing scan keeps every term of the update. On failure the partial solve is stored for the catcher's dump.
   out.lidar_rhs = out.b_L;
   out.prior_rhs = prior.P_inverse * out.vec;
   out.rhs = out.lidar_rhs + out.prior_rhs;
+  try
+  {
+    out.K1 = symmetricInverse(out.A, "posterior_A");
+  }
+  catch (...)
+  {
+    jointKnotLastFailedSolve() = out;
+    throw;
+  }
   out.lidar_delta = out.K1 * out.lidar_rhs;
   out.prior_delta = out.K1 * out.prior_rhs;
   out.delta = out.lidar_delta + out.prior_delta;

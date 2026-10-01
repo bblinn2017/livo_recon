@@ -10,6 +10,7 @@
 #include "livo_recon/lio/deskew.h"
 #include "livo_recon/lio/residual_redundancy.h"
 #include "livo_recon/lio/info_scale.h"
+#include "livo_recon/lio/step_cap.h"
 
 #include <array>
 #include <initializer_list>
@@ -106,6 +107,10 @@ struct LioProcOptions
   // R70 (F-320): separate rotation / position scales on the LiDAR information (see info_scale.h). mode "off" (default) is
   // bit-identical. iekf estimator only.
   InfoScaleOptions info_scale;
+
+  // R72 (F-403, F-391): opt-in hard cap on the per-iteration iekf update step (see step_cap.h). mode "off" (default) is
+  // bit-identical. iekf estimator only; refused under coupled and under cuda.
+  StepCapOptions step_cap;
 
   // R70 (F-340): write-only per-frame geometry of the admitted residuals (iteration 0 only): normal and lever-arm scatter
   // eigenvalues, plane concentration, distance statistics. Backend independent, so surface and octree can be compared.
@@ -322,6 +327,10 @@ protected:
   mutable ResidualRedundancyStats redundancy_stats_;
 
   // R70 (F-320): engagement counters of the block information scale (written by solveSystem*, which are const).
+  // R72 (F-403): step-cap engagement (iterations seen, iterations where the cap bound, sum of applied/raw scale when bound).
+  mutable long step_cap_iterations_ = 0, step_cap_bound_ = 0;
+  mutable double step_cap_scale_sum_ = 0.0, step_cap_scale_min_ = 1.0, step_cap_rot_raw_max_ = 0.0, step_cap_pos_raw_max_ = 0.0;
+  void recordStepCap() const;
   mutable long info_scale_iterations_ = 0;
   mutable long info_scale_discarded_modes_ = 0;
   mutable double info_scale_trace_ratio_sum_ = 0.0;

@@ -335,12 +335,139 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
     akf_q_.configure(ak);
   }
 
+  // ── R72 (F-401): innovation-driven Q gain (opt-in). Sub-keys are refused unless their mode is selected; a configuration that
+  // could not change anything (gain bounds both 1, forgetting 1, inflate 1) is refused as inert. ──
+  cfg.mode("lio/q_adapt/mode", q_gain_opts_.mode, "off", { "off", "innovation_scale", "nis_gate" });
+  {
+    const bool ia = q_gain_opts_.mode == "innovation_scale";
+    const bool ng = q_gain_opts_.mode == "nis_gate";
+    const bool any = ia || ng;
+    cfg.nestedMode(any, "lio/q_adapt/mode!=off", "lio/q_adapt/apply", q_gain_opts_.apply, "both", { "both", "acc", "gyr" });
+    cfg.nested<double>(any, "lio/q_adapt/mode!=off", "lio/q_adapt/min_gain", q_gain_opts_.min_gain, 1.0);
+    cfg.nested<double>(any, "lio/q_adapt/mode!=off", "lio/q_adapt/max_gain", q_gain_opts_.max_gain, 100.0);
+    cfg.nested<double>(ia, "lio/q_adapt/mode=innovation_scale", "lio/q_adapt/forgetting", q_gain_opts_.forgetting, 0.9);
+    cfg.nested<double>(ia, "lio/q_adapt/mode=innovation_scale", "lio/q_adapt/rho_clamp", q_gain_opts_.rho_clamp, 4.0);
+    cfg.nested<double>(ng, "lio/q_adapt/mode=nis_gate", "lio/q_adapt/nis_hi", q_gain_opts_.nis_hi, 1.5);
+    cfg.nested<double>(ng, "lio/q_adapt/mode=nis_gate", "lio/q_adapt/inflate", q_gain_opts_.inflate, 1.25);
+    cfg.nested<double>(ng, "lio/q_adapt/mode=nis_gate", "lio/q_adapt/decay", q_gain_opts_.decay, 0.95);
+    cfg.nested<double>(ng, "lio/q_adapt/mode=nis_gate", "lio/q_adapt/whiteness_max", q_gain_opts_.whiteness_max, 0.0);
+    if (any)
+    {
+      if (akf_q_.enabled())
+        throw std::invalid_argument("lio/q_adapt/mode != off and akf_q/enable=true both write the IMU process noise; refused");
+      if (!(q_gain_opts_.min_gain > 0.0) || !(q_gain_opts_.max_gain >= q_gain_opts_.min_gain))
+        throw std::invalid_argument("lio/q_adapt/min_gain must be > 0 and <= max_gain");
+      if (q_gain_opts_.min_gain == 1.0 && q_gain_opts_.max_gain == 1.0)
+        throw std::invalid_argument("lio/q_adapt gain bounds min_gain == max_gain == 1 are inert (use mode=off)");
+    }
+    if (ia)
+    {
+      if (!(q_gain_opts_.forgetting >= 0.0 && q_gain_opts_.forgetting <= 1.0) || !(q_gain_opts_.rho_clamp >= 1.0))
+        throw std::invalid_argument("lio/q_adapt/forgetting must be in [0,1] and rho_clamp >= 1");
+      if (q_gain_opts_.forgetting == 1.0)
+        throw std::invalid_argument("lio/q_adapt/mode=innovation_scale with forgetting == 1 never moves the gain (inert)");
+    }
+    if (ng)
+    {
+      if (!(q_gain_opts_.nis_hi > 0.0) || !(q_gain_opts_.inflate >= 1.0) || !(q_gain_opts_.decay >= 0.0 && q_gain_opts_.decay <= 1.0) ||
+          !(q_gain_opts_.whiteness_max >= 0.0 && q_gain_opts_.whiteness_max <= 1.0))
+        throw std::invalid_argument("lio/q_adapt nis_gate: nis_hi > 0, inflate >= 1, decay in [0,1], whiteness_max in [0,1]");
+      if (q_gain_opts_.inflate == 1.0)
+        throw std::invalid_argument("lio/q_adapt/mode=nis_gate with inflate == 1 never moves the gain (inert)");
+    }
+    q_gain_.configure(q_gain_opts_);
+  }
+
+  // ── R72 (F-401): zero-velocity pseudo-update (opt-in). detect_only runs the detector and the log only (the control arm). ──
+  cfg.mode("lio/zupt/mode", zupt_opts_.mode, "off", { "off", "detect_only", "apply" });
+  {
+    const bool zon = zupt_opts_.on();
+    cfg.nested<double>(zon, "lio/zupt/mode!=off", "lio/zupt/gyro_thresh", zupt_opts_.gyro_thresh, 0.02);
+    cfg.nested<double>(zon, "lio/zupt/mode!=off", "lio/zupt/acc_thresh", zupt_opts_.acc_thresh, 0.15);
+    cfg.nested<int>(zon, "lio/zupt/mode!=off", "lio/zupt/enter_scans", zupt_opts_.enter_scans, 3);
+    cfg.nested<double>(zupt_opts_.apply(), "lio/zupt/mode=apply", "lio/zupt/sigma_v", zupt_opts_.sigma_v, 0.02);
+    if (zon && (!(zupt_opts_.gyro_thresh > 0.0) || !(zupt_opts_.acc_thresh > 0.0) || zupt_opts_.enter_scans < 1))
+      throw std::invalid_argument("lio/zupt gyro_thresh and acc_thresh must be > 0 and enter_scans >= 1");
+    if (zupt_opts_.apply() && !(zupt_opts_.sigma_v > 0.0))
+      throw std::invalid_argument("lio/zupt/sigma_v must be > 0");
+  }
+
   // Anything left over in the spline/* and adaptive_q/* namespaces (both removed) is a key nobody consumes.
   // Deliberately NOT extended to voxel_map/: several of its keys are still
   // read by paramWarn() in voxelmap.cpp, so they are unclaimed here and would
   // be reported as dead when they are merely read elsewhere. Widen this only
   // as those move onto a resolver.
   return finalizeConfig(cfg, { "spline", "adaptive_q", "akf_q", "lio/ekf", "voxel_map" });
+}
+
+// R72 (F-401): once per scan, from the iteration-0 residuals (evaluated at the propagated prior) and the frame's fixed prior.
+void LioProcIekf::updateQGainFromResiduals()
+{
+  std::vector<InnovationRow> rows;
+  rows.reserve(residuals_.size());
+  for (const auto& r : residuals_)
+  {
+    InnovationRow row;
+    row.r = r.r;
+    row.sigma2 = r.sigma_squared;
+    row.h << r.point_cross_normal, r.normal;   // (rotation 3, position 3): the same rows accumulateLioResiduals() uses
+    rows.push_back(row);
+  }
+  const Eigen::Matrix<double, 6, 6> P6 = prior_cov_.block<6, 6>(StateGroup::idxR(), StateGroup::idxR());
+  const InnovationStats st = innovationStats(rows, P6);
+  const double g_before = q_gain_.gain();
+  q_gain_.update(st);
+  state_->setQGain(q_gain_.gainAcc(), q_gain_.gainGyr());   // read by ImuProc::propagate on the NEXT scan's steps
+  ++qa_scans_;
+  if (q_gain_.gain() != 1.0) ++qa_scans_gain_ne_1_;
+  qa_nis_sum_ += st.nis;
+  qa_rho_sum_ += st.rho;
+  qa_lag1_abs_sum_ += std::abs(st.lag1);
+  static PersistentLogStream log("q_adapt.csv");
+  bool first = false;
+  std::ofstream& o = log.stream(&first);
+  if (first) o << "frame,n,nis,rho,lag1,sum_r2,sum_sigma2,sum_hph,valid,gain_before,gain_after\n";
+  o << std::setprecision(10) << voxel_map_->frame_idx_ << ',' << st.n << ',' << st.nis << ',' << st.rho << ',' << st.lag1 << ','
+    << st.sum_r2 << ',' << st.sum_sigma2 << ',' << st.sum_hph << ',' << (st.valid ? 1 : 0) << ',' << g_before << ','
+    << q_gain_.gain() << '\n';
+}
+
+// R72 (F-401): zero-velocity pseudo-update. Statistics from the scan's IMU poses (bias-corrected angular rate; world-frame
+// specific force plus gravity, ~0 at rest).
+void LioProcIekf::applyZuptIfStationary(MeasureGroup& mg)
+{
+  if (!zupt_opts_.on() || mg.poses.empty()) return;
+  double gyro_sum = 0.0, acc_sum = 0.0;
+  for (const auto& ps : mg.poses)
+  {
+    gyro_sum += ps.gyr.norm();
+    acc_sum += (0.5 * (ps.acc_head + ps.acc_tail)).norm();
+  }
+  const double n = static_cast<double>(mg.poses.size());
+  const double gyro_mean = gyro_sum / n, acc_mean = acc_sum / n;
+  ++zupt_scans_;
+  const bool stationary = zupt_det_.update(gyro_mean, acc_mean, zupt_opts_);
+  if (stationary) ++zupt_stationary_;
+  const double vnorm = state_->vel().norm();
+  bool applied = false;
+  if (stationary && zupt_opts_.apply())
+  {
+    Eigen::VectorXd dx;
+    Eigen::MatrixXd P_new;
+    zuptVelocityUpdate(state_->cov(), state_->vel(), StateGroup::idxV(), zupt_opts_.sigma_v, dx, P_new);
+    state_->applyDelta(dx);
+    state_->covMut() = P_new;
+    applied = true;
+    ++zupt_applied_;
+    zupt_vnorm_sum_ += vnorm;
+    zupt_vnorm_max_ = std::max(zupt_vnorm_max_, vnorm);
+  }
+  static PersistentLogStream log("zupt.csv");
+  bool first = false;
+  std::ofstream& o = log.stream(&first);
+  if (first) o << "frame,gyro_mean,acc_mean,run,stationary,applied,vnorm_before\n";
+  o << std::setprecision(10) << voxel_map_->frame_idx_ << ',' << gyro_mean << ',' << acc_mean << ',' << zupt_det_.run() << ','
+    << (stationary ? 1 : 0) << ',' << (applied ? 1 : 0) << ',' << vnorm << '\n';
 }
 
 // LIO Processing
@@ -435,6 +562,46 @@ std::string LioProcIekf::engagementReport() const
       << " mean_trace_ratio=" << (info_scale_iterations_ > 0 ? info_scale_trace_ratio_sum_ / info_scale_iterations_ : 0.0);
     if (info_scale_iterations_ == 0)
       o << "   <-- INERT: block information scale selected and never applied";
+  }
+
+  if (q_gain_opts_.on())
+  {
+    o << "\n  lio/q_adapt mode=" << q_gain_opts_.mode << " apply=" << q_gain_opts_.apply << " scans=" << qa_scans_
+      << " scans_with_gain_ne_1=" << qa_scans_gain_ne_1_ << " max_gain=" << q_gain_.maxSeen()
+      << " mean_nis=" << (qa_scans_ > 0 ? qa_nis_sum_ / qa_scans_ : 0.0) << " mean_rho=" << (qa_scans_ > 0 ? qa_rho_sum_ / qa_scans_ : 0.0)
+      << " mean_abs_lag1=" << (qa_scans_ > 0 ? qa_lag1_abs_sum_ / qa_scans_ : 0.0) << " inflating_scans=" << q_gain_.inflating()
+      << " whiteness_blocked=" << q_gain_.whitenessBlocked();
+    if (qa_scans_ == 0)
+      o << "   <-- INERT: q_adapt selected and no scan produced residuals";
+    else if (qa_scans_gain_ne_1_ == 0)
+      o << "   <-- NOT ENGAGED: the gain never left 1 (a valid null: the model never looked inconsistent; the IMU-side q_gain counter in "
+           "engagement_imu.txt must agree)";
+  }
+  if (zupt_opts_.on())
+  {
+    o << "\n  lio/zupt mode=" << zupt_opts_.mode << " gyro_thresh=" << zupt_opts_.gyro_thresh << " acc_thresh=" << zupt_opts_.acc_thresh
+      << " enter_scans=" << zupt_opts_.enter_scans << " sigma_v=" << zupt_opts_.sigma_v << " scans=" << zupt_scans_
+      << " stationary=" << zupt_stationary_ << " applied=" << zupt_applied_
+      << " mean_vnorm_before(applied)=" << (zupt_applied_ > 0 ? zupt_vnorm_sum_ / zupt_applied_ : 0.0)
+      << " max_vnorm_before=" << zupt_vnorm_max_;
+    if (zupt_scans_ == 0)
+      o << "   <-- INERT: zupt selected and no scan was evaluated";
+    else if (zupt_stationary_ == 0)
+      o << "   <-- NOT ENGAGED: no scan was judged stationary (thresholds too tight for this bag, or it never rests)";
+    else if (zupt_opts_.apply() && zupt_applied_ == 0)
+      o << "   <-- INERT: apply selected and no update was applied";
+  }
+  if (opts_.step_cap.on())
+  {
+    o << "\n  lio/ekf/step_cap mode=hard cap_rot=" << opts_.step_cap.rotation_rad << " rad cap_pos=" << opts_.step_cap.position_m
+      << " m iterations=" << step_cap_iterations_ << " bound=" << step_cap_bound_
+      << " mean_scale(bound)=" << (step_cap_bound_ > 0 ? step_cap_scale_sum_ / step_cap_bound_ : 1.0)
+      << " min_scale=" << step_cap_scale_min_ << " max_raw_rot=" << step_cap_rot_raw_max_
+      << " max_raw_pos=" << step_cap_pos_raw_max_;
+    if (step_cap_iterations_ == 0)
+      o << "   <-- INERT: step cap selected and no update was ever evaluated";
+    else if (step_cap_bound_ == 0)
+      o << "   <-- NOT ENGAGED: every step stayed inside the caps (a valid null: the cap never bound)";
   }
 
   o << "\n[engagement] a flag marked INERT above did not test anything; the "
@@ -677,6 +844,10 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
     // the opts_.log_debug_en gate -- diagnostic-only, zero cost when off, no new config key.
     static PersistentLogStream gn_iter_log("iekf_gn_iteration.csv");
 
+    // R72 (F-401): zero-velocity pseudo-update on the propagated tail state, BEFORE the prior snapshot below, so the whole frame's
+    // iterations see the updated prior. No-op unless lio/zupt/mode != off; detect_only never touches the state.
+    applyZuptIfStationary(mg);
+
     // Fixed IEKF prior for this frame's ENTIRE inner loop -- see ekf.h's
     // applyMeanUpdate() doc comment. Set once here, read (never rewritten)
     // by every solveSystem()/solveSystem_cuda() call below until the loop
@@ -720,6 +891,7 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
       // is defined over.
       setDiagnosticGnIteration(iter);
       double error = estimateStateCorrection(mg.points, dtheta, dt, /*allow_consistency_log=*/iter == 0);
+      if (iter == 0 && q_gain_opts_.on() && !residuals_.empty()) updateQGainFromResiduals();   // R72 (F-401)
       writeStationaryIterationDiagnostics(
           firstFrameArchitectureName(), firstFrameArchitectureName(),
           voxel_map_->frame_idx_, iter,

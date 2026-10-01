@@ -123,6 +123,11 @@ struct JointKnotSolve
   ResidualRedundancyStats redundancy_stats;
 };
 
+// R72 (F-398): the partial solve (Gamma_L, b_L, A, vec and the right-hand-side terms; K1 and the deltas are empty) of the most recent
+// solveJointKnotInformation() call whose A = P^-1 + Gamma_L failed the positive-definiteness check. Thread-local; overwritten by the
+// next failure; contents are only meaningful when lastNonPdCapture().where == "posterior_A".
+JointKnotSolve& jointKnotLastFailedSolve();
+
 // Pre-linearized scalar LiDAR row used by the shared joint information
 // accumulator. Keeping this independent of trajectory interpolation makes the
 // correlated-group algebra directly testable against dense C^-1.
