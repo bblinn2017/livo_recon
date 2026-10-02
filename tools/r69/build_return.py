@@ -135,8 +135,26 @@ def check_table(path, cols, min_rows):
     return "PRESENT", "%d bytes" % os.path.getsize(path)
 
 
-def check_required(ret, runs, spec):
-    """-> list of rows (followup, item, file, where, status, detail)."""
+STEP0_KEEP = ("STEP0/step0_missing.txt", "STEP0/STEP0_SIZES.txt", "STEP0/STEP0_SHA256.txt")
+DELIVERED = "DELIVERED_IN_STAGE1B"
+
+
+def step0_index(ret):
+    """Paths listed in STEP0/STEP0_SHA256.txt (the index of what the stage-1b return already delivered); None if absent."""
+    p = os.path.join(ret, "STEP0", "STEP0_SHA256.txt")
+    if not os.path.exists(p):
+        return None
+    out = set()
+    for ln in open(p):
+        parts = ln.split(None, 1)
+        if len(parts) == 2:
+            out.add(parts[1].strip().replace("\\", "/"))
+    return out
+
+
+def check_required(ret, runs, spec, idx=None):
+    """-> list of rows (followup, item, file, where, status, detail). idx: set of STEP0 paths already delivered in the stage-1b return (only with --step0-delivered):
+    a step-0 item whose file is not here but IS in that index is DELIVERED_IN_STAGE1B (satisfied); a file in neither is MISSING."""
     rows = []
     compact = os.path.join(ret, "compact")
     for e in spec:
@@ -166,11 +184,17 @@ def check_required(ret, runs, spec):
             rows.append((fu, "-", "checks/" + f, where, st, dt))
         elif src in ("step0", "step0_raw"):
             for a in arms:
+                rel = "STEP0/%s/%s" % (a, f)
                 st, dt = check_table(os.path.join(ret, "STEP0", a, f), e["columns"], e["min_rows"])
-                rows.append((fu, a, "STEP0/%s/%s" % (a, f), where, st, dt))
+                if st != "PRESENT" and idx is not None and rel in idx:
+                    st, dt = DELIVERED, "listed in STEP0_SHA256.txt (delivered in the stage-1b return)"
+                rows.append((fu, a, rel, where, st, dt))
         elif src == "step0_table":
             p = os.path.join(ret, "STEP0", f)
             st, dt = check_table(p, e["columns"], e["min_rows"])
+            if st != "PRESENT" and idx is not None and "STEP0/" + f in idx:
+                rows.append((fu, "-", "STEP0/" + f, where, DELIVERED, "listed in STEP0_SHA256.txt (delivered in the stage-1b return)"))
+                continue
             rows.append((fu, "-", "STEP0/" + f, where, st, dt))
             if st == "PRESENT":
                 have = set(pd.read_csv(p, usecols=["arm"])["arm"].unique())
@@ -196,6 +220,7 @@ def main():
     ap.add_argument("--ret", required=True); ap.add_argument("--runs", required=True); ap.add_argument("--arms", required=True)
     ap.add_argument("--manifest", required=True); ap.add_argument("--queue-dir", required=True); ap.add_argument("--date", required=True)
     ap.add_argument("--params", default=None); ap.add_argument("--limit-mb", type=float, default=28.0); ap.add_argument("--allow-missing", action="store_true")
+    ap.add_argument("--step0-delivered", action="store_true", help="STEP0 data was delivered in the stage-1b return: check it against STEP0/STEP0_SHA256.txt and do NOT pack it again (only the three index files are packed)")
     a = ap.parse_args()
     here = os.path.dirname(os.path.abspath(__file__))
     q = os.path.join(a.ret, "queue"); os.makedirs(q, exist_ok=True)
@@ -228,8 +253,18 @@ def main():
     arm_ids = [r["arm"] for r in csv.DictReader(open(a.arms), delimiter="\t")]
     engagement_all(a.runs, arm_ids, os.path.join(a.ret, "engagement_all.txt"))
     spec = json.load(open(os.path.join(a.manifest, "required_outputs.json")))
-    rows = check_required(a.ret, a.runs, spec)
-    miss = [r for r in rows if r[4] != "PRESENT"]
+    idx = None
+    if a.step0_delivered:
+        idx = step0_index(a.ret)
+        if idx is None:
+            print("--step0-delivered needs STEP0/STEP0_SHA256.txt in --ret (the index sent with the stage-1b reply)")
+            return 3
+        for k in STEP0_KEEP:
+            if not os.path.exists(os.path.join(a.ret, k)):
+                print("--step0-delivered: %s is absent from --ret" % k)
+                return 3
+    rows = check_required(a.ret, a.runs, spec, idx)
+    miss = [r for r in rows if r[4] not in ("PRESENT", DELIVERED)]
     lines = ["# R73 return checklist (generated from required_outputs.json; presence, columns and row counts only)", "", "| follow-up | arm | file | where | status | detail |", "|---|---|---|---|---|---|"]
     lines += ["| %s | %s | %s | %s | %s | %s |" % (r[0], r[1], r[2], r[3], r[4] if r[4] == "PRESENT" else "**%s**" % r[4], r[5]) for r in rows]
     lines += ["", "## agent-authored and generated items", "", "| item | status | bytes |", "|---|---|---|"]
@@ -252,6 +287,11 @@ def main():
         return 3
     zp = "R73_RETURN_%s.zip" % a.date
     allf = files_of(a.ret, ".")
+    if a.step0_delivered:
+        keep = {os.path.normpath(os.path.join(a.ret, k)) for k in STEP0_KEEP}
+        stp = os.path.normpath(os.path.join(a.ret, "STEP0")) + os.sep
+        allf = [f for f in allf if not f.startswith(stp) or f in keep]
+        print("STEP0 data not packed (delivered in stage 1b); %d files kept" % len(allf))
     nbytes = write_zip(zp, a.ret, allf)
     print("zip %s %.2f MB (%d files)" % (zp, nbytes / 1e6, len(allf)))
     if nbytes <= a.limit_mb * 1e6:

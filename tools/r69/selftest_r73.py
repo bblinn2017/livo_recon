@@ -215,6 +215,19 @@ def main():
         pd.DataFrame({"frame": [1], "role": ["d"]}).to_csv(os.path.join(ret, "compact", "armA", "shadow_scan_all.csv.gz"), index=False, compression="gzip")
         if {(r[0], r[1]): r[4] for r in BR.check_required(ret, runs, spec)}[("F-414", "armA")] != "FAIL":
             fails.append("R2 row-count shortfall not FAIL")
+        # ---- R3 step-0 data delivered in the stage-1b return: satisfied by the index, not by the file; a file in neither is still MISSING
+        os.remove(os.path.join(ret, "STEP0", "r73_f416_frame_errors.csv"))
+        open(os.path.join(ret, "STEP0", "STEP0_SHA256.txt"), "w").write("0" * 64 + "  STEP0/r73_f416_frame_errors.csv\n")
+        idx_ = BR.step0_index(ret)
+        s3 = {(r[0], r[1]): r[4] for r in BR.check_required(ret, runs, spec, idx_)}
+        if s3[("F-416", "-")] != "DELIVERED_IN_STAGE1B":
+            fails.append("R3 step0 item in the index not accepted: %s" % s3)
+        s4 = {(r[0], r[1]): r[4] for r in BR.check_required(ret, runs, spec, set())}
+        if s4[("F-416", "-")] != "MISSING":
+            fails.append("R3 step0 item not in the index must stay MISSING: %s" % s4)
+        s5 = {(r[0], r[1]): r[4] for r in BR.check_required(ret, runs, spec, None)}
+        if s5[("F-416", "-")] != "MISSING":
+            fails.append("R3 without --step0-delivered a missing step0 file must stay MISSING")
         zp = os.path.join(t, "z.zip"); open(zp, "wb").write(os.urandom(2_500_000))
         parts = BR.byte_split(zp, 1_000_000)
         if len(parts) != 3 or not BR.reassembly_proof(zp, parts, os.path.join(t, "proof.txt")):
@@ -226,7 +239,7 @@ def main():
             mf = os.path.join(t, "m")
             subprocess.check_call([sys.executable, os.path.join(HERE, "make_r73_manifest.py"), "--jobs", a.manifest_jobs, "--out", mf], stdout=subprocess.DEVNULL)
             cnt = {b: len(json.load(open(os.path.join(mf, "jobs_%s.json" % b)))) for b in ("smoke", "refuse", "sh", "co", "qa", "p2")}
-            if cnt != {"smoke": 22, "refuse": 24, "sh": 13, "co": 16, "qa": 18, "p2": 108}:
+            if cnt != {"smoke": 22, "refuse": 24, "sh": 13, "co": 13, "qa": 18, "p2": 108}:
                 fails.append("M1 counts %s" % cnt)
             ids = set()
             for b in cnt:
@@ -243,7 +256,12 @@ def main():
             p2 = tab[tab.group.isin(["P2", "P2C"])]
             if len(p2) != 108 or p2.seq.nunique() != 9 or p2.arm.str.extract(r"r73_p2_[a-z]+_\d\d_(.+)")[0].nunique() != 12:
                 fails.append("M1 p2 grid is not 12 cells (11 new + centre) x 9 bags")
-            for need in ("r73_id_shadow_same_60s", "r73_sh_sbs03_a", "r73_co_rerun_meas_gateon_knots8_mq_full"):
+            if any(n.startswith("r73_co_rerun") or n.endswith("_full") and n.startswith("r73_co") for n in set(tab.arm)):
+                fails.append("M1 a full-bag coupled arm is in the manifest (Bryce asked for short runs)")
+            dur = tab[tab.group == "CO"]
+            if (dur.duration_s.astype(str) == "full").any():
+                fails.append("M1 a CO arm is not 60 s: %s" % list(dur[dur.duration_s.astype(str) == "full"].arm))
+            for need in ("r73_id_shadow_same_60s", "r73_sh_sbs03_a", "r73_co60_meas_k8_mq"):
                 if need not in set(tab.arm):
                     fails.append("M1 arm missing: " + need)
             sh = tab[tab.arm == "r73_sh_sbs03_a"].iloc[0]
@@ -251,7 +269,7 @@ def main():
                 fails.append("M1 requires column of a shadow arm incomplete: %s" % sh.requires)
             ro = json.load(open(os.path.join(mf, "required_outputs.json")))
             fus = {r["followup"] for r in ro}
-            for f_ in ("F-400", "F-403", "F-407", "F-409", "F-410", "F-414", "F-415", "F-416", "F-417", "F-418", "F-419"):
+            for f_ in ("F-400", "F-403", "F-407", "F-409", "F-414", "F-415", "F-416", "F-417", "F-418", "F-419"):
                 if f_ not in fus:
                     fails.append("M1 required_outputs has no entry for " + f_)
             # every file an arm REQUESTS (requires) that is also returned must be in required_outputs or in the archive lists: no silently unrequested log

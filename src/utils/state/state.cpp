@@ -93,6 +93,9 @@ StateGroup& StateGroup::operator=(const StateGroup& o)
     bias_gyr_ = o.bias_gyr_; bias_acc_ = o.bias_acc_; gravity_ = o.gravity_;
     cov_ = o.cov_;
     var_acc_ = o.var_acc_; var_gyr_ = o.var_gyr_;
+    // R73b: the stationary calibration floors were never copied (found by r73_smoke_shadow_iso_60s: the shadow state is assigned from the driver every scan and
+    // an isotropic motion-Q shadow threw "motion-dependent Q requires positive stationary calibration floors"). Copying them is inert for the driver.
+    var_acc_floor_ = o.var_acc_floor_; var_gyr_floor_ = o.var_gyr_floor_;
     cov_bias_gyr_ = o.cov_bias_gyr_; cov_bias_acc_ = o.cov_bias_acc_;
     init_cov_rot_tilt_ = o.init_cov_rot_tilt_;
     init_cov_rot_yaw_ = o.init_cov_rot_yaw_;

@@ -12,7 +12,7 @@ Batches (queues)
   smoke    identity gates (R73 code inert at defaults; the shadow and the logs must not change the driver) and one 60 s smoke per new flag (rule 3.6)
   refuse   jobs that MUST fail at startup (new dependency refusals, the retired key names)
   sh       F-414: shadow-update pairs on sbs_03 and eee_02 (70 s), a determinism repeat, plain controls and the map-freeze controls
-  co       F-415 / F-410: 3 former aborting coupled arms rerun full bag, 8 coupled 60 s arms with the update log, IMU-prior information-scale arms, iekf controls
+  co       F-415: 8 coupled 60 s arms with the update log, IMU-prior information-scale arms (60 s), iekf controls (60 s). No full-bag coupled arm (Bryce asked for short runs).
   qa       F-401 / F-418: the 18 motion-Q alternative arms on eee_01 (released)
   p2       F-400 Stage 2: motion-Q, derived P0, gyro_scale {7,10,12,14,17} x acc_scale {0,0.3,0.6}, 11 new cells + the centre control, 9 bags (108 arms)
 The requires column of arm_table.tsv names the files an arm must have produced (derived from its overrides); r73_score_job.py fails the arm's stage if one is absent,
@@ -181,13 +181,7 @@ def arms(J):
         SH("r73_fz_%s_fq" % tag, bfq, FREEZE, "F-414 secondary control: map frozen after calibration, %s fixed-Q (valid only if its frame-1 map digest equals the plain control's)" % bag, "FZ")
         SH("r73_fz_%s_%s" % (tag, qn), bmq, d(mq2, FREEZE), "F-414 secondary control: map frozen after calibration, %s motion-Q %s" % (bag, qn), "FZ")
     # ---- co: F-415 / F-410
-    for t, tn in (("measurement", "meas"),):
-        for k, q, qn in ((4, "fixedq", "fq"), (8, "fixedq", "fq"), (8, "motionq", "mq")):
-            n = "60_D3_coupled_%s_gateon_knots%d_iters5_%s_full" % (t, k, q)
-            if n not in J:
-                sys.exit("base job %s not in r66_jobs.json" % n)
-            add("r73_co_rerun_meas_gateon_knots%d_%s_full" % (k, qn), n, d(CO_FULL, CO_REC, CO_LOG), batch="co", group="CO", tier="CO", keep=1,
-                purpose="F-410 / F-415: R72 twin r72_co_meas_gateon_knots%d_%s ABORTED (non-PD prior at scan %s); lazy joint prior, full bag, update log on" % (k, qn, {(4, "fq"): 2401, (8, "fq"): 1302, (8, "mq"): 1130}[(k, qn)]))
+    # Bryce (2026-10-01): the coupled arms run SHORT (60 s). The three full-bag F-410 reruns that were here were NOT asked for and are removed (addendum 5, rule 1.12).
     for t, tn in (("tail", "tail"), ("measurement", "meas")):
         for k in (4, 8):
             for q, qn in (("fixedq", "fq"), ("motionq", "mq")):
@@ -317,8 +311,6 @@ def required_outputs(table):
     add("F-415", "coupled update log per scan (tail and per-knot prior/posterior traces)", co_upd, "coupled_update_scan_all.csv.gz", ["frame", "stop", "iterations"], 100)
     add("F-415", "coupled update reducer output (per arm)", co_upd, "r73_coupled_update_arm.csv", ["frame", "prior_share_pos", "lidar_share_pos"], 100)
     add("F-415", "coupled raw first-frame matrices (record frames 1-5) of the 60 s arms", arm_ids({"CO"}, "r73_co60_"), "coupled_record_f1.txt", [], 1, where="archive")
-    add("F-410", "engagement line with prior_built_scans / prior_skipped_no_residual_scans for the three rerun arms", [], "engagement_all.txt", [], 1, source="generated",
-        contains={a: ["prior_built_scans", "prior_skipped_no_residual_scans"] for a in arm_ids({"CO"}, "r73_co_rerun")})
     # F-400 stage 2
     add("F-400", "per-scan posterior position and yaw of every Stage-2 arm (alignment-free collapse timing needs it)", arm_ids({"P2", "P2C"}), "pos_trace_all.csv.gz", ["scan_id", "t_abs", "px", "py", "pz", "yaw_rad"], 500)
     add("F-400", "Stage-2 cell table, per-arm table and selection (collapsed arms excluded)", [], "r73_p2_cells.csv", ["cell", "n_bags"], 10, source="generated")
