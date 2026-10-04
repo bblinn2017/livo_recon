@@ -1,3 +1,4 @@
+#include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/processing/lio_coupled.h"
 
 #include <stdexcept>
@@ -30,6 +31,13 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
     throw std::invalid_argument("lio/shadow/mode=on is implemented for estimator/mode=iekf only (R73 F-414); refused under coupled");
   if (opts_.scan_log_en)
     throw std::invalid_argument("lio/scan_log_en is implemented for estimator/mode=iekf only (R73); refused under coupled");
+
+  {
+    bool line_enabled = false;
+    pnh.getParam("voxel_map/plane/line_residual/enabled", line_enabled);
+    if (line_enabled)
+      throw std::invalid_argument("voxel_map/plane/line_residual/enabled=true is implemented for estimator/mode=iekf only (R74 F-430); refused under coupled");
+  }
 
   cfg.nested<int>(true, "estimator/mode=coupled",
                   "estimator/coupled/knot_count", copts_.knot_count, 4);
@@ -158,7 +166,7 @@ void LioProcCoupled::makeEvaluationPoints(
     if (copts_.gating_state_uncertainty) {
       const Eigen::MatrixXd J = trajectory_.worldPointJacobian(
           points[i].t, q, JointKnotResidualTime::Measurement);
-      gating_covariances[i] = J * joint_prior_.P * J.transpose();
+      gating_covariances[i] = symmetrized(M3D(J * joint_prior_.P * J.transpose()));   // R74 F-419
     }
   }
 }

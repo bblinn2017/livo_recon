@@ -104,6 +104,22 @@ struct Residual
   // ~(2*neighborhood_size+1)^3 voxels rather than giving up). Debug-only,
   // for attributing residual-quality issues to a specific tier.
   int match_tier = 0;
+
+  // R74 (F-430, F-431): which kind of row this is (see lio/line_residual.h LineRowKind): 0 = the ordinary single point-to-plane row (the
+  // default; everything above describes it), 1/2 = the u0/u1 rows of a line voxel, 3/4/5 = the u0/u1/u2 rows of the smooth point-to-
+  // distribution form. For a point that gets more than one row, VoxelPlane::computeResidual() fills this residual (the u0 row) and puts
+  // the other rows in extra_* (n_extra of them); LioProcBase::buildResiduals() turns each into its own Residual right after this one.
+  // Default 0 / n_extra 0: nothing changes for a run that does not select a line mode.
+  int row_kind = 0;
+  int n_extra = 0;
+  V3D extra_normal[2] = {V3D::Zero(), V3D::Zero()};
+  double extra_r[2] = {0.0, 0.0};
+  double extra_sigma[2] = {0.0, 0.0};      // floor + point noise projected on the row direction (the fit part is extra_fit_var)
+  double extra_fit_var[2] = {0.0, 0.0};
+  int extra_kind[2] = {0, 0};              // LineRowKind of each extra row
+  // R77 (F-453): the tilt part of each row's fit variance (already included in plane_var_term / extra_fit_var); 0 unless line_variance = plane_equivalent.
+  double tilt_var_term = 0.0;
+  double extra_tilt_var[2] = {0.0, 0.0};
 };
 
 // A world-frame point with its covariance kept as two separate
@@ -688,6 +704,32 @@ struct VoxelOpts
   // exactly the calibration (bootstrap) map for the whole run. Default false is bit-identical. A frozen map removes the map-feedback
   // path from a comparison; it is only a valid control between runs whose end-of-calibration map digests agree (see scan_log.csv).
   bool freeze_after_calibration = false;
+
+  // R76 (F-445): residual form for voxels that may be lines. line_enabled (default false = bit-identical to R73) switches the whole feature.
+  // line_form (read only when enabled): hard (default; a line voxel gets two rows) | smooth (every matched point gets three rows).
+  // line_rule (read only when form is hard): absolute (default; second eigenvalue < plane_threshold, the same constant that tests the first) |
+  // relative (e1 not distinguishable from e0, rel_sigmas) | relative_noise (relative with e0 floored at the sensor noise variance) |
+  // shape (e1 <= line_shape_ratio * e2). See lio/line_residual.h. line_residual_enum is resolved once at load.
+  bool line_enabled = false;
+  std::string line_form = "hard";
+  std::string line_rule = "absolute";
+  double line_rel_sigmas = 3.0;
+  double line_shape_ratio = 0.1;   // used only with line_rule = shape
+  int line_residual_enum = 0;   // LineMode as an int (0 = Off), set by VoxelMap::loadParameters()
+
+  // R77 (F-453): how the map-side variance of a line / smooth row is formed (read only when line_enabled).
+  //   fit_only (default, R76 behaviour, bit-identical): hard rows e_i/N; smooth rows max(e_i, sensor noise variance)(1+1/N).
+  //   plane_equivalent: the same fit_only variance PLUS the tilt term the point-to-plane row already has: the uncertainty of the row's own direction
+  //   (first-order eigenvector perturbation of the fit, propagated from the points' sensor / pose covariance, gap floored at the sensor noise variance)
+  //   multiplied by the point's lever arm. Hard rows i = 0, 1 tilt toward u2 only (the line axis); smooth rows tilt toward the other two axes.
+  // Read only with plane_fit_mode = pca and plane_var_mode = eigengap (the information and debiased paths have no per-point fit to propagate): refused otherwise.
+  std::string line_variance = "fit_only";
+  bool line_var_plane_equivalent = false;   // resolved once at load from line_variance
+
+  // R77 (F-433): floor the eigenvalue gaps |e0-e1| and |e0-e2| of the eigengap plane variance at the sensor noise variance (weight_sigma_r2), keeping the plane.
+  // Default false is bit-identical to R76. Read only with plane_fit_mode = pca and plane_var_mode = eigengap; refused together with plane_var_denom_floor_en
+  // (that flag rejects planes whose gap is below 2.5e-4, which a 4e-4 floor would make unreachable).
+  bool plane_gap_floor_en = false;
 };
 using VoxelOptsPtr = std::shared_ptr<VoxelOpts>;
 

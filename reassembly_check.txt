@@ -1,0 +1,4 @@
+whole zip sha256 b156fe66fddd42f37b601856fcc3c110b1e886ce7a3beda631ad4eeeb6f55fff (107803546 bytes)
+parts: 4
+reassembly of all parts equals the whole: PASS
+reassembly with part01 dropped is rejected (sha differs): PASS

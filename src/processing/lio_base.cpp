@@ -1,3 +1,4 @@
+#include "livo_recon/utils/log/bag_clock.h"
 #include "livo_recon/processing/lio_base.h"
 #include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/utils/log/param_warn.h"
@@ -204,7 +205,7 @@ void logUpdateDiag(int frame_idx, int iteration, double t_abs, const std::vector
   bool first = false;
   std::ofstream& o = log.stream(&first);
   if (first) {
-    o << "frame,iter,t_abs,n_resid,sum_inv_sigma2,mean_sigma2,mean_plane_var_term,mean_base_sigma2,mean_r,mean_r2_over_sigma2";
+    o << "frame,iter,t_abs,t_rel_s,n_resid,sum_inv_sigma2,mean_sigma2,mean_plane_var_term,mean_base_sigma2,mean_r,mean_r2_over_sigma2";
     for (int i = 0; i < 6; ++i) for (int j = i; j < 6; ++j) o << ",HtH_" << i << j;
     for (int i = 0; i < 6; ++i) o << ",Htz_" << i;
     o << ",dtheta_x,dtheta_y,dtheta_z,dt_x,dt_y,dt_z\n";
@@ -216,12 +217,41 @@ void logUpdateDiag(int frame_idx, int iteration, double t_abs, const std::vector
     s_r += r.r; s_chi += r.r * r.r / r.sigma_squared;
   }
   const double dn = n > 0.0 ? n : 1.0;
-  o << std::setprecision(10) << frame_idx << ',' << iteration << ',' << std::setprecision(17) << t_abs << ',' << residuals.size()
+  o << std::setprecision(10) << frame_idx << ',' << iteration << ',' << std::setprecision(17) << t_abs << ',' << tRelString(t_abs) << ',' << residuals.size()
     << ',' << s_inv << ',' << s_sig / dn << ',' << s_pv / dn << ',' << (s_sig - s_pv) / dn << ',' << s_r / dn << ',' << s_chi / dn;
   for (int i = 0; i < 6; ++i) for (int j = i; j < 6; ++j) o << ',' << ekf.HtH(i, j);
   for (int i = 0; i < 6; ++i) o << ',' << ekf.Htz(i);
   o << ',' << ekf.dtheta.x() << ',' << ekf.dtheta.y() << ',' << ekf.dtheta.z()
     << ',' << ekf.dt.x() << ',' << ekf.dt.y() << ',' << ekf.dt.z() << '\n';
+  o.flush();
+}
+
+// R77 (F-451): write-only per-scan record of the rows the update used, first iteration of every frame.
+// Row kinds (lio/line_residual.h LineRowKind): 0 plane; 1, 2 hard line u0, u1; 3, 4, 5 smooth u0, u1, u2. Every admitted point has exactly one u0-type row (kind 0, 1 or 3), so
+// n_points = kind0 + kind1 + kind3 and n_pts_with_line_rows = kind1 + kind3. sum_fit_var_line / sum_tilt_var / sum_sigma2_line are over the rows of kind 1..5 (tilt is the part of the
+// fit variance added by line_residual/variance = plane_equivalent, 0 otherwise); sum_sigma2_plane over the kind 0 rows. The last six columns are the cumulative R77 engagement counters
+// of voxelPlaneR77Counters(): they read the map updates through the previous scan.
+void logLineRows(int frame_idx, int iteration, const std::vector<Residual>& residuals)
+{
+  static PersistentLogStream log("line_rows_per_scan.csv");
+  bool first = false;
+  std::ofstream& o = log.stream(&first);
+  if (first) {
+    o << "scan_id,iter,n_rows,n_points,n_plane_rows,n_line_u0,n_line_u1,n_smooth_u0,n_smooth_u1,n_smooth_u2,n_pts_with_line_rows,sum_fit_var_line,sum_tilt_var,sum_sigma2_line,sum_sigma2_plane,"
+         "gap_fits,gap_d1,gap_d2,tilt_voxels,tilt_floored_axes,tilt_fallbacks\n";
+  }
+  long cnt[6] = {0, 0, 0, 0, 0, 0};
+  double s_fit = 0.0, s_tilt = 0.0, s_sig_line = 0.0, s_sig_plane = 0.0;
+  for (const auto& r : residuals) {
+    const int k = (r.row_kind >= 0 && r.row_kind <= 5) ? r.row_kind : 0;
+    ++cnt[k];
+    if (k == 0) { s_sig_plane += r.sigma_squared; continue; }
+    s_fit += r.plane_var_term; s_tilt += r.tilt_var_term; s_sig_line += r.sigma_squared;
+  }
+  const VoxelPlaneR77Counters c = voxelPlaneR77Counters();
+  o << frame_idx << ',' << iteration << ',' << residuals.size() << ',' << (cnt[0] + cnt[1] + cnt[3]) << ',' << cnt[0] << ',' << cnt[1] << ',' << cnt[2] << ',' << cnt[3] << ',' << cnt[4] << ',' << cnt[5]
+    << ',' << (cnt[1] + cnt[3]) << ',' << std::setprecision(10) << s_fit << ',' << s_tilt << ',' << s_sig_line << ',' << s_sig_plane
+    << ',' << c.gap_fits << ',' << c.gap_d1 << ',' << c.gap_d2 << ',' << c.tilt_voxels << ',' << c.tilt_floored_axes << ',' << c.tilt_fallbacks << '\n';
   o.flush();
 }
 
@@ -320,7 +350,7 @@ void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const s
   std::ofstream& so = shadow ? shslog.stream(&sfirst) : slog.stream(&sfirst);
   if (first)
     o << "frame,iter,idx,source_index,t,r,sigma_squared,plane_var_term,plane_key,node_id,tier,vis,"
-         "hrot_x,hrot_y,hrot_z,hpos_x,hpos_y,hpos_z,wx,wy,wz,bx,by,bz\n";
+         "hrot_x,hrot_y,hrot_z,hpos_x,hpos_y,hpos_z,wx,wy,wz,bx,by,bz,row_kind\n";
   if (sfirst) so << "frame,iter,n_resid,px,py,pz,rvx,rvy,rvz\n";
   const V3D rv = Log(st.rot());
   so << frame_idx << ',' << iteration << ',' << residuals.size() << ',' << std::setprecision(17) << st.pos().x() << ','
@@ -333,7 +363,7 @@ void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const s
       << ',' << r.point_cross_normal.x() << ',' << r.point_cross_normal.y() << ',' << r.point_cross_normal.z()
       << ',' << r.normal.x() << ',' << r.normal.y() << ',' << r.normal.z()
       << ',' << r.world_point.x() << ',' << r.world_point.y() << ',' << r.world_point.z()
-      << ',' << r.raw_body_point.x() << ',' << r.raw_body_point.y() << ',' << r.raw_body_point.z() << '\n';
+      << ',' << r.raw_body_point.x() << ',' << r.raw_body_point.y() << ',' << r.raw_body_point.z() << ',' << r.row_kind << '\n';
   }
   o.flush(); so.flush();
 }
@@ -468,6 +498,7 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
                      opts_.residual_dump_last_iter, false);
   }
   paramWarn<bool>(pnh, "lio/residual_geometry_en", opts_.residual_geometry_en, false);   // R70: residual_geometry.csv (write-only)
+  paramWarn<bool>(pnh, "lio/line_rows_log_en", opts_.line_rows_log_en, false);   // R77 (F-451): line_rows_per_scan.csv (write-only)
 
   // R61: open-loop IMU propagation (see OpenLoopOptions). reset_period_s is only meaningful, and only accepted,
   // under propagate_only.
@@ -680,7 +711,27 @@ void LioProcBase::buildResiduals(
           res.sigma_squared *= opts_.bootstrap_inflate_factor;   // R65 (F-128)
         res.t = pts[i].t;   // diagnostic only (spline refinement removed)
         res.raw_body_point = pts[i].raw_body_point;  // CQ-50
+        const bool inflate_now = opts_.bootstrap_inflate_scans > 0 && voxel_map_->frame_idx_ >= 1 &&
+            voxel_map_->frame_idx_ <= static_cast<decltype(voxel_map_->frame_idx_)>(opts_.bootstrap_inflate_scans);
         build_thread_residuals_[omp_get_thread_num()].push_back(res);
+        // R74 (F-430, F-431): the further rows of this point (line u1 row, smooth u1/u2 rows), each its own Residual, right after the u0 row.
+        // Same point, same plane id, same world point; own direction, residual, variance (fit part in plane_var_term, as for the u0 row).
+        for (int e = 0; e < res.n_extra; ++e) {
+          Residual x = res;
+          x.n_extra = 0;
+          x.row_kind = res.extra_kind[e];
+          x.normal = res.extra_normal[e];
+          x.r = res.extra_r[e];
+          x.plane_var_term = res.extra_fit_var[e];
+          x.tilt_var_term = res.extra_tilt_var[e];   // R77 (F-453)
+          x.sigma_squared = res.extra_sigma[e] + x.plane_var_term;
+          x.sigma_diag_squared = res.extra_sigma[e] - (res.floor_term > 0.0 ? res.floor_term : 0.0);
+          x.point_cross_normal = pts[i].point.cross(state_->rot().transpose() * x.normal);
+          x.plane_jacobian = V3D::Zero();
+          x.plane_covariance = M3D::Zero();
+          if (inflate_now) x.sigma_squared *= opts_.bootstrap_inflate_factor;
+          build_thread_residuals_[omp_get_thread_num()].push_back(x);
+        }
         if (allow_consistency_log && opts_.log_pair_corr_en)
           appendPairCorrResidual(voxel_map_->frame_idx_, res);
         tier0_missed = (res.match_tier != 0);
@@ -858,10 +909,10 @@ void LioProcBase::recordStepCap() const
   static PersistentLogStream log("step_cap.csv");
   bool first = false;
   std::ofstream& o = log.stream(&first);
-  if (first) o << "frame,iter,rot_raw,pos_raw,scale,bound,cap_rot,cap_pos\n";
+  if (first) o << "frame,iter,rot_raw,pos_raw,scale,bound,cap_rot,cap_pos,rot_applied,pos_applied\n";   // R74 (F-406): applied step norms appended
   o << std::setprecision(10) << voxel_map_->frame_idx_ << ',' << diagnostic_gn_iteration_ << ',' << r.rot_norm << ','
     << r.pos_norm << ',' << r.scale << ',' << (r.bound ? 1 : 0) << ',' << opts_.step_cap.rotation_rad << ','
-    << opts_.step_cap.position_m << '\n';
+    << opts_.step_cap.position_m << ',' << r.rot_norm * r.scale << ',' << r.pos_norm * r.scale << '\n';
 }
 
 void LioProcBase::solveSystem(const std::vector<Residual>& residuals) const {
@@ -929,6 +980,8 @@ double LioProcBase::estimateStateCorrection(
     logLivePointCov(voxel_map_->frame_idx_, pts);
   if (opts_.residual_geometry_en && diagnostic_gn_iteration_ == 0)   // R70: write-only residual geometry
     logResidualGeometry(voxel_map_->frame_idx_, residuals_);
+  if (opts_.line_rows_log_en && diagnostic_gn_iteration_ == 0)   // R77 (F-451): write-only per-scan row counts by kind
+    logLineRows(voxel_map_->frame_idx_, diagnostic_gn_iteration_, residuals_);
   if (!opts_.residual_dump_frames.empty() && diagnostic_gn_iteration_ == 0 &&
       std::find(opts_.residual_dump_frames.begin(), opts_.residual_dump_frames.end(), voxel_map_->frame_idx_) != opts_.residual_dump_frames.end())
     logResidualDump(voxel_map_->frame_idx_, diagnostic_gn_iteration_, *state_, residuals_);   // R71: write-only per-residual dump

@@ -10,13 +10,6 @@
 //   QA6 nis_gate state machine: for NIS = 2,2,0.5,0.5 the gain is exactly 1.25, 1.5625, 1+0.95*0.5625, 1+0.95*(that) (1e-14);
 //       the whiteness gate blocks inflation when |lag1| > whiteness_max and counts it.
 //   QA7 apply selects which variance sees the gain.
-//   QL1 data that IS a polynomial of the fitted degree has residual variance ~ 0 (< 1e-18).
-//   QL2 data = polynomial + c * w, with w a vector orthogonal to the polynomial space scaled to |w|^2 = n - p, has variance c^2 (1e-9
-//       relative). Controls: dividing RSS by n instead of n - p is off by the factor (n-p)/n, and the plain sample variance (no
-//       polynomial removed) is far larger than c^2 on trending data - both would fail QL2.
-//   QL3 refusals: n - p < 1 and zero time span return false.
-//   QW1 WNOA blocks equal the integral of the propagated disturbance (3-point Gauss-Legendre, exact to degree 5) to 1e-14 relative.
-//   QW2 semigroup: Q(dt1 + dt2) = F2 Q(dt1) F2^T + Q(dt2) with F2 = [1 dt2; 0 1]. Control: the naive sum Q(dt1) + Q(dt2) violates it.
 #include "livo_recon/lio/q_adapt.h"
 
 #include <cstdio>
@@ -153,81 +146,6 @@ int main()
     CHECK(y.gainAcc() == 1.0 && y.gainGyr() == 2.0, "QA7 apply=gyr");
   }
 
-  // ---- local polynomial
-  const int n = 40, order = 2, p = order + 1;
-  std::vector<double> t(n);
-  for (int i = 0; i < n; ++i) t[i] = 0.1 + 0.0025 * i;
-  auto tau = [&](int i) { return 2.0 * (t[i] - t.front()) / (t.back() - t.front()) - 1.0; };
-  {   // QL1
-    std::vector<Eigen::Vector3d> y(n);
-    for (int i = 0; i < n; ++i) {
-      const double x = tau(i);
-      y[i] = Eigen::Vector3d(9.81 + 2.0 * x - 3.0 * x * x, -1.0 + 0.5 * x, 4.0 * x * x);
-    }
-    Eigen::Vector3d var;
-    CHECK(localPolyResidualVariance(t, y, order, var), "QL1 fit succeeds");
-    CHECK(var.maxCoeff() < 1e-18, "QL1 polynomial data has ~0 residual variance");
-  }
-  {   // QL2
-    Eigen::MatrixXd A(n, p);
-    for (int i = 0; i < n; ++i) { double pw = 1; for (int j = 0; j < p; ++j) { A(i, j) = pw; pw *= tau(i); } }
-    Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr(A);
-    std::normal_distribution<double> N(0, 1);
-    const double cs[3] = {0.02, 0.003, 0.15};
-    std::vector<Eigen::Vector3d> y(n);
-    for (int i = 0; i < n; ++i) y[i].setZero();
-    for (int axis = 0; axis < 3; ++axis) {
-      Eigen::VectorXd e(n);
-      for (int i = 0; i < n; ++i) e(i) = N(rng);
-      Eigen::VectorXd w = e - A * qr.solve(e);
-      w *= std::sqrt((n - p) / w.squaredNorm());
-      for (int i = 0; i < n; ++i) {
-        const double x = tau(i);
-        y[i](axis) = (axis == 0 ? 9.81 + 40.0 * x : 3.0 * x * x) + cs[axis] * w(i);
-      }
-    }
-    Eigen::Vector3d var;
-    CHECK(localPolyResidualVariance(t, y, order, var), "QL2 fit succeeds");
-    for (int axis = 0; axis < 3; ++axis)
-      CHECK(close(var(axis), cs[axis] * cs[axis], 1e-9), "QL2 variance == c^2 for noise orthogonal to the polynomial space");
-    const double c0 = cs[0];
-    const double rss0 = var(0) * (n - p);
-    CHECK(std::abs(rss0 / n - c0 * c0) > 1e-3 * c0 * c0, "QL2 control: RSS/n would be wrong by (n-p)/n (the check fires)");
-    double mean = 0.0; for (int i = 0; i < n; ++i) mean += y[i](0); mean /= n;
-    double sv = 0.0; for (int i = 0; i < n; ++i) sv += (y[i](0) - mean) * (y[i](0) - mean); sv /= (n - 1);
-    CHECK(sv > 100.0 * c0 * c0, "QL2 control: plain sample variance on trending data is far above c^2 (the trend is what the fit removes)");
-  }
-  {   // QL3
-    Eigen::Vector3d var(7, 7, 7);
-    std::vector<double> t3 = {0.0, 0.1, 0.2};
-    std::vector<Eigen::Vector3d> y3(3, Eigen::Vector3d::Zero());
-    CHECK(!localPolyResidualVariance(t3, y3, 2, var) && var(0) == 7.0, "QL3 n - p < 1 refused, output untouched");
-    std::vector<double> tz = {1.0, 1.0, 1.0, 1.0, 1.0};
-    std::vector<Eigen::Vector3d> yz(5, Eigen::Vector3d::Zero());
-    CHECK(!localPolyResidualVariance(tz, yz, 1, var), "QL3 zero time span refused");
-  }
-  {   // QW1, QW2
-    const double qa = 0.37, qg = 0.011, dt = 0.0123;
-    const WnoaBlocks b = wnoaBlocks(qa, qg, dt);
-    const double xs[3] = {-std::sqrt(3.0 / 5.0), 0.0, std::sqrt(3.0 / 5.0)};
-    const double ws[3] = {5.0 / 9.0, 8.0 / 9.0, 5.0 / 9.0};
-    double ipp = 0, ipv = 0, ivv = 0;
-    for (int k = 0; k < 3; ++k) {
-      const double s = 0.5 * dt * (xs[k] + 1.0);
-      const double w = 0.5 * dt * ws[k];
-      const double m = dt - s;   // position response to a velocity kick at s
-      ipp += w * m * m; ipv += w * m; ivv += w * 1.0;
-    }
-    CHECK(close(b.pp, qa * ipp, 1e-14) && close(b.pv, qa * ipv, 1e-14) && close(b.vv, qa * ivv, 1e-14), "QW1 blocks equal the integral of the propagated disturbance");
-    CHECK(close(b.rr, qg * dt, 1e-15), "QW1 rotation block is qc_gyr dt");
-    const double d1 = 0.004, d2 = 0.009;
-    auto Q = [&](double d) { const WnoaBlocks w = wnoaBlocks(qa, 0, d); Eigen::Matrix2d m; m << w.pp, w.pv, w.pv, w.vv; return m; };
-    Eigen::Matrix2d F2; F2 << 1, d2, 0, 1;
-    const Eigen::Matrix2d lhs = Q(d1 + d2), rhs = F2 * Q(d1) * F2.transpose() + Q(d2);
-    CHECK((lhs - rhs).cwiseAbs().maxCoeff() < 1e-14 * lhs.cwiseAbs().maxCoeff(), "QW2 semigroup identity");
-    const Eigen::Matrix2d naive = Q(d1) + Q(d2);
-    CHECK((lhs - naive).cwiseAbs().maxCoeff() > 1e-3 * lhs.cwiseAbs().maxCoeff(), "QW2 control: the naive sum violates it (the check fires)");
-  }
   std::printf("ALL PASS\n");
   return 0;
 }

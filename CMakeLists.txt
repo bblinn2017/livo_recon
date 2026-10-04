@@ -272,6 +272,21 @@ target_include_directories(test_voxel_history PUBLIC include ${EIGEN3_INCLUDE_DI
 target_link_libraries(test_voxel_history ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
 add_test(NAME voxel_history COMMAND test_voxel_history)
 
+# R74 (F-419 extension): plane covariance exactly symmetric (same sources as test_voxel_history).
+add_executable(test_plane_var_symmetry tests/test_plane_var_symmetry.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
+target_include_directories(test_plane_var_symmetry PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+target_link_libraries(test_plane_var_symmetry ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
+add_test(NAME plane_var_symmetry COMMAND test_plane_var_symmetry)
+add_executable(test_line_residual_glue tests/test_line_residual_glue.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
+target_include_directories(test_line_residual_glue PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+target_link_libraries(test_line_residual_glue ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
+add_test(NAME line_residual_glue COMMAND test_line_residual_glue)
+# R77 (F-453, F-433): line variance tilt term and plane eigengap floor (same sources as test_line_residual_glue).
+add_executable(test_line_variance_r77 tests/test_line_variance_r77.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
+target_include_directories(test_line_variance_r77 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+target_link_libraries(test_line_variance_r77 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
+add_test(NAME line_variance_r77 COMMAND test_line_variance_r77)
+
 # R70 (planning agent's patch): block information scale identities (ROS-free, Eigen only).
 add_executable(test_info_scale tests/test_info_scale.cpp src/lio/info_scale.cpp)
 target_include_directories(test_info_scale PUBLIC include ${EIGEN3_INCLUDE_DIRS})
@@ -281,7 +296,7 @@ add_test(NAME info_scale COMMAND test_info_scale)
 # R72 (planning agent's patch): step cap (F-403), Q-adaptation alternatives (F-401), ZUPT (F-401), failure dump round trip (F-398).
 # ROS-free header-only modules, Eigen only. (The solver-level failure-capture test, test_joint_knot_failure_capture, is picked up by
 # tests/joint_knots/CMakeLists.txt's glob.)
-foreach(r72_test step_cap q_adapt zupt failure_capture symmetrize renamed_keys shadow_options)
+foreach(r72_test step_cap q_adapt zupt failure_capture symmetrize renamed_keys shadow_options bag_clock row_flush plane_test_values line_residual line_residual_r75 line_residual_r76 process_noise_switch)
   add_executable(test_${r72_test} tests/test_${r72_test}.cpp)
   target_include_directories(test_${r72_test} PUBLIC include ${EIGEN3_INCLUDE_DIRS})
   target_link_libraries(test_${r72_test} Eigen3::Eigen)

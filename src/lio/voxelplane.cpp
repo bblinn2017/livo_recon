@@ -1,4 +1,6 @@
 #include "livo_recon/lio/voxelplane.h"
+#include "livo_recon/utils/algo/symmetrize.h"
+#include "livo_recon/lio/line_residual.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include <fstream>
 #include <sstream>
@@ -21,6 +23,9 @@ namespace
 // T0-F-2b: see voxelplane.h's voxelPlaneFrameStats{Reset,Read}() doc
 // comment. atomic<double> has no fetch_max pre-C++20 -- CAS loop instead.
 std::atomic<int> g_denom_rejected_count{0};
+// R77 (F-433, F-453): cumulative engagement counters (never reset), read by voxelPlaneR77Counters().
+std::atomic<long> g_r77_gap_fits{0}, g_r77_gap_d1{0}, g_r77_gap_d2{0};
+std::atomic<long> g_r77_tilt_voxels{0}, g_r77_tilt_floored_axes{0}, g_r77_tilt_fallbacks{0};
 // Engagement counter for the information plane model.  A run configured with
 // plane_var_mode = "information" that never increments this built no plane
 // under the model and is an INERT cell, not a null result -- the same
@@ -625,6 +630,18 @@ void voxelPlaneFrameStatsRead(int& denom_rejected_count, double& max_plane_var_t
   max_plane_var_trace = g_max_plane_var_trace.load(std::memory_order_relaxed);
 }
 
+VoxelPlaneR77Counters voxelPlaneR77Counters()
+{
+  VoxelPlaneR77Counters c;
+  c.gap_fits = g_r77_gap_fits.load(std::memory_order_relaxed);
+  c.gap_d1 = g_r77_gap_d1.load(std::memory_order_relaxed);
+  c.gap_d2 = g_r77_gap_d2.load(std::memory_order_relaxed);
+  c.tilt_voxels = g_r77_tilt_voxels.load(std::memory_order_relaxed);
+  c.tilt_floored_axes = g_r77_tilt_floored_axes.load(std::memory_order_relaxed);
+  c.tilt_fallbacks = g_r77_tilt_fallbacks.load(std::memory_order_relaxed);
+  return c;
+}
+
 // CQ-56 item 3: separate accessor (not folded into voxelPlaneFrameStatsRead
 // above) so no existing caller's signature needs to change -- this is a
 // report-only diagnostic added for this card's own measurement, not a
@@ -1002,6 +1019,64 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
     H_i << point_cross_normal.transpose(), plane_.normal.transpose();
     res.s_prior_pose = (H_i * pt.prior_cov_rp * H_i.transpose()).value();
   }
+  // R74 (F-430, F-431, F-432): line / point-to-distribution rows.  Off (line_residual_enum == 0) never enters this block, so the single
+  // point-to-plane row above is bit for bit what R73 built.  This residual is always the u0 row; further rows go in res.extra_*, and
+  // LioProcBase::buildResiduals() turns each into its own Residual.  The plane-fit admission above (gate()) is unchanged in every mode.
+  res.row_kind = kRowPlane;
+  res.n_extra = 0;
+  if (opts_->line_residual_enum != 0) {
+    LineOptions lo;
+    lo.mode = static_cast<LineMode>(opts_->line_residual_enum);
+    lo.plane_threshold = opts_->plane_threshold;
+    lo.rel_sigmas = opts_->line_rel_sigmas;
+    lo.shape_ratio = opts_->line_shape_ratio;
+    lo.sensor_noise_var = opts_->weight_sigma_r2;
+    LineRow rows[3];
+    const V3D d_center = pt.point - plane_.center;
+    const int nr = lineRows(lo, plane_.normal, y_normal_, x_normal_, eigen_values_, d_center, points_size_, rows);
+    if (nr > 0) {
+      const bool smooth = (lo.mode == LineMode::Smooth);
+      // R77 (F-453): variance = plane_equivalent adds the tilt term to every row's fit variance (fit_only: nothing changes, bit for bit).
+      double tilt[3] = {0.0, 0.0, 0.0};
+      if (opts_->line_var_plane_equivalent) {
+        for (int i = 0; i < nr; ++i) {
+          double t = 0.0;
+          if (lineTiltVar(i, d_center, smooth, t)) { rows[i].fit_var += t; tilt[i] = t; }
+          else g_r77_tilt_fallbacks.fetch_add(1, std::memory_order_relaxed);
+        }
+      }
+      res.tilt_var_term = tilt[0];
+      // Row 0 (u0): the fit variance replaces the plane-covariance term; the exact plane Jacobian/covariance no longer describe it, so
+      // they are zeroed (residual_redundancy then tallies the group as degenerate and leaves it alone).
+      res.row_kind = smooth ? kRowSmoothU0 : kRowLineU0;
+      res.plane_var_term = rows[0].fit_var;
+      res.plane_jacobian = V3D::Zero();
+      res.plane_covariance = M3D::Zero();
+      if (smooth) {   // the eigenvalue floor already contains the sensor noise floor: weight_floor is not added a second time
+        res.floor_term = 0.0;
+        res.sigma_squared = sigma_diag_squared;
+      }
+      const bool pose_in_gate = opts_->pose_cov_in_sigma || pt.include_pose_cov_in_gate;
+      for (int k = 1; k < nr; ++k) {
+        double sd = pointPlaneGateMeasurementVariance(rows[k].normal, pt.sensor_cov, pt.pose_cov, opts_->pose_cov_in_sigma);
+        if (!std::isfinite(sd) || sd <= 0.0) continue;
+        if (sd < 1e-6) sd = 1e-6;
+        if (!smooth) {   // hard line: the u1 row is gated like the plane row (sigma_num), with its own variance
+          double sg = pointPlaneGateMeasurementVariance(rows[k].normal, pt.sensor_cov, pt.pose_cov, pose_in_gate);
+          if (!std::isfinite(sg) || sg <= 0.0) continue;
+          if (sg < 1e-6) sg = 1e-6;
+          if (!(rows[k].r * rows[k].r <= opts_->sigma_num_squared * (floor_term + sg + rows[k].fit_var))) continue;
+        }
+        const int e = res.n_extra++;
+        res.extra_normal[e] = rows[k].normal;
+        res.extra_r[e] = rows[k].r;
+        res.extra_sigma[e] = (smooth ? 0.0 : floor_term) + sd;
+        res.extra_fit_var[e] = rows[k].fit_var;
+        res.extra_tilt_var[e] = tilt[k];
+        res.extra_kind[e] = (smooth ? kRowSmoothU0 : kRowLineU0) + k;
+      }
+    }
+  }
   if (opts_->log_variance_shares_en) debugLogVarianceShare(sigma_diag_squared, plane_var_term);
   return true;
 }
@@ -1046,12 +1121,98 @@ void VoxelPlane::fillSnapshot(VoxelPlaneSnapshot& out) const
   out.plane_conf_factor = last_plane_conf_factor_;
 }
 
+// R77 (F-453).  First-order perturbation of row i's own eigenvector u_i toward the other two eigenvectors u_a (a != i), the same expansion VoxelPlane::update() uses for the
+// plane normal (row i = 0 reproduces the tilt block of plane_var_):
+//   theta_ia = sum_k  g_ia,k . dp_k ,   g_ia,k = (w_k / (e_i - e_a)) * ( z_k,a u_i + z_k,i u_a ) ,   z_k,x = u_x . (p_k - center) ,
+// so  Var(theta_ia, theta_ib) = sum_k g_ia,k^T Cov_k g_ib,k  with Cov_k the same per-point covariance plane_var_ uses (sensor + pose, or sensor only).
+// A residual along u_i changes by (u_a . d) theta_ia + (u_b . d) theta_ib for a query offset d = point - center: that is lineTiltVar(). Gaps are floored at the sensor noise variance
+// (always, in this form), with the sign the eigenvalue order implies.  Hard rows (i = 0, 1) use only the line axis u2 as tilt axis (the tilt toward the other small eigenvector
+// only rotates u0 into u1 inside the plane that the pair already spans, it does not move the line); smooth rows use both axes.
+void VoxelPlane::computeLineTilt(const std::vector<PointXYZCov>& points, const std::vector<double>* var_weights, double var_weight_sum, bool use_var_weights)
+{
+  LineOptions lo;
+  lo.mode = static_cast<LineMode>(opts_->line_residual_enum);
+  lo.plane_threshold = opts_->plane_threshold;
+  lo.rel_sigmas = opts_->line_rel_sigmas;
+  lo.shape_ratio = opts_->line_shape_ratio;
+  lo.sensor_noise_var = opts_->weight_sigma_r2;
+  const bool smooth = (lo.mode == LineMode::Smooth);
+  if (!smooth && !isLineVoxel(lo, eigen_values_(0), eigen_values_(1), points_size_, eigen_values_(2))) return;
+  const int rows = smooth ? 3 : 2;
+  const int N = static_cast<int>(points.size());
+  if (N < 1) return;
+  const double inv_N = 1.0 / N;
+  const double fl = opts_->weight_sigma_r2;
+  const V3D u[3] = {plane_.normal, y_normal_, x_normal_};
+  const double e[3] = {eigen_values_(0), eigen_values_(1), eigen_values_(2)};
+  int ia[3], ib[3];
+  double gap_a[3] = {0, 0, 0}, gap_b[3] = {0, 0, 0};
+  long floored = 0;
+  auto flooredGap = [&](int i, int a, bool count) {
+    const double g = e[i] - e[a];
+    const double m = std::max(std::fabs(g), fl);
+    if (count && std::fabs(g) < fl) ++floored;
+    return (i < a) ? -m : m;   // ascending eigenvalues: e_i <= e_a when i < a
+  };
+  Eigen::Matrix2d L[3] = {Eigen::Matrix2d::Zero(), Eigen::Matrix2d::Zero(), Eigen::Matrix2d::Zero()};
+  for (int i = 0; i < rows; ++i) {
+    ia[i] = (i == 0) ? 1 : 0;
+    ib[i] = (i == 2) ? 1 : 2;
+    gap_a[i] = flooredGap(i, ia[i], smooth);   // hard rows do not use axis a: not counted
+    gap_b[i] = flooredGap(i, ib[i], true);
+  }
+  const bool sensor_only = (opts_->plane_fit_pose_cov_mode == "sensor_only");
+  for (int k = 0; k < N; ++k) {
+    const auto& pt = points[k];
+    const double w = use_var_weights ? ((*var_weights)[k] / var_weight_sum) : inv_N;
+    const V3D z = pt.point - plane_.center;
+    const double zz[3] = {u[0].dot(z), u[1].dot(z), u[2].dot(z)};
+    const M3D C = sensor_only ? pt.sensor_cov : M3D(pt.sensor_cov + pt.pos_cov);
+    for (int i = 0; i < rows; ++i) {
+      const int a = ia[i], b = ib[i];
+      const V3D gb = (w / gap_b[i]) * (zz[b] * u[i] + zz[i] * u[b]);
+      const V3D Cgb = C * gb;
+      L[i](1, 1) += gb.dot(Cgb);
+      if (smooth) {
+        const V3D ga = (w / gap_a[i]) * (zz[a] * u[i] + zz[i] * u[a]);
+        L[i](0, 0) += ga.dot(C * ga);
+        L[i](0, 1) += ga.dot(Cgb);
+      }
+    }
+  }
+  for (int i = 0; i < rows; ++i) {
+    L[i](1, 0) = L[i](0, 1);
+    line_tilt_L_[i] = L[i];
+    line_tilt_valid_[i] = true;
+  }
+  g_r77_tilt_voxels.fetch_add(1, std::memory_order_relaxed);
+  if (floored) g_r77_tilt_floored_axes.fetch_add(floored, std::memory_order_relaxed);
+}
+
+bool VoxelPlane::lineTiltVar(int row, const V3D& d, bool smooth, double& out) const
+{
+  if (row < 0 || row > 2 || !line_tilt_valid_[row]) return false;
+  const V3D u[3] = {plane_.normal, y_normal_, x_normal_};
+  const int a = (row == 0) ? 1 : 0, b = (row == 2) ? 1 : 2;
+  const double lb = u[b].dot(d);
+  double v;
+  if (smooth) {
+    const double la = u[a].dot(d);
+    v = la * la * line_tilt_L_[row](0, 0) + 2.0 * la * lb * line_tilt_L_[row](0, 1) + lb * lb * line_tilt_L_[row](1, 1);
+  } else {
+    v = lb * lb * line_tilt_L_[row](1, 1);
+  }
+  out = (v > 0.0 && std::isfinite(v)) ? v : 0.0;
+  return true;
+}
+
 void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
                         const std::vector<double>* weights_in,
                         const RunningMoments* running,
                         const std::vector<double>* var_weights_in,
                         int frame_idx)
 {
+  line_tilt_valid_[0] = line_tilt_valid_[1] = line_tilt_valid_[2] = false;   // R77 (F-453)
   plane_var_.setZero();
   covariance_.setZero();
   plane_ = {};
@@ -1184,8 +1345,19 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   // together, making a small gap far more common there) -- reverted here
   // to preserve PCA's exact original byte-identical behavior. Revisit
   // only if PCA mode is later found to have its own denom-blowup problem.
-  const double denom1 = eigen_values_(0) - eigen_values_(1);
-  const double denom2 = eigen_values_(0) - eigen_values_(2);
+  double denom1 = eigen_values_(0) - eigen_values_(1);
+  double denom2 = eigen_values_(0) - eigen_values_(2);
+  // R77 (F-433): keep the plane, floor the eigenvalue gaps at the sensor noise variance. e0 is the smallest eigenvalue, so both gaps are <= 0 and the floored value is -floor.
+  // Default off (plane_gap_floor_en false): denom1 / denom2 are exactly what they were, bit for bit. The information path below never divides by them.
+  if (opts_->plane_gap_floor_en) {
+    const double fl = opts_->weight_sigma_r2;
+    const bool f1 = std::fabs(denom1) < fl, f2 = std::fabs(denom2) < fl;
+    if (f1) denom1 = -fl;
+    if (f2) denom2 = -fl;
+    g_r77_gap_fits.fetch_add(1, std::memory_order_relaxed);
+    if (f1) g_r77_gap_d1.fetch_add(1, std::memory_order_relaxed);
+    if (f2) g_r77_gap_d2.fetch_add(1, std::memory_order_relaxed);
+  }
 
   plane_.normal = evecs.col(0).normalized();
   y_normal_     = evecs.col(1);
@@ -1312,6 +1484,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
     plane_var_.noalias() += Jmin * residual_cov * Jmin.transpose();
   }
 
+  plane_var_ = symmetrized(plane_var_);   // R74 F-419: the sum of J C J^T terms is symmetric only up to rounding
   last_fit_j_ = use_weights ? N : 0;
 
   // T1: refitDebiased() rejects a fit whose eigengap denominators are within
@@ -1332,6 +1505,10 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   }
 
   }  // end eigengap branch
+
+  // R77 (F-453): the tilt matrices of the line / smooth rows. Reached only on the pca + eigengap path (the config refuses plane_equivalent with any other fit or variance model).
+  if (opts_->line_var_plane_equivalent)
+    computeLineTilt(points, var_weights, var_weight_sum, use_var_weights);
 
   if (opts_->log_variance_shares_en) {
     double n_eff = N;
@@ -1758,7 +1935,7 @@ void VoxelPlane::buildInformationCovariance(double n_raw, const M3D& mean_cov_al
       is_plane_ = false;
       return;
     }
-    plane_var_ = H.inverse();
+    plane_var_ = symmetrized(M3D(H.inverse()));   // R74 F-419
     if (!plane_var_.allFinite()) { is_plane_ = false; return; }
     g_info_fits.fetch_add(1, std::memory_order_relaxed);
     return;

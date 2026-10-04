@@ -2,12 +2,15 @@
 
 #include <algorithm>
 
+#include "livo_recon/utils/log/bag_clock.h"
+
 namespace livo_recon
 {
 
 void DataQueues::setStartTime(const double timestamp)
 {
   start_time = timestamp;
+  setBagStart(timestamp);   // R74 (F-422): t_rel_s = t_abs - start_time in every per-scan file
   {
     std::lock_guard<std::mutex> lock(imu_mutex);
     for (auto& imu : imu_queue) imu.t -= start_time;

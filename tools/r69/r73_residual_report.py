@@ -25,6 +25,9 @@ import pandas as pd
 GROUND, WALL = 0.8, 0.35
 HC = ["hrot_x", "hrot_y", "hrot_z", "hpos_x", "hpos_y", "hpos_z"]
 IJ = [(i, j) for i in range(6) for j in range(i, 6)]
+# per_residual()'s 12 derived columns: rebuildable offline from HC + sigma_squared + r in one per_residual() call,
+# so the *_all.csv.gz return copies drop them (weight/cls are kept -- cheap, not part of this list).
+PER_RESIDUAL_DERIVED = ["info_trace", "info_rot_trace", "info_pos_trace", "info_yaw", "info_x", "info_y"] + ["htz_%d" % k for k in range(6)]
 
 
 def classify(nz):
@@ -162,13 +165,13 @@ def opener(path):
     return path if os.path.exists(path) else (path + ".gz" if os.path.exists(path + ".gz") else None)
 
 
-def run_one(dump_path, diag, frames, arm, role):
+def run_one(dump_path, diag, frames, arm, role, hth_dump_frames_only=False):
     dump = pd.read_csv(dump_path)
     if frames != "all":
         dump = dump[dump["frame"].isin(frames)]
     pr = per_residual(dump)
     out = {}
-    hth = hth_table(diag[diag["frame"].isin(pr["frame"].unique()) | True], pr) if len(diag) else pd.DataFrame()
+    hth = hth_table(diag[diag["frame"].isin(pr["frame"].unique())] if hth_dump_frames_only else diag, pr) if len(diag) else pd.DataFrame()
     cls = class_table(pr) if len(pr) else pd.DataFrame()
     con = consistency(pr, diag) if len(diag) and len(pr) else pd.DataFrame()
     for name, df in (("hth", hth), ("cls", cls), ("con", con), ("res", pr)):
@@ -182,6 +185,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", required=True); ap.add_argument("--out", required=True); ap.add_argument("--arm", default=None)
     ap.add_argument("--resid-frames", default="1,2,3,4,5"); ap.add_argument("--shadow", action="store_true")
+    ap.add_argument("--dump-frames-only", action="store_true")
     a = ap.parse_args()
     arm = a.arm or os.path.basename(os.path.abspath(a.dir))
     frames = "all" if a.resid_frames == "all" else [int(x) for x in a.resid_frames.split(",") if x]
@@ -200,7 +204,7 @@ def main():
             print("missing residual_dump.csv or lio_update_diag.csv in", a.dir); return 2
         jobs.append(("driver", dp, diag_from_update_diag(up)))
     for role, path, diag in jobs:
-        o = run_one(path, diag, frames, arm, role)
+        o = run_one(path, diag, frames, arm, role, hth_dump_frames_only=a.dump_frames_only)
         for k in parts:
             if len(o[k]):
                 parts[k].append(o[k])

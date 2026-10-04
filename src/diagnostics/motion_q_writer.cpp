@@ -1,3 +1,4 @@
+#include "livo_recon/utils/log/bag_clock.h"
 #include "livo_recon/diagnostics/motion_q_writer.h"
 
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
@@ -49,14 +50,14 @@ void writeMotionQScanDiagnostic(
   bool first = false;
   std::ofstream& out = log.stream(&first);
   if (first)
-    out << "scan_index,t_abs,model,beta,acc_scale,gyro_scale,n_samples,mean_dynamic_acc_norm,"
+    out << "scan_index,t_abs,t_rel_s,model,beta,acc_scale,gyro_scale,n_samples,mean_dynamic_acc_norm,"
            "mean_dynamic_gyr_norm,mean_q_acc_x,mean_q_acc_y,mean_q_acc_z,"
            "mean_q_gyr_x,mean_q_gyr_y,mean_q_gyr_z,acc_clamped_axes,"
            "gyr_clamped_axes,mean_debiased_acc_energy_x,"
            "mean_debiased_acc_energy_y,mean_debiased_acc_energy_z,"
            "mean_debiased_gyr_energy_x,mean_debiased_gyr_energy_y,"
            "mean_debiased_gyr_energy_z,acc_cap_fraction,gyr_cap_fraction\n";
-  out << std::setprecision(17) << scan_index << ',' << t_abs << ',' << model
+  out << std::setprecision(17) << scan_index << ',' << t_abs << ',' << tRelString(t_abs) << ',' << model
       << ',' << beta << ',' << acc_scale << ',' << gyr_scale << ','
       << sample_count << ',' << mean_dynamic_acc_norm
       << ',' << mean_dynamic_gyr_norm << ',' << mean_q_acc.x() << ','

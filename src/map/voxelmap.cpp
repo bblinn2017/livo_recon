@@ -1,3 +1,5 @@
+#include "livo_recon/lio/line_residual.h"
+#include "livo_recon/lio/plane_test_values.h"
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/lio/voxelplane.h"
 #include "livo_recon/utils/log/param_warn.h"
@@ -360,6 +362,56 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     cfg.mode("voxel_map/plane/plane_fit_pose_cov_mode",
              opts_->plane_fit_pose_cov_mode, "sensor_only",
              { "combined", "sensor_only" });
+    // ── R76 (F-445): line / point-to-distribution residual rows: a flag plus mutually exclusive choices ──
+    // enabled=false (default) is bit-identical to R73.  enabled=true, form=hard (default), rule=absolute (default): a voxel whose second eigenvalue is also
+    // below plane_threshold (the constant that tests the first) is a LINE and gets two rows (u0, u1) instead of one point-to-plane row.
+    // rule picks another line test (relative, relative_noise, shape).  form=smooth: every matched point gets three rows, no class switch.
+    cfg.refuseIfSet("voxel_map/plane/line_residual/mode",
+                    "Use voxel_map/plane/line_residual/enabled (bool) with form (hard|smooth) and rule (absolute|relative|relative_noise|shape).");
+    cfg.refuseIfSet("voxel_map/plane/line_residual/threshold",
+                    "Use voxel_map/plane/line_residual/rule (absolute|relative|relative_noise|shape), read only when form is hard.");
+    cfg.get<bool>("voxel_map/plane/line_residual/enabled", opts_->line_enabled, false);
+    cfg.nestedMode(opts_->line_enabled, "voxel_map/plane/line_residual/enabled=true",
+                   "voxel_map/plane/line_residual/form", opts_->line_form, "hard", { "hard", "smooth" });
+    cfg.nestedMode(opts_->line_enabled && opts_->line_form == "hard", "voxel_map/plane/line_residual/enabled=true,form=hard",
+                   "voxel_map/plane/line_residual/rule", opts_->line_rule, "absolute",
+                   { "absolute", "relative", "relative_noise", "shape" });
+    cfg.nested<double>(opts_->line_enabled && opts_->line_form == "hard" && (opts_->line_rule == "relative" || opts_->line_rule == "relative_noise"),
+                       "voxel_map/plane/line_residual/enabled=true,form=hard,rule=relative|relative_noise",
+                       "voxel_map/plane/line_residual/rel_sigmas", opts_->line_rel_sigmas, 3.0);
+    cfg.nested<double>(opts_->line_enabled && opts_->line_form == "hard" && opts_->line_rule == "shape",
+                       "voxel_map/plane/line_residual/enabled=true,form=hard,rule=shape",
+                       "voxel_map/plane/line_residual/shape_ratio", opts_->line_shape_ratio, 0.1);
+    if (!(opts_->line_shape_ratio > 0.0) || !(opts_->line_shape_ratio < 1.0) || !std::isfinite(opts_->line_shape_ratio))
+      throw std::runtime_error("voxel_map/plane/line_residual/shape_ratio must be finite and in (0, 1)");
+    if (!(opts_->line_rel_sigmas > 0.0) || !std::isfinite(opts_->line_rel_sigmas))
+      throw std::runtime_error("voxel_map/plane/line_residual/rel_sigmas must be finite and > 0");
+    {
+      LineMode lm = LineMode::Off;
+      std::string why;
+      if (!resolveLineConfig(opts_->line_enabled, opts_->line_form, opts_->line_rule, lm, &why))
+        throw std::runtime_error("voxel_map/plane/line_residual: unresolvable combination: " + why);
+      opts_->line_residual_enum = static_cast<int>(lm);
+    }
+    // ── R77 (F-453): how the map-side variance of a line / smooth row is formed ──
+    cfg.nestedMode(opts_->line_enabled, "voxel_map/plane/line_residual/enabled=true",
+                   "voxel_map/plane/line_residual/variance", opts_->line_variance, "fit_only", { "fit_only", "plane_equivalent" });
+    opts_->line_var_plane_equivalent = opts_->line_enabled && opts_->line_variance == "plane_equivalent";
+    if (opts_->line_var_plane_equivalent && !(opts_->plane_fit_mode == "pca" && eigengap))
+      cfg.requireCombination(
+          "voxel_map/plane/line_residual/variance = plane_equivalent needs voxel_map/plane/plane_fit_mode = pca and plane_var_mode = eigengap: the tilt term is "
+          "propagated from the voxel's own points inside VoxelPlane::update()'s eigengap branch, which the debiased fit (no points kept) and the information "
+          "variance (no eigengap) never run. Use variance = fit_only with those modes.");
+    // ── R77 (F-433): eigengap floor on the plane variance, plane kept ──
+    cfg.nested<bool>(opts_->plane_fit_mode == "pca" && eigengap, "voxel_map/plane/plane_fit_mode=pca,plane_var_mode=eigengap",
+                     "voxel_map/plane/plane_gap_floor_en", opts_->plane_gap_floor_en, false);
+    if (opts_->plane_gap_floor_en && opts_->plane_var_denom_floor_en)
+      cfg.requireCombination(
+          "voxel_map/plane/plane_gap_floor_en = true together with plane_var_denom_floor_en = true: the rejection flag drops planes whose gap is below "
+          "max(1e-8, 0.1 * plane_threshold) = 2.5e-4, and the floor (sensor noise variance, 4e-4 with range_err 0.02) lifts every gap above that, so the rejection could never "
+          "fire. Set one of them.");
+    if (opts_->plane_gap_floor_en && !(opts_->weight_sigma_r2 > 0.0))
+      cfg.requireCombination("voxel_map/plane/plane_gap_floor_en = true needs imu/sensor/range_err > 0 (the floor is range_err^2); it would be inert at 0.");
     // R65: eigengap-denominator rejection on the debiased path (default true = R64).
     cfg.nested<bool>(opts_->plane_fit_mode == "debiased" && eigengap, "voxel_map/plane/plane_fit_mode=debiased,plane_var_mode=eigengap",
                      "voxel_map/plane/debias_denominator_guard", opts_->debias_denominator_guard, true);
@@ -460,6 +512,8 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/min_frames_to_init:        " << opts_->min_frames_to_init
       << "\n  plane/plane_threshold:           " << opts_->plane_threshold
       << "\n  plane/plane_fit_mode:            " << opts_->plane_fit_mode
+      << "\n  plane/line_residual:             enabled " << (opts_->line_enabled ? "true" : "false") << " / form " << opts_->line_form << " / rule " << opts_->line_rule << " / rel_sigmas " << opts_->line_rel_sigmas << " / shape_ratio " << opts_->line_shape_ratio << " / enum " << opts_->line_residual_enum << " / variance " << opts_->line_variance
+      << "\n  plane/plane_gap_floor_en:        " << (opts_->plane_gap_floor_en ? "true" : "false")
       << "\n  plane/plane_var_mode:            " << opts_->plane_var_mode
       << "\n  plane/plane_fit_pose_cov_mode:   " << opts_->plane_fit_pose_cov_mode
       << "\n  plane/bin_weight_mode_fit:       " << opts_->bin_weight_mode_fit
@@ -813,7 +867,8 @@ void VoxelMap::writePostCalibrationSnapshot() const
          "plane_var_10,plane_var_11,plane_var_12,plane_var_20,plane_var_21,plane_var_22,"
          "point_count,distinct_frames,last_fit_j,roughness,sigma_bar2,info_n_raw,info_n_eff,"
          "info_rho,info_path,occupied_cells,occupancy_anisotropy,occupancy_var_u,"
-         "occupancy_var_v,plane_conf_factor\n";
+         "occupancy_var_v,plane_conf_factor,";
+  out << planeTestValuesHeader() << '\n';   // R74 (F-428): appended at the END, existing readers keep working
   out << std::setprecision(17);
   auto vec = [&](const V3D& v) { out << v.x() << ',' << v.y() << ',' << v.z(); };
   auto mat = [&](const M3D& m) {
@@ -859,7 +914,11 @@ void VoxelMap::writePostCalibrationSnapshot() const
         << ',' << r.info_n_eff << ',' << r.info_rho << ',' << r.info_path
         << ',' << r.occupied_cells << ',' << r.occupancy_anisotropy
         << ',' << r.occupancy_var_u << ',' << r.occupancy_var_v
-        << ',' << r.plane_conf_factor << '\n';
+        << ',' << r.plane_conf_factor << ',';
+    // R74 (F-428): test values of the plane and eigengap decisions (include/livo_recon/lio/plane_test_values.h)
+    writePlaneTestValues(out, planeTestValues(r.eigenvalues(0), r.eigenvalues(1), r.eigenvalues(2), r.layer, opts_->voxel_size,
+                                              opts_->plane_threshold, r.is_plane, r.point_count));
+    out << '\n';
   }
 }
 

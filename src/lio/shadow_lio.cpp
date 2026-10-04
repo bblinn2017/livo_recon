@@ -24,8 +24,6 @@ ShadowLio::ShadowLio(NodeContext& ctx, const ImuProc& driver_imu, const ShadowOp
     o.process_noise_model = "fixed";
     o.motion_acc_floor_scale = 1.0;
     o.motion_gyr_floor_scale = 1.0;
-    o.energy_source = "instant";
-    o.local_poly_order = 2;
   }
   else if (opts_.process_noise_model == "isotropic")
   {
@@ -37,7 +35,6 @@ ShadowLio::ShadowLio(NodeContext& ctx, const ImuProc& driver_imu, const ShadowOp
     o.motion_gyr_max_dynamic_variance = opts_.motion_gyr_cap;
     o.motion_acc_floor_scale = 1.0;
     o.motion_gyr_floor_scale = 1.0;
-    o.energy_source = "instant";
   }
   // "same": the shadow's Q configuration equals the driver's (a null shadow; used as the determinism and bookkeeping control).
 }

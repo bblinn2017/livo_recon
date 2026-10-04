@@ -3,6 +3,9 @@
 #include <cmath>
 #include <cstdio>
 #include <iostream>
+#include <random>
+
+#include "livo_recon/utils/algo/symmetrize.h"
 
 using namespace livo_recon;
 
@@ -528,6 +531,58 @@ int main()
   if (legacy_stats.redund_groups != 1)
     return fail("legacy exact covariance group is admitted",
         legacy_stats.redund_groups, 1.0);
+
+  // ---- R74 (F-419 extension): the joint-knot chain is EXACTLY symmetric (asymmetry 0, not "small").
+  //   SJ1 prior.P, prior.P_inverse, and the solve's A, K1, posterior, Gamma_L (empty LiDAR) and the tail covariance extracted from the
+  //       posterior have asymmetryMax == 0.
+  //   SJ2 accumulateJointLidarInformation: Gamma has asymmetryMax == 0 in both modes on a random 54-dimensional problem with 300 rows in 20
+  //       plane groups (the hand-built H^T H sums are symmetric only up to rounding before R74).
+  //   SJ3 control: a matrix with one off-diagonal pair perturbed by 1e-12 is reported as asymmetric, so the checks above can fail.
+  //   SJ4 the symmetrisation changes the values by rounding only: |symmetrized(Gamma) - Gamma_unsymmetrised| < 1e-12 relative.
+  {
+    if (asymmetryMax(prior.P) != 0.0) return fail("SJ1 prior.P exactly symmetric", asymmetryMax(prior.P), 0.0);
+    if (asymmetryMax(prior.P_inverse) != 0.0) return fail("SJ1 prior.P_inverse exactly symmetric", asymmetryMax(prior.P_inverse), 0.0);
+    if (asymmetryMax(restore.A) != 0.0) return fail("SJ1 solve A exactly symmetric", asymmetryMax(restore.A), 0.0);
+    if (asymmetryMax(restore.K1) != 0.0) return fail("SJ1 solve K1 exactly symmetric", asymmetryMax(restore.K1), 0.0);
+    if (asymmetryMax(restore.posterior) != 0.0) return fail("SJ1 solve posterior exactly symmetric", asymmetryMax(restore.posterior), 0.0);
+    if (asymmetryMax(restore.Gamma_L) != 0.0) return fail("SJ1 solve Gamma_L exactly symmetric", asymmetryMax(restore.Gamma_L), 0.0);
+    const Eigen::MatrixXd tail_post = extractTailStateCovariance(trajectory, restore.posterior, state);
+    if (asymmetryMax(tail_post) != 0.0) return fail("SJ1 tail covariance of the posterior exactly symmetric", asymmetryMax(tail_post), 0.0);
+    if (asymmetryMax(independent.Gamma) != 0.0) return fail("SJ2 independent Gamma exactly symmetric", asymmetryMax(independent.Gamma), 0.0);
+    if (asymmetryMax(woodbury.Gamma) != 0.0) return fail("SJ2 woodbury Gamma exactly symmetric", asymmetryMax(woodbury.Gamma), 0.0);
+
+    std::mt19937 rng(74);
+    std::normal_distribution<double> N01(0.0, 1.0);
+    std::uniform_real_distribution<double> U(0.05, 0.5);
+    const int D = 54, n_rows = 300, n_groups = 20;
+    std::vector<int> tokens(n_groups);
+    std::vector<JointLidarRow> big;
+    Eigen::MatrixXd plain = Eigen::MatrixXd::Zero(D, D);
+    for (int i = 0; i < n_rows; ++i) {
+      Eigen::RowVectorXd h(D);
+      for (int c = 0; c < D; ++c) h(c) = N01(rng);
+      const int g = i % n_groups;
+      const double sig = U(rng);
+      const M3D pc = (V3D(0.01, 0.02, 0.03)).asDiagonal();
+      big.push_back(JointLidarRow{h, N01(rng) * 0.1, sig + 0.01, 0.01, &tokens[g], V3D(1.0, 0.0, 0.0), pc});
+      plain.noalias() += (1.0 / sig) * h.transpose() * h;
+    }
+    ResidualRedundancyOptions off_o; off_o.mode = "off";
+    ResidualRedundancyOptions wb_o; wb_o.mode = "woodbury"; wb_o.rho = 1.0;
+    const JointLidarInformation g_off = accumulateJointLidarInformation(big, D, off_o);
+    const JointLidarInformation g_wb = accumulateJointLidarInformation(big, D, wb_o);
+    if (asymmetryMax(g_off.Gamma) != 0.0) return fail("SJ2 random 54-dim Gamma (off) exactly symmetric", asymmetryMax(g_off.Gamma), 0.0);
+    if (asymmetryMax(g_wb.Gamma) != 0.0) return fail("SJ2 random 54-dim Gamma (woodbury) exactly symmetric", asymmetryMax(g_wb.Gamma), 0.0);
+    std::printf("[INFO] SJ2 unsymmetrised H^T H sum asymmetry on the same rows: %.3e (informational; it can be 0 on some builds)\n", asymmetryMax(plain));
+    Eigen::MatrixXd bump = g_off.Gamma;
+    bump(2, 5) += 1e-12;
+    if (!(asymmetryMax(bump) > 0.0)) return fail("SJ3 control: a perturbed pair is detected as asymmetric");
+    Eigen::MatrixXd ref = Eigen::MatrixXd::Zero(D, D);
+    for (int i = 0; i < n_rows; ++i) ref.noalias() += (1.0 / std::max(big[i].sigma_squared, 1e-12)) * big[i].H.transpose() * big[i].H;
+    if ((symmetrized(ref) - g_off.Gamma).norm() >= 1e-12 * g_off.Gamma.norm())
+      return fail("SJ4 symmetrised Gamma equals the plain sum to rounding", (symmetrized(ref) - g_off.Gamma).norm(), 1e-12 * g_off.Gamma.norm());
+    std::cout << "R74 joint-knot symmetry checks passed\n";
+  }
 
   std::cout << "joint-knot estimator invariants passed\n";
   return 0;

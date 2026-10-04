@@ -8,18 +8,12 @@
 
 // ============================================================================
 // R72 (F-401): process-noise alternatives to the motion-dependent Q, as small ROS-free pure functions so each can be tested
-// for algebraic identities in isolation (tests/test_q_adapt.cpp).  Four mechanisms live here:
+// for algebraic identities in isolation (tests/test_q_adapt.cpp).  Two mechanisms live here (R74 F-427 removed the local-polynomial energy source and the additive WNOA disturbance):
 //
 //  (1) innovationStats()   per-scan LiDAR innovation statistics against the propagated prior (used by imu/process_noise/gain/mode =
 //                          innovation_scale and nis_gate).
 //  (2) QGain               a bounded scalar gain on the IMU step variance, updated once per scan from (1).  The gain is applied
 //                          by ImuProc::propagate on the NEXT scan's steps (a one-scan lag, by construction).
-//  (3) localPolyResidualVariance()  per-axis residual variance of a local polynomial fit to one scan's raw IMU samples
-//                          (imu/process_noise/motion/energy_source = local_poly): replaces the instantaneous "excitation
-//                          energy" fed to the unchanged motion-Q filter/debias/scale/cap pipeline.
-//  (4) wnoaBlocks()        the exact discrete covariance of a continuous white-noise-on-acceleration (WNOA) disturbance over dt
-//                          (imu/process_noise/disturbance/mode = wnoa), added to the step process covariance.
-//
 // Every mechanism is OFF by default and off is bit-identical (the integration never evaluates any of this when off).
 // Numeric defaults of the options below are PROVISIONAL (rule 1.7): they are starting values for the R72 experiment arms, not
 // recommended settings; the manifest sets every one of them explicitly.
@@ -146,56 +140,5 @@ private:
   double g_ = 1.0, last_ = 1.0, max_seen_ = 1.0;
   long scans_ = 0, changed_ = 0, inflating_ = 0, whiteness_blocked_ = 0;
 };
-
-// ---------------------------------------------------------------- (3) local polynomial residual variance
-// Fits y_k(t) ~ polynomial of degree `order` (p = order + 1 coefficients) to each of the three columns of y by least squares
-// and returns RSS / (n - p) per column. Returns false (var untouched) when n - p < 1 or the time span is not positive.
-inline bool localPolyResidualVariance(const std::vector<double>& t, const std::vector<Eigen::Vector3d>& y, int order,
-                                      Eigen::Vector3d& var)
-{
-  const int n = static_cast<int>(t.size());
-  const int p = order + 1;
-  if (order < 0 || n != static_cast<int>(y.size()) || n - p < 1) return false;
-  const double span = t.back() - t.front();
-  if (!(span > 0.0)) return false;
-  Eigen::MatrixXd A(n, p);
-  for (int i = 0; i < n; ++i)
-  {
-    const double tau = 2.0 * (t[i] - t.front()) / span - 1.0;   // [-1, 1]
-    double pw = 1.0;
-    for (int j = 0; j < p; ++j) { A(i, j) = pw; pw *= tau; }
-  }
-  Eigen::ColPivHouseholderQR<Eigen::MatrixXd> qr(A);
-  if (qr.rank() < p) return false;
-  for (int axis = 0; axis < 3; ++axis)
-  {
-    Eigen::VectorXd b(n);
-    for (int i = 0; i < n; ++i) b(i) = y[i](axis);
-    const Eigen::VectorXd coef = qr.solve(b);
-    const double rss = (b - A * coef).squaredNorm();
-    var(axis) = rss / static_cast<double>(n - p);
-  }
-  return true;
-}
-
-// ---------------------------------------------------------------- (4) WNOA discrete covariance
-// Continuous white noise on acceleration with power spectral density qc_acc (m^2/s^5), and white noise on angular rate with qc_gyr
-// (rad^2/s^3). Over an interval dt the exact discrete blocks are (per axis, identity over the three axes):
-//   velocity-velocity  qc_acc dt        position-position  qc_acc dt^3 / 3       position-velocity  qc_acc dt^2 / 2
-//   rotation-rotation  qc_gyr dt
-struct WnoaBlocks
-{
-  double vv = 0.0, pp = 0.0, pv = 0.0, rr = 0.0;
-};
-
-inline WnoaBlocks wnoaBlocks(double qc_acc, double qc_gyr, double dt)
-{
-  WnoaBlocks b;
-  b.vv = qc_acc * dt;
-  b.pp = qc_acc * dt * dt * dt / 3.0;
-  b.pv = qc_acc * dt * dt / 2.0;
-  b.rr = qc_gyr * dt;
-  return b;
-}
 
 }  // namespace livo_recon

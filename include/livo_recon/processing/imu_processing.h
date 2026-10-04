@@ -1,6 +1,7 @@
 #pragma once
 
 #include "livo_recon/node_context.h"
+#include "livo_recon/lio/process_noise_switch.h"
 #include "livo_recon/utils/data/measures.h"
 #include "livo_recon/utils/log/profiler.h"
 
@@ -34,18 +35,6 @@ struct ImuProcOptions
   double motion_acc_floor_scale = 1.0;
   double motion_gyr_floor_scale = 1.0;
   double motion_gyr_max_dynamic_variance = 0.3;
-
-  // R72 (F-401): source of the "excitation energy" the motion-Q filter consumes. "instant" (default) is the existing per-step
-  // |dynamic acc|^2 and |gyro|^2. "local_poly": the per-axis residual variance of a degree-`local_poly_order` polynomial fit to
-  // the scan's raw IMU samples (high-frequency content only; slow motion is absorbed by the fit). Refused under the "fixed" model.
-  std::string energy_source = "instant";   // instant|local_poly
-  int local_poly_order = 2;
-
-  // R72 (F-401): additive continuous white-noise-on-acceleration disturbance (see lio/q_adapt.h wnoaBlocks). "off" (default)
-  // is bit-identical.
-  std::string continuous_prior_mode = "off";   // off|wnoa
-  double continuous_prior_qc_acc = 0.0;        // m^2/s^5
-  double continuous_prior_qc_gyr = 0.0;        // rad^2/s^3
 
   // Per-IMU-step trace of the first three propagations (imu_first_scans.csv).
   bool first_scans_log_en = false;
@@ -106,6 +95,10 @@ public:
 
   std::string loadParameters(ros::NodeHandle& pnh);
 
+  // R74 (F-426 part 2): call BEFORE processIMU(mg) with the map frame index the scan about to be propagated will have (frame_idx + 1). Applies the
+  // configured process-noise switch once; a no-op (and bit-identical) when imu/process_noise/switch/scan is 0.
+  void maybeSwitchProcessNoise(long next_frame);
+
   void propagate(MeasureGroup& mg);
   // History (78-82): see docs/livo_recon_changelog.md#include-livo_recon-processing-imu_processing.h-78
   void processIMU(MeasureGroup& mg);
@@ -130,6 +123,10 @@ private:
   V3D filtered_gyr_excitation_energy_ = V3D::Zero();
   bool motion_noise_primed_ = false;
   size_t propagation_index_ = 0;
+  ProcessNoiseSwitch switch_;           // R74 (F-426)
+  bool switch_applied_ = false;
+  long switch_applied_frame_ = -1;
+  size_t switch_applied_propagation_ = 0;
   // R66 Gauss-Markov bias engagement counters / magnitude.
   bool gm_ref_set_ = false;
   V3D gm_ref_gyr_ = V3D::Zero(), gm_ref_acc_ = V3D::Zero();
@@ -137,12 +134,8 @@ private:
   double gm_max_q_gyr_ = 0.0, gm_max_q_acc_ = 0.0;     // largest Q bias entry injected in one step
   double gm_max_dev_gyr_ = 0.0, gm_max_dev_acc_ = 0.0; // largest |b - mu| seen (norm)
   // R72 (F-401) engagement counters.
-  long lp_scans_used_ = 0, lp_scans_fallback_ = 0;        // local_poly: scans where the fit was used / fell back to instant
-  double lp_var_acc_sum_ = 0.0, lp_var_gyr_sum_ = 0.0;    // sum over used scans of the mean-axis fit variance
   long gain_steps_ = 0, gain_steps_applied_ = 0;          // steps seen / steps whose variance was multiplied by a gain != 1
   double gain_acc_max_ = 1.0, gain_gyr_max_ = 1.0;
-  long wnoa_steps_ = 0;
-  double wnoa_vv_sum_ = 0.0;
 public:
   std::string engagementReport() const;
 

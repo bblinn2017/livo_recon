@@ -77,6 +77,11 @@ public:
   // "information_directional"; always 0 otherwise).
   int infoPath() const { return info_path_; }
 
+  // R77 (F-453): the tilt part of a line / smooth row's fit variance for the query offset d = point - plane center (see VoxelOpts::line_variance).
+  // row = 0, 1 (hard line) or 0, 1, 2 (smooth); smooth = true uses both tilt axes of the row, false only the line axis u2. Returns false (value untouched)
+  // when this voxel has no tilt matrix for that row (not classified as a line at its last fit): computeResidual() counts that as a fallback.
+  bool lineTiltVar(int row, const V3D& d, bool smooth, double& out) const;
+
   // History (36-65): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-36
   // P10.  frame_idx (default -1 -> chart-age tracking skipped) is
   // VoxelNode's own g_current_frame_idx, threaded down purely so
@@ -96,6 +101,8 @@ public:
 
 private:
   void refitDebiased();
+  // R77 (F-453): fills line_tilt_L_ / line_tilt_valid_ from the fit's own points (same weights, same covariance choice, same first-order eigenvector perturbation as plane_var_).
+  void computeLineTilt(const std::vector<PointXYZCov>& points, const std::vector<double>* var_weights, double var_weight_sum, bool use_var_weights);
 
   // Persistent accumulators for addPoints()/refitDebiased() -- RAW
   // (unweighted, w_i=1) sums, never reset. Normalization (by N or N^2, see
@@ -176,6 +183,11 @@ private:
   V3D x_normal_;
   float radius_ = 0;
   V3D eigen_values_ = V3D::Ones();
+  // R77 (F-453): per-row tilt covariance of the row's own direction, for variance = plane_equivalent. Row i's two tilt axes are the other two eigenvectors in
+  // ascending index (row 0: u1,u2; row 1: u0,u2; row 2: u0,u1), so L(1,1) of rows 0 and 1 is the tilt toward the line axis u2.
+  // Written by computeLineTilt() at the end of update()'s eigengap branch, cleared at the start of every update().
+  Eigen::Matrix2d line_tilt_L_[3] = {Eigen::Matrix2d::Zero(), Eigen::Matrix2d::Zero(), Eigen::Matrix2d::Zero()};
+  bool line_tilt_valid_[3] = {false, false, false};
 
   int points_size_ = 0;
   bool is_plane_ = false;
@@ -383,6 +395,15 @@ public:
 // History (238-248): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-238
 void voxelPlaneFrameStatsReset();
 void voxelPlaneFrameStatsRead(int& denom_rejected_count, double& max_plane_var_trace);
+
+// R77 (F-433, F-453): cumulative engagement counters since process start (never reset; the per-scan log writes them as they stand when a scan's first residual build runs,
+// i.e. after the previous scan's map update). gap_fits: eigengap fits made with plane_gap_floor_en; gap_d1 / gap_d2: fits whose |e0-e1| / |e0-e2| was below the floor.
+// tilt_voxels: voxels whose line tilt matrices were computed; tilt_floored_axes: tilt gaps lifted to the floor; tilt_fallbacks: line rows asked for a tilt matrix the voxel did not have.
+struct VoxelPlaneR77Counters
+{
+  long gap_fits = 0, gap_d1 = 0, gap_d2 = 0, tilt_voxels = 0, tilt_floored_axes = 0, tilt_fallbacks = 0;
+};
+VoxelPlaneR77Counters voxelPlaneR77Counters();
 // CQ-56 item 3: this frame's largest covariance_.trace() seen across every
 // VoxelPlane refit -- reset by voxelPlaneFrameStatsReset() alongside the
 // other per-frame maxima above.

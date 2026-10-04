@@ -195,6 +195,7 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
 
   // R73 (F-414): the shadow starts from the driver's posterior of the previous scan (its state right now), BEFORE the driver propagates.
   if (shadow_) shadow_->propagateFromDriver(mg, *ctx_.state);
+  imu_proc_.maybeSwitchProcessNoise(static_cast<long>(ctx_.voxel_map->frame_idx_) + 1);   // R74 (F-426): no-op unless imu/process_noise/switch/scan > 0
   { TimedScope ts(ctx_.profiler, "imu"); imu_proc_.processIMU(mg); }
   mg.pos_after_imu = ctx_.state->pos();
   mg.rot_after_imu = ctx_.state->rot();

@@ -25,11 +25,22 @@ import numpy as np
 import pandas as pd
 
 AX = ["Rx", "Ry", "Rz", "px", "py", "pz", "vx", "vy", "vz"]
-REF60 = "r73_00_id_baseline_60s"
-BASE = {"full": "r73_00_id_baseline_full", "60": "r73_00_id_baseline_60s", "48": "r73_00_id_baseline_48s"}   # R72: names of the in-round identity arms (48 s does not exist in R72)
-R72_DIGESTS = {"r73_00_id_baseline_60s": "8cb066436baaedb45f2af20921ff56337a1b553e1aa2d8fafe9d4170a9043f19",     # R72 digests of the same jobs (identical to R71)
-               "r73_00_id_baseline_full": "8bc89b6bb69aaf32d2283a969ad6cffad798836cf40ccf0def2fe9712d14e5c2",
-               "r73_00_id_motionq_full": "98f3855cb2146bb06e9dc15b101a8699804a395b4807144323f99e2e509dbad1"}
+REF60 = "r74_own_id_baseline_60s"
+BASE = {"full": "r74_qb_eee_01_fq", "60": "r74_own_id_baseline_60s", "48": "r74_own_id_baseline_48s"}   # R74: the fq baseline of the same batch (F-418) / the 0.425 identity arm; no 48 s arm exists   # R72: names of the in-round identity arms (48 s does not exist in R72)
+R73_DIGEST_60S = "6cd2d754"      # prefix of the R73 identity reference digest of eee_01 60 s fixed-Q (r73_00_id_baseline_60s; claude/followups.md F-419 R73 RESULT)
+DROP_FROM_RETURN = {"r73_f417_residuals.csv.gz",
+                     # Return-trim (Bryce, R74): not named in required_outputs.json; stay in each arm's host archive only.
+                     # Redundant for R75's LN/DET arms (already excluded via F1_GROUPS/F1_KEEP below) but kept global for consistency.
+                     "lio_update_diag_compact.csv.gz", "residual_geometry_compact.csv.gz",
+                     "frame_stats_compact.csv.gz", "frame_stats_blocks.csv", "frame_stats_windows.csv.gz",
+                     "lio_gt_matched_compact.csv.gz", "crossframe_frames.csv.gz", "crossframe_axes.csv",
+                     "live_point_cov_compact.csv.gz", "motion_q_scan_all.csv.gz", "frame_window_all.csv.gz"}   # R74: duplicates residual_dump_all.csv.gz (same rows, weight and class); stays in the host bundle and archive, not in the return (return size, rule 5.12a)
+KEEP_IF_ARM_HAS = {"r73_f417_residuals.csv.gz": "_n200_"}   # R74 addendum 1 (Bryce: return it for calibration samples N=200 only): a dropped file is still returned for an arm whose name contains this
+F1_GROUPS = {"VX", "LN", "SM", "DET", "FB", "IDN", "SMK", "GAP", "SWP"}   # R77: smoke (SMK), gap-floor (GAP) and voxel-sweep (SWP) groups as well;   # R76: FB (the full-bag grid) and IDN (identity arms) as well;   # R74 addendum 5: these groups' other per-frame compact files stay in the host archive; only frame-1 files are returned
+F1_KEEP = {"residual_dump_all.csv.gz", "r73_f417_residuals.csv.gz", "r74_plane_table.csv.gz",
+           "r74_plane_check.json", "r73_f417_hth_frames.csv", "r73_f417_classes.csv",
+           "r73_f417_consistency.csv", "pos_trace_all.csv.gz", "compress_manifest.json",
+           "sensor_stamps_summary.json", "line_rows_per_scan_all.csv.gz"}   # R77 (F-451)
 LEVELS = {0: (25, None, 0), 1: (25, 5, 0), 2: (50, 10, 0), 3: (100, 25, 45)}   # (step, keep-arm step (None = every scan), onset-window trim after onset+70)
 
 def g(d, *ks):
@@ -147,7 +158,7 @@ def main():
     for key, nm in BASE.items():
         base_tabs[key] = load_base(nm)
     for sq in sorted(set(plan.seq) - {"eee_01"}):
-        base_tabs["seq:" + sq] = load_base("r73_p2_%s_mq_a0p3_g10" % sq)
+        base_tabs["seq:" + sq] = load_base("r74_qb_%s_fq" % sq)
     for _, p in plan.iterrows():
         D = os.path.join(a.runs, p.arm)
         sj = os.path.join(D, "arm_summary.json")
@@ -164,8 +175,12 @@ def main():
         cdir = os.path.join(a.out, "compact", p.arm)
         for pat in ("*_compact.csv.gz", "*_windows.csv.gz", "*_blocks.csv", "*_all.csv.gz", "plane_trace_window.csv.gz", "sensor_stamps_summary.json", "compress_manifest.json",
                     "residual_info_*", "crossframe_*", "knot_windows.csv", "knot_trend_stationary.csv",
-                    "r72_*", "r73_*", "shadow_*_all.csv.gz", "scan_log_all.csv.gz", "residual_dump_*all.csv.gz", "coupled_update_*_all.csv.gz", "pos_trace_all.csv.gz"):   # R71-R73 analysis outputs
+                    "r72_*", "r73_*", "r74_*", "step_cap.csv.gz", "shadow_*_all.csv.gz", "scan_log_all.csv.gz", "residual_dump_*all.csv.gz", "coupled_update_*_all.csv.gz", "pos_trace_all.csv.gz"):   # R71-R73 analysis outputs
             for fp in glob.glob(os.path.join(D, pat)):
+                if os.path.basename(fp) in DROP_FROM_RETURN and KEEP_IF_ARM_HAS.get(os.path.basename(fp), "\0") not in p.arm:
+                    continue
+                if str(p.get("group", "")) in F1_GROUPS and os.path.basename(fp) not in F1_KEEP:
+                    continue
                 os.makedirs(cdir, exist_ok=True)
                 shutil.copy(fp, cdir)
         ssj = os.path.join(D, "sensor_stamps_summary.json")
@@ -204,22 +219,16 @@ def main():
     json.dump(summaries_all, open(os.path.join(a.out, "summaries_all.json"), "w"), default=lambda o: None)
     json.dump(manifests, open(os.path.join(a.out, "compress_manifests.json"), "w"), indent=1)
     json.dump(stamps, open(os.path.join(a.out, "sensor_stamps_summaries.json"), "w"), indent=1)
-    groups = [(REF60, [x], "identity: " + x) for x in ("r73_id_stepcap_wide_60s", "r73_id_zupt_detect_60s", "r73_id_nisgate_dead_60s", "r73_id_diag_on_60s", "r73_id_scanlog_60s",
-                                                       "r73_id_dump_lastiter_60s", "r73_id_shadow_same_60s")]
-    groups += [("r73_00_id_baseline_full", ["r73_sh_sbs03_ctl_fq"], "(different bag: expected DIFFERENT; listed so that the digest of every reference arm is in this file)")]
-    with open(os.path.join(a.out, "identity_controls.txt"), "w") as f:
+    with open(os.path.join(a_out := a.out, "identity_controls.txt"), "w") as f:
         f.write("sha256 of state_trace.csv with the run_id column blanked (empty = file missing)\n")
-        f.write("R73 REFERENCE digests (F-419: the symmetrisation changed the arithmetic, so these are NEW; the R72 metrics are compared at 0.005 mm by r73_gates.py)\n")
-        for arm in ("r73_00_id_baseline_60s", "r73_00_id_baseline_full", "r73_00_id_motionq_full"):
-            f.write("  %s  %s\n" % (sha.get(arm, "") or "(missing)", arm))
-        for ref, others, why in groups[:-1]:
-            f.write("%s | %s\n" % (why, ref))
-            f.write("  %s  %s\n" % (sha.get(ref, "") or "(missing)", ref))
-            for o in others:
-                f.write("  %s  %s  -> %s\n" % (sha.get(o, "") or "(missing)", o, "IDENTICAL" if sha.get(ref) and sha.get(ref) == sha.get(o) else "DIFFERENT or missing"))
-        f.write("\nR72 digests of the same three jobs (expected DIFFERENT after F-419; the verdict is the 0.005 mm metric gate in r73_gates.txt)\n")
-        for arm, dg in R72_DIGESTS.items():
-            f.write("  %s  R72 %s  R73 %s  -> %s\n" % (arm, dg[:16], (sha.get(arm, "") or "(missing)")[:16], "IDENTICAL" if sha.get(arm) == dg else "DIFFERENT or missing"))
+        if REF60 in set(plan.arm):   # R75 has no identity arm
+            f.write("R74 identity arm (eee_01 60 s, fixed-Q, no new option on; F-419 extension changes round-off only, so the verdict is the 0.005 mm metric gate in r74_gates.txt; digest equality with R73 is reported as a fact)\n")
+            d0 = sha.get(REF60, "")
+            f.write("  %s  %s  R73 reference digest starts %s -> %s\n" % (d0 or "(missing)", REF60, R73_DIGEST_60S, "IDENTICAL to R73" if d0.startswith(R73_DIGEST_60S) else "DIFFERENT or missing"))
+        for pre, rep in (("r74_own_det_", "r74_vox_"), ("r75_own_det_", "r75_line_"), ("r76_own_det_id_", "r76_id_"), ("r76_own_det_fb_", "r76_fb_"), ("r77_own_det_id_", "r77_id_"), ("r77_own_det_fb_", "r77_fb_")):   # R75: the control's original is the r75_line_ arm of the same name
+            for x in [x for x in sha if x.startswith(pre)]:
+                orig = x.replace(pre, rep)
+                f.write("determinism: %s  %s  vs %s  %s  -> %s\n" % (sha.get(x, "") or "(missing)", x, sha.get(orig, "") or "(missing)", orig, "IDENTICAL" if sha.get(x) and sha.get(x) == sha.get(orig) else "DIFFERENT or missing"))
     print("collected %d/%d arms" % (len(rows), len(plan)))
 
 if __name__ == "__main__":

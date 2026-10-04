@@ -1,0 +1,17 @@
+zip 0.03 MB
+arms reduced 2 / 2; scan files 2; dropped for budget 0
+
+consistent: median nees9_post (stationary)                      7.978  expected in [7.50, 10.50]  ok
+consistent: median nees9_pre (stationary)                       8.367  expected in [7.50, 10.50]  ok
+consistent: median jump9_mahal (expected 4.50)                  4.110  expected in [3.50, 5.50]  ok
+consistent: frac nees9_post above chi2 95%                      0.029  expected in [0.00, 0.12]  ok
+overconfident(x3): median oc9_post (expected ~8)                8.184  expected in [6.00, 10.00]  ok
+overconfident(x3): median nees_p_post / 3 (expected ~8)         6.567  expected in [5.50, 10.50]  ok
+consistent: sd_p_post mm (expected 3.67)                        3.674  expected in [3.49, 3.86]  ok
+consistent: sdratio_p (expected 0.707)                          0.707  expected in [0.70, 0.72]  ok
+consistent: qshare_p (expected 0.1)                             0.100  expected in [0.09, 0.11]  ok
+motion window has no reference NEES (NaN or absent)             0.000  expected in [0.00, 0.00]  ok
+motion window still reports jump9_mahal                         3.953  expected in [0.00, 20.00]  ok
+scan file rows 193, columns 60
+zip size 0.034 MB for 2 arms (window table 321 columns)
+SELFTEST PASS

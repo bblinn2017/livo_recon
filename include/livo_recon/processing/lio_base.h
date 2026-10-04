@@ -118,6 +118,11 @@ struct LioProcOptions
   // eigenvalues, plane concentration, distance statistics. Backend independent, so surface and octree can be compared.
   bool   residual_geometry_en  = false;
 
+  // R77 (F-451): write-only per-scan record (line_rows_per_scan.csv, iteration 0 of every frame) of the rows the update used by kind (plane, hard line u0/u1, smooth u0/u1/u2),
+  // the points that got line or smooth rows, the sums of fit variance, tilt variance and total variance, and the cumulative R77 engagement counters
+  // (voxelPlaneR77Counters()). Default false writes nothing and is bit-identical.
+  bool   line_rows_log_en      = false;
+
   // R71 (F-363): write-only per-residual dump (residual_dump.csv, residual_dump_state.csv) for the listed frame indices at
   // iteration 0. Empty (default) writes nothing and is bit-identical.
   std::vector<int> residual_dump_frames;

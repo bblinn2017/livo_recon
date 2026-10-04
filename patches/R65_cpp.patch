@@ -1,0 +1,726 @@
+diff -ruN '--exclude=build' a/include/livo_recon/lio/voxelnode.h b/include/livo_recon/lio/voxelnode.h
+--- a/include/livo_recon/lio/voxelnode.h
++++ b/include/livo_recon/lio/voxelnode.h
+@@ -145,6 +145,8 @@
+   VoxelNode *leaves_[8];
+   int update_count_ = 0;
+   std::vector<PointXYZCov> points_;
++  // R65 (F-158): true when the most recent debiased insertion appended its batch to points_.
++  bool batch_stored_in_points_ = false;
+ 
+   // Running sufficient statistics paralleling points_ (see RunningMoments'
+   // docs) -- added to whenever a point is appended to points_, reset
+diff -ruN '--exclude=build' a/include/livo_recon/processing/cbk_processing.h b/include/livo_recon/processing/cbk_processing.h
+--- a/include/livo_recon/processing/cbk_processing.h
++++ b/include/livo_recon/processing/cbk_processing.h
+@@ -85,6 +85,16 @@
+   // default -- zero behavioral effect, purely an ofstream write.
+   bool log_raw_point_count = false;
+ 
++  // R65 (F-164/F-173). Write-only log sensor_stamps.csv (kind,stamp,n_raw,n_kept): one row per LiDAR message (n_raw = points in
++  // the message, n_kept = points after the blind/tag/point_filter_num filters) and one row per image message (n_raw = n_kept
++  // = 0). Off by default; no effect on the estimator.
++  bool log_sensor_stamps = false;
++  // R65 (F-170 repeats). Sub-noise seeded perturbation of every kept LiDAR point (isotropic Gaussian, std in metres, per-scan
++  // deterministic stream from perturb_seed and the scan stamp). 0 (default) = off, bit-identical. Used only to create
++  // distinct-but-equivalent inputs for repeat runs, because identical inputs give bit-identical runs.
++  double perturb_std_m = 0.0;
++  int    perturb_seed  = 0;
++
+   // History (86-98): see docs/livo_recon_changelog.md#include-livo_recon-processing-cbk_processing.h-86
+   int image_subsample_n = 1;
+ 
+diff -ruN '--exclude=build' a/include/livo_recon/processing/lio_base.h b/include/livo_recon/processing/lio_base.h
+--- a/include/livo_recon/processing/lio_base.h
++++ b/include/livo_recon/processing/lio_base.h
+@@ -87,6 +87,12 @@
+   // = off, bit-identical. Tests whether the first LiDAR updates cause the scan 1-10 excursion.
+   int startup_hold_scans = 0;
+ 
++  // R65 (F-128/F-135). For LIO scans with frame index 1..bootstrap_inflate_scans every admitted residual's sigma_squared is
++  // multiplied by bootstrap_inflate_factor (measurement noise inflated while the map is only a few scans old). 0 scans (default)
++  // = off, bit-identical. factor must be >= 1.
++  int    bootstrap_inflate_scans  = 0;
++  double bootstrap_inflate_factor = 1.0;
++
+   // The residual model has one independent control and one direct
+   // per-VoxelPlane covariance marginalization. Failed collapse, count, and
+   // conditioning heuristics were removed; see docs/RESIDUAL_MODE_AUDIT.md.
+diff -ruN '--exclude=build' a/include/livo_recon/utils/map/voxelmap_utils.h b/include/livo_recon/utils/map/voxelmap_utils.h
+--- a/include/livo_recon/utils/map/voxelmap_utils.h
++++ b/include/livo_recon/utils/map/voxelmap_utils.h
+@@ -299,6 +299,10 @@
+   // risk of using pose_cov to do it.
+   bool pose_cov_in_sigma           = false;
+ 
++  // R65 (F-169). Write-only: one row per map insertion in point_cov_stats.csv (frame, n_points, mean/min/max of
++  // trace(pos_cov) over the inserted points). Off by default; no effect on the estimator.
++  bool point_cov_stats_en          = false;
++
+   // History (177-181): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-177
+   bool log_debug_en                = false;
+ 
+@@ -454,6 +458,10 @@
+   // R64. Multiplier on plane_threshold applied only when a debiased voxel that WAS a plane is refit (1.0 = off,
+   // bit-identical). > 1 makes an existing plane harder to revoke than a new one is to create.
+   double plane_threshold_hysteresis = 1.0;
++  // R65 (F-159). Debiased path only, eigengap variance only: true (default, R64 behaviour) rejects a fit whose eigengap
++  // denominators are within max(1e-8, 0.1*plane_threshold) of zero; false disables that rejection (the finiteness and
++  // ceiling guards remain).
++  bool debias_denominator_guard = true;
+   // R64. Plane-fit diagnostics (write-only, default off). plane_fit_reasons_en: per-frame counts of fit outcomes by
+   // reason for both fit paths -> plane_fit_reasons.csv. plane_fit_trace_frames > 0: one row per fit attempt for
+   // frames 0..plane_fit_trace_frames (frame 0 = bootstrap window) -> plane_fit_trace.csv, at most
+diff -ruN '--exclude=build' a/include/livo_recon/utils/state/rel_cov.h b/include/livo_recon/utils/state/rel_cov.h
+--- /dev/null
++++ b/include/livo_recon/utils/state/rel_cov.h
+@@ -0,0 +1,33 @@
++#pragma once
++// R65 (F-169). Noise accrued from each IMU step's head to the scan end, restricted to the 6x6 (R,P) block.
++//
++// For steps k = 0..n-1 with per-step transition F_k and process covariance Q_k (P_{k+1} = F_k P_k F_k^T + Q_k), the noise
++// covariance accrued from the head of step k to the end of step n-1 is
++//     N_k = sum_{j>=k} Phi_{j+1} Q_j Phi_{j+1}^T,   Phi_{j+1} = F_{n-1} ... F_{j+1}  (Phi_n = I),
++// computed by one backward sweep:  N_k = N_{k+1} + M_{k+1} Q_k M_{k+1}^T,  M_k = M_{k+1} F_k,  M_n = I.
++// Header-only and ROS-free so it can be unit tested against an independent forward simulation.
++#include <Eigen/Dense>
++#include <vector>
++
++namespace livo_recon
++{
++
++inline std::vector<Eigen::Matrix<double, 6, 6>> relCovBlocksBackward(
++    const std::vector<Eigen::MatrixXd>& F, const std::vector<Eigen::MatrixXd>& Q, int idx_r)
++{
++  const std::size_t n = F.size();
++  std::vector<Eigen::Matrix<double, 6, 6>> out(n, Eigen::Matrix<double, 6, 6>::Zero());
++  if (n == 0 || Q.size() != n) return out;
++  const int dim = static_cast<int>(F[0].rows());
++  Eigen::MatrixXd M = Eigen::MatrixXd::Identity(dim, dim);
++  Eigen::MatrixXd N = Eigen::MatrixXd::Zero(dim, dim);
++  for (int k = static_cast<int>(n) - 1; k >= 0; --k)
++  {
++    N += M * Q[k] * M.transpose();
++    out[k] = N.block<6, 6>(idx_r, idx_r);
++    M = M * F[k];
++  }
++  return out;
++}
++
++}  // namespace livo_recon
+diff -ruN '--exclude=build' a/include/livo_recon/utils/state/state.h b/include/livo_recon/utils/state/state.h
+--- a/include/livo_recon/utils/state/state.h
++++ b/include/livo_recon/utils/state/state.h
+@@ -164,6 +164,32 @@
+   // own (R,P) covariance block, itself PSD).
+   M3D poseCovAt(const V3D& p_body) const;
+ 
++  // R65 (F-169). Per-point pose covariance for a point captured at frame-relative time t_point.
++  //   base    : the (R,P) covariance block of the state (posterior at map insertion, prior in the residual gate),
++  //             or, for insertion with pointCovInsertionPrior(), the frame's PRIOR (R,P) block.
++  //   rel     : if pointCovPropagated(), plus the noise accrued from the point's own time to the scan end,
++  //             propagated through the IMU transitions (see setRelCovProfile); same Jacobian J(p_body).
++  // With the defaults (end_pose, posterior) the result is bit-identical to poseCovAt(p_body).
++  M3D poseCovAtPoint(const V3D& p_body, double t_point, bool for_insertion) const;
++  void setPointCovModel(bool propagated, bool insertion_prior)
++  { point_cov_propagated_ = propagated; point_cov_insertion_prior_ = insertion_prior; }
++  bool pointCovPropagated() const { return point_cov_propagated_; }
++  bool pointCovInsertionPrior() const { return point_cov_insertion_prior_; }
++  // head_times[k]: time of IMU step k's head (same base as PointXYZCov::t); blocks[k]: 6x6 (R,P) covariance of the
++  // noise accrued from head_times[k] to the scan end. Empty vectors clear the profile (rel term zero).
++  void setRelCovProfile(std::vector<double> head_times, std::vector<Eigen::Matrix<double, 6, 6>> blocks)
++  { rel_head_times_ = std::move(head_times); rel_blocks_ = std::move(blocks); }
++  // Frame's prior (R,P) 6x6 block, captured where prior_cov_ is fixed for the frame.
++  void setPriorPoseBlock(const Eigen::MatrixXd& prior_cov)
++  {
++    if (prior_cov.rows() >= idxR() + 6 && prior_cov.cols() >= idxR() + 6) {
++      prior_pose_block_ = prior_cov.block<6, 6>(idxR(), idxR());
++      prior_pose_block_valid_ = true;
++    } else {
++      prior_pose_block_valid_ = false;
++    }
++  }
++
+   PointXYZCov toCamera(const PointXYZCov& pt_body) const;
+   V3D lidarToImu(const V3D& p)  const { return R_li_ * p + t_li_; }
+   M3D lidarToImu(const M3D& C)  const { return R_li_ * C * R_li_.transpose(); }
+@@ -213,6 +239,13 @@
+   M3D rot_;
+   V3D pos_, vel_, bias_gyr_, bias_acc_, gravity_;
+   Eigen::MatrixXd cov_;   // dimState() × dimState()
++  // R65 (F-169) per-point pose covariance model
++  bool point_cov_propagated_ = false;
++  bool point_cov_insertion_prior_ = false;
++  std::vector<double> rel_head_times_;
++  std::vector<Eigen::Matrix<double, 6, 6>> rel_blocks_;
++  Eigen::Matrix<double, 6, 6> prior_pose_block_ = Eigen::Matrix<double, 6, 6>::Zero();
++  bool prior_pose_block_valid_ = false;
+   V3D var_acc_, var_gyr_, cov_bias_gyr_, cov_bias_acc_;
+   V3D var_acc_floor_ = V3D::Zero(), var_gyr_floor_ = V3D::Zero();
+   // Right-perturbation attitude covariance after gravity alignment. Equal
+diff -ruN '--exclude=build' a/src/lio/voxelnode.cpp b/src/lio/voxelnode.cpp
+--- a/src/lio/voxelnode.cpp
++++ b/src/lio/voxelnode.cpp
+@@ -142,6 +142,15 @@
+       // VoxelPlane::addPoints()'s trust_sensor_noise docs); don't trust
+       // those points' sensor_cov for the debiasing correction.
+       plane_.addPoints(points_world, -1, distinct_frames_, g_current_frame_idx >= 1, g_current_frame_idx);
++      // R65 (F-158): keep the raw history exactly as the pca path does, so a later subdivision hands
++      // the children every point this voxel has seen. Same bound as pca: a batch is appended whole
++      // while points_ holds fewer than max_points; once at or above max_points no further batch is
++      // stored (the O(1) sums above still take every point). The fit itself never reads points_.
++      batch_stored_in_points_ = false;
++      if (static_cast<int>(points_.size()) < opts_->max_points) {
++        points_.insert(points_.end(), points_world.begin(), points_world.end());
++        batch_stored_in_points_ = true;
++      }
+       // History (135-153): see docs/livo_recon_changelog.md#src-lio-voxelnode.cpp-135
+       //
+       // n_planes accounting fix.  addPoints() (via refitDebiased()) can
+@@ -283,11 +292,18 @@
+     if (was_plane) updates.push_back({node_id_, true, {}});
+     plane_retired_ = true;
+     if (debiased) {
+-      // No raw-point history to hand off (VoxelPlane::addPoints() keeps
+-      // only O(1) accumulators, by design) -- fall back to just this
+-      // batch, same accepted-approximation spirit as the bins_ path below
+-      // for this already-rare non-planar/give-up case.
+-      passToChildren(points_world, updates);
++      // R65 (F-158): children receive the stored history (points_, bounded by max_points as in the pca
++      // path). If this batch was not stored (points_ already at the bound) it is added so the newest
++      // points are never lost. No refit from scratch: the parent's O(1) sums are simply retired.
++      if (batch_stored_in_points_) {
++        passToChildren(points_, updates);
++      } else {
++        std::vector<PointXYZCov> hist(points_);
++        hist.insert(hist.end(), points_world.begin(), points_world.end());
++        passToChildren(hist, updates);
++      }
++      points_.clear();
++      running_moments_.reset(voxel_center_);
+     } else if (useBins()) {
+       // points_ stays empty whenever useBins() is true (see insertPoints()
+       // above) -- children need bins_'s current contents instead, collapsed to one
+diff -ruN '--exclude=build' a/src/lio/voxelplane.cpp b/src/lio/voxelplane.cpp
+--- a/src/lio/voxelplane.cpp
++++ b/src/lio/voxelplane.cpp
+@@ -1551,7 +1551,7 @@
+   // plane_var_ is assembled directly in the (theta1, theta2, d) chart and
+   // never divides by lambda0 - lambda_m.  This guard, plane_var_denom_floor_en
+   // and kPlaneVarCeiling below are all artefacts of the incumbent form.
+-  const bool denom_rejected = !info_mode &&
++  const bool denom_rejected = !info_mode && opts_->debias_denominator_guard &&   // R65: key debias_denominator_guard (default true)
+       (std::fabs(denom1) < eps_denom || std::fabs(denom2) < eps_denom);
+   if (opts_->log_debug_en) {
+     std::ostringstream dbg;
+diff -ruN '--exclude=build' a/src/map/voxelmap.cpp b/src/map/voxelmap.cpp
+--- a/src/map/voxelmap.cpp
++++ b/src/map/voxelmap.cpp
+@@ -212,6 +212,7 @@
+   { double sigma_num; paramWarn<double>(pnh, "voxel_map/residual/sigma_num", sigma_num, 3.); opts_->sigma_num_squared = sigma_num * sigma_num; }
+   paramWarn<double>(pnh, "voxel_map/residual/max_radius",  opts_->max_radius,          3.);
+   paramWarn<bool>(pnh, "voxel_map/residual/pose_cov_in_sigma", opts_->pose_cov_in_sigma, false);
++  paramWarn<bool>(pnh, "voxel_map/point_cov_stats_en", opts_->point_cov_stats_en, false);   // R65
+   paramWarn<bool>(pnh, "voxel_map/plane/log_debug_en", opts_->log_debug_en, false);
+   paramWarn<bool>(pnh, "voxel_map/plane/plane_fit_reasons_en", opts_->plane_fit_reasons_en, false);
+   paramWarn<int>(pnh, "voxel_map/plane/plane_fit_trace_frames", opts_->plane_fit_trace_frames, 0);
+@@ -373,6 +374,9 @@
+     cfg.mode("voxel_map/plane/plane_fit_pose_cov_mode",
+              opts_->plane_fit_pose_cov_mode, "combined",
+              { "combined", "sensor_only" });
++    // R65: eigengap-denominator rejection on the debiased path (default true = R64).
++    cfg.nested<bool>(opts_->plane_fit_mode == "debiased" && eigengap, "voxel_map/plane/plane_fit_mode=debiased,plane_var_mode=eigengap",
++                     "voxel_map/plane/debias_denominator_guard", opts_->debias_denominator_guard, true);
+     // R64: debiasing arithmetic variant; only meaningful on the debiased path.
+     cfg.nestedMode(opts_->plane_fit_mode == "debiased", "voxel_map/plane/plane_fit_mode=debiased",
+                    "voxel_map/plane/debias_mode", opts_->debias_mode, "full",
+@@ -610,12 +614,26 @@
+         // own residual-weighting propagation) adds `sensor_cov + pos_cov`
+         // explicitly at the point of use. Matches gate()'s own
+         // WorldPointCov, which already kept these separate.
+-        pts_world_[i].pos_cov = state_->poseCovAt(map_pts[i].point);
++        pts_world_[i].pos_cov = state_->poseCovAtPoint(map_pts[i].point, map_pts[i].t, true);   // R65: default path == poseCovAt
+         thread_keys_[omp_get_thread_num()].emplace_back(
+           worldToKey(pts_world_[i].point), i);
+       }
+     }
+ 
++    if (opts_->point_cov_stats_en && np > 0) {   // R65 (F-169): write-only per-insertion statistics of the per-point pose covariance
++      double sum = 0.0, mn = 1e300, mx = 0.0;
++      for (int i = 0; i < np; ++i) {
++        const double tr = pts_world_[i].pos_cov.trace();
++        sum += tr; mn = std::min(mn, tr); mx = std::max(mx, tr);
++      }
++      static PersistentLogStream pcs_log("point_cov_stats.csv");
++      bool pcs_first;
++      std::ofstream& pcs = pcs_log.stream(&pcs_first);
++      if (pcs_first) pcs << "frame,n_points,mean_trace_pos_cov,min_trace_pos_cov,max_trace_pos_cov\n";
++      pcs << frame_idx_ << ',' << np << ',' << std::setprecision(10) << sum / np << ',' << mn << ',' << mx << "\n";
++      pcs.flush();
++    }
++
+     {
+       TimedScope ts(profiler_, "voxelmap/bucket_build/merge");
+       for (const auto& local : thread_keys_)
+diff -ruN '--exclude=build' a/src/processing/cbk_processing.cpp b/src/processing/cbk_processing.cpp
+--- a/src/processing/cbk_processing.cpp
++++ b/src/processing/cbk_processing.cpp
+@@ -7,6 +7,11 @@
+ #include <chrono>
+ #include <fstream>
+ #include <iomanip>
++#include <cstdint>
++#include <functional>
++#include <mutex>
++#include <stdexcept>
++#include <random>
+ #include <sstream>
+ 
+ namespace livo_recon
+@@ -100,6 +105,11 @@
+   paramWarn<std::string>(pnh, "data_queues/sync_debug_log_path", opts_.sync_debug_log_path,
+                           debugLogPath("livo_recon_sync_debug.txt"));
+   paramWarn<bool>(pnh, "data_queues/log_raw_point_count", opts_.log_raw_point_count, false);
++  paramWarn<bool>(pnh, "data_queues/log_sensor_stamps", opts_.log_sensor_stamps, false);   // R65
++  paramWarn<double>(pnh, "cbk/lidar/perturb_std_m", opts_.perturb_std_m, 0.0);               // R65
++  paramWarn<int>(pnh, "cbk/lidar/perturb_seed", opts_.perturb_seed, 0);                       // R65
++  if (!(opts_.perturb_std_m >= 0.0))
++    throw std::invalid_argument("cbk/lidar/perturb_std_m must be >= 0");
+   paramWarn<int>(pnh, "preprocess/image_subsample_n", opts_.image_subsample_n, 1);
+ 
+   // Ground-truth topic ingestion -- see CbkProcOptions::evo_enable's doc
+@@ -145,6 +155,33 @@
+ 
+ const CbkProcOptions& CbkProc::opts() const { return opts_; }
+ 
++namespace
++{
++// R65: write-only stamp/count log (see CbkProcOptions::log_sensor_stamps).
++void logSensorStamp(char kind, double stamp, std::size_t n_raw, std::size_t n_kept)
++{
++  static std::mutex mtx;
++  std::lock_guard<std::mutex> lock(mtx);
++  static PersistentLogStream log("sensor_stamps.csv");
++  bool first;
++  std::ofstream& ofs = log.stream(&first);
++  if (first) ofs << "kind,stamp,n_raw,n_kept\n";
++  ofs << kind << ',' << std::setprecision(17) << stamp << ',' << n_raw << ',' << n_kept << "\n";
++  ofs.flush();
++}
++
++// R65: seeded sub-noise perturbation of kept points (see CbkProcOptions::perturb_std_m).
++void perturbPoints(std::vector<PointXYZT>& points, double scan_time, double std_m, int seed)
++{
++  if (!(std_m > 0.0)) return;
++  const std::size_t stamp_bits = std::hash<double>()(scan_time);
++  std::mt19937_64 rng(static_cast<std::uint64_t>(seed) * 0x9E3779B97F4A7C15ULL ^ static_cast<std::uint64_t>(stamp_bits));
++  std::normal_distribution<double> nd(0.0, std_m);
++  for (auto& pt : points)
++    pt.p += V3D(nd(rng), nd(rng), nd(rng));
++}
++}  // namespace
++
+ void CbkProc::imageCallback(const sensor_msgs::ImageConstPtr& msg)
+ {
+   // Generalized frame-rate subsampling -- ported from FAST-LIVO2's
+@@ -165,6 +202,7 @@
+     return;
+   }
+ 
++  if (opts_.log_sensor_stamps) logSensorStamp('I', img_time, 0, 0);   // R65
+   if (opts_.log_sync_debug && !logged_first_img_arrival_)
+   {
+     logged_first_img_arrival_ = true;
+@@ -213,6 +251,8 @@
+   std::vector<PointXYZT> points = pointsFromLivoxMsg(
+       *msg, scan_time, opts_.tag_mask, opts_.tag_max_keep, opts_.blind_sqr, measures_,
+       opts_.point_filter_num);
++  if (opts_.log_sensor_stamps) logSensorStamp('L', scan_time, static_cast<std::size_t>(msg->point_num), points.size());   // R65
++  perturbPoints(points, scan_time, opts_.perturb_std_m, opts_.perturb_seed);                                               // R65
+ 
+   // See CbkProcOptions::dry_run_point_filter_num's doc comment -- reuses
+   // the SAME raw msg, decimated a second time at a different rate.
+@@ -263,6 +303,9 @@
+ 
+   std::vector<PointXYZT> points = pointsFromPointCloud2(
+       *msg, scan_time, opts_.blind_sqr, measures_, opts_.point_filter_num);
++  if (opts_.log_sensor_stamps)
++    logSensorStamp('L', scan_time, static_cast<std::size_t>(msg->width) * static_cast<std::size_t>(msg->height), points.size());   // R65
++  perturbPoints(points, scan_time, opts_.perturb_std_m, opts_.perturb_seed);                                                     // R65
+ 
+   // See lidarCallbackMsg()'s matching comment.
+   if (opts_.dry_run_point_filter_num > 0)
+diff -ruN '--exclude=build' a/src/processing/imu_processing.cpp b/src/processing/imu_processing.cpp
+--- a/src/processing/imu_processing.cpp
++++ b/src/processing/imu_processing.cpp
+@@ -1,4 +1,5 @@
+ #include "livo_recon/processing/imu_processing.h"
++#include "livo_recon/utils/state/rel_cov.h"
+ #include "livo_recon/utils/log/param_warn.h"
+ #include "livo_recon/utils/state/state.h"
+ #include "livo_recon/diagnostics/log/debug_log_dir.h"
+@@ -323,6 +324,7 @@
+ 
+   mg.poses.reserve(mg.imu_samples.size());
+   mg.pose_covariances.clear();
++  if (state_->pointCovPropagated()) state_->setRelCovProfile({}, {});   // R65 (F-169): cleared each scan
+   mg.imu_state_transitions.clear();
+   mg.imu_process_covariances.clear();
+   mg.pose_covariances.reserve(mg.imu_samples.size());
+@@ -577,11 +579,27 @@
+       mg.imu_samples_raw.push_back(head);
+   }
+ 
++  // R65 (F-169): noise accrued from each IMU step's head to the scan end, restricted to the (R,P) block, by one backward
++  // sweep over the stored per-step transitions F_k and process covariances Q_k:  R_k = R_{k+1} + M_{k+1} Q_k M_{k+1}^T,
++  // M_k = M_{k+1} F_k  (M_n = I).  Used by StateGroup::poseCovAtPoint(); off (no cost) unless lio/point_cov/mode=propagated.
++  if (state_->pointCovPropagated())
++  {
++    const std::size_t n_steps = mg.poses.size();
++    if (n_steps > 0 && mg.imu_state_transitions.size() == n_steps && mg.imu_process_covariances.size() == n_steps)
++    {
++      std::vector<double> head_times(n_steps);
++      for (std::size_t k = 0; k < n_steps; ++k) head_times[k] = mg.poses[k].t;
++      auto blocks = relCovBlocksBackward(mg.imu_state_transitions, mg.imu_process_covariances, StateGroup::idxR());
++      state_->setRelCovProfile(std::move(head_times), std::move(blocks));
++    }
++  }
++
+   last_imu_sample_ = head;
+   mg.n_imu_samples = static_cast<int>(mg.imu_samples.size());
+   mg.imu_samples.clear();
+ 
+   state_->setPropagatedState(rot_imu, pos_imu, vel_imu);
++  state_->setPriorPoseBlock(state_->cov());   // R65 (F-169): this scan's propagated (prior) (R,P) block; read only if insertion_source=prior
+   writeImuCovGrowthRow(propagation_index_, mg.image.t + data_queues_->start_time, r61_P_start, state_->cov(), r61_Q_acc);
+ 
+   // One compact row per scan; the first post-calibration scan is also logged
+diff -ruN '--exclude=build' a/src/processing/lio_base.cpp b/src/processing/lio_base.cpp
+--- a/src/processing/lio_base.cpp
++++ b/src/processing/lio_base.cpp
+@@ -242,6 +242,25 @@
+   cfg.nested<double>(opts_.open_loop.mode == "propagate_only", "lio/open_loop/mode=propagate_only",
+                      "lio/open_loop/reset_period_s", opts_.open_loop.reset_period_s, 0.0);
+ 
++  // R65 (F-169): per-point pose covariance model. end_pose (default) = R64 behaviour, bit-identical. propagated adds, per
++  // point, the noise accrued from the point's time to the scan end. insertion_source=prior makes map insertion use the
++  // frame's prior (R,P) block, the same basis the residual gate sees; posterior (default) = R64.
++  {
++    std::string pc_mode, pc_ins;
++    cfg.mode("lio/point_cov/mode", pc_mode, "end_pose", { "end_pose", "propagated" });
++    cfg.mode("lio/point_cov/insertion_source", pc_ins, "posterior", { "posterior", "prior" });
++    state_->setPointCovModel(pc_mode == "propagated", pc_ins == "prior");
++  }
++
++  // R65 (F-128): measurement-noise inflation for the first N LIO scans (see LioProcOptions::bootstrap_inflate_scans).
++  cfg.get<int>("lio/bootstrap_inflate/scans", opts_.bootstrap_inflate_scans, 0);
++  if (opts_.bootstrap_inflate_scans < 0)
++    throw std::invalid_argument("lio/bootstrap_inflate/scans must be >= 0");
++  cfg.nested<double>(opts_.bootstrap_inflate_scans > 0, "lio/bootstrap_inflate/scans>0", "lio/bootstrap_inflate/factor",
++                     opts_.bootstrap_inflate_factor, 1.0);
++  if (!(opts_.bootstrap_inflate_factor >= 1.0))
++    throw std::invalid_argument("lio/bootstrap_inflate/factor must be >= 1");
++
+   // R64: startup hold (see LioProcOptions::startup_hold_scans). 0 = off.
+   cfg.get<int>("lio/startup_hold/scans", opts_.startup_hold_scans, 0);
+   if (opts_.startup_hold_scans < 0)
+@@ -396,7 +415,7 @@
+         if (pose_cov_overrides && i < static_cast<int>(pose_cov_overrides->size()))
+           pose_cov = (*pose_cov_overrides)[i];
+         else
+-          pose_cov = state_->poseCovAt(pts[i].point);
++          pose_cov = state_->poseCovAtPoint(pts[i].point, pts[i].t, false);   // R65: default path == poseCovAt
+       }
+       WorldPointCov pt_world{sensor_world.point, sensor_world.sensor_cov, pose_cov};
+       pt_world.include_pose_cov_in_gate = include_state_uncertainty_in_gate;
+@@ -423,6 +442,9 @@
+         res.point_cross_normal = pts[i].point.cross(state_->rot().transpose() * res.normal);
+         res.world_point = pt_world.point;
+         res.sigma_squared += res.plane_var_term;
++        if (opts_.bootstrap_inflate_scans > 0 && voxel_map_->frame_idx_ >= 1 &&
++            voxel_map_->frame_idx_ <= static_cast<decltype(voxel_map_->frame_idx_)>(opts_.bootstrap_inflate_scans))
++          res.sigma_squared *= opts_.bootstrap_inflate_factor;   // R65 (F-128)
+         res.t = pts[i].t;   // for the spline control-point refinement
+         res.raw_body_point = pts[i].raw_body_point;  // CQ-50
+         build_thread_residuals_[omp_get_thread_num()].push_back(res);
+diff -ruN '--exclude=build' a/src/utils/state/state.cpp b/src/utils/state/state.cpp
+--- a/src/utils/state/state.cpp
++++ b/src/utils/state/state.cpp
+@@ -148,6 +148,42 @@
+        - JRP - JRP.transpose();
+ }
+ 
++namespace
++{
++// J*P*J^T for a point at body offset p_body, from explicit (R,P) blocks; identical algebra to StateGroup::poseCovAt.
++M3D poseCovFromBlocks(const M3D& rot, const V3D& p_body, const M3D& P_RR, const M3D& P_PP, const M3D& P_RP)
++{
++  M3D p_skew;
++  p_skew << SKEW_SYM_MATRX(p_body);
++  const M3D Rp  = rot * p_skew;
++  const M3D JRP = Rp * P_RP;
++  return -rot * p_skew * P_RR * p_skew * rot.transpose() + P_PP - JRP - JRP.transpose();
++}
++}  // namespace
++
++M3D StateGroup::poseCovAtPoint(const V3D& p_body, double t_point, bool for_insertion) const
++{
++  if (!point_cov_propagated_ && !(for_insertion && point_cov_insertion_prior_))
++    return poseCovAt(p_body);   // bit-identical default path
++
++  M3D out;
++  if (for_insertion && point_cov_insertion_prior_ && prior_pose_block_valid_) {
++    out = poseCovFromBlocks(rot_, p_body, prior_pose_block_.block<3,3>(0,0), prior_pose_block_.block<3,3>(3,3),
++                            prior_pose_block_.block<3,3>(0,3));
++  } else {
++    out = poseCovAt(p_body);
++  }
++  if (point_cov_propagated_ && !rel_head_times_.empty() && rel_blocks_.size() == rel_head_times_.size()) {
++    // last step whose head is at or before t_point (clamped): noise accrued from that head to the scan end, which
++    // is at most one IMU period longer than the exact t_point-to-end interval (conservative).
++    std::size_t k = 0;
++    while (k + 1 < rel_head_times_.size() && rel_head_times_[k + 1] <= t_point) ++k;
++    const auto& B = rel_blocks_[k];
++    out += poseCovFromBlocks(rot_, p_body, B.block<3,3>(0,0), B.block<3,3>(3,3), B.block<3,3>(0,3));
++  }
++  return out;
++}
++
+ PointXYZCov StateGroup::toCamera(const PointXYZCov& pt_body) const
+ {
+   return {
+diff -ruN '--exclude=build' a/tests/test_point_cov.cpp b/tests/test_point_cov.cpp
+--- /dev/null
++++ b/tests/test_point_cov.cpp
+@@ -0,0 +1,127 @@
++// R65 unit test (F-169): per-point pose covariance (StateGroup::poseCovAtPoint) and the backward sweep relCovBlocksBackward.
++// Mirrors test_gravity_s2.cpp's pattern (ros first, then #define private public) so it stays ROS-runtime-free.
++//   PC1 defaults (end_pose, posterior): poseCovAtPoint(p,t,true) and (p,t,false) equal poseCovAt(p) exactly.
++//   PC2 propagated with an empty profile equals poseCovAt(p).
++//   PC3 propagated: result = poseCovAt(p) + J B J^T, J built independently from -R[p]x (rotation) and I (position),
++//       B the profile block selected by time; compared to 1e-12.
++//   PC4 profile lookup: t before the first head -> block 0; t in [head_k, head_{k+1}) -> block k; t after the last head -> last.
++//   PC5 insertion_source=prior: for_insertion=true uses the stored prior (R,P) block; for_insertion=false uses cov_.
++//   PC6 relCovBlocksBackward equals an independent forward simulation (S <- F S F^T + Q from step k to the end) to 1e-12,
++//       and the last step's block equals Q_last.
++#include <ros/ros.h>
++#define private public
++#include "livo_recon/utils/state/state.h"
++#undef private
++#include "livo_recon/utils/state/rel_cov.h"
++
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <random>
++
++#define CHECK(c, msg)                                                                       \
++  do {                                                                                      \
++    if (!(c)) { std::fprintf(stderr, "[FAIL] %s  (%s:%d: %s)\n", msg, __FILE__, __LINE__, #c); std::exit(1); } \
++    else { std::printf("[PASS] %s\n", msg); }                                               \
++  } while (0)
++
++using namespace livo_recon;
++using M6 = Eigen::Matrix<double, 6, 6>;
++
++namespace {
++
++M3D skew(const V3D& v) { M3D k; k << 0, -v.z(), v.y(), v.z(), 0, -v.x(), -v.y(), v.x(), 0; return k; }
++
++M6 randPsd6(std::mt19937& rng, double scale)
++{
++  std::normal_distribution<double> N(0, 1);
++  M6 A; for (int i = 0; i < 6; ++i) for (int j = 0; j < 6; ++j) A(i, j) = N(rng);
++  return scale * (A * A.transpose() + 0.1 * M6::Identity());
++}
++
++// independent: J = [ -R[p]x , I ] on (rotation, position); returns J B J^T
++M3D jbj(const M3D& R, const V3D& p, const M6& B)
++{
++  Eigen::Matrix<double, 3, 6> J; J.block<3,3>(0,0) = -R * skew(p); J.block<3,3>(0,3) = M3D::Identity();
++  return J * B * J.transpose();
++}
++
++StateGroup makeState(std::mt19937& rng)
++{
++  StateGroup s;
++  s.cov_ = Eigen::MatrixXd::Identity(s.dimState(), s.dimState());
++  s.cov_.block<6,6>(0,0) = randPsd6(rng, 1e-3);
++  Eigen::AngleAxisd aa(0.7, V3D(0.3, -0.5, 0.8).normalized());
++  s.rot_ = aa.toRotationMatrix();
++  return s;
++}
++
++}  // namespace
++
++int main()
++{
++  std::mt19937 rng(7);
++  const V3D p(1.3, -0.4, 2.1);
++
++  {  // PC1
++    StateGroup s = makeState(rng);
++    const M3D ref = s.poseCovAt(p);
++    CHECK((s.poseCovAtPoint(p, 0.05, true) - ref).norm() == 0.0, "PC1a defaults, insertion path bit-identical to poseCovAt");
++    CHECK((s.poseCovAtPoint(p, 0.05, false) - ref).norm() == 0.0, "PC1b defaults, gate path bit-identical to poseCovAt");
++    // independent check of poseCovAt itself against J P J^T
++    const M6 Pb = s.cov_.block<6,6>(0,0);
++    CHECK((ref - jbj(s.rot_, p, Pb)).norm() < 1e-12, "PC1c poseCovAt equals independent J P J^T");
++  }
++  {  // PC2
++    StateGroup s = makeState(rng);
++    s.setPointCovModel(true, false);
++    const M3D ref = s.poseCovAt(p);
++    CHECK((s.poseCovAtPoint(p, 0.05, false) - ref).norm() == 0.0, "PC2 propagated with empty profile equals poseCovAt");
++  }
++  M6 B0 = randPsd6(rng, 1e-4), B1 = randPsd6(rng, 3e-4), B2 = randPsd6(rng, 1e-5);
++  {  // PC3, PC4
++    StateGroup s = makeState(rng);
++    s.setPointCovModel(true, false);
++    s.setRelCovProfile({0.00, 0.05, 0.08}, {B0, B1, B2});
++    const M3D base = s.poseCovAt(p);
++    CHECK((s.poseCovAtPoint(p, 0.02, false) - (base + jbj(s.rot_, p, B0))).norm() < 1e-12, "PC3 propagated = base + J B0 J^T at t=0.02");
++    CHECK((s.poseCovAtPoint(p, 0.02, true) - (base + jbj(s.rot_, p, B0))).norm() < 1e-12, "PC3b same at insertion (posterior base)");
++    CHECK((s.poseCovAtPoint(p, -1.0, false) - (base + jbj(s.rot_, p, B0))).norm() < 1e-12, "PC4a t before first head -> block 0");
++    CHECK((s.poseCovAtPoint(p, 0.05, false) - (base + jbj(s.rot_, p, B1))).norm() < 1e-12, "PC4b t == head_1 -> block 1");
++    CHECK((s.poseCovAtPoint(p, 0.079, false) - (base + jbj(s.rot_, p, B1))).norm() < 1e-12, "PC4c t inside step 1 -> block 1");
++    CHECK((s.poseCovAtPoint(p, 0.5, false) - (base + jbj(s.rot_, p, B2))).norm() < 1e-12, "PC4d t after last head -> last block");
++  }
++  {  // PC5
++    StateGroup s = makeState(rng);
++    s.setPointCovModel(false, true);
++    Eigen::MatrixXd prior = Eigen::MatrixXd::Identity(s.dimState(), s.dimState());
++    const M6 Pp = randPsd6(rng, 5e-3);
++    prior.block<6,6>(0,0) = Pp;
++    s.setPriorPoseBlock(prior);
++    const M3D gate = s.poseCovAtPoint(p, 0.02, false);
++    const M3D ins  = s.poseCovAtPoint(p, 0.02, true);
++    CHECK((gate - s.poseCovAt(p)).norm() == 0.0, "PC5a gate uses cov_ (state's own block)");
++    CHECK((ins - jbj(s.rot_, p, Pp)).norm() < 1e-12, "PC5b insertion uses the stored prior (R,P) block");
++  }
++  {  // PC6
++    const int dim = 12, n = 5, idxR = 0;
++    std::normal_distribution<double> N(0, 1);
++    std::vector<Eigen::MatrixXd> F(n), Q(n);
++    for (int k = 0; k < n; ++k) {
++      F[k] = Eigen::MatrixXd::Identity(dim, dim) + 0.05 * Eigen::MatrixXd::NullaryExpr(dim, dim, [&]() { return N(rng); });
++      Eigen::MatrixXd A = Eigen::MatrixXd::NullaryExpr(dim, dim, [&]() { return N(rng); });
++      Q[k] = 1e-4 * (A * A.transpose());
++    }
++    const auto blocks = relCovBlocksBackward(F, Q, idxR);
++    double worst = 0.0;
++    for (int k = 0; k < n; ++k) {
++      Eigen::MatrixXd S = Eigen::MatrixXd::Zero(dim, dim);
++      for (int j = k; j < n; ++j) S = F[j] * S * F[j].transpose() + Q[j];
++      worst = std::max(worst, (blocks[k] - S.block<6,6>(idxR, idxR)).norm());
++    }
++    CHECK(worst < 1e-12, "PC6a backward sweep equals independent forward simulation for every k");
++    CHECK((blocks[n - 1] - Q[n - 1].block<6,6>(idxR, idxR)).norm() < 1e-14, "PC6b last block equals Q_last");
++  }
++  std::printf("ALL PASS\n");
++  return 0;
++}
+diff -ruN '--exclude=build' a/tests/test_voxel_history.cpp b/tests/test_voxel_history.cpp
+--- /dev/null
++++ b/tests/test_voxel_history.cpp
+@@ -0,0 +1,100 @@
++// R65 unit test (F-158): a debiased voxel keeps its raw history and hands ALL of it to its children on subdivision.
++// Same private-access pattern as test_gravity_s2.cpp (standard headers first, then #define private public).
++//   VH1 precondition: after batch A (planar points, frame 1) the debiased voxel is a plane.
++//   VH2 after batch B (off-plane scatter, frame 2) the voxel has subdivided (status PARENT, plane retired).
++//   VH3 the children's accumulated point counts sum to |A|+|B| (before F-158 they summed to |B| only), for both
++//       max_points=50 (points_ already at the bound when B arrives, so the batch-not-stored branch) and max_points=1000
++//       (batch stored branch).
++//   VH4 the parent's points_ is empty after the hand-off.
++//   VH5 pca control: the same scenario with plane_fit_mode=pca; children hold at least the last batch (not asserted to be all of it).
++// Exit code 0 = all pass.
++#include <Eigen/Dense>
++#include <algorithm>
++#include <atomic>
++#include <cstdio>
++#include <cstdlib>
++#include <fstream>
++#include <functional>
++#include <iostream>
++#include <map>
++#include <memory>
++#include <mutex>
++#include <random>
++#include <sstream>
++#include <string>
++#include <unordered_map>
++#include <vector>
++#define private public
++#include "livo_recon/lio/voxelnode.h"
++#undef private
++
++#define CHECK(c, msg)                                                                       \
++  do {                                                                                      \
++    if (!(c)) { std::fprintf(stderr, "[FAIL] %s  (%s:%d: %s)\n", msg, __FILE__, __LINE__, #c); std::exit(1); } \
++    else { std::printf("[PASS] %s\n", msg); }                                               \
++  } while (0)
++
++using namespace livo_recon;
++
++namespace {
++
++std::vector<PointXYZCov> planar(std::mt19937& rng, int n)
++{
++  std::uniform_real_distribution<double> U(-0.2, 0.2);
++  std::vector<PointXYZCov> v;
++  for (int i = 0; i < n; ++i) {
++    PointXYZCov p; p.point = V3D(U(rng), U(rng), 0.0); p.sensor_cov = 1e-8 * M3D::Identity(); v.push_back(p);
++  }
++  return v;
++}
++std::vector<PointXYZCov> scatter(std::mt19937& rng, int n)
++{
++  std::uniform_real_distribution<double> U(-0.2, 0.2);
++  std::vector<PointXYZCov> v;
++  for (int i = 0; i < n; ++i) {
++    PointXYZCov p; p.point = V3D(U(rng), U(rng), U(rng)); p.sensor_cov = 1e-8 * M3D::Identity(); v.push_back(p);
++  }
++  return v;
++}
++
++void scenario(const std::string& mode, int max_points, bool expect_history)
++{
++  std::mt19937 rng(11);
++  auto opts = std::make_shared<VoxelOpts>();
++  opts->plane_fit_mode = mode;
++  opts->max_points = max_points;
++  opts->max_layer = 1;
++  opts->voxel_size = 0.5;
++  opts->min_init_points = 5;
++  opts->min_update_points = 5;
++  auto stats = std::make_shared<VoxelStats>();
++  VoxelNode node(opts, stats, 0, V3D::Zero());
++  std::vector<PlaneUpdate> updates;
++  const int nA = 60, nB = 60;
++  setCurrentFrame(1);
++  node.insertPoints(planar(rng, nA), updates);
++  const std::string tag = mode + " max_points=" + std::to_string(max_points);
++  if (mode == "debiased") CHECK(node.plane_.isPlane(), ("VH1 planar batch gives a plane (" + tag + ")").c_str());
++  setCurrentFrame(2);
++  node.insertPoints(scatter(rng, nB), updates);
++  CHECK(node.status_ == VoxelStatus::PARENT, ("VH2 voxel subdivided (" + tag + ")").c_str());
++  int sum = 0;
++  for (int i = 0; i < 8; ++i)
++    if (node.leaves_[i]) sum += node.leaves_[i]->plane_.pointsSize();
++  if (expect_history)
++    CHECK(sum == nA + nB, ("VH3 children hold all history " + std::to_string(sum) + " == 120 (" + tag + ")").c_str());
++  else
++    CHECK(sum >= nB, ("VH5 control children hold at least the last batch, got " + std::to_string(sum) + " (" + tag + ")").c_str());
++  CHECK(node.points_.empty(), ("VH4 parent points_ cleared (" + tag + ")").c_str());
++}
++
++}  // namespace
++
++int main()
++{
++  scenario("debiased", 50, true);
++  scenario("debiased", 1000, true);
++  scenario("pca", 1000, false);
++  std::printf("ALL PASS\n");
++  return 0;
++}

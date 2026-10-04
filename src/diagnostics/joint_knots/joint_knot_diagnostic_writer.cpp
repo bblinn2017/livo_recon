@@ -1,3 +1,4 @@
+#include "livo_recon/utils/log/bag_clock.h"
 #include "livo_recon/diagnostics/joint_knots/joint_knot_diagnostic_writer.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 
@@ -33,7 +34,7 @@ void writeJointKnotIterationDiagnostics(
   bool first = false;
   std::ofstream& csv = summary.stream(&first);
   if (first)
-    csv << "test_id,scan_id,iteration,t_abs,residual_time,gating_state_uncertainty,"
+    csv << "test_id,scan_id,iteration,t_abs,t_rel_s,residual_time,gating_state_uncertainty,"
            "knot_count,state_dimension,residual_count,mean_abs_residual,delta_norm,"
            "lidar_rhs_norm,prior_rhs_norm,lidar_delta_norm,prior_delta_norm,"
            "lidar_prior_delta_dot,zero_jacobian_residual_count,residuals_by_interval,"
@@ -63,7 +64,7 @@ void writeJointKnotIterationDiagnostics(
   const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> prior_eigs(prior.P);
   const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> lidar_eigs(solve.Gamma_L);
   const Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> posterior_eigs(solve.posterior);
-  csv << test_id << ',' << scan_id << ',' << iteration << ',' << std::setprecision(17) << t_abs << ','
+  csv << test_id << ',' << scan_id << ',' << iteration << ',' << std::setprecision(17) << t_abs << ',' << tRelString(t_abs) << ','
       << residual_time << ',' << (gating_state_uncertainty ? 1 : 0) << ','
       << after.knotCount() << ',' << after.dim() << ',' << residual_count << ','
       << solve.mean_abs_residual << ',' << solve.delta.norm() << ','
@@ -208,7 +209,7 @@ void writeJointKnotLidarInformationDiagnostics(
   bool first = false;
   std::ofstream& csv = log.stream(&first);
   if (first)
-    csv << "test_id,scan_id,iteration,t_abs,lidar_information_mode,"
+    csv << "test_id,scan_id,iteration,t_abs,t_rel_s,lidar_information_mode,"
            "residual_count,gamma_trace,gamma_frobenius,b_norm,"
            "redund_groups_seen,redund_groups,redund_groups_degenerate_pv,"
            "redund_groups_degenerate_var,redund_n_raw,"
@@ -219,7 +220,7 @@ void writeJointKnotLidarInformationDiagnostics(
            "information_increase_groups\n";
   const ResidualRedundancyStats& s = solve.redundancy_stats;
   csv << test_id << ',' << scan_id << ',' << iteration << ','
-      << std::setprecision(17) << t_abs << ','
+      << std::setprecision(17) << t_abs << ',' << tRelString(t_abs) << ','
       << solve.lidar_information_mode << ',' << residual_count << ','
       << solve.Gamma_L.trace() << ',' << solve.Gamma_L.norm() << ','
       << solve.b_L.norm() << ',' << s.redund_groups_seen << ','
@@ -248,7 +249,7 @@ void writeJointKnotStateChainDiagnostics(
   if (first)
     out << "test_id,scan_id,first_post_calibration_lio_frame,map_seed_complete,"
            "imu_propagated,n_imu_samples,scan_start_t,scan_tail_t,"
-           "iteration,phase,t_abs,state,theta_x,theta_y,theta_z,"
+           "iteration,phase,t_abs,t_rel_s,state,theta_x,theta_y,theta_z,"
            "p_x,p_y,p_z,v_x,v_y,v_z\n";
   const bool imu_propagated = measures.n_imu_samples > 0 && !measures.poses.empty();
   const double scan_start_t = measures.poses.empty()
@@ -259,7 +260,7 @@ void writeJointKnotStateChainDiagnostics(
         << (imu_propagated ? 1 : 0) << ',' << measures.n_imu_samples << ','
         << std::setprecision(17) << scan_start_t << ',' << measures.image.t << ','
         << iteration << ',' << phase << ','
-        << std::setprecision(17) << t_abs << ',' << label << ','
+        << std::setprecision(17) << t_abs << ',' << tRelString(t_abs) << ',' << label << ','
         << theta.x() << ',' << theta.y() << ',' << theta.z() << ','
         << p.x() << ',' << p.y() << ',' << p.z() << ','
         << v.x() << ',' << v.y() << ',' << v.z() << '\n';
@@ -281,7 +282,7 @@ void writeJointKnotAllScanDiagnostics(
   bool first = false;
   std::ofstream& out = log.stream(&first);
   if (first)
-    out << "test_id,scan_id,iteration,t_abs,knot_index,knot_t,immutable_head,"
+    out << "test_id,scan_id,iteration,t_abs,t_rel_s,knot_index,knot_t,immutable_head,"
            "before_p_distance,after_p_distance,dp_x,dp_y,dp_z,dp_norm,"
            "before_attitude_distance,after_attitude_distance,dtheta_x,dtheta_y,dtheta_z,dtheta_norm,"
            "before_velocity_distance,after_velocity_distance,dv_x,dv_y,dv_z,dv_norm,"
@@ -302,7 +303,7 @@ void writeJointKnotAllScanDiagnostics(
     const double adjacent_ba = k == 0 ? 0.0
         : (after.biasAcc(k) - after.biasAcc(k - 1)).norm();
     out << test_id << ',' << scan_id << ',' << iteration << ','
-        << std::setprecision(17) << t_abs << ',' << k << ',' << a.t << ','
+        << std::setprecision(17) << t_abs << ',' << tRelString(t_abs) << ',' << k << ',' << a.t << ','
         << (k == 0 ? 1 : 0) << ','
         << (b.p - reference_p).norm() << ',' << (a.p - reference_p).norm() << ','
         << dp.x() << ',' << dp.y() << ',' << dp.z() << ',' << dp.norm() << ','
@@ -345,12 +346,12 @@ void writeJointKnotScanSummaryDiagnostics(
   bool first = false;
   std::ofstream& out = log.stream(&first);
   if (first)
-    out << "test_id,scan_id,t_abs,completed_iterations,stop_reason,"
+    out << "test_id,scan_id,t_abs,t_rel_s,completed_iterations,stop_reason,"
            "dtheta_from_post_imu,dp_from_post_imu,dv_from_post_imu,"
            "p_distance_from_fixed_reference_before,p_distance_from_fixed_reference_after,"
            "v_distance_from_fixed_reference_before,v_distance_from_fixed_reference_after,"
            "attitude_distance_from_fixed_reference_before,attitude_distance_from_fixed_reference_after\n";
-  out << test_id << ',' << scan_id << ',' << std::setprecision(17) << t_abs << ','
+  out << test_id << ',' << scan_id << ',' << std::setprecision(17) << t_abs << ',' << tRelString(t_abs) << ','
       << completed_iterations << ',' << stop_reason << ','
       << Log(M3D(post_imu.rot().transpose() * final_state.rot())).norm() << ','
       << (final_state.pos() - post_imu.pos()).norm() << ','

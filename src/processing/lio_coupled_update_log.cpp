@@ -2,12 +2,15 @@
 #include "livo_recon/processing/lio_coupled.h"
 
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
+#include "livo_recon/utils/log/bag_clock.h"
+#include "livo_recon/utils/log/row_flush.h"
 #include "livo_recon/map/voxelmap.h"
 
 #include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <sstream>
 
 namespace livo_recon
 {
@@ -40,7 +43,7 @@ void LioProcCoupled::writeUpdateLogIteration(const MeasureGroup& mg, int iterati
   const JointKnotSolve& s = last_solve_;
   if (first)
   {
-    o << "frame,t_abs,iter,n_residuals,imu_prior_info_scale,knot_count";
+    o << "frame,t_abs,t_rel_s,iter,n_residuals,imu_prior_info_scale,knot_count";
     for (const char* v : {"delta", "lidar_delta", "prior_delta"})
     {
       o << ',' << v << "_rot_allknots_rad," << v << "_pos_allknots_m," << v << "_vel_allknots_mps," << v << "_bg_allknots_radps,"
@@ -49,19 +52,21 @@ void LioProcCoupled::writeUpdateLogIteration(const MeasureGroup& mg, int iterati
     }
     o << ",A_eig_min,A_eig_max,A_cond,Gamma_L_eig_max,Gamma_L_rank_rel1e-9,vec_rot_allknots_rad,vec_pos_allknots_m\n";
   }
-  o << voxel_map_->frame_idx_ << ',' << std::setprecision(17) << (mg.image.t + data_queues_->start_time) << std::setprecision(10) << ','
+  std::ostringstream row;
+  const double t_abs_row = mg.image.t + data_queues_->start_time;
+  row << voxel_map_->frame_idx_ << ',' << std::setprecision(17) << t_abs_row << ',' << tRelString(t_abs_row) << std::setprecision(10) << ','
     << iteration << ',' << n_residuals << ',' << copts_.imu_prior_info_scale << ',' << T.knotCount();
   const int tail = T.knotCount() - 1;
   for (const Eigen::VectorXd* v : {&s.delta, &s.lidar_delta, &s.prior_delta})
   {
-    o << ',' << acrossKnots(*v, T, 0) << ',' << acrossKnots(*v, T, 1) << ',' << acrossKnots(*v, T, 2) << ',' << acrossBias(*v, T, 0)
+    row << ',' << acrossKnots(*v, T, 0) << ',' << acrossKnots(*v, T, 1) << ',' << acrossKnots(*v, T, 2) << ',' << acrossBias(*v, T, 0)
       << ',' << acrossBias(*v, T, 1) << ',' << blockNorm(*v, T.gravityOffset(), 3);
     if (tail >= 1)
-      o << ',' << blockNorm(*v, T.knotOffset(tail), 3) << ',' << blockNorm(*v, T.knotOffset(tail) + 3, 3) << ','
+      row << ',' << blockNorm(*v, T.knotOffset(tail), 3) << ',' << blockNorm(*v, T.knotOffset(tail) + 3, 3) << ','
         << blockNorm(*v, T.knotOffset(tail) + 6, 3);
     else
-      o << ",nan,nan,nan";
-    o << ',' << v->norm();
+      row << ",nan,nan,nan";
+    row << ',' << v->norm();
   }
   Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eA(s.A);
   Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> eG(s.Gamma_L);
@@ -70,9 +75,9 @@ void LioProcCoupled::writeUpdateLogIteration(const MeasureGroup& mg, int iterati
   const double gmax = eG.info() == Eigen::Success ? eG.eigenvalues()(eG.eigenvalues().size() - 1) : std::nan("");
   int grank = 0;
   if (eG.info() == Eigen::Success) for (int i = 0; i < eG.eigenvalues().size(); ++i) if (eG.eigenvalues()(i) > 1e-9 * gmax) ++grank;
-  o << ',' << amin << ',' << amax << ',' << (amin > 0.0 ? amax / amin : std::numeric_limits<double>::infinity()) << ',' << gmax << ','
+  row << ',' << amin << ',' << amax << ',' << (amin > 0.0 ? amax / amin : std::numeric_limits<double>::infinity()) << ',' << gmax << ','
     << grank << ',' << acrossKnots(s.vec, T, 0) << ',' << acrossKnots(s.vec, T, 1) << '\n';
-  o.flush();
+  appendRowAndFlush(o, row.str());   // R74 (F-424): one write, flushed now
 }
 
 void LioProcCoupled::writeUpdateLogScan(const MeasureGroup& mg, const std::string& stop, int completed) const
@@ -85,7 +90,7 @@ void LioProcCoupled::writeUpdateLogScan(const MeasureGroup& mg, const std::strin
   const Eigen::MatrixXd& Pq = last_solve_.posterior;
   if (first)
   {
-    o << "frame,t_abs,stop,iterations,n_residuals,imu_prior_info_scale,knot_count,"
+    o << "frame,t_abs,t_rel_s,stop,iterations,n_residuals,imu_prior_info_scale,knot_count,"
          "tail18_prior_trace_rot,tail18_prior_trace_pos,tail18_prior_trace_vel,tail18_post_trace_rot,tail18_post_trace_pos,"
          "tail18_post_trace_vel";
     for (int k = 1; k < T.knotCount(); ++k)
@@ -94,15 +99,17 @@ void LioProcCoupled::writeUpdateLogScan(const MeasureGroup& mg, const std::strin
   }
   const StateGroup& prop = state_propagat_;
   const StateGroup& post = *state_;
-  o << voxel_map_->frame_idx_ << ',' << std::setprecision(17) << (mg.image.t + data_queues_->start_time) << std::setprecision(10) << ','
+  std::ostringstream row;
+  const double t_abs_row = mg.image.t + data_queues_->start_time;
+  row << voxel_map_->frame_idx_ << ',' << std::setprecision(17) << t_abs_row << ',' << tRelString(t_abs_row) << std::setprecision(10) << ','
     << stop << ',' << completed << ',' << residuals_.size() << ',' << copts_.imu_prior_info_scale << ',' << T.knotCount();
-  o << ',' << traceBlock(prop.cov(), StateGroup::idxR()) << ',' << traceBlock(prop.cov(), StateGroup::idxP()) << ','
+  row << ',' << traceBlock(prop.cov(), StateGroup::idxR()) << ',' << traceBlock(prop.cov(), StateGroup::idxP()) << ','
     << traceBlock(prop.cov(), StateGroup::idxV()) << ',' << traceBlock(post.cov(), StateGroup::idxR()) << ','
     << traceBlock(post.cov(), StateGroup::idxP()) << ',' << traceBlock(post.cov(), StateGroup::idxV());
   for (int k = 1; k < T.knotCount(); ++k)
     for (int c = 0; c < 3; ++c)
-      o << ',' << traceBlock(Pp, T.knotOffset(k) + 3 * c) << ',' << traceBlock(Pq, T.knotOffset(k) + 3 * c);
-  o << '\n';
-  o.flush();
+      row << ',' << traceBlock(Pp, T.knotOffset(k) + 3 * c) << ',' << traceBlock(Pq, T.knotOffset(k) + 3 * c);
+  row << '\n';
+  appendRowAndFlush(o, row.str());   // R74 (F-424): one write, flushed now
 }
 }  // namespace livo_recon

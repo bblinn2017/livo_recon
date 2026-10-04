@@ -50,8 +50,7 @@ GroupCorrection computeGroupCorrection(const std::vector<const Residual*>& group
     return out;
   }
 
-  const M3D plane_cov = 0.5 * (group.front()->plane_covariance +
-                               group.front()->plane_covariance.transpose());
+  const M3D plane_cov = symmetrized(group.front()->plane_covariance);   // R74 F-419 (same value as 0.5 (X + X^T))
   Eigen::SelfAdjointEigenSolver<M3D> plane_es(plane_cov);
   if (plane_es.info() != Eigen::Success ||
       plane_es.eigenvalues().minCoeff() <
@@ -228,7 +227,7 @@ void applyPriorScalarControls(Eigen::MatrixXd& prior_cov, const PriorScalarOptio
     Eigen::VectorXd eigvals = es.eigenvalues();
     for (int i = 0; i < eigvals.size(); ++i)
       eigvals(i) = std::max(eigvals(i), opts.p_floor_min_eig);
-    prior_cov = es.eigenvectors() * eigvals.asDiagonal() * es.eigenvectors().transpose();
+    prior_cov = symmetrized(Eigen::MatrixXd(es.eigenvectors() * eigvals.asDiagonal() * es.eigenvectors().transpose()));   // R74 F-419
   }
 
   if (opts.p_fading_lambda != 1.0) prior_cov /= opts.p_fading_lambda;

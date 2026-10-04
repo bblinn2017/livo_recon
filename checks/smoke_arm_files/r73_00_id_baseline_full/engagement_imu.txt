@@ -1,0 +1,2 @@
+[engagement/imu] propagations=3980
+  q_gain steps=157111 steps_with_gain_ne_1=0 max_gain_acc=1 max_gain_gyr=1

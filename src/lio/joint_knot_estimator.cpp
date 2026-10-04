@@ -44,7 +44,7 @@ Eigen::MatrixXd symmetricInverse(const Eigen::MatrixXd& matrix, const char* wher
     captureNonPd(S, ldlt, where);   // R72 (F-398): keep what failed; the catcher dumps it. No cost on the success path.
     throw std::runtime_error("joint-knot information matrix is not positive definite");
   }
-  return ldlt.solve(Eigen::MatrixXd::Identity(S.rows(), S.cols()));
+  return symmetrized(Eigen::MatrixXd(ldlt.solve(Eigen::MatrixXd::Identity(S.rows(), S.cols()))));   // R74 F-419: the inverse is symmetric only up to rounding
 }
 
 }  // namespace
@@ -374,8 +374,7 @@ JointLidarInformation accumulateJointLidarInformation(
       ++out.redundancy_stats.redund_groups_degenerate_pv;
       continue;
     }
-    const M3D plane_cov = 0.5 * (group.front()->plane_covariance +
-                                 group.front()->plane_covariance.transpose());
+    const M3D plane_cov = symmetrized(group.front()->plane_covariance);   // R74 F-419 (same value as 0.5 (X + X^T))
     Eigen::SelfAdjointEigenSolver<M3D> plane_es(plane_cov);
     if (plane_es.info() != Eigen::Success ||
         plane_es.eigenvalues().minCoeff() <
@@ -496,6 +495,7 @@ JointLidarInformation accumulateJointLidarInformation(
     out.Gamma += delta_gamma;
     out.b += delta_b;
   }
+  out.Gamma = symmetrized(out.Gamma);   // R74 F-419: a sum of H^T H products is symmetric only up to rounding
   return out;
 }
 
@@ -544,13 +544,13 @@ JointKnotSolve solveJointKnotInformation(
   }
   const JointLidarInformation lidar = accumulateJointLidarInformation(
       lidar_rows, D, redundancy_options);
-  out.Gamma_L = lidar.Gamma;
+  out.Gamma_L = symmetrized(lidar.Gamma);   // R74 F-419
   out.b_L = lidar.b;
   out.redundancy_stats = lidar.redundancy_stats;
   out.lidar_information_mode = lidar.mode;
   out.mean_abs_residual = residuals.empty() ? 0.0 : abs_r / residuals.size();
   out.vec = current.boxminus(imu_prior_mean);
-  out.A = prior.P_inverse + out.Gamma_L;
+  out.A = symmetrized(Eigen::MatrixXd(prior.P_inverse + out.Gamma_L));   // R74 F-419
   // R72 (F-398): the right-hand-side terms are computed BEFORE the inversion that can throw (the same expressions as before, only
   // moved up), so a failing scan keeps every term of the update. On failure the partial solve is stored for the catcher's dump.
   out.lidar_rhs = out.b_L;

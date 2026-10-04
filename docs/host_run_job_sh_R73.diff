@@ -1,0 +1,176 @@
+# R73 host_run_job_sh.diff
+#
+# Two separate, dated edits to the same file, scripts/parallel/run_job.sh,
+# which lives in /home/bblinn/fast_ws -- OUTSIDE the src/livo_recon git
+# repository (fast_ws itself has no git at all). Needs no commit/push; not
+# part of either R73_cpp.patch's or R73b_state_floors.patch's own scope.
+
+(b) /home/bblinn/fast_ws/scripts/parallel/run_job.sh -- FAILED-sentinel fix
+    (OUTSIDE src/livo_recon; direct user request, not git-tracked; not meant
+    to be `git apply`'d into this repository -- included for the record only)
+===============================================================================
+Direct user instruction that prompted this edit, quoted verbatim:
+"can we fix the run_job.sh generic ATE line heuristic that marks jobs as
+failed when evo lines aren't printed? the behavior should be that when a job
+crashes or fails in some other way the script should note that it failed"
+
+Problem: run_job.sh's livo_recon-branch DONE/FAILED decision required a
+`[evo ATE=...]` line to appear in run.log. R72's new EF tier sets
+`duration_secs = ceil(samples/197.5 + 8)` seconds (calibration length plus a
+handful of dump frames only, by design) -- short enough that the node's own
+`auto_terminate_idle_secs_` idle watchdog (src/livo_recon_node.cpp:517) ends
+the run cleanly (exit_code=0, signal=none) before evo's scoring window
+(onset_scan ~485+) is ever reached. The old heuristic could not distinguish
+this normal, by-design early termination from an actual crash, and
+misclassified all 40 of R72's EF arms as FAILED even though every one
+completed exactly as designed with complete, correct raw output.
+
+Fix: the real process exit status (`exit_status.txt`, already written just
+before the DONE/FAILED decision) is now the authoritative crash signal.
+
+--- a/scripts/parallel/run_job.sh (before, reconstructed)
++++ b/scripts/parallel/run_job.sh (after, as applied and verified live)
+@@
+-    if [[ "$last_evo" =~ $ATE_LINE_RE && -s "$OUT_DIR/odometry.txt" ]]; then
++    # R72: a job that exits cleanly (exit_code=0, no signal) but never prints
++    # an [evo ATE=...] line is not necessarily a failure -- a short/truncated
++    # run (e.g. gen_jobs.py's EF tier: duration_secs covers calibration plus
++    # a handful of dump frames, not the full bag) can legitimately end, via
++    # the node's own auto_terminate_idle_secs idle watchdog, well before evo
++    # reaches its scoring window (onset_scan ~485+). Before this fix,
++    # run_job.sh's generic ATE-line requirement misclassified every one of
++    # R72's 40 EF arms as FAILED even though all 40 completed exactly as
++    # designed with full, correct raw output -- confirmed by exit_status.txt
++    # reading exit_code=0 signal=none for all 40, with residual_dump.csv/
++    # plane_fit_trace.csv/state_trace.csv all present and complete. The real
++    # crash/failure signal is the actual process exit status (captured
++    # above), not whether evo happened to produce a line in time -- so a
++    # clean exit with the primary output (odometry.txt) present is DONE even
++    # without a matching [evo line; a crash (nonzero exit code or any
++    # signal) or missing/empty odometry.txt is still unconditionally FAILED.
++    _exit_status_text="$(cat "$OUT_DIR/exit_status.txt" 2>/dev/null)"
++    _clean_exit=0
++    [[ "$_exit_status_text" == "exit_code=0 signal=none" ]] && _clean_exit=1
++    if [[ ( "$last_evo" =~ $ATE_LINE_RE || "$_clean_exit" == "1" ) && -s "$OUT_DIR/odometry.txt" ]]; then
+       ... (unchanged: the run.log-quiescence recheck, the write-then-rename
+            of results_lio.txt)
+-        echo "$last_evo" > "$_tmp_results"
++        if [[ "$last_evo" =~ $ATE_LINE_RE ]]; then
++          echo "$last_evo" > "$_tmp_results"
++        else
++          # R72: clean exit, no ATE -- see comment above the outer `if`.
++          echo "NO_ATE: clean exit ($_exit_status_text), odometry.txt present, no [evo ATE=...m line in run.log -- evo likely never reached its scoring window (a short/truncated-duration run, or evo disabled/misconfigured for this job); see run.log" > "$_tmp_results"
++        fi
+         mv -f "$_tmp_results" "$JOB_DIR/results_lio.txt"
+         touch "$JOB_DIR/DONE"
+-        echo "[$(basename "$JOB_DIR")] $last_evo"
++        if [[ "$last_evo" =~ $ATE_LINE_RE ]]; then
++          echo "[$(basename "$JOB_DIR")] $last_evo"
++        else
++          echo "[$(basename "$JOB_DIR")] DONE ($_exit_status_text, no ATE line -- see results_lio.txt)"
++        fi
+     else
+       rm -f "$JOB_DIR/DONE"
+       touch "$JOB_DIR/FAILED"
+-      echo "[$(basename "$JOB_DIR")] FAILED (no ATE=...m [evo line in run.log after retries -- see $JOB_DIR/run.log)"
++      if [[ ! -s "$OUT_DIR/odometry.txt" ]]; then
++        echo "[$(basename "$JOB_DIR")] FAILED ($_exit_status_text -- \$OUT_DIR/odometry.txt missing or empty -- see $JOB_DIR/run.log)"
++      else
++        echo "[$(basename "$JOB_DIR")] FAILED ($_exit_status_text -- no ATE=...m [evo line in run.log after retries and the process did not exit cleanly -- last [evo line, if any: '${last_evo:-<none>}' -- see $JOB_DIR/run.log)"
++      fi
+     fi
+
+Net effect: DONE now fires if (ATE line matches OR the process exited
+cleanly: exit_code=0/signal=none) AND odometry.txt is non-empty; otherwise
+FAILED, and every FAILED message now always includes the real
+`exit_status.txt` text so a future reader does not have to re-derive it. A
+clean-exit-no-ATE DONE writes an explicit `NO_ATE: clean exit (...)` line
+into `results_lio.txt` in place of a fabricated ATE line.
+
+Verification this did not disturb the normal ATE-producing path: the edit
+was applied mid-round, live, while `r72_sc` and `r72_co` dispatchers were
+actively running. Immediately afterward: `r72_sc` completed 3/3 jobs with
+real `[evo ATE=...]` lines; `r72_co` completed 10/10 jobs (including all 8
+non-control gate-on arms, 3 of which crashed via SIGABRT and were correctly
+still marked FAILED with the real signal text, and 5 of which produced real
+ATE lines); `r72_p` subsequently completed 144/144 jobs, every one with a
+real ATE line. Dispatch-log timestamps show continuous, uninterrupted
+progress across the edit with no stalls or re-dispatches attributable to it.
+
+===============================================================================
+
+(c) /home/bblinn/fast_ws/scripts/parallel/run_job.sh -- R73 sentinel-masking fix
+    (OUTSIDE src/livo_recon; direct user request, mid-round, same file as
+    part (b) above but a SEPARATE, later edit; not meant to be `git apply`'d
+    into this repository -- included for the record only)
+===============================================================================
+Direct user instruction that prompted this edit, quoted verbatim (in response
+to the agent explaining the discovered bug mechanism):
+"i don't think that's good logic. run job should report failed on crashes or
+when we have to manually kill the process or something, this is unrelated to
+whether or not we generated ATE data"
+
+Problem: the DONE/FAILED gate (as left by the R72 fix, part (b) above) was
+`(last_evo matches ATE_LINE_RE OR clean_exit) AND odometry.txt non-empty` --
+an OR. A job that printed at least one periodic [evo/interp] diagnostic line
+and THEN crashed still satisfied the ATE-line disjunct regardless of its
+actual exit status, and was sentinelled DONE even though the process had
+aborted. This went uncaught in R72 because evo there only ever logged once,
+at the genuine end of a finished run -- "last_evo matches" was in practice a
+reliable proxy for "reached the end normally." A long coupled job that logs
+evo periodically throughout its run (rather than once at the end) breaks
+that implicit assumption: a crash occurring any time after the first
+periodic evaluation line is masked as DONE. Confirmed live this round on a
+real crashed co-queue arm (SIGABRT, "joint-knot information matrix is not
+positive definite") that had already logged a mid-run [evo/interp] line
+before aborting.
+
+Fix: the ATE-line disjunct was removed entirely from the gate.
+
+--- a/scripts/parallel/run_job.sh (before, R72 state)
++++ b/scripts/parallel/run_job.sh (after, as applied and verified live)
+@@
+     _exit_status_text="$(cat "$OUT_DIR/exit_status.txt" 2>/dev/null)"
+     _clean_exit=0
+     [[ "$_exit_status_text" == "exit_code=0 signal=none" ]] && _clean_exit=1
+-    if [[ ( "$last_evo" =~ $ATE_LINE_RE || "$_clean_exit" == "1" ) && -s "$OUT_DIR/odometry.txt" ]]; then
++    # R73 fix (direct user request): the DONE/FAILED decision must depend
++    # ONLY on how the process actually exited (clean vs crashed/killed),
++    # never on whether evo happened to produce a line -- ATE-line presence
++    # is relevant only to what gets WRITTEN into results_lio.txt (a real
++    # ATE line vs the NO_ATE placeholder), not to whether the job is DONE
++    # or FAILED. The previous `(ATE-line OR clean-exit)` OR let a job that
++    # printed a periodic (non-final) evo line and then crashed still read
++    # as DONE.
++    if [[ "$_clean_exit" == "1" && -s "$OUT_DIR/odometry.txt" ]]; then
+       ... (unchanged: the two-sentinel-never-coexist clear, the
+            run.log-quiescence recheck, the write-then-rename of
+            results_lio.txt -- the ATE-line-vs-NO_ATE branching inside this
+            block is UNCHANGED, still gated on `"$last_evo" =~ $ATE_LINE_RE`
+            purely to decide what text to write, not whether DONE fires)
+     else
+       rm -f "$JOB_DIR/DONE"
+       touch "$JOB_DIR/FAILED"
+       if [[ ! -s "$OUT_DIR/odometry.txt" ]]; then
+         echo "[$(basename "$JOB_DIR")] FAILED ($_exit_status_text -- \$OUT_DIR/odometry.txt missing or empty -- see $JOB_DIR/run.log)"
+       else
+-        echo "[$(basename "$JOB_DIR")] FAILED ($_exit_status_text -- no ATE=...m [evo line in run.log after retries and the process did not exit cleanly -- last [evo line, if any: '${last_evo:-<none>}' -- see $JOB_DIR/run.log)"
++        echo "[$(basename "$JOB_DIR")] FAILED ($_exit_status_text -- the process did not exit cleanly (crashed, was killed, or an unrecognized exit) -- last [evo line, if any: '${last_evo:-<none>}' -- see $JOB_DIR/run.log)"
+       fi
+     fi
+
+Net effect: DONE now fires if and only if (exit_code=0 signal=none) AND
+odometry.txt is non-empty. ATE-line presence never factors into DONE/FAILED
+again, only into what results_lio.txt's content says. This also correctly
+covers a manual/external kill: exit_status.txt's third possible value,
+`exit_code=unknown signal=unknown` (neither a "process has died"-style death
+nor a "process has finished cleanly" line in run.log -- e.g. an externally
+applied kill that bypasses roslaunch's own exit reporting), also fails to
+set _clean_exit=1 and correctly falls through to FAILED.
+
+Verified: `bash -n scripts/parallel/run_job.sh` syntax-checks clean. Applied
+mid-round while r73_p2's dispatcher was actively running; all of p2's
+remaining ~95 jobs completed correctly afterward with real ATE lines,
+confirming the fix did not disturb the normal ATE-producing path. Does NOT
+retroactively re-sentinel jobs dispatched before this edit -- their on-disk
+JOB_DIR sentinel remains whatever the pre-fix script wrote.

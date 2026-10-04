@@ -1,0 +1,95 @@
+=== test_step_cap ===
+[PASS] SC1 inside both caps: scale == 1, not bound
+[PASS] SC1 inside both caps: step bit-identical
+[PASS] SC2 rotation over cap: bound
+[PASS] SC2 applied rotation norm equals the cap
+[PASS] SC3 direction preserved over 2000 random steps
+[PASS] SC4 the both-over case was exercised (more than 50 draws)
+[PASS] SC5 norm exactly at the cap is not bound
+[PASS] SC6 scalar cap keeps direction
+[PASS] SC6 per-component clamp would rotate the step (the check fires)
+[PASS] SC7 default mode is off
+[PASS] SC7 mode=hard is on
+ALL PASS
+=== test_q_adapt ===
+[PASS] QA1 consistent model: NIS == 1
+[PASS] QA1 consistent model: rho == 1
+[PASS] QA1 control: rows scaled by 1.2 give NIS == 1.44 (the check fires)
+[PASS] QA1 control: rho > 1.4 for the scaled rows
+[PASS] QA2 sum h P h scales with P
+[PASS] QA2 rho scales as 1/c at fixed residuals
+[PASS] QA3 no rows: invalid
+[PASS] QA3 P = 0: invalid
+[PASS] QA4 alternating innovations: lag1 == -(n-1)/n
+[PASS] QA4 constant-sign innovations: lag1 == +(n-1)/n
+[PASS] QA5 rho == 1 leaves the gain exactly 1
+[PASS] QA5 rho = 4 gives 4^(1-f)
+[PASS] QA5 rho above the clamp acts as the clamp
+[PASS] QA5 forgetting == 1 never moves the gain
+[PASS] QA5 max_gain bound holds
+[PASS] QA5 min_gain = 1 blocks deflation
+[PASS] QA5 min_gain < 1 allows deflation (the bound is what blocked it above)
+[PASS] QA5 invalid statistic leaves the gain unchanged
+[PASS] QA6 step 1: 1.25
+[PASS] QA6 step 2: 1.5625
+[PASS] QA6 step 3: decay toward 1
+[PASS] QA6 step 4: decay toward 1
+[PASS] QA6 counters
+[PASS] QA6 whiteness gate blocks inflation and counts it
+[PASS] QA6 white innovations still inflate
+[PASS] QA7 apply=both
+[PASS] QA7 apply=acc
+[PASS] QA7 apply=gyr
+[PASS] QL1 fit succeeds
+[PASS] QL1 polynomial data has ~0 residual variance
+[PASS] QL2 fit succeeds
+[PASS] QL2 variance == c^2 for noise orthogonal to the polynomial space
+[PASS] QL2 variance == c^2 for noise orthogonal to the polynomial space
+[PASS] QL2 variance == c^2 for noise orthogonal to the polynomial space
+[PASS] QL2 control: RSS/n would be wrong by (n-p)/n (the check fires)
+[PASS] QL2 control: plain sample variance on trending data is far above c^2 (the trend is what the fit removes)
+[PASS] QL3 n - p < 1 refused, output untouched
+[PASS] QL3 zero time span refused
+[PASS] QW1 blocks equal the integral of the propagated disturbance
+[PASS] QW1 rotation block is qc_gyr dt
+[PASS] QW2 semigroup identity
+[PASS] QW2 control: the naive sum violates it (the check fires)
+ALL PASS
+=== test_zupt ===
+[PASS] ZU1 information identity over 20 random SPD covariances
+[PASS] ZU3 symmetric positive definite, velocity trace does not grow (20 draws)
+[PASS] ZU4 dx_v = -P_vv S^-1 v (20 draws)
+[PASS] ZU2 sigma -> 0: velocity driven to zero
+[PASS] ZU2 sigma -> 0: velocity block of P' vanishes
+[PASS] ZU5 sigma -> infinity: no change
+[PASS] ZU6 control: a wrong gain breaks the information identity (the check fires)
+[PASS] ZD1 not stationary before enter_scans
+[PASS] ZD1 stationary on the third candidate
+[PASS] ZD1 stays stationary
+[PASS] ZD1 one non-candidate exits at once and resets the run
+[PASS] ZD1 re-entry needs enter_scans again
+[PASS] ZD1 the acceleration criterion also exits
+[PASS] ZD2 off
+[PASS] ZD2 detect_only
+[PASS] ZD2 apply
+ALL PASS
+=== test_failure_capture ===
+[PASS] FC1 stream parses
+[PASS] FC1 matrix round trip bit-exact (extremes, subnormal, signed zero)
+[PASS] FC1 vector round trip bit-exact
+[PASS] FC1 scalar round trip bit-exact
+[PASS] FC2 truncated block is reported
+[PASS] FC3 fixture is not positive definite
+[PASS] FC3 capture valid and labelled
+[PASS] FC3 stored matrix is the symmetrised one, bit-exact
+[PASS] FC3 eigenvalues equal an independent solve
+[PASS] FC3 smallest eigenvalue is negative and the list ascends
+[PASS] FC3 LDLT status and pivots stored
+[PASS] FC4 a PD matrix passes the factorisation test (no capture is taken)
+ALL PASS
+=== test_joint_knot_failure_capture ===
+[PASS] FK1 solver failure captured (posterior_A, A = -I, eigenvalues -1)
+[PASS] FK2 partial solve retained
+[PASS] FK3 control: a PD prior does not throw and takes no capture
+[PASS] FK4 scan-head failure captured
+ALL PASS

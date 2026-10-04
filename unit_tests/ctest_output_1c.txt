@@ -1,0 +1,45 @@
+Test project /root/catkin_ws/build
+      Start  1: surface_core
+ 1/20 Test  #1: surface_core ...............................   Passed    0.00 sec
+      Start  2: gravity_s2
+ 2/20 Test  #2: gravity_s2 .................................   Passed    0.01 sec
+      Start  3: debias_modes
+ 3/20 Test  #3: debias_modes ...............................   Passed    0.01 sec
+      Start  4: point_cov
+ 4/20 Test  #4: point_cov ..................................   Passed    0.01 sec
+      Start  5: voxel_history
+ 5/20 Test  #5: voxel_history ..............................   Passed    0.01 sec
+      Start  6: info_scale
+ 6/20 Test  #6: info_scale .................................   Passed    0.00 sec
+      Start  7: step_cap
+ 7/20 Test  #7: step_cap ...................................   Passed    0.00 sec
+      Start  8: q_adapt
+ 8/20 Test  #8: q_adapt ....................................   Passed    0.00 sec
+      Start  9: zupt
+ 9/20 Test  #9: zupt .......................................   Passed    0.00 sec
+      Start 10: failure_capture
+10/20 Test #10: failure_capture ............................   Passed    0.00 sec
+      Start 11: symmetrize
+11/20 Test #11: symmetrize .................................   Passed    0.01 sec
+      Start 12: renamed_keys
+12/20 Test #12: renamed_keys ...............................   Passed    0.00 sec
+      Start 13: shadow_options
+13/20 Test #13: shadow_options .............................   Passed    0.00 sec
+      Start 14: test_bootstrap_observation_moments
+14/20 Test #14: test_bootstrap_observation_moments .........   Passed    0.00 sec
+      Start 15: test_joint_knot_calibration_p0
+15/20 Test #15: test_joint_knot_calibration_p0 .............   Passed    0.00 sec
+      Start 16: test_joint_knot_estimator
+16/20 Test #16: test_joint_knot_estimator ..................   Passed    0.01 sec
+      Start 17: test_joint_knot_failure_capture
+17/20 Test #17: test_joint_knot_failure_capture ............   Passed    0.01 sec
+      Start 18: test_joint_knot_init_consistency
+18/20 Test #18: test_joint_knot_init_consistency ...........   Passed    0.00 sec
+      Start 19: test_joint_knot_motion_q
+19/20 Test #19: test_joint_knot_motion_q ...................   Passed    0.00 sec
+      Start 20: test_reference_temporal_lidar_covariance
+20/20 Test #20: test_reference_temporal_lidar_covariance ...   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 20
+
+Total Test time (real) =   0.13 sec

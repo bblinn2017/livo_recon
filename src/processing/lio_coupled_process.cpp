@@ -5,6 +5,7 @@
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/diagnostics/matrix_dump.h"
 #include "livo_recon/lio/failure_capture.h"
+#include "livo_recon/lio/lazy_prior.h"
 #include "livo_recon/diagnostics/joint_knots/joint_knot_diagnostic_writer.h"
 #include "livo_recon/diagnostics/r66_writers.h"
 #include "livo_recon/diagnostics/stationary_diagnostic_writer.h"
@@ -154,7 +155,8 @@ std::string LioProcCoupled::processLIOBody(MeasureGroup& mg)
       if (iteration == 0) ++prior_skipped_scans_;   // R73 (F-410): nothing solved, nothing built, covariance left as propagated
       break;
     }
-    if (!joint_prior_built_) buildPrior();
+    // R74 (F-410): the one rule lives in lio/lazy_prior.h (unit-tested); residuals_ is non-empty here, so this builds when not yet built.
+    buildPriorIfResiduals(residuals_.size(), joint_prior_built_, buildPrior);
 
     // The accepted residual covariance is consumed directly. Deprecated
     // global density/chi2 scalers and per-residual reweighting are absent.

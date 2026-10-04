@@ -1,30 +1,71 @@
 #!/usr/bin/env python3
-"""R73: assemble the return, check it against required_outputs.json item by item, byte-split it when it is over the size limit. Nothing is interpreted.
+"""R74 (= R73 build_return.py ported: no STEP0, switch reducer in place of the shadow-pair reducer, no p_table): assemble the return, check it against required_outputs.json item by item, byte-split it when it is over the size limit. Nothing is interpreted.
 
-python3 tools/r69/build_return.py --ret R73_RETURN --runs r73_runs --arms r73_manifest/arm_table.tsv --manifest r73_manifest \\
-        --queue-dir ablations/_job_queue/r73_smoke,ablations/_job_queue/r73_refuse,ablations/_job_queue/r73_sh,... --date 2026-10-02 [--params r69_inputs/bag_params.json] [--allow-missing]
-Before running it, YOU write into --ret (agent-authored, R73_INSTRUCTIONS.md section 10): report.md, STATE.md, agent_edits.patch, code_answers.md, R73_tree.tar.gz, unit_tests/, checks/
-(incl. r73_symmetrize_gate.txt, the selftest outputs), launch/, listener/, stop_reasons.csv and STEP0/ (python tools/r69/r73_step0.py --out R73_RETURN/STEP0).
-This script adds: phase_summary.csv, arm_scan_all.csv.gz, completeness.csv, identity_controls.txt, r73_gates.txt, r73_shadow_pairs.*, r73_freeze_check.csv, r73_p_table/, engagement_all.txt,
+python3 tools/r69/build_return.py --ret R74_RETURN --runs r74_runs --arms r74_manifest/arm_table.tsv --manifest r74_manifest --r73-runs <R73 results dir> \\
+        --queue-dir ablations/_job_queue/r74_smoke,ablations/_job_queue/r74_ef,... --date 2026-10-02 [--params r69_inputs/bag_params.json] [--allow-missing]
+Before running it, YOU write into --ret (agent-authored, R74_INSTRUCTIONS.md section 13): report.md, STATE.md, agent_edits.patch, code_answers.md, R74_tree.tar.gz, unit_tests/, checks/
+(incl. r74_symmetrize_gate.txt, the selftest outputs), launch/, listener/ and stop_reasons.csv.
+This script adds: phase_summary.csv, arm_scan_all.csv.gz, completeness.csv, identity_controls.txt, r74_gates.txt, r74_f426_part1_*.csv, r74_f426_part2_*.csv, engagement_all.txt,
 duplicates.tsv, summaries_all.json, compress_manifests.json, sensor_stamps_summaries.json, compact/, queue/, RETURN_CHECKLIST.md.
-RETURN_CHECKLIST.md is derived from r73_manifest/required_outputs.json: one row per (follow-up, arm or table, file): follow-up id, file, columns, minimum rows, where it is, status.
+RETURN_CHECKLIST.md is derived from r74_manifest/required_outputs.json: one row per (follow-up, arm or table, file): follow-up id, file, columns, minimum rows, where it is, status.
 If ANY required item is absent the script prints the follow-up ids and files and EXITS 3 WITHOUT packing (an item you cannot produce is written as `NOT PRODUCED: <reason>` into a file of that
 name and the script re-run with --allow-missing; the reason also goes in report.md).
-NOTHING is thinned or dropped. The zip is built once; if it is over --limit-mb (default 28) it is BYTE-SPLIT into R73_RETURN_<date>.zip.part00, .part01, ... (28 MB each, fixed size) with
-R73_return.sha256 (sha256 and size of the whole zip and of every part), REASSEMBLE.txt and reassembly_check.txt (the parts are re-joined and the sha256 compared; a copy with one part dropped is
+NOTHING is thinned or dropped. The zip is built once; if it is over --limit-mb (default 28) it is BYTE-SPLIT into R74_RETURN_<date>.zip.part00, .part01, ... (28 MB each, fixed size) with
+R74_return.sha256 (sha256 and size of the whole zip and of every part), REASSEMBLE.txt and reassembly_check.txt (the parts are re-joined and the sha256 compared; a copy with one part dropped is
 re-joined and MUST fail the comparison; both results are printed)."""
 import argparse, csv, glob, gzip, hashlib, io, json, os, shutil, subprocess, sys, zipfile
 import pandas as pd
 
-REQUIRED_AGENT = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R73_tree.tar.gz",
-                  "unit_tests/ctest_output.txt", "checks/smoke_table.md", "checks/build_log_tail.txt", "checks/r73_symmetrize_gate.txt",
+REQUIRED_AGENT = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R74_tree.tar.gz",
+                  "unit_tests/ctest_output.txt", "checks/smoke_table.md", "checks/build_log_tail.txt", "checks/r74_symmetrize_gate.txt",
                   "launch/launch_command.txt", "launch/containers_file.txt", "launch/launch_time.txt", "launch/checkup_cycles",
                   "listener/selftest_output.txt", "listener/smoke_dry_run/listener_ledger.jsonl", "listener/smoke_delete/listener_ledger.jsonl",
-                  "listener/smoke/listener_ledger.jsonl", "listener/smoke/listener_final.json", "stop_reasons.csv", "STEP0/step0_missing.txt"]
-REQUIRED_DIRS_NONEMPTY = ["listener", "checks/param_dumps", "checks/smoke_arm_files", "launch/checkup_cycles", "STEP0"]
-GENERATED = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r73_gates.txt", "duplicates.tsv", "summaries_all.json",
+                  "listener/smoke/listener_ledger.jsonl", "listener/smoke/listener_final.json", "stop_reasons.csv", "checks/r74_selftest_output.txt"]
+REQUIRED_DIRS_NONEMPTY = ["listener", "checks/param_dumps", "checks/smoke_arm_files", "launch/checkup_cycles"]
+GENERATED = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r74_gates.txt", "duplicates.tsv", "summaries_all.json",
              "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "compact", "queue"]
+# R75: lists for --round R75 (the R74 listener proof and smoke stage are not repeated; one queue, r75_ln)
+REQUIRED_AGENT_R75 = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R75_tree.tar.gz", "unit_tests/ctest_output.txt", "checks/build_log_tail.txt",
+                      "checks/r75_selftest_output.txt", "launch/launch_command.txt", "launch/containers_file.txt", "launch/launch_time.txt", "launch/checkup_cycles",
+                      "listener/ln/listener_ledger.jsonl", "listener/ln/listener_final.json", "stop_reasons.csv", "harness_answers.md"]
+REQUIRED_DIRS_NONEMPTY_R75 = ["listener", "launch/checkup_cycles", "checks"]
+GENERATED_R75 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r75_gates.txt", "duplicates.tsv", "summaries_all.json",
+                 "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "compact", "queue"]
+# R76: two listener runs (id + refuse, then the full-bag grid), the voxel-size statistics, the F-426 step-0 outputs written by r76_step0_f426.py (not by this script)
+REQUIRED_AGENT_R76 = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R76_tree.tar.gz", "unit_tests/ctest_output.txt", "checks/build_log_tail.txt",
+                      "checks/r76_selftest_output.txt", "launch/launch_command.txt", "launch/containers_file.txt", "launch/launch_time.txt", "launch/checkup_cycles",
+                      "listener/id/listener_ledger.jsonl", "listener/id/listener_final.json", "listener/fb/listener_ledger.jsonl", "listener/fb/listener_final.json",
+                      "stop_reasons.csv", "harness_answers.md", "step0_f426_log.txt", "voxel_stats/voxel_stats_run_log.txt"]
+REQUIRED_DIRS_NONEMPTY_R76 = ["listener", "launch/checkup_cycles", "checks", "voxel_stats"]
+GENERATED_R76 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r76_gates.txt", "r76_identity_vs_old.csv", "duplicates.tsv", "summaries_all.json",
+                 "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "compact", "queue"]
+# R77: id + refuse listener run, then the full-bag run (no F-426 step 0, no voxel statistics in this round)
+REQUIRED_AGENT_R77 = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R77_tree.tar.gz", "unit_tests/ctest_output.txt", "checks/build_log_tail.txt",
+                      "checks/r77_selftest_output.txt", "launch/launch_command.txt", "launch/containers_file.txt", "launch/launch_time.txt", "launch/checkup_cycles",
+                      "listener/id/listener_ledger.jsonl", "listener/id/listener_final.json", "listener/fb/listener_ledger.jsonl", "listener/fb/listener_final.json",
+                      "stop_reasons.csv", "harness_answers.md"]
+REQUIRED_DIRS_NONEMPTY_R77 = ["listener", "launch/checkup_cycles", "checks"]
+GENERATED_R77 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r77_gates.txt", "r77_identity_vs_old.csv", "duplicates.tsv", "summaries_all.json",
+                 "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "compact", "queue"]
 PART = 28 * 1000 * 1000
+STORED_EXTS = (".gz", ".zip")   # already-compressed; ZIP_STORED saves time, not space (a .tar.gz is caught by .gz)
+
+
+def excluded_from_zip(relpath):
+    """Return-trim (Bryce, R74): not named in required_outputs.json, already returned elsewhere, or a local-only copy.
+    relpath is the path as it will appear inside the zip (R74_RETURN/... or R75_RETURN/... form)."""
+    parts = relpath.split(os.sep)
+    if len(parts) >= 3 and parts[-3] == "smoke_arms" and parts[-1] == "arm_bundle.zip":
+        return True   # already returned in stage 1b; keep only each arm's summary.json (R74 only -- R75 has no smoke_arms)
+    if "queue" in parts[:-1] and os.path.basename(relpath) != "queue_state.txt":
+        return True   # copies of the planner's own manifest/; only queue_state.txt (derived, not a copy) belongs in the return
+    return False
+
+
+def choose_part_size(nbytes, target=PART):
+    """Spread nbytes evenly over the minimum number of parts <= target each, so the split has no tiny remainder part."""
+    n = max(1, -(-nbytes // target))
+    return -(-nbytes // n)
 
 
 def size(p):
@@ -42,9 +83,10 @@ def files_of(ret, rel):
 
 def write_zip(zp, ret, files):
     base = os.path.dirname(os.path.abspath(ret.rstrip("/")))
-    with zipfile.ZipFile(zp, "w", zipfile.ZIP_DEFLATED, allowZip64=True) as z:
+    with zipfile.ZipFile(zp, "w", allowZip64=True) as z:
         for f in files:
-            z.write(f, os.path.relpath(os.path.abspath(f), base))
+            ct = zipfile.ZIP_STORED if f.lower().endswith(STORED_EXTS) else zipfile.ZIP_DEFLATED
+            z.write(f, os.path.relpath(os.path.abspath(f), base), compress_type=ct)
     return os.path.getsize(zp)
 
 
@@ -220,9 +262,14 @@ def main():
     ap.add_argument("--ret", required=True); ap.add_argument("--runs", required=True); ap.add_argument("--arms", required=True)
     ap.add_argument("--manifest", required=True); ap.add_argument("--queue-dir", required=True); ap.add_argument("--date", required=True)
     ap.add_argument("--params", default=None); ap.add_argument("--limit-mb", type=float, default=28.0); ap.add_argument("--allow-missing", action="store_true")
+    ap.add_argument("--r73-runs", default=None, help="directory holding the R73 arm dirs (r73_sh_* shadow arms and plain controls) for the F-426 comparison")
+    ap.add_argument("--round", default="R74", choices=["R74", "R75", "R76", "R77"], help="R75 / R76 / R77: that round's names, required-agent list and gates script (R7x_INSTRUCTIONS.md section 13)")
     ap.add_argument("--step0-delivered", action="store_true", help="STEP0 data was delivered in the stage-1b return: check it against STEP0/STEP0_SHA256.txt and do NOT pack it again (only the three index files are packed)")
     a = ap.parse_args()
     here = os.path.dirname(os.path.abspath(__file__))
+    RND = a.round
+    gates_py, gates_txt = {"R77": ("r77_gates.py", "r77_gates.txt"), "R76": ("r76_gates.py", "r76_gates.txt"), "R75": ("r75_gates.py", "r75_gates.txt")}.get(RND, ("r74_gates.py", "r74_gates.txt"))
+    req_agent, req_dirs, gen_items = {"R77": (REQUIRED_AGENT_R77, REQUIRED_DIRS_NONEMPTY_R77, GENERATED_R77), "R76": (REQUIRED_AGENT_R76, REQUIRED_DIRS_NONEMPTY_R76, GENERATED_R76), "R75": (REQUIRED_AGENT_R75, REQUIRED_DIRS_NONEMPTY_R75, GENERATED_R75)}.get(RND, (REQUIRED_AGENT, REQUIRED_DIRS_NONEMPTY, GENERATED))
     q = os.path.join(a.ret, "queue"); os.makedirs(q, exist_ok=True)
     for f in glob.glob(os.path.join(a.manifest, "*")):
         if os.path.isfile(f):
@@ -241,15 +288,14 @@ def main():
     pairs_f = os.path.join(a.manifest, "coupled_pairs.txt")
     if os.path.exists(pairs_f):
         subprocess.call([sys.executable, os.path.join(here, "r71_spline_tools.py"), "pairs", "--scan-table", os.path.join(a.ret, "arm_scan_all.csv.gz"), "--pairs", open(pairs_f).read().strip(), "--out", a.ret])
-    sp = os.path.join(a.manifest, "shadow_pairs.json")
-    if os.path.exists(sp):
-        subprocess.call([sys.executable, os.path.join(here, "r73_shadow_reduce.py"), "pairs", "--runs", a.runs, "--pairs", sp, "--out", a.ret])
-    subprocess.call([sys.executable, os.path.join(here, "r73_gates.py"), "--runs", a.runs, "--out", os.path.join(a.ret, "r73_gates.txt")])   # FAIL is reported in the file, not fatal here
-    if os.path.exists(os.path.join(a.ret, "phase_summary.csv")) and a.params:
-        subprocess.call([sys.executable, os.path.join(here, "r73_p_table.py"), "--summary", os.path.join(a.ret, "phase_summary.csv"), "--compact", os.path.join(a.ret, "compact"), "--params", a.params, "--out", os.path.join(a.ret, "r73_p_table")])
-        for f in ("r73_p2_cells.csv",):
-            if os.path.exists(os.path.join(a.ret, "r73_p_table", f)):
-                shutil.copy(os.path.join(a.ret, "r73_p_table", f), os.path.join(a.ret, f))
+    sp = os.path.join(a.manifest, "switch_pairs.json")
+    if os.path.exists(sp) and a.r73_runs and RND not in ("R76", "R77"):   # R76: the F-426 tables come from r76_step0_f426.py (the archive layout and the missing t_rel_s are handled there)
+        subprocess.call([sys.executable, os.path.join(here, "r74_switch_reduce.py"), "part1", "--shadow-dirs", a.r73_runs, "--pairs", sp, "--out", a.ret])
+        subprocess.call([sys.executable, os.path.join(here, "r74_switch_reduce.py"), "part2", "--runs", a.runs, "--controls", a.r73_runs, "--pairs", sp, "--out", a.ret])
+    gcmd = [sys.executable, os.path.join(here, gates_py), "--runs", a.runs, "--out", os.path.join(a.ret, gates_txt)]
+    if RND in ("R76", "R77"):
+        gcmd += ["--refs", os.path.join(a.manifest, "identity_refs.json"), "--csv", os.path.join(a.ret, "%s_identity_vs_old.csv" % RND.lower())]
+    subprocess.call(gcmd)   # FAIL is reported in the file, not fatal here
     arm_ids = [r["arm"] for r in csv.DictReader(open(a.arms), delimiter="\t")]
     engagement_all(a.runs, arm_ids, os.path.join(a.ret, "engagement_all.txt"))
     spec = json.load(open(os.path.join(a.manifest, "required_outputs.json")))
@@ -265,14 +311,14 @@ def main():
                 return 3
     rows = check_required(a.ret, a.runs, spec, idx)
     miss = [r for r in rows if r[4] not in ("PRESENT", DELIVERED)]
-    lines = ["# R73 return checklist (generated from required_outputs.json; presence, columns and row counts only)", "", "| follow-up | arm | file | where | status | detail |", "|---|---|---|---|---|---|"]
+    lines = ["# %s return checklist (generated from required_outputs.json; presence, columns and row counts only)" % RND, "", "| follow-up | arm | file | where | status | detail |", "|---|---|---|---|---|---|"]
     lines += ["| %s | %s | %s | %s | %s | %s |" % (r[0], r[1], r[2], r[3], r[4] if r[4] == "PRESENT" else "**%s**" % r[4], r[5]) for r in rows]
     lines += ["", "## agent-authored and generated items", "", "| item | status | bytes |", "|---|---|---|"]
     gmiss = 0
-    for it in REQUIRED_AGENT + REQUIRED_DIRS_NONEMPTY + GENERATED:
+    for it in req_agent + req_dirs + gen_items:
         p = os.path.join(a.ret, it)
         ok = os.path.exists(p) and (size(p) > 0 or it == "agent_edits.patch")
-        if it in REQUIRED_DIRS_NONEMPTY or it == "compact":
+        if it in req_dirs or it == "compact":
             ok = os.path.isdir(p) and len(os.listdir(p)) > 0
         gmiss += 0 if ok else 1
         lines.append("| %s | %s | %d |" % (it, "PRESENT" if ok else "**MISSING**", size(p)))
@@ -285,8 +331,12 @@ def main():
             print("   %s  %s  %s  [%s] %s" % (r[0], r[1], r[2], r[4], r[5]))
         print("   (%d more)" % max(0, len(miss) - 60) if len(miss) > 60 else "", "agent/generated missing: %d (see RETURN_CHECKLIST.md)" % gmiss)
         return 3
-    zp = "R73_RETURN_%s.zip" % a.date
+    zp = "%s_RETURN_%s.zip" % (RND, a.date)
     allf = files_of(a.ret, ".")
+    base = os.path.dirname(os.path.abspath(a.ret.rstrip("/")))
+    before_n = len(allf)
+    allf = [f for f in allf if not excluded_from_zip(os.path.relpath(os.path.abspath(f), base))]
+    print("return-trim: excluded %d files from the zip (kept on disk under --ret)" % (before_n - len(allf)))
     if a.step0_delivered:
         keep = {os.path.normpath(os.path.join(a.ret, k)) for k in STEP0_KEEP}
         stp = os.path.normpath(os.path.join(a.ret, "STEP0")) + os.sep
@@ -295,15 +345,15 @@ def main():
     nbytes = write_zip(zp, a.ret, allf)
     print("zip %s %.2f MB (%d files)" % (zp, nbytes / 1e6, len(allf)))
     if nbytes <= a.limit_mb * 1e6:
-        open("R73_return.sha256", "w").write("%s  %s  %d\n" % (sha(zp), zp, nbytes))
-        print("single file; sha256 in R73_return.sha256")
+        open("%s_return.sha256" % RND, "w").write("%s  %s  %d\n" % (sha(zp), zp, nbytes))
+        print("single file; sha256 in %s_return.sha256" % RND)
         return 0
-    parts = byte_split(zp)
-    with open("R73_return.sha256", "w") as f:
+    parts = byte_split(zp, part=choose_part_size(nbytes))
+    with open("%s_return.sha256" % RND, "w") as f:
         f.write("%s  %s  %d  (whole zip)\n" % (sha(zp), zp, nbytes))
         for nm, n, h in parts:
             f.write("%s  %s  %d\n" % (h, os.path.basename(nm), n))
-    open("REASSEMBLE.txt", "w").write("cat %s.part* > %s && sha256sum %s   # the hash must equal the first line of R73_return.sha256; unzip only then\n" % (zp, zp, zp))
+    open("REASSEMBLE.txt", "w").write("cat %s.part* > %s && sha256sum %s   # the hash must equal the first line of %s_return.sha256; unzip only then\n" % (zp, zp, zp, RND))
     ok = reassembly_proof(zp, parts, "reassembly_check.txt")
     os.remove(zp)       # only the parts and the checksum files are delivered
     print("byte-split into %d parts of %d bytes: %s" % (len(parts), PART, ", ".join(os.path.basename(p[0]) for p in parts[:3]) + (" ..." if len(parts) > 3 else "")))

@@ -294,8 +294,8 @@ M3D CalibProc::covarianceOfMean(bool accelerometer) const
                  static_cast<double>(n);
   Eigen::SelfAdjointEigenSolver<M3D> es(cov_mean);
   if (es.info() != Eigen::Success) throw std::runtime_error("P0 mean covariance eigensolve failed");
-  return es.eigenvectors() * es.eigenvalues().cwiseMax(0.0).asDiagonal() *
-         es.eigenvectors().transpose();
+  return symmetrized(M3D(es.eigenvectors() * es.eigenvalues().cwiseMax(0.0).asDiagonal() *
+                         es.eigenvectors().transpose()));   // R74 F-419
 }
 
 void CalibProc::applyCalibrationDerivedP0(
@@ -357,8 +357,8 @@ void CalibProc::applyCalibrationDerivedP0(
   A << SKEW_SYM_MATRX(gravity_mag * gravity_axis_body);
   // On the tangent plane pinv([g*u]_x) = -[g*u]_x/g^2.
   const M3D A_pinv = -A / (gravity_mag * gravity_mag);
-  const M3D P_theta_amb =
-      A_pinv * ambiguity_accel_cov * A_pinv.transpose();
+  const M3D P_theta_amb = symmetrized(M3D(
+      A_pinv * ambiguity_accel_cov * A_pinv.transpose()));   // R74 F-419
   const M3D P_ba_amb = ambiguity_accel_cov;
   const M3D P_theta_ba_amb =
       -A_pinv * ambiguity_accel_cov;

@@ -206,7 +206,8 @@ def r73_analyses(D, T, row, keep):
         p = os.path.join(D, src)
         if os.path.exists(p) and grp in ("SH", "SM", "ID"):
             import r73_residual_report as RR
-            RR.per_residual(pd.read_csv(p)).to_csv(os.path.join(D, dst), index=False, float_format="%.9g", compression="gzip")
+            df = RR.per_residual(pd.read_csv(p)).drop(columns=RR.PER_RESIDUAL_DERIVED, errors="ignore")
+            df.to_csv(os.path.join(D, dst), index=False, float_format="%.9g", compression="gzip")
             info[dst + "_rows"] = int(sum(1 for _ in open(p)) - 1)
     for src, dst in (("residual_dump_state.csv", "residual_dump_state_all.csv.gz"), ("shadow_residual_dump_state.csv", "shadow_residual_dump_state_all.csv.gz")):
         if grp in ("SH", "SM", "ID"):

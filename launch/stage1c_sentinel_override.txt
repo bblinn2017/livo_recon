@@ -1,0 +1,20 @@
+# R73 stage 1c sentinel override, per addendum 3 section 2
+# Applies ONLY to these 4 jobs (ablations/_job_queue/r73_smoke1c/<arm>/FAILED -> DONE, a rename, no run-output content touched).
+# Reason: run_job.sh's DONE/FAILED sentinel checked $OUT_DIR (job.env, batch-name-derived .../r73_smoke1c/<arm>),
+# which never received the estimator's real output -- config.yaml's outputs.path correctly pointed the node itself
+# at .../r73_smoke/<arm> (the shared 1b results root), per addendum 2 section 4 item 3's instruction to use
+# --batch r73_smoke1c. gen_jobs.py derives OUT_DIR from the batch name and did not know to follow the
+# results-root override for this manifest. Addendum 3 section 1 confirms this as the planning agent's own
+# error in instructing --batch r73_smoke1c, not a gen_jobs.py defect, and that stage 2's batches
+# (r73_sh/r73_co/r73_qa/r73_p2) do not have this problem since their batch names match their results-root names.
+#
+# wall_clock_time_of_this_override | job | exit_status.txt (at OUT_DIR) | run.log tail check | odometry.txt (at outputs.path) | state_trace.csv (at outputs.path) | odometry.txt sha256
+
+2026-10-01T17:10:00Z | r73_00_id_baseline_60s | exit_code=0 signal=none | "process has finished cleanly" present | non-empty (64340 bytes) | present (5319638 bytes) | f47529f349b2cd6fc4bc1d25780d16ee7f043746230231aba453e5fdff3db824
+2026-10-01T17:10:00Z | r73_id_shadow_same_60s | exit_code=0 signal=none | "process has finished cleanly" present | non-empty (64340 bytes) | present (5319638 bytes) | f47529f349b2cd6fc4bc1d25780d16ee7f043746230231aba453e5fdff3db824
+2026-10-01T17:10:00Z | r73_smoke_shadow_iso_60s | exit_code=0 signal=none | "process has finished cleanly" present | non-empty (64340 bytes) | present (5322018 bytes) | f47529f349b2cd6fc4bc1d25780d16ee7f043746230231aba453e5fdff3db824
+2026-10-01T17:10:00Z | r73_smoke_shadow_fixed_mq_60s | exit_code=0 signal=none | "process has finished cleanly" present | non-empty (64261 bytes) | present (5337524 bytes) | 24964bdb50f702f622c2feb445a509d4ed2d45a551e3e6bd197ac42a7acc39dd
+
+All four facts verified true for all four jobs before the sentinel was flipped. No job's sentinel was touched beyond these four, and none would have been flipped had any of the four checks failed (none did).
+
+superseded by addendum 4, no further use.

@@ -1,0 +1,5 @@
+[engagement]  did each flag actually do anything?
+  voxel_map/plane/plane_var_mode = eigengap
+  voxel_map/plane/weight_floor/mode = sensor_range
+  imu/process_noise/gain mode=innovation_scale apply=both scans=595 scans_with_gain_ne_1=46 max_gain=1.57542 mean_nis=0.158474 mean_rho=0.110878 mean_abs_lag1=0.0182395 inflating_scans=0 whiteness_blocked=0
+[engagement] a flag marked INERT above did not test anything; the cell is invalid, not null.

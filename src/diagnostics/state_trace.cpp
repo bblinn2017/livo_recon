@@ -1,3 +1,4 @@
+#include "livo_recon/utils/log/bag_clock.h"
 #include "livo_recon/diagnostics/state_trace.h"
 
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
@@ -28,7 +29,7 @@ void writeStateTraceRow(const std::string& run_id, int scan_id, double t_abs, co
   bool first = false;
   std::ofstream& out = log.stream(&first);
   if (first) {
-    out << "run_id,scan_id,t_abs,phase,dim,qw,qx,qy,qz,px,py,pz,vx,vy,vz,bgx,bgy,bgz,bax,bay,baz,gx,gy,gz,"
+    out << "run_id,scan_id,t_abs,t_rel_s,phase,dim,qw,qx,qy,qz,px,py,pz,vx,vy,vz,bgx,bgy,bgz,bax,bay,baz,gx,gy,gz,"
            "residual_count,completed_iterations,ol_window,ol_reset";
     for (int i = 0; i < kTraceDim; ++i)
       for (int j = i; j < kTraceDim; ++j) out << ",P_" << i << '_' << j;
@@ -36,7 +37,7 @@ void writeStateTraceRow(const std::string& run_id, int scan_id, double t_abs, co
   }
   const Eigen::MatrixXd& P = s.cov();
   const Eigen::Quaterniond q(s.rot());
-  out << std::setprecision(17) << run_id << ',' << scan_id << ',' << t_abs << ',' << phase << ',' << P.rows() << ','
+  out << std::setprecision(17) << run_id << ',' << scan_id << ',' << t_abs << ',' << tRelString(t_abs) << ',' << phase << ',' << P.rows() << ','
       << q.w() << ',' << q.x() << ',' << q.y() << ',' << q.z() << ','
       << s.pos().x() << ',' << s.pos().y() << ',' << s.pos().z() << ','
       << s.vel().x() << ',' << s.vel().y() << ',' << s.vel().z() << ','
@@ -60,12 +61,12 @@ void writeImuCovGrowthRow(size_t scan_index, double t_abs, const Eigen::MatrixXd
   bool first = false;
   std::ofstream& out = log.stream(&first);
   if (first) {
-    out << "scan_index,t_abs,dim";
+    out << "scan_index,t_abs,t_rel_s,dim";
     for (const char* tag : {"Pstart", "Pend", "Qacc"})
       for (int i = 0; i < kTraceDim; ++i) out << ',' << tag << '_' << i;
     out << '\n';
   }
-  out << std::setprecision(17) << scan_index << ',' << t_abs << ',' << P_end.rows();
+  out << std::setprecision(17) << scan_index << ',' << t_abs << ',' << tRelString(t_abs) << ',' << P_end.rows();
   writeDiag(out, P_start);
   writeDiag(out, P_end);
   writeDiag(out, Q_acc);
@@ -85,6 +86,7 @@ void writeStateReference(const Eigen::Matrix3d& R_ref, const Eigen::Vector3d& p_
       << "q_wxyz " << q.w() << ' ' << q.x() << ' ' << q.y() << ' ' << q.z() << '\n'
       << "p " << p_ref.x() << ' ' << p_ref.y() << ' ' << p_ref.z() << '\n'
       << "v " << v_ref.x() << ' ' << v_ref.y() << ' ' << v_ref.z() << '\n'
+      << "bag_start_abs " << bagStart() << '\n'   // R74 (F-422): lets Python derive t_rel_s for any file that only has t_abs
       << "P0_dim " << P0.rows() << '\n' << "P0_row_major";
   for (int i = 0; i < P0.rows(); ++i)
     for (int j = 0; j < P0.cols(); ++j) out << ' ' << P0(i, j);

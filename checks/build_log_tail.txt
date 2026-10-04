@@ -1,0 +1,37 @@
+[  1%] Built target test_renamed_keys
+[  3%] Built target livo_cuda
+[  5%] Built target test_q_adapt
+[  6%] Built target test_shadow_options
+[  8%] Built target test_symmetrize
+[ 10%] Built target test_failure_capture
+[ 13%] Built target test_info_scale
+[ 13%] Built target test_zupt
+[ 15%] Built target test_step_cap
+[ 16%] Built target surface_core
+[ 16%] Built target test_reference_temporal_lidar_covariance
+[ 20%] Built target test_debias_modes
+[ 22%] Built target state_lib
+[ 27%] Built target joint_knot_test_core
+[ 30%] Built target test_voxel_history
+[ 33%] Built target test_bootstrap_observation_moments
+[ 35%] Built target test_surface_core
+[ 37%] Built target test_joint_knot_calibration_p0
+[ 40%] Built target test_gravity_s2
+[ 42%] Built target test_joint_knot_estimator
+[ 42%] Built target test_point_cov
+[ 44%] Built target test_joint_knot_init_consistency
+[ 45%] Built target test_joint_knot_motion_q
+[ 47%] Built target test_joint_knot_failure_capture
+[ 55%] Built target cache_tracker_output_livo_recon
+[100%] Built target livo_recon_node
+Base path: /root/catkin_ws
+Source space: /root/catkin_ws/src
+Build space: /root/catkin_ws/build
+Devel space: /root/catkin_ws/devel
+Install space: /root/catkin_ws/install
+####
+#### Running command: "make cmake_check_build_system" in "/root/catkin_ws/build"
+####
+####
+#### Running command: "make -j128" in "/root/catkin_ws/build/livo_recon"
+####
