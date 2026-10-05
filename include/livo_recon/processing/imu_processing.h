@@ -25,9 +25,9 @@ struct ImuProcOptions
   // production control. The dynamic modes use the stationary-calibration
   // variance as their floor and add a bounded motion-dependent variance.
   std::string process_noise_model = "fixed";  // fixed|isotropic|axis_aware
-  double motion_beta = 0.0;  // 0 = instantaneous; larger = more smoothing
-  double motion_acc_scale = 1.0;
-  double motion_gyr_scale = 1.0;
+  double motion_beta = 0.9;  // 0 = instantaneous; larger = more smoothing (R80 F-477: default 0.9, was 0.0)
+  double motion_acc_scale = 0.3;   // R80 F-477: was 1.0
+  double motion_gyr_scale = 10.0;  // R80 F-477: was 1.0
   double motion_acc_max_dynamic_variance = 0.5;
   // R64: multipliers on the stationary calibration floor inside the motion-dependent Q (1.0 = bit-identical).
   // var_step = floor_scale * floor + scale^2 * max(0, filtered energy - floor) (the excess is still measured

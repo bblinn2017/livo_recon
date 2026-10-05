@@ -352,6 +352,8 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
     cfg.nested<double>(ia, "imu/process_noise/gain/mode=innovation_scale", "imu/process_noise/gain/forgetting", q_gain_opts_.forgetting, 0.9);
     cfg.nested<double>(ia, "imu/process_noise/gain/mode=innovation_scale", "imu/process_noise/gain/rho_clamp", q_gain_opts_.rho_clamp, 4.0);
     cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/nis_hi", q_gain_opts_.nis_hi, 1.5);
+    cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/nis_lo", q_gain_opts_.nis_lo, 0.0);   // R80 (F-476)
+    cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/deflate", q_gain_opts_.deflate, 1.0);   // R80 (F-476)
     cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/inflate", q_gain_opts_.inflate, 1.25);
     cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/decay", q_gain_opts_.decay, 0.95);
     cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/whiteness_max", q_gain_opts_.whiteness_max, 0.0);
@@ -376,8 +378,15 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
       if (!(q_gain_opts_.nis_hi > 0.0) || !(q_gain_opts_.inflate >= 1.0) || !(q_gain_opts_.decay >= 0.0 && q_gain_opts_.decay <= 1.0) ||
           !(q_gain_opts_.whiteness_max >= 0.0 && q_gain_opts_.whiteness_max <= 1.0))
         throw std::invalid_argument("imu/process_noise/gain nis_gate: nis_hi > 0, inflate >= 1, decay in [0,1], whiteness_max in [0,1]");
-      if (q_gain_opts_.inflate == 1.0)
-        throw std::invalid_argument("imu/process_noise/gain/mode=nis_gate with inflate == 1 never moves the gain (inert)");
+      if (q_gain_opts_.inflate == 1.0 && !(q_gain_opts_.nis_lo > 0.0))
+        throw std::invalid_argument("imu/process_noise/gain/mode=nis_gate with inflate == 1 and nis_lo == 0 never moves the gain (inert)");
+      // R80 (F-476): the deflating side. nis_lo = 0 keeps the one-sided gate bit for bit.
+      if (!(q_gain_opts_.nis_lo >= 0.0) || !(q_gain_opts_.nis_lo < q_gain_opts_.nis_hi) || !(q_gain_opts_.deflate > 0.0 && q_gain_opts_.deflate <= 1.0))
+        throw std::invalid_argument("imu/process_noise/gain nis_gate: nis_lo must be in [0, nis_hi) and deflate in (0, 1]");
+      if (q_gain_opts_.nis_lo > 0.0 && (q_gain_opts_.deflate == 1.0 || !(q_gain_opts_.min_gain < 1.0)))
+        throw std::invalid_argument("imu/process_noise/gain nis_gate: nis_lo > 0 needs deflate < 1 and min_gain < 1 (the gain could not go below 1: inert)");
+      if (q_gain_opts_.nis_lo == 0.0 && (q_gain_opts_.deflate != 1.0 || q_gain_opts_.min_gain < 1.0))
+        throw std::invalid_argument("imu/process_noise/gain nis_gate: deflate != 1 or min_gain < 1 with nis_lo == 0 never deflates (inert)");
     }
     q_gain_.configure(q_gain_opts_);
   }
@@ -573,7 +582,7 @@ std::string LioProcIekf::engagementReport() const
     o << "\n  imu/process_noise/gain mode=" << q_gain_opts_.mode << " apply=" << q_gain_opts_.apply << " scans=" << qa_scans_
       << " scans_with_gain_ne_1=" << qa_scans_gain_ne_1_ << " max_gain=" << q_gain_.maxSeen()
       << " mean_nis=" << (qa_scans_ > 0 ? qa_nis_sum_ / qa_scans_ : 0.0) << " mean_rho=" << (qa_scans_ > 0 ? qa_rho_sum_ / qa_scans_ : 0.0)
-      << " mean_abs_lag1=" << (qa_scans_ > 0 ? qa_lag1_abs_sum_ / qa_scans_ : 0.0) << " inflating_scans=" << q_gain_.inflating()
+      << " mean_abs_lag1=" << (qa_scans_ > 0 ? qa_lag1_abs_sum_ / qa_scans_ : 0.0) << " inflating_scans=" << q_gain_.inflating() << " deflating_scans=" << q_gain_.deflating() << " min_gain_seen=" << q_gain_.minSeen()
       << " whiteness_blocked=" << q_gain_.whitenessBlocked();
     if (qa_scans_ == 0)
       o << "   <-- INERT: q_adapt selected and no scan produced residuals";

@@ -96,6 +96,9 @@ struct Residual
   double floor_term         = -1.0;
   double sigma_diag_squared = -1.0;
   double s_prior_pose       = -1.0;
+  // R80 (F-449a / gate puzzle): the variance the admission test used, floor_term + sigma_gate_diag_squared + plane_var_term (the gate's diag part includes the pose covariance when
+  // the estimator passes include_state_uncertainty_in_gate, which is the default); sigma_squared above is what the WEIGHT uses (no pose covariance unless pose_cov_in_sigma). -1 = not set. Write-only.
+  double sigma_gate_squared = -1.0;
 
   // Which tier of VoxelMap::findPlaneResidual()'s fallback matched this
   // point: 0 = primary voxel, 1 = single directional neighbor (the only
@@ -723,12 +726,18 @@ struct VoxelOpts
 
   // R77 (F-453): how the map-side variance of a line / smooth row is formed (read only when line_enabled).
   //   fit_only (default, R76 behaviour, bit-identical): hard rows e_i/N; smooth rows max(e_i, sensor noise variance)(1+1/N).
-  //   plane_equivalent: the same fit_only variance PLUS the tilt term the point-to-plane row already has: the uncertainty of the row's own direction
-  //   (first-order eigenvector perturbation of the fit, propagated from the points' sensor / pose covariance, gap floored at the sensor noise variance)
-  //   multiplied by the point's lever arm. Hard rows i = 0, 1 tilt toward u2 only (the line axis); smooth rows tilt toward the other two axes.
+  //   plane_equivalent (R80, replaces the R77 tilt-only form): the same fit_only variance PLUS what the point-to-plane row's J plane_var_ J^T carries: the variance of the row's own direction
+  //   u_i, propagated from the points' sensor / pose covariance as a quadratic form in l = (u_a . d, u_b . d, 1) -- the tilt of u_i toward the tilt axes (first-order eigenvector perturbation,
+  //   gap floored at the sensor noise variance), the offset variance of the centroid along u_i (n^T (sum w^2 C) n for a plane), and their cross term. Hard rows i = 0, 1 tilt toward u2 only
+  //   (the line axis); smooth rows tilt toward the other two axes. R77 plane_equivalent results (tilt only, no offset or cross term) are not reproducible with this key.
   // Read only with plane_fit_mode = pca and plane_var_mode = eigengap (the information and debiased paths have no per-point fit to propagate): refused otherwise.
   std::string line_variance = "fit_only";
   bool line_var_plane_equivalent = false;   // resolved once at load from line_variance
+  // R80 (F-453, Bryce 2026-10-05): rows = per_normal (default; a hard line voxel gives the two rows u0 and u1, bit for bit what R74 to R79 built) | distance (a hard line voxel gives ONE row:
+  // the shortest distance from the point to the line (the voxel's axis u2), along the direction q from the line to the point; q = (d - (u2.d) u2) / |.|). Read only for form hard.
+  // Fit variance of the distance row: fit_only = sum_i (q.u_i)^2 e_i / N; plane_equivalent adds Var(q-weighted row perturbation) = the two plane-normal point covariances projected on q.
+  std::string line_rows = "per_normal";
+  bool line_rows_distance = false;   // resolved once at load from line_rows
 
   // R77 (F-433): floor the eigenvalue gaps |e0-e1| and |e0-e2| of the eigengap plane variance at the sensor noise variance (weight_sigma_r2), keeping the plane.
   // Default false is bit-identical to R76. Read only with plane_fit_mode = pca and plane_var_mode = eigengap; refused together with plane_var_denom_floor_en

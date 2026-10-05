@@ -412,6 +412,12 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
           "voxel_map/plane/line_residual/variance = plane_equivalent needs voxel_map/plane/plane_fit_mode = pca and plane_var_mode = eigengap: the tilt term is "
           "propagated from the voxel's own points inside VoxelPlane::update()'s eigengap branch, which the debiased fit (no points kept) and the information "
           "variance (no eigengap) never run. Use variance = fit_only with those modes.");
+    // ── R80 (F-453, Bryce 2026-10-05): one distance row per hard line voxel instead of the two normal rows ──
+    cfg.nestedMode(opts_->line_enabled, "voxel_map/plane/line_residual/enabled=true",
+                   "voxel_map/plane/line_residual/rows", opts_->line_rows, "per_normal", { "per_normal", "distance" });
+    opts_->line_rows_distance = opts_->line_enabled && opts_->line_rows == "distance";
+    if (opts_->line_rows_distance && opts_->line_form != "hard")
+      cfg.requireCombination("voxel_map/plane/line_residual/rows = distance needs form = hard: the smooth form has no line, it gives three Mahalanobis rows.");
     // ── R77 (F-433): eigengap floor on the plane variance, plane kept ──
     cfg.nested<bool>(opts_->plane_fit_mode == "pca" && eigengap, "voxel_map/plane/plane_fit_mode=pca,plane_var_mode=eigengap",
                      "voxel_map/plane/plane_gap_floor_en", opts_->plane_gap_floor_en, false);
@@ -522,7 +528,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/min_frames_to_init:        " << opts_->min_frames_to_init
       << "\n  plane/plane_threshold:           " << opts_->plane_threshold
       << "\n  plane/plane_fit_mode:            " << opts_->plane_fit_mode
-      << "\n  plane/line_residual:             enabled " << (opts_->line_enabled ? "true" : "false") << " / form " << opts_->line_form << " / rule " << opts_->line_rule << " / rel_sigmas " << opts_->line_rel_sigmas << " / shape_ratio " << opts_->line_shape_ratio << " / enum " << opts_->line_residual_enum << " / variance " << opts_->line_variance
+      << "\n  plane/line_residual:             enabled " << (opts_->line_enabled ? "true" : "false") << " / form " << opts_->line_form << " / rule " << opts_->line_rule << " / rel_sigmas " << opts_->line_rel_sigmas << " / shape_ratio " << opts_->line_shape_ratio << " / enum " << opts_->line_residual_enum << " / variance " << opts_->line_variance << " / rows " << opts_->line_rows
       << "\n  plane/plane_gap_floor_en:        " << (opts_->plane_gap_floor_en ? "true" : "false")
       << "\n  plane/plane_var_mode:            " << opts_->plane_var_mode
       << "\n  plane/plane_fit_pose_cov_mode:   " << opts_->plane_fit_pose_cov_mode
@@ -874,6 +880,7 @@ void VoxelMap::writeSnapshotFile(const std::string& filename, int snapshot_frame
     return a.node_id < b.node_id;
   });
   std::ofstream out(debugLogPath(filename));
+  long long support_rows_written = -1, support_bytes = -1;   // R80 (N-8): -1 = no support companion file written
   out << "snapshot_frame,node_id,root_key_x,root_key_y,root_key_z,layer,"
          "cell_center_x,cell_center_y,cell_center_z,cell_min_x,cell_min_y,cell_min_z,"
          "cell_max_x,cell_max_y,cell_max_z,status,retired,initialized,is_plane,full,"
@@ -917,7 +924,8 @@ void VoxelMap::writeSnapshotFile(const std::string& filename, int snapshot_frame
         for (int cc = 0; cc < 3; ++cc) support_out << ',' << r.sum_pp(rr, cc);
       support_out << '\n';
     }
-
+    support_rows_written = static_cast<long long>(support_rows.size());
+    support_bytes = static_cast<long long>(support_out.tellp());
   }
 
   for (const auto& r : rows) {
@@ -941,6 +949,12 @@ void VoxelMap::writeSnapshotFile(const std::string& filename, int snapshot_frame
                                               opts_->plane_threshold, r.is_plane, r.point_count));
     out << '\n';
   }
+  // R80 (N-8): the engagement line of the snapshot keys (voxel_map/map/snapshot_post_calibration, voxel_map/map/snapshot_frames): one line per file written, so a run
+  // log shows that the key engaged, for which map frame, and how large the output is (a run with the key set and no line here wrote nothing: an error).
+  ROS_INFO_STREAM("[snapshot] engaged file=" << filename << " map_frame=" << snapshot_frame_label << " plane_rows=" << rows.size()
+                  << " file_bytes=" << static_cast<long long>(out.tellp())
+                  << " support_rows=" << support_rows_written << " support_bytes=" << support_bytes
+                  << " (support_rows/support_bytes -1: no support companion file for this snapshot)");
 }
 
 // ─────────────────────────────────────────────

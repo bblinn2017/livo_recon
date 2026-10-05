@@ -1,27 +1,127 @@
 [
- {"file": "imu_processing.cpp", "needle": "g_qhat_accum_cov_w = F_x", "reason": "Myers-Tapley Q-hat diagnostic accumulator: read only by the log (imuProcQhatRead), never fed back to the state; outside the requested scope (joint-knot chain, calibration, plane covariance)"},
- {"file": "calib_processing.cpp", "needle": "P = es.eigenvectors() * values.asDiagonal()", "reason": "symmetrised on the next statement (P = symmetrized(P))"},
- {"file": "calib_processing.cpp", "needle": "acc_cov  += da * da.transpose()", "reason": "sum of outer products d d^T: element (i,j) and (j,i) are the same product, exactly symmetric in IEEE arithmetic"},
- {"file": "calib_processing.cpp", "needle": "gyro_cov += dg * dg.transpose()", "reason": "sum of outer products d d^T, exactly symmetric"},
- {"file": "calib_processing.cpp", "needle": "gamma += xi * xj.transpose()", "reason": "lagged cross-covariance, asymmetric by definition; symmetrised in the sum (gamma + gamma^T) and symmetrized(spectral)"},
- {"file": "calib_processing.cpp", "needle": "P_acc = J * acc_mean_cov * J.transpose()", "reason": "symmetrised on the next statement (P_acc = symmetrized(P_acc))"},
- {"file": "calib_processing.cpp", "needle": "P_acc.block<3,3>(3,3) +=", "reason": "adds the exactly symmetric terms P_ba_amb and g g^T (outer product)"},
- {"file": "calib_processing.cpp", "needle": "P_acc.block<3,3>(3,0) += P_theta_ba_amb.transpose()", "reason": "off-diagonal block: the transpose of the (0,3) block by construction"},
- {"file": "calib_processing.cpp", "needle": "P.block<3,3>(StateGroup::idxR(), StateGroup::idxR()) =", "reason": "block assignment into P; the whole of P is symmetrised by P = symmetrized(P) at the end of applyCalibrationDerivedP0"},
- {"file": "joint_knot_estimator.cpp", "needle": "out.Gamma.noalias() += w * row.H.transpose() * row.H", "reason": "running sum; out.Gamma = symmetrized(out.Gamma) before the function returns (R74)"},
- {"file": "joint_knot_estimator.cpp", "needle": "naive_gamma.noalias() +=", "reason": "per-group scratch, only its trace is used"},
- {"file": "joint_knot_estimator.cpp", "needle": "corrected_gamma.noalias()", "reason": "per-group scratch; its difference from naive_gamma enters delta_gamma, which is added to out.Gamma before the final symmetrized(out.Gamma)"},
- {"file": "joint_knot_estimator.cpp", "needle": "delta_gamma.noalias() +=", "reason": "added to out.Gamma before the final symmetrized(out.Gamma)"},
- {"file": "voxelplane.cpp", "needle": "covariance_   = running->sum_pp", "reason": "scatter matrix built from sums of outer products, exactly symmetric; an eigensolver reads only the lower triangle"},
- {"file": "voxelplane.cpp", "needle": "covariance_ += ", "reason": "sum of outer products d d^T, exactly symmetric"},
- {"file": "voxelplane.cpp", "needle": "plane_var_.noalias() += Jmin * residual_cov", "reason": "symmetrised after the loop (plane_var_ = symmetrized(plane_var_), R74)"},
- {"file": "voxelplane.cpp", "needle": "raw_cov = Spp_ / N", "reason": "scatter from accumulated outer-product sums, exactly symmetric"},
- {"file": "voxelplane.cpp", "needle": "covariance_ = Spp_ / N", "reason": "scatter from accumulated outer-product sums, exactly symmetric"},
- {"file": "deskew.cpp", "needle": "cov_lidar_end = R_rel * cov_lidar_i", "reason": "PER-POINT 3x3 sensor covariance (not the joint-knot chain, calibration or plane covariance). Left unchanged; listed for Bryce's ruling (R74 question)"},
- {"file": "deskew.cpp", "needle": "cov_imu_end.noalias() +=", "reason": "adds a scalar times a symmetric matrix to a per-point covariance; same ruling as the line above"},
- {"file": "calibration_p0_writer.cpp", "needle": "cov += d * d.transpose()", "reason": "diagnostic writer, sum of outer products, exactly symmetric"},
- {"file": "zupt.h", "needle": "P_new = IKH * P * IKH.transpose()", "reason": "symmetrised on the next statement (P_new = symmetrized(P_new))"},
- {"file": "ekf.h", "needle": "coeff_cov = ldlt.solve", "reason": "P_new is built from it and symmetrised two statements later"},
- {"file": "ekf.h", "needle": "P_new = M ?", "reason": "symmetrised on the next statement (P_new = symmetrized(P_new))"},
- {"file": "akfmap_utils.h", "needle": "p3.cov = ratio1", "reason": "AKF map merge of two point clouds: weighted sum of exactly symmetric terms (covariances plus outer products)"}
+ {
+  "file": "imu_processing.cpp",
+  "needle": "g_qhat_accum_cov_w = F_x",
+  "reason": "Myers-Tapley Q-hat diagnostic accumulator: read only by the log (imuProcQhatRead), never fed back to the state; outside the requested scope (joint-knot chain, calibration, plane covariance)"
+ },
+ {
+  "file": "calib_processing.cpp",
+  "needle": "P = es.eigenvectors() * values.asDiagonal()",
+  "reason": "symmetrised on the next statement (P = symmetrized(P))"
+ },
+ {
+  "file": "calib_processing.cpp",
+  "needle": "acc_cov  += da * da.transpose()",
+  "reason": "sum of outer products d d^T: element (i,j) and (j,i) are the same product, exactly symmetric in IEEE arithmetic"
+ },
+ {
+  "file": "calib_processing.cpp",
+  "needle": "gyro_cov += dg * dg.transpose()",
+  "reason": "sum of outer products d d^T, exactly symmetric"
+ },
+ {
+  "file": "calib_processing.cpp",
+  "needle": "gamma += xi * xj.transpose()",
+  "reason": "lagged cross-covariance, asymmetric by definition; symmetrised in the sum (gamma + gamma^T) and symmetrized(spectral)"
+ },
+ {
+  "file": "calib_processing.cpp",
+  "needle": "P_acc = J * acc_mean_cov * J.transpose()",
+  "reason": "symmetrised on the next statement (P_acc = symmetrized(P_acc))"
+ },
+ {
+  "file": "calib_processing.cpp",
+  "needle": "P_acc.block<3,3>(3,3) +=",
+  "reason": "adds the exactly symmetric terms P_ba_amb and g g^T (outer product)"
+ },
+ {
+  "file": "calib_processing.cpp",
+  "needle": "P_acc.block<3,3>(3,0) += P_theta_ba_amb.transpose()",
+  "reason": "off-diagonal block: the transpose of the (0,3) block by construction"
+ },
+ {
+  "file": "calib_processing.cpp",
+  "needle": "P.block<3,3>(StateGroup::idxR(), StateGroup::idxR()) =",
+  "reason": "block assignment into P; the whole of P is symmetrised by P = symmetrized(P) at the end of applyCalibrationDerivedP0"
+ },
+ {
+  "file": "joint_knot_estimator.cpp",
+  "needle": "out.Gamma.noalias() += w * row.H.transpose() * row.H",
+  "reason": "running sum; out.Gamma = symmetrized(out.Gamma) before the function returns (R74)"
+ },
+ {
+  "file": "joint_knot_estimator.cpp",
+  "needle": "naive_gamma.noalias() +=",
+  "reason": "per-group scratch, only its trace is used"
+ },
+ {
+  "file": "joint_knot_estimator.cpp",
+  "needle": "corrected_gamma.noalias()",
+  "reason": "per-group scratch; its difference from naive_gamma enters delta_gamma, which is added to out.Gamma before the final symmetrized(out.Gamma)"
+ },
+ {
+  "file": "joint_knot_estimator.cpp",
+  "needle": "delta_gamma.noalias() +=",
+  "reason": "added to out.Gamma before the final symmetrized(out.Gamma)"
+ },
+ {
+  "file": "voxelplane.cpp",
+  "needle": "covariance_   = running->sum_pp",
+  "reason": "scatter matrix built from sums of outer products, exactly symmetric; an eigensolver reads only the lower triangle"
+ },
+ {
+  "file": "voxelplane.cpp",
+  "needle": "covariance_ += ",
+  "reason": "sum of outer products d d^T, exactly symmetric"
+ },
+ {
+  "file": "voxelplane.cpp",
+  "needle": "plane_var_.noalias() += Jmin * residual_cov",
+  "reason": "symmetrised after the loop (plane_var_ = symmetrized(plane_var_), R74)"
+ },
+ {
+  "file": "voxelplane.cpp",
+  "needle": "raw_cov = Spp_ / N",
+  "reason": "scatter from accumulated outer-product sums, exactly symmetric"
+ },
+ {
+  "file": "voxelplane.cpp",
+  "needle": "covariance_ = Spp_ / N",
+  "reason": "scatter from accumulated outer-product sums, exactly symmetric"
+ },
+ {
+  "file": "calibration_p0_writer.cpp",
+  "needle": "cov += d * d.transpose()",
+  "reason": "diagnostic writer, sum of outer products, exactly symmetric"
+ },
+ {
+  "file": "zupt.h",
+  "needle": "P_new = IKH * P * IKH.transpose()",
+  "reason": "symmetrised on the next statement (P_new = symmetrized(P_new))"
+ },
+ {
+  "file": "ekf.h",
+  "needle": "coeff_cov = ldlt.solve",
+  "reason": "P_new is built from it and symmetrised two statements later"
+ },
+ {
+  "file": "ekf.h",
+  "needle": "P_new = M ?",
+  "reason": "symmetrised on the next statement (P_new = symmetrized(P_new))"
+ },
+ {
+  "file": "akfmap_utils.h",
+  "needle": "p3.cov = ratio1",
+  "reason": "AKF map merge of two point clouds: weighted sum of exactly symmetric terms (covariances plus outer products)"
+ },
+ {
+  "file": "deskew.cpp",
+  "needle": "cov_imu_end.noalias() += (total_dt * total_dt) *",
+  "reason": "symmetrised at the end of the block: cov_imu_end = symmetrized(cov_imu_end) follows the process-noise branch (R80, F-419)"
+ },
+ {
+  "file": "deskew.cpp",
+  "needle": "cov_imu_end.noalias() += (total_dt * total_dt * total_dt)",
+  "reason": "symmetrised at the end of the block: cov_imu_end = symmetrized(cov_imu_end) follows the process-noise branch (R80, F-419)"
+ }
 ]

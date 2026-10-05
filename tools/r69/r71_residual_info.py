@@ -3,14 +3,18 @@
 `lio_update_diag.csv`.  Python only, offline, no estimator numerics.  Closes F-367/F-368 follow-ups (F-374, F-375, F-376, F-377 in followups.md).
 
     python3 r71_residual_info.py dump  --dump residual_dump.csv [--state residual_dump_state.csv] --out OUTDIR
-    python3 r71_residual_info.py cross --diag lio_update_diag.csv|.csv.gz --out OUTDIR [--max-frame 500]
+    python3 r71_residual_info.py cross --diag lio_update_diag.csv|.csv.gz --out OUTDIR [--max-frame 500] [--state state_trace.csv|.csv.gz]
 
 dump writes   residual_info_frames.csv        one row per (frame, iteration): believed information, leverage, split tests, ICC, lag correlations
               residual_info_axes.csv          one row per (frame, iteration, split, axis): believed sd, observed split-half scatter, ratio
               residual_info_planes.csv.gz     one row per (frame, plane): n, info share, mean world point and normal, mean standardised residual, leverage
               residual_info_persistence.csv   per plane seen in >= 2 dumped frames: sign persistence of its mean standardised residual (map error)
               residual_info_whatif.csv        believed sd after offline reweightings (plane-normalised, sqrt-plane-normalised)
-cross writes  crossframe_axes.csv            per axis: believed single-frame sd, realised scatter of the LiDAR-only increment, mean, lag-1, cumulative drift
+cross writes  crossframe_axes.csv            per axis: believed single-frame sd, realised scatter of the LiDAR-only increment, mean, lag-1, cumulative drift.
+                                             R80 (F-381): with --state, the believed sd also carries the prior term. The increment d = Lambda^+ g is the LiDAR-only correction FROM the propagated
+                                             prior, so it contains the prior's own error: Var(d) = Lambda^+ + P_pred (6 x 6, rotation then position, the post_imu covariance of the same scan).
+                                             Columns believed_total_sd_median and realised_over_believed_total are then the consistent ratio; without --state they are blank and
+                                             realised_over_believed stays what it was (Lambda^+ only: PROVISIONAL, it overstates the ratio by the prior share).
               crossframe_frames.csv.gz       per frame: LiDAR-only increment per axis and its believed sd
 
 Information layout (lio_base.cpp): residual i has Jacobian row h_i = (hrot_x, hrot_y, hrot_z, hpos_x, hpos_y, hpos_z), residual r_i, variance sigma_squared_i;
@@ -23,7 +27,10 @@ import numpy as np
 import pandas as pd
 
 AX = ["rot_x", "rot_y", "rot_z", "pos_x", "pos_y", "pos_z"]
-RNG = np.random.default_rng(12345)       # fixed seed: the tool is deterministic
+import zlib
+SEED = 12345                              # F-381: one generator per (frame, iteration, split) so a ratio does not move with the frame set
+def split_rng(frame, it, name):
+    return np.random.default_rng([SEED, int(frame), int(it), zlib.crc32(name.encode())])
 
 
 def pinv_psd(L, rel=1e-10):
@@ -101,8 +108,9 @@ def analyse_frame(g, nplane_min=3, ndraw=200):
     for name, m in splits.items():
         diffs = []; covs = []
         if m is None:
+            rng_s = split_rng(row["frame"], row.get("iter", 0), name)
             for _ in range(ndraw):
-                mk = (RNG.random(N) < 0.5) if name == "random_resid" else (RNG.random(len(u)) < 0.5)[inv]
+                mk = (rng_s.random(N) < 0.5) if name == "random_resid" else (rng_s.random(len(u)) < 0.5)[inv]
                 res = split_axes(H, w, r, mk)
                 if res: diffs.append(res[0]); covs.append(res[1])
         else:
@@ -177,8 +185,30 @@ def run_dump(a):
     print("frames analysed:", len(fr))
 
 
+def load_prior_cov6(path, frames):
+    """Rotation-then-position 6 x 6 block of the post_imu covariance (the propagated prior of the LiDAR update) per scan_id == frame. Returns {frame: 6x6} and prints the match count."""
+    cols = ["P_%d_%d" % (i, j) for i in range(6) for j in range(i, 6)]
+    head = pd.read_csv(path, nrows=1)
+    need = ["scan_id", "phase"] + cols
+    miss = [c for c in need if c not in head.columns]
+    if miss:
+        sys.exit("--state lacks columns %s" % miss[:8])
+    S = pd.read_csv(path, usecols=need)
+    S = S[S["phase"] == "post_imu"].drop_duplicates("scan_id", keep="last")
+    out = {}
+    for _, r in S.iterrows():
+        P = np.zeros((6, 6))
+        for i in range(6):
+            for j in range(i, 6):
+                P[i, j] = P[j, i] = r["P_%d_%d" % (i, j)]
+        out[int(r["scan_id"])] = P
+    print("prior covariance (post_imu, scan_id == frame): %d scans" % len(out), "of which usable for the frames below are counted at the end")
+    return out
+
+
 def run_cross(a):
     os.makedirs(a.out, exist_ok=True)
+    prior = load_prior_cov6(a.state, None) if a.state else None
     df = pd.read_csv(a.diag)
     df = df[df["iter"] == df.groupby("frame")["iter"].transform("min")]       # iteration 0 of every frame
     df = df[df["frame"] <= a.max_frame].sort_values("frame")
@@ -192,8 +222,11 @@ def run_cross(a):
         Li, rank, ev = pinv_psd(L)
         d = Li @ g; sd = np.sqrt(np.clip(np.diag(Li), 0, None))
         row = dict(frame=int(r["frame"]), rank=rank, n_resid=int(r["n_resid"]))
+        Pp = prior.get(int(r["frame"])) if prior is not None else None
+        sdt = np.sqrt(np.clip(np.diag(Li + Pp), 0, None)) if Pp is not None else None   # R80 F-381: prior term (Lambda^+ + P_pred)
         for a_ in range(6):
             row["inc_" + AX[a_]] = d[a_] * 1e3; row["sd_" + AX[a_]] = sd[a_] * 1e3
+            row["sdtot_" + AX[a_]] = sdt[a_] * 1e3 if sdt is not None else float("nan")
         rows.append(row)
     F = pd.DataFrame(rows)
     if F.empty:
@@ -206,20 +239,23 @@ def run_cross(a):
             continue
         for a_ in range(6):
             x = S["inc_" + AX[a_]].to_numpy(); s = S["sd_" + AX[a_]].to_numpy(); n = len(x)
+            st = S["sdtot_" + AX[a_]].to_numpy(); have_t = bool(np.isfinite(st).all()) and n > 0
             out.append(dict(window=nm, axis=AX[a_], n_frames=n, believed_single_frame_sd_median=float(np.median(s)), realised_scatter_sd=float(np.std(x, ddof=1)),
+                            believed_total_sd_median=float(np.median(st)) if have_t else float("nan"),
+                            realised_over_believed_total=float(np.std(x, ddof=1) / np.median(st)) if have_t else float("nan"),
                             realised_over_believed=float(np.std(x, ddof=1) / np.median(s)), mean_increment=float(x.mean()),
                             mean_over_sd_of_mean=float(x.mean() / (np.std(x, ddof=1) / np.sqrt(n))), mean_over_believed_sd_of_mean=float(x.mean() / (np.median(s) / np.sqrt(n))),
                             lag1_autocorr=float(np.corrcoef(x[:-1], x[1:])[0, 1]), cumulative_drift_end=float(x.sum()),
                             believed_sd_of_mean_if_independent=float(np.median(s) / np.sqrt(n)),
                             realised_sd_of_mean_if_independent=float(np.std(x, ddof=1) / np.sqrt(n))))
     pd.DataFrame(out).to_csv(os.path.join(a.out, "crossframe_axes.csv"), index=False, float_format="%.6g")
-    print("frames:", len(F), "full-rank frames:", int((F['rank'] >= 6).sum()))
+    print("frames:", len(F), "full-rank frames:", int((F['rank'] >= 6).sum()), "frames with the prior term:", int(np.isfinite(F["sdtot_rot_x"]).sum()))
 
 
 def main():
     ap = argparse.ArgumentParser(); sp = ap.add_subparsers(dest="cmd", required=True)
     d = sp.add_parser("dump"); d.add_argument("--dump", required=True); d.add_argument("--state"); d.add_argument("--out", required=True)
-    c = sp.add_parser("cross"); c.add_argument("--diag", required=True); c.add_argument("--out", required=True); c.add_argument("--max-frame", type=int, default=500)
+    c = sp.add_parser("cross"); c.add_argument("--diag", required=True); c.add_argument("--out", required=True); c.add_argument("--max-frame", type=int, default=500); c.add_argument("--state", default=None, help="state_trace.csv[.gz]: adds the prior term P_pred (post_imu) to the believed sd (R80, F-381)")
     a = ap.parse_args()
     run_dump(a) if a.cmd == "dump" else run_cross(a)
 

@@ -111,12 +111,22 @@ def main():
     D = a.arm_dir
     meta = json.load(open(os.path.join(D, "arm.json"))) if os.path.exists(os.path.join(D, "arm.json")) else {}
     seq = meta.get("seq", "eee_01")
+    # R80 (F-381): the source of the window parameters is recorded in the summary (it was not: a bag whose entry was missing silently kept the eee_01 numbers).
+    params_source, params_warn = "command-line / eee_01 defaults (%d / %d / %d)" % (a.onset_scan, a.stat_last, a.trans_last), None
     if a.params and os.path.exists(a.params) and seq != "eee_01":
         pj = json.load(open(a.params)).get(seq)
         if pj:
             a.onset_scan, a.stat_last, a.trans_last = int(pj["onset_scan"]), int(pj["stat_last"]), int(pj["trans_last"])
+            params_source = "%s[%s]" % (os.path.basename(a.params), seq)
+        else:
+            params_warn = "params file %s has no entry for %s: the eee_01 window parameters were USED for this bag" % (a.params, seq)
+    elif seq != "eee_01":
+        params_warn = "bag %s reduced without a params entry (no --params or the file is absent): the eee_01 window parameters were USED" % seq
     S = {"arm": meta.get("arm", os.path.basename(os.path.abspath(D))), "meta": meta, "missing": [], "warnings": [],
-         "seq": seq, "definitions": {"onset_scan": a.onset_scan, "stat_last": a.stat_last, "trans_last": a.trans_last}}
+         "seq": seq, "definitions": {"onset_scan": a.onset_scan, "stat_last": a.stat_last, "trans_last": a.trans_last, "params_source": params_source}}
+    if params_warn:
+        S["warnings"].append(params_warn)
+    print("[params] %s -> onset %d, stat_last %d, trans_last %d" % (params_source, a.onset_scan, a.stat_last, a.trans_last))
 
     def path(fn):
         p = os.path.join(D, fn)

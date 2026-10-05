@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "livo_recon/utils/data/lidar_msg_log.h"
 #include "livo_recon/utils/log/bag_clock.h"
 
 namespace livo_recon
@@ -68,15 +69,22 @@ void DataQueues::pushImu(const ImuSample& msg)
   imu_queue.push_back(msg_cpy);
 }
 
-void DataQueues::pushLidar(std::vector<PointXYZT>&& msg)
+bool DataQueues::pushLidar(std::vector<PointXYZT>&& msg)
 {
   last_lidar_arrival_ns.store(nowNs(), std::memory_order_relaxed);
   updateLatestFedTime(msg.back().t);
   std::lock_guard<std::mutex> lock(lidar_mutex);
-  if (msg.front().t < latest_lidar_time) return;
+  if (lidarMessageOverlapsPrevious(msg.front().t, latest_lidar_time)) return false;   // R80: the same comparison as before (msg.front().t < latest_lidar_time), named so a test can check it
   latest_lidar_time = msg.back().t;
   for (auto& pt : msg) pt.t -= start_time;
   lidar_queue.push_back(std::move(msg));
+  return true;
+}
+
+double DataQueues::latestLidarTime()
+{
+  std::lock_guard<std::mutex> lock(lidar_mutex);
+  return latest_lidar_time;
 }
 
 // See dry_run_lidar_queue's doc comment (data_queues.h) -- deliberately

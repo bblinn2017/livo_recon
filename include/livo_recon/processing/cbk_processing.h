@@ -89,6 +89,10 @@ struct CbkProcOptions
   // the message, n_kept = points after the blind/tag/point_filter_num filters) and one row per image message (n_raw = n_kept
   // = 0). Off by default; no effect on the estimator.
   bool log_sensor_stamps = false;
+  // R80 (F-389 / F-311). Write-only log lidar_msg_log.csv: one row per LiDAR message seen by the PointCloud2 callback (the NTU VIRAL path; the custom-message callback is not instrumented), with the header stamp, the
+  // time of the first and of the last point, the last point time of the previously accepted message and the verdict of DataQueues::pushLidar() (include/livo_recon/utils/data/lidar_msg_log.h). Off by default;
+  // no effect on the estimator (it reads the message and the queue's latest_lidar_time, and uses pushLidar()'s return value, which callers ignored before).
+  bool log_lidar_msgs = false;
   // R65 (F-170 repeats). Sub-noise seeded perturbation of every kept LiDAR point (isotropic Gaussian, std in metres, per-scan
   // deterministic stream from perturb_seed and the scan stamp). 0 (default) = off, bit-identical. Used only to create
   // distinct-but-equivalent inputs for repeat runs, because identical inputs give bit-identical runs.

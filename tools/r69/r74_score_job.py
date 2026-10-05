@@ -22,7 +22,8 @@ SNAP_FRAMES = ["voxelmap_snapshot_f%d.csv" % i for i in range(2, 22)]   # R79: a
 R73_NEW = ["scan_log.csv", "shadow_scan.csv", "shadow_cov.csv", "shadow_residual_dump.csv", "shadow_residual_dump_state.csv", "coupled_update_iter.csv", "coupled_update_scan.csv"]
 # Written only when their flag / failure applies. "Optional" here means ONLY "the scorer does not demand it of an arm that did not ask for it": an arm that asked for a file lists it in the
 # requires column of arm_table.tsv (derived from its overrides) and the scorer FAILS the arm when it is absent (F-409/F-420: a requested log is never optional).
-R73_OPTIONAL = {"step_cap.csv", "q_adapt.csv", "zupt.csv", "coupled_failure_dump.txt", "line_rows_per_scan.csv"} | {"coupled_record_f%d.txt" % i for i in range(1, 6)} | set(R73_NEW) | set(SNAP_FRAMES)
+R73_OPTIONAL = {"step_cap.csv", "q_adapt.csv", "zupt.csv", "coupled_failure_dump.txt", "line_rows_per_scan.csv", "post_calibration_voxel_observation_support.csv", "iekf_factor_iteration.csv", "lidar_msg_log.csv"} | {"coupled_record_f%d.txt" % i for i in range(1, 6)} | set(R73_NEW) | set(SNAP_FRAMES)
+EXTRA_ARCHIVE = ["exit_status.txt"]   # R80 (F-326): archived losslessly (listed in raw_sha256.txt and archive_index.json) whether or not the spec's raw.delete names it; never deleted by this script; absent = skipped
 SMALL = ["bootstrap_preparation.txt", "bootstrap_map_seed.txt", "state_reference.txt", "results_lio.txt", "gravity_alignment.txt",
          "imu_first_scans.csv", "calibration_p0.txt", "config.yaml", "engagement.txt", "run.log", "pose_control_first_frame_solve.csv",
          "plane_fit_reasons.csv",
@@ -35,6 +36,8 @@ BIG = ["state_trace.csv", "lio_gt_matched.csv", "imu_cov_growth.csv", "frame_sta
        "residual_dump.csv", "residual_dump_state.csv",                        # R71 per-residual dump (selected frames)
        "joint_knot_all_scans.csv", "joint_knot_scan_summary.csv",           # coupled knot diagnostics (full diag only)
        "step_cap.csv", "q_adapt.csv", "zupt.csv",                             # R72 write-only logs (present only when the flag is on)
+       "iekf_factor_iteration.csv", "lidar_msg_log.csv",                      # R80 (F-449a, F-389): per-iteration state with velocity (lio.log_debug_en); per-message LiDAR log (data_queues.log_lidar_msgs)
+       "post_calibration_voxel_observation_support.csv",                      # R80 (N-9): per-observation sums of the post-calibration snapshot (voxel_map.map.snapshot_post_calibration); about 83 MB raw per round was left on the host unarchived
        "line_rows_per_scan.csv",                                              # R77 (F-451) write-only per-scan line-row log (present only when lio.line_rows_log_en is on)
        ] + SNAP_FRAMES + [                                                    # R79 (F-464, F-441, F-440): voxelmap_snapshot_f2..f21.csv (present only when voxel_map.map.snapshot_frames lists them)
        "coupled_failure_dump.txt"] + ["coupled_record_f%d.txt" % i for i in range(1, 6)] + R73_NEW   # R72 F-398 (present only on failure / when record_frames > 0); R73 logs (only when their flag is on)
@@ -271,6 +274,19 @@ def r74_analyses(D, T, row, keep):
     # R79: the first frames of the state / covariance and of the update (HtH, Htz, step) of the arms whose arm_table `early` column is 1 (the reducer fails when either source is absent)
     if truthy(row, "early") and rc_run_ok(D):
         res["early_state"] = run([sys.executable, os.path.join(T, "r79_early_reduce.py"), "--dir", D, "--out", D, "--early"], log)
+    # R80 fix (F-437): R79 listed motion_q_scan_all.csv.gz as a returned file but nothing ever wrote it; the gz copy now exists (returned only for arms named in r69_collect.KEEP_IF_ARM_HAS)
+    if os.path.exists(os.path.join(D, "motion_q_scan.csv")):
+        info["motion_q_scan_all_rows"] = gz_copy(D, "motion_q_scan.csv", "motion_q_scan_all.csv.gz")
+    # R80 (F-449a): the takeoff-window files (frames 515 to 530; ground rows 518 to 524) of the arms whose arm_table `win` column is 1 (the reducer fails when a source or a column is absent)
+    if truthy(row, "win") and rc_run_ok(D):
+        res["window"] = run([sys.executable, os.path.join(T, "r80_window_reduce.py"), "--dir", D, "--out", D, "--window"], log)
+    # R80 (F-389): the per-message LiDAR log, lossless, of the arms whose `msglog` column is 1
+    if truthy(row, "msglog") and rc_run_ok(D):
+        res["msglog"] = run([sys.executable, os.path.join(T, "r80_window_reduce.py"), "--dir", D, "--out", D, "--msglog"], log)
+    # R80 (F-467, F-476): lossless gzip copies of the detector log (lio.zupt.mode != off) and of the process-noise adaptation log (imu.process_noise.gain.mode != off); both sources are in BIG and
+    # R73_OPTIONAL (archived losslessly first). A source the arm's overrides require but that is absent fails the stage through the arm_table `requires` column (make_r74_manifest.requires_of), not here.
+    info["zupt_all_rows"] = gz_copy(D, "zupt.csv", "zupt_all.csv.gz")
+    info["q_adapt_all_rows"] = gz_copy(D, "q_adapt.csv", "q_adapt_all.csv.gz")
     # F-406
     if os.path.exists(os.path.join(D, "step_cap.csv")):
         info["step_cap_rows"] = step_cap_reduce(D)
@@ -313,6 +329,11 @@ def main():
             os.symlink(os.path.abspath(s), os.path.join(D, n))
         elif n not in R73_OPTIONAL:
             missing.append(n)
+    # R80 (F-326): exit_status.txt = the node's real exit status, written by the host's run_job.sh into the job dir. Copied into the arm dir and archived below (EXTRA_ARCHIVE); its absence is NOT an
+    # error here (the R80 gates report MISSING), so it is neither in `missing` nor a stage failure.
+    es_src = find("exit_status.txt", roots)
+    if es_src:
+        shutil.copy(es_src, os.path.join(D, "exit_status.txt"))
     sent = "FAILED" if os.path.exists(os.path.join(a.job_dir, "FAILED")) else "DONE"
     rc_run = 1 if sent == "FAILED" else 0
     fin = os.path.join(a.job_dir, sent)
@@ -421,7 +442,7 @@ def main():
     # ---- 4. lossless archive of everything the spec will delete
     adir = os.path.join(a.stage_out, "archive"); os.makedirs(adir, exist_ok=True)
     index = []
-    for n in raw_names:
+    for n in raw_names + [x for x in EXTRA_ARCHIVE if x not in raw_names]:
         s = find(n, roots)
         if s:
             index.append(archive(s, adir, n))

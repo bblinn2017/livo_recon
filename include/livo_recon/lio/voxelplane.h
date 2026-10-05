@@ -81,6 +81,8 @@ public:
   // row = 0, 1 (hard line) or 0, 1, 2 (smooth); smooth = true uses both tilt axes of the row, false only the line axis u2. Returns false (value untouched)
   // when this voxel has no tilt matrix for that row (not classified as a line at its last fit): computeResidual() counts that as a fallback.
   bool lineTiltVar(int row, const V3D& d, bool smooth, double& out) const;
+  // R80 (F-453, rows = distance): the plane-equivalent variance of the distance row, c0^2 Var(dr0) + c1^2 Var(dr1) + 2 c0 c1 Cov(dr0, dr1), c_i = q.u_i, s = u2.d. False when the hard-row forms are not valid for this fit.
+  bool lineDistanceTiltVar(double c0, double c1, double s, double& out) const;
 
   // History (36-65): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-36
   // P10.  frame_idx (default -1 -> chart-age tracking skipped) is
@@ -146,7 +148,8 @@ private:
             Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate = nullptr,
             bool* dropped_by_ablation = nullptr,
             double* gate_floor_term_out = nullptr,
-            bool* reached_statistical_gate = nullptr) const;
+            bool* reached_statistical_gate = nullptr,
+            double* sigma_gate_squared_out = nullptr) const;   // R80: the variance of the admission test (write-only; nullptr = unchanged behaviour)
 
   // Additive along-normal variance floor, m^2 -- see
   // VoxelOpts::weight_floor_mode.  The SAME value feeds gate()'s admission
@@ -183,11 +186,14 @@ private:
   V3D x_normal_;
   float radius_ = 0;
   V3D eigen_values_ = V3D::Ones();
-  // R77 (F-453): per-row tilt covariance of the row's own direction, for variance = plane_equivalent. Row i's two tilt axes are the other two eigenvectors in
-  // ascending index (row 0: u1,u2; row 1: u0,u2; row 2: u0,u1), so L(1,1) of rows 0 and 1 is the tilt toward the line axis u2.
+  // R80 (F-453): per-row 3x3 covariance form of the row's own direction, for variance = plane_equivalent, over (tilt toward axis a, tilt toward axis b, offset along the row direction). Row i's two tilt axes are the other two
+  // eigenvectors in ascending index (row 0: u1,u2; row 1: u0,u2; row 2: u0,u1), so L(1,1) of rows 0 and 1 is the tilt toward the line axis u2; L(2,2) is the offset (centroid) variance along u_i; L(.,2) the cross terms.
   // Written by computeLineTilt() at the end of update()'s eigengap branch, cleared at the start of every update().
-  Eigen::Matrix2d line_tilt_L_[3] = {Eigen::Matrix2d::Zero(), Eigen::Matrix2d::Zero(), Eigen::Matrix2d::Zero()};
+  Eigen::Matrix3d line_tilt_L_[3] = {Eigen::Matrix3d::Zero(), Eigen::Matrix3d::Zero(), Eigen::Matrix3d::Zero()};
   bool line_tilt_valid_[3] = {false, false, false};
+  // R80 (F-453, rows = distance): cross-covariance form of the hard rows u0 and u1 over (tilt toward u2, offset), indices 1 and 2 as in line_tilt_L_: Cov(dr0, dr1) = l^T X l, l = (0, u2.d, 1) (X is not symmetric; l^T X l is what is used).
+  Eigen::Matrix3d line_tilt_X_ = Eigen::Matrix3d::Zero();
+  bool line_tilt_X_valid_ = false;
 
   int points_size_ = 0;
   bool is_plane_ = false;

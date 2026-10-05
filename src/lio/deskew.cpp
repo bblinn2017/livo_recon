@@ -2,6 +2,7 @@
 
 #include "livo_recon/utils/algo/math.h"
 #include "livo_recon/utils/algo/hashing.h"
+#include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 
 #include <algorithm>
@@ -96,7 +97,7 @@ void deskewPoints(
     const V3D p_imu_end = R_rel * p_imu_i + t_rel;
 
     const M3D cov_lidar_i   = getBodyCov(pt.p, opts.sigma_r2, opts.sigma_a2);
-    const M3D cov_lidar_end = R_rel * cov_lidar_i * R_rel.transpose();
+    const M3D cov_lidar_end = symmetrized(M3D(R_rel * cov_lidar_i * R_rel.transpose()));   // R80 F-419 (Bryce): per-point covariance, no exemption
     M3D cov_imu_end   = state->lidarToImu(cov_lidar_end);
 
     if (opts.time_based_process_noise != "none") {
@@ -106,6 +107,7 @@ void deskewPoints(
       else  // "var_acc"
         cov_imu_end.noalias() += (total_dt * total_dt * total_dt) * vel_noise_end;
     }
+    cov_imu_end = symmetrized(cov_imu_end);   // R80 F-419 (Bryce): covers lidarToImu() and the process-noise sums above
 
     PointXYZCov out{ p_imu_end, cov_imu_end };
     out.t = pt.t;

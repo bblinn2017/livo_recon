@@ -54,7 +54,8 @@ struct LineRow
 };
 
 // Row kinds written in the residual dump (Residual::row_kind). 0 is the ordinary single point-to-plane row.
-enum LineRowKind { kRowPlane = 0, kRowLineU0 = 1, kRowLineU1 = 2, kRowSmoothU0 = 3, kRowSmoothU1 = 4, kRowSmoothU2 = 5 };
+// R80 (F-453, Bryce 2026-10-05): kRowLineDist = 6, the single distance row of a hard line voxel (rows = distance): the shortest line-to-point distance, along the direction from the line to the point.
+enum LineRowKind { kRowPlane = 0, kRowLineU0 = 1, kRowLineU1 = 2, kRowSmoothU0 = 3, kRowSmoothU1 = 4, kRowSmoothU2 = 5, kRowLineDist = 6 };
 
 // e2 is only read by HardShape (default -1: HardShape then says not a line); the other variants ignore it, so every R74 call site keeps its meaning.
 inline bool isLineVoxel(const LineOptions& o, double e0, double e1, int n_points, double e2 = -1.0)

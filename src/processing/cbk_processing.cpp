@@ -2,6 +2,7 @@
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/profiler.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
+#include "livo_recon/utils/data/lidar_msg_log.h"
 #include "livo_recon/vio/tracker.h"
 
 #include <chrono>
@@ -9,6 +10,7 @@
 #include <iomanip>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <mutex>
 #include <stdexcept>
 #include <random>
@@ -106,6 +108,7 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
                           debugLogPath("livo_recon_sync_debug.txt"));
   paramWarn<bool>(pnh, "data_queues/log_raw_point_count", opts_.log_raw_point_count, false);
   paramWarn<bool>(pnh, "data_queues/log_sensor_stamps", opts_.log_sensor_stamps, false);   // R65
+  paramWarn<bool>(pnh, "data_queues/log_lidar_msgs", opts_.log_lidar_msgs, false);           // R80 (F-389): lidar_msg_log.csv, write-only
   paramWarn<double>(pnh, "cbk/lidar/perturb_std_m", opts_.perturb_std_m, 0.0);               // R65
   paramWarn<int>(pnh, "cbk/lidar/perturb_seed", opts_.perturb_seed, 0);                       // R65
   if (!(opts_.perturb_std_m >= 0.0))
@@ -138,6 +141,7 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  cbk/imu/gyr_type: " << opts_.imu_gyr_type
       << "\n  data_queues/log_sync_debug: " << (opts_.log_sync_debug ? "true" : "false")
       << "\n  data_queues/sync_debug_log_path: " << opts_.sync_debug_log_path
+      << "\n  data_queues/log_lidar_msgs: " << (opts_.log_lidar_msgs ? "true" : "false")   // R80 (F-389)
       << "\n  preprocess/image_subsample_n: " << opts_.image_subsample_n
       << "\n  evo/enable (gt ingestion): " << (opts_.evo_enable ? "true" : "false")
       << "\n  evo/gt_source: " << opts_.evo_gt_source
@@ -167,6 +171,28 @@ void logSensorStamp(char kind, double stamp, std::size_t n_raw, std::size_t n_ke
   std::ofstream& ofs = log.stream(&first);
   if (first) ofs << "kind,stamp,n_raw,n_kept\n";
   ofs << kind << ',' << std::setprecision(17) << stamp << ',' << n_raw << ',' << n_kept << "\n";
+  ofs.flush();
+}
+
+// R80 (F-389 / F-311): one row of lidar_msg_log.csv (see CbkProcOptions::log_lidar_msgs and lidar_msg_log.h). Called only from the PointCloud2 callback, which runs on one thread;
+// the mutex is for the static state (message counter, previous header stamp), not for concurrency.
+void logLidarMsg(unsigned seq, double header_stamp, double scan_time, std::size_t n_raw, std::size_t n_kept, double t_first, double t_last,
+                 double prev_accepted_last_t, LidarMsgVerdict verdict)
+{
+  static std::mutex mtx;
+  std::lock_guard<std::mutex> lock(mtx);
+  static PersistentLogStream log("lidar_msg_log.csv");
+  static long long msg_index = 0;
+  static double prev_header = std::numeric_limits<double>::quiet_NaN();
+  bool first;
+  std::ofstream& ofs = log.stream(&first);
+  if (first) ofs << lidarMsgLogHeader();
+  LidarMsgRow r;
+  r.msg_index = msg_index++; r.seq = seq; r.header_stamp = header_stamp; r.scan_time = scan_time; r.prev_header_stamp = prev_header;
+  r.n_raw = static_cast<long long>(n_raw); r.n_kept = static_cast<long long>(n_kept); r.t_first = t_first; r.t_last = t_last;
+  r.prev_accepted_last_t = prev_accepted_last_t; r.verdict = verdict;
+  prev_header = header_stamp;
+  ofs << formatLidarMsgRow(r);
   ofs.flush();
 }
 
@@ -289,6 +315,9 @@ void CbkProc::lidarCallbackPcl(const sensor_msgs::PointCloud2::ConstPtr& msg)
   if (!measures_->isValid(scan_time))
   {
     ROS_WARN_STREAM("Received an old LiDAR scan. Ignoring. stamp=" << msg->header.stamp);
+    if (opts_.log_lidar_msgs)   // R80 (F-389): write-only
+      logLidarMsg(msg->header.seq, msg->header.stamp.toSec(), scan_time, static_cast<std::size_t>(msg->width) * static_cast<std::size_t>(msg->height), 0,
+                  std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN(), data_queues_->latestLidarTime(), LidarMsgVerdict::DroppedOld);
     return;
   }
 
@@ -316,8 +345,22 @@ void CbkProc::lidarCallbackPcl(const sensor_msgs::PointCloud2::ConstPtr& msg)
       data_queues_->pushDryRunLidar(std::move(dry_run_points));
   }
 
-  if (points.empty()) return;
-  data_queues_->pushLidar(std::move(points));
+  if (points.empty())
+  {
+    if (opts_.log_lidar_msgs)   // R80 (F-389): write-only
+      logLidarMsg(msg->header.seq, msg->header.stamp.toSec(), scan_time, static_cast<std::size_t>(msg->width) * static_cast<std::size_t>(msg->height), 0,
+                  std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN(), data_queues_->latestLidarTime(), LidarMsgVerdict::NoPoints);
+    return;
+  }
+  // R80 (F-389): the first / last point time and the queue's state are read BEFORE the push (the push moves the points and rewrites the times); the push itself is unchanged.
+  const bool log_msg = opts_.log_lidar_msgs;
+  const double msg_t_first = log_msg ? points.front().t : 0.0, msg_t_last = log_msg ? points.back().t : 0.0;
+  const std::size_t msg_n_kept = log_msg ? points.size() : 0;
+  const double prev_accepted_last_t = log_msg ? data_queues_->latestLidarTime() : 0.0;
+  const bool accepted = data_queues_->pushLidar(std::move(points));
+  if (log_msg)
+    logLidarMsg(msg->header.seq, msg->header.stamp.toSec(), scan_time, static_cast<std::size_t>(msg->width) * static_cast<std::size_t>(msg->height), msg_n_kept,
+                msg_t_first, msg_t_last, prev_accepted_last_t, accepted ? LidarMsgVerdict::Accepted : LidarMsgVerdict::DroppedOverlap);
 }
 
 void CbkProc::imuCallback(const sensor_msgs::ImuConstPtr& msg)

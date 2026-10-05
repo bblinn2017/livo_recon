@@ -84,6 +84,8 @@ struct QGainOptions
   double max_gain = 100.0;
   double rho_clamp = 4.0;     // innovation_scale: rho is clamped to [1/rho_clamp, rho_clamp] before use
   double nis_hi = 1.5;        // nis_gate: inflate when NIS exceeds this
+  double nis_lo = 0.0;        // R80 (F-476): nis_gate: deflate when NIS is below this (0 = never deflate: the R72 one-sided gate, bit for bit)
+  double deflate = 1.0;       // R80 (F-476): nis_gate: gain multiplier on a deflating scan (< 1); the gain is then bounded below by min_gain (< 1 needed)
   double inflate = 1.25;      // nis_gate: gain multiplier on an inflating scan
   double decay = 0.95;        // nis_gate: g <- 1 + decay (g - 1) on a non-inflating scan
   double whiteness_max = 0.0; // nis_gate: when > 0, scans with |lag1| above this are NOT inflated (map-error signature)
@@ -117,6 +119,11 @@ public:
         g_ = g_ * o_.inflate;
         ++inflating_;
       }
+      else if (o_.nis_lo > 0.0 && s.nis < o_.nis_lo)
+      {
+        g_ = g_ * o_.deflate;   // R80 (F-476): the filter is under-confident on this scan (NIS below nis_lo): shrink the step variance
+        ++deflating_;
+      }
       else
       {
         if (s.nis > o_.nis_hi) ++whiteness_blocked_;
@@ -126,19 +133,22 @@ public:
     g_ = std::min(std::max(g_, o_.min_gain), o_.max_gain);
     if (g_ != last_) ++changed_;
     max_seen_ = std::max(max_seen_, g_);
+    min_seen_ = std::min(min_seen_, g_);
     return g_;
   }
 
   long scans() const { return scans_; }
   long changed() const { return changed_; }
   long inflating() const { return inflating_; }
+  long deflating() const { return deflating_; }
+  double minSeen() const { return min_seen_; }
   long whitenessBlocked() const { return whiteness_blocked_; }
   double maxSeen() const { return max_seen_; }
 
 private:
   QGainOptions o_;
-  double g_ = 1.0, last_ = 1.0, max_seen_ = 1.0;
-  long scans_ = 0, changed_ = 0, inflating_ = 0, whiteness_blocked_ = 0;
+  double g_ = 1.0, last_ = 1.0, max_seen_ = 1.0, min_seen_ = 1.0;
+  long scans_ = 0, changed_ = 0, inflating_ = 0, deflating_ = 0, whiteness_blocked_ = 0;
 };
 
 }  // namespace livo_recon

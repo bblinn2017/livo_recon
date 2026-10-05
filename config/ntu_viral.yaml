@@ -130,9 +130,11 @@ imu:
       # beta=0 uses each IMU sample directly; beta in [0,1) low-pass filters
       # the dynamic variance. Scales are dimensionless because the motion
       # signal is squared to produce a variance contribution.
-      beta: 0.0
-      acc_scale: 1.0
-      gyro_scale: 1.0
+      # R80 (F-477, Bryce): motion defaults beta 0.9, acc_scale 0.3, gyro_scale 10 (were 0.0 / 1.0 / 1.0);
+      # read only when model != fixed, so model: fixed is unchanged.
+      beta: 0.9
+      acc_scale: 0.3
+      gyro_scale: 10.0
       acc_max_dynamic_variance: 0.5
       gyro_max_dynamic_variance: 0.3
     bias_random_walk:

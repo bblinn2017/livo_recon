@@ -63,6 +63,14 @@ REQUIRED_AGENT_R79 = ["report.md", "STATE.md", "agent_edits.patch", "code_answer
 REQUIRED_DIRS_NONEMPTY_R79 = ["listener", "launch/checkup_cycles", "checks"]
 GENERATED_R79 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r79_gates.txt", "r79_identity_vs_old.csv", "duplicates.tsv", "summaries_all.json",
                  "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "compact", "queue"]
+# R80: id (the pfn 3 window arm: smoke + identity) then the run (window arms + whole-bag message logs)
+REQUIRED_AGENT_R80 = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R80_tree.tar.gz", "unit_tests/ctest_output.txt", "checks/build_log_tail.txt",
+                      "checks/r80_selftest_output.txt", "launch/launch_command.txt", "launch/containers_file.txt", "launch/launch_time.txt", "launch/checkup_cycles",
+                      "listener/id/listener_ledger.jsonl", "listener/id/listener_final.json", "listener/run/listener_ledger.jsonl", "listener/run/listener_final.json",
+                      "stop_reasons.csv", "harness_answers.md"]
+REQUIRED_DIRS_NONEMPTY_R80 = ["listener", "launch/checkup_cycles", "checks"]
+GENERATED_R80 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r80_gates.txt", "r80_identity_vs_old.csv", "duplicates.tsv", "summaries_all.json",
+                 "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "compact", "queue"]
 PART = 28 * 1000 * 1000
 STORED_EXTS = (".gz", ".zip")   # already-compressed; ZIP_STORED saves time, not space (a .tar.gz is caught by .gz)
 
@@ -79,9 +87,8 @@ def excluded_from_zip(relpath):
 
 
 def choose_part_size(nbytes, target=PART):
-    """Spread nbytes evenly over the minimum number of parts <= target each, so the split has no tiny remainder part."""
-    n = max(1, -(-nbytes // target))
-    return -(-nbytes // n)
+    """N-5/N-10: fixed-size parts, equivalent to `split -b 28M`. (Earlier versions spread the bytes evenly, which produced equal thirds against the documented 28 MB parts.)"""
+    return target
 
 
 def size(p):
@@ -279,13 +286,13 @@ def main():
     ap.add_argument("--manifest", required=True); ap.add_argument("--queue-dir", required=True); ap.add_argument("--date", required=True)
     ap.add_argument("--params", default=None); ap.add_argument("--limit-mb", type=float, default=28.0); ap.add_argument("--allow-missing", action="store_true")
     ap.add_argument("--r73-runs", default=None, help="directory holding the R73 arm dirs (r73_sh_* shadow arms and plain controls) for the F-426 comparison")
-    ap.add_argument("--round", default="R74", choices=["R74", "R75", "R76", "R77", "R78", "R79"], help="R75 / R76 / R77: that round's names, required-agent list and gates script (R7x_INSTRUCTIONS.md section 13)")
+    ap.add_argument("--round", default="R74", choices=["R74", "R75", "R76", "R77", "R78", "R79", "R80"], help="R75 / R76 / R77: that round's names, required-agent list and gates script (R7x_INSTRUCTIONS.md section 13)")
     ap.add_argument("--step0-delivered", action="store_true", help="STEP0 data was delivered in the stage-1b return: check it against STEP0/STEP0_SHA256.txt and do NOT pack it again (only the three index files are packed)")
     a = ap.parse_args()
     here = os.path.dirname(os.path.abspath(__file__))
     RND = a.round
-    gates_py, gates_txt = {"R79": ("r79_gates.py", "r79_gates.txt"), "R78": ("r78_gates.py", "r78_gates.txt"), "R77": ("r77_gates.py", "r77_gates.txt"), "R76": ("r76_gates.py", "r76_gates.txt"), "R75": ("r75_gates.py", "r75_gates.txt")}.get(RND, ("r74_gates.py", "r74_gates.txt"))
-    req_agent, req_dirs, gen_items = {"R79": (REQUIRED_AGENT_R79, REQUIRED_DIRS_NONEMPTY_R79, GENERATED_R79), "R78": (REQUIRED_AGENT_R78, REQUIRED_DIRS_NONEMPTY_R78, GENERATED_R78), "R77": (REQUIRED_AGENT_R77, REQUIRED_DIRS_NONEMPTY_R77, GENERATED_R77), "R76": (REQUIRED_AGENT_R76, REQUIRED_DIRS_NONEMPTY_R76, GENERATED_R76), "R75": (REQUIRED_AGENT_R75, REQUIRED_DIRS_NONEMPTY_R75, GENERATED_R75)}.get(RND, (REQUIRED_AGENT, REQUIRED_DIRS_NONEMPTY, GENERATED))
+    gates_py, gates_txt = {"R80": ("r80_gates.py", "r80_gates.txt"), "R79": ("r79_gates.py", "r79_gates.txt"), "R78": ("r78_gates.py", "r78_gates.txt"), "R77": ("r77_gates.py", "r77_gates.txt"), "R76": ("r76_gates.py", "r76_gates.txt"), "R75": ("r75_gates.py", "r75_gates.txt")}.get(RND, ("r74_gates.py", "r74_gates.txt"))
+    req_agent, req_dirs, gen_items = {"R80": (REQUIRED_AGENT_R80, REQUIRED_DIRS_NONEMPTY_R80, GENERATED_R80), "R79": (REQUIRED_AGENT_R79, REQUIRED_DIRS_NONEMPTY_R79, GENERATED_R79), "R78": (REQUIRED_AGENT_R78, REQUIRED_DIRS_NONEMPTY_R78, GENERATED_R78), "R77": (REQUIRED_AGENT_R77, REQUIRED_DIRS_NONEMPTY_R77, GENERATED_R77), "R76": (REQUIRED_AGENT_R76, REQUIRED_DIRS_NONEMPTY_R76, GENERATED_R76), "R75": (REQUIRED_AGENT_R75, REQUIRED_DIRS_NONEMPTY_R75, GENERATED_R75)}.get(RND, (REQUIRED_AGENT, REQUIRED_DIRS_NONEMPTY, GENERATED))
     q = os.path.join(a.ret, "queue"); os.makedirs(q, exist_ok=True)
     for f in glob.glob(os.path.join(a.manifest, "*")):
         if os.path.isfile(f):
@@ -297,7 +304,7 @@ def main():
             n[st] += 1
             f.write("%s\t%s\n" % (os.path.basename(jd.rstrip("/")), st))
         f.write("# totals: %s\n" % n)
-    cmd = [sys.executable, os.path.join(here, "r69_collect.py"), "--runs", a.runs, "--arms", a.arms, "--out", a.ret, "--level", "0"]
+    cmd = [sys.executable, os.path.join(here, "r69_collect.py"), "--runs", a.runs, "--arms", a.arms, "--out", a.ret, "--level", ("-1" if a.round == "R80" else "0")]   # R80 (F-381): no thinning; the SW sweep arms are kept out of arm_scan_all by the collector
     if a.params:
         cmd += ["--params", a.params]
     subprocess.check_call(cmd)
@@ -305,7 +312,7 @@ def main():
     if os.path.exists(pairs_f):
         subprocess.call([sys.executable, os.path.join(here, "r71_spline_tools.py"), "pairs", "--scan-table", os.path.join(a.ret, "arm_scan_all.csv.gz"), "--pairs", open(pairs_f).read().strip(), "--out", a.ret])
     sp = os.path.join(a.manifest, "switch_pairs.json")
-    if os.path.exists(sp) and a.r73_runs and RND not in ("R76", "R77", "R78", "R79"):   # R76: the F-426 tables come from r76_step0_f426.py (the archive layout and the missing t_rel_s are handled there)
+    if os.path.exists(sp) and a.r73_runs and RND not in ("R76", "R77", "R78", "R79", "R80"):   # R76: the F-426 tables come from r76_step0_f426.py (the archive layout and the missing t_rel_s are handled there)
         subprocess.call([sys.executable, os.path.join(here, "r74_switch_reduce.py"), "part1", "--shadow-dirs", a.r73_runs, "--pairs", sp, "--out", a.ret])
         subprocess.call([sys.executable, os.path.join(here, "r74_switch_reduce.py"), "part2", "--runs", a.runs, "--controls", a.r73_runs, "--pairs", sp, "--out", a.ret])
     gcmd = [sys.executable, os.path.join(here, gates_py), "--runs", a.runs, "--out", os.path.join(a.ret, gates_txt)]
@@ -313,6 +320,13 @@ def main():
         gcmd += ["--refs", os.path.join(a.manifest, "identity_refs.json"), "--csv", os.path.join(a.ret, "%s_identity_vs_old.csv" % RND.lower())]
         if RND in ("R78", "R79"):
             gcmd += ["--refs-fb", os.path.join(a.manifest, "identity_refs_fb.csv.gz")]
+    if RND == "R80":   # R80 gates: identity against R79 positions only (no identity_refs.json)
+        gcmd += ["--refs-fb", os.path.join(a.manifest, "identity_refs_fb.csv.gz"), "--csv", os.path.join(a.ret, "r80_identity_vs_old.csv")]
+        disp = os.path.join(q, "dispatched_arms.txt")   # R80 (rule 1.16): an undispatched queue is NOT RUN in the gates, not MISSING
+        with open(disp, "w") as df:
+            for jd in sorted(j for qd in a.queue_dir.split(",") for j in glob.glob(os.path.join(qd, "*/"))):
+                df.write(os.path.basename(jd.rstrip("/")) + "\n")
+        gcmd += ["--dispatched", disp]
     subprocess.call(gcmd)   # FAIL is reported in the file, not fatal here
     arm_ids = [r["arm"] for r in csv.DictReader(open(a.arms), delimiter="\t")]
     engagement_all(a.runs, arm_ids, os.path.join(a.ret, "engagement_all.txt"))

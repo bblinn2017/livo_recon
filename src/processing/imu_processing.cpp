@@ -171,11 +171,11 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "imu/log_qhat_en", opts_.log_qhat_en, false);
   paramWarn<std::string>(pnh, "imu/process_noise/model",
                          opts_.process_noise_model, std::string("fixed"));
-  paramWarn<double>(pnh, "imu/process_noise/motion/beta", opts_.motion_beta, 0.0);
+  paramWarn<double>(pnh, "imu/process_noise/motion/beta", opts_.motion_beta, 0.9);   // R80 F-477 (Bryce): was 0.0; read only under model != fixed
   paramWarn<double>(pnh, "imu/process_noise/motion/acc_scale",
-                    opts_.motion_acc_scale, 1.0);
+                    opts_.motion_acc_scale, 0.3);   // R80 F-477 (Bryce): was 1.0
   paramWarn<double>(pnh, "imu/process_noise/motion/gyro_scale",
-                    opts_.motion_gyr_scale, 1.0);
+                    opts_.motion_gyr_scale, 10.0);   // R80 F-477 (Bryce): was 1.0
   paramWarn<double>(pnh, "imu/process_noise/motion/acc_floor_scale", opts_.motion_acc_floor_scale, 1.0);
   paramWarn<double>(pnh, "imu/process_noise/motion/gyro_floor_scale", opts_.motion_gyr_floor_scale, 1.0);
   paramWarn<double>(pnh, "imu/process_noise/motion/acc_max_dynamic_variance",

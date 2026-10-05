@@ -677,7 +677,7 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
                       double& r, double& sigma_diag_squared, double& plane_var_term,
                       Eigen::Matrix<double, 1, 3>& J_nq, bool* is_candidate,
                       bool* dropped_by_ablation, double* gate_floor_term_out,
-                      bool* reached_statistical_gate) const
+                      bool* reached_statistical_gate, double* sigma_gate_squared_out) const
 {
   const V3D& n = plane_.normal;
   r = n.dot(p) + plane_.d;
@@ -756,6 +756,7 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
   const double floor_term = weightFloor(body_dir, body_normal, /*in_gate=*/true);
   if (gate_floor_term_out) *gate_floor_term_out = floor_term;
   const double sigma_gate_squared = floor_term + sigma_gate_diag_squared + plane_var_term;
+  if (sigma_gate_squared_out) *sigma_gate_squared_out = sigma_gate_squared;   // R80: write-only
   if (!std::isfinite(sigma_gate_squared) || sigma_gate_squared <= 0.0) return false;
 
   if (reached_statistical_gate) *reached_statistical_gate = true;
@@ -819,12 +820,13 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
   // this is used at.  pt.rot_transpose is R_wb^T.
   const V3D body_normal = pt.rot_transpose * plane_.normal;
   double gate_floor_term = std::numeric_limits<double>::quiet_NaN();
+  double sigma_gate_squared_out = -1.0;   // R80: write-only copy of the admission variance
   const bool accepted = gate(pt.point, pt.sensor_cov, pt.pose_cov,
                               pt.include_pose_cov_in_gate,
                               pt.body_point, body_normal,
                               r, sigma_diag_squared,
                               plane_var_term, J_nq, &is_candidate, &dropped_by_ablation,
-                              &gate_floor_term, &reached_statistical_gate);
+                              &gate_floor_term, &reached_statistical_gate, &sigma_gate_squared_out);
   if (pt.gate_audit && reached_statistical_gate) {
     pt.gate_audit->reached_statistical_gate = true;
     if (!accepted)
@@ -999,6 +1001,7 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
   res.normal         = plane_.normal;
   res.floor_term         = floor_term;
   res.sigma_diag_squared = sigma_diag_squared;
+  res.sigma_gate_squared = sigma_gate_squared_out;   // R80: write-only
   res.sigma_squared  = floor_term + sigma_diag_squared;
   res.plane_id       = this;
   res.plane_var_term = plane_var_term;
@@ -1034,6 +1037,46 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
     LineRow rows[3];
     const V3D d_center = pt.point - plane_.center;
     const int nr = lineRows(lo, plane_.normal, y_normal_, x_normal_, eigen_values_, d_center, points_size_, rows);
+    if (nr == 2 && opts_->line_rows_distance) {
+      // R80 (F-453, Bryce 2026-10-05): ONE row for a hard line voxel: the shortest distance from the point to the line (the axis u2 through the plane centre), along the direction q from the line to the point.
+      // r = q.d = |d - (u2.d) u2|; the two plane-normal point covariances (along u0 and u1) are projected on q: c_i = q.u_i, Var = sum_i c_i^2 Var_i + 2 c0 c1 Cov_01 (plane_equivalent), e_i/N weighted the same way.
+      const V3D u2 = x_normal_;
+      const double s_ax = u2.dot(d_center);
+      const V3D dperp = d_center - s_ax * u2;
+      const double rd = dperp.norm();
+      if (rd > 1e-9 && std::isfinite(rd)) {
+        const V3D q = dperp / rd;
+        const double c0 = q.dot(plane_.normal), c1 = q.dot(y_normal_);
+        double fit = c0 * c0 * rows[0].fit_var + c1 * c1 * rows[1].fit_var;
+        double t = 0.0;
+        if (opts_->line_var_plane_equivalent) {
+          if (lineDistanceTiltVar(c0, c1, s_ax, t)) fit += t;
+          else g_r77_tilt_fallbacks.fetch_add(1, std::memory_order_relaxed);
+        }
+        double sd = pointPlaneGateMeasurementVariance(q, pt.sensor_cov, pt.pose_cov, opts_->pose_cov_in_sigma);
+        const bool pose_in_gate = opts_->pose_cov_in_sigma || pt.include_pose_cov_in_gate;
+        double sg = pointPlaneGateMeasurementVariance(q, pt.sensor_cov, pt.pose_cov, pose_in_gate);
+        if (std::isfinite(sd) && sd > 0.0 && std::isfinite(sg) && sg > 0.0) {
+          if (sd < 1e-6) sd = 1e-6;
+          if (sg < 1e-6) sg = 1e-6;
+          if (rd * rd <= opts_->sigma_num_squared * (floor_term + sg + fit)) {   // gated like the u1 row of the two-row form
+            res.row_kind = kRowLineDist;
+            res.normal = q;
+            res.r = rd;
+            res.tilt_var_term = t;
+            res.plane_var_term = fit;
+            res.plane_jacobian = V3D::Zero();
+            res.plane_covariance = M3D::Zero();
+            res.sigma_diag_squared = sd;
+            res.sigma_squared = floor_term + sd;
+            if (opts_->log_variance_shares_en) debugLogVarianceShare(sd, fit);
+            return true;
+          }
+        }
+      }
+      res.row_kind = kRowPlane; res.n_extra = 0;
+      return false;   // the point has no admissible distance row: no row (the plane gate had admitted it along u0 only)
+    }
     if (nr > 0) {
       const bool smooth = (lo.mode == LineMode::Smooth);
       // R77 (F-453): variance = plane_equivalent adds the tilt term to every row's fit variance (fit_only: nothing changes, bit for bit).
@@ -1121,13 +1164,16 @@ void VoxelPlane::fillSnapshot(VoxelPlaneSnapshot& out) const
   out.plane_conf_factor = last_plane_conf_factor_;
 }
 
-// R77 (F-453).  First-order perturbation of row i's own eigenvector u_i toward the other two eigenvectors u_a (a != i), the same expansion VoxelPlane::update() uses for the
-// plane normal (row i = 0 reproduces the tilt block of plane_var_):
-//   theta_ia = sum_k  g_ia,k . dp_k ,   g_ia,k = (w_k / (e_i - e_a)) * ( z_k,a u_i + z_k,i u_a ) ,   z_k,x = u_x . (p_k - center) ,
-// so  Var(theta_ia, theta_ib) = sum_k g_ia,k^T Cov_k g_ib,k  with Cov_k the same per-point covariance plane_var_ uses (sensor + pose, or sensor only).
-// A residual along u_i changes by (u_a . d) theta_ia + (u_b . d) theta_ib for a query offset d = point - center: that is lineTiltVar(). Gaps are floored at the sensor noise variance
-// (always, in this form), with the sign the eigenvalue order implies.  Hard rows (i = 0, 1) use only the line axis u2 as tilt axis (the tilt toward the other small eigenvector
-// only rotates u0 into u1 inside the plane that the pair already spans, it does not move the line); smooth rows use both axes.
+// R80 (F-453, replaces the R77 tilt-only term at Bryce's direction): the plane-equivalent map-side variance of row i, built exactly the way the point-to-plane row builds its own.
+// The plane row's variance is J plane_var_ J^T with J = [d.u1, d.u2, 1] over (tilt toward u1, tilt toward u2, offset of the plane along its normal): the plane's offset variance is
+// the variance of the points' mean along the normal, n^T (sum_k w_k^2 C_k) n, and the tilt block is the first-order eigenvector perturbation; the two are correlated through the same dp_k.
+// A residual along u_i for a query offset d = point - center, with the centre moved by dc = sum_k w_k dp_k and u_i rotated by theta_ia toward each tilt axis u_a, changes by
+//   delta r_i = -u_i . dc + sum_a (u_a . d) theta_ia ,   theta_ia = sum_k g_ia,k . dp_k ,   g_ia,k = (w_k / (e_i - e_a)) ( z_k,a u_i + z_k,i u_a ) ,   z_k,x = u_x . (p_k - center) ,
+// (the centre's own shift drops out of the covariance perturbation because sum_k w_k z_k = 0).  With independent point noise Cov_k (sensor, or sensor + pose under 'combined'):
+//   Var = sum_k h_k^T Cov_k h_k ,  h_k = -w_k u_i + sum_a (u_a . d) g_ia,k ,
+// a quadratic form l^T L l in l = (u_a . d, u_b . d, 1); L is accumulated once per fit, the query only forms l.  Gaps are floored at the sensor noise variance (always, in this form),
+// with the sign the eigenvalue order implies.  Hard rows (i = 0, 1) use only the line axis u2 as tilt axis (the tilt toward the other small eigenvector only rotates u0 into u1 inside the
+// plane that the pair already spans, it does not move the line); smooth rows use both axes.  The offset term and the cross terms are included in every row.
 void VoxelPlane::computeLineTilt(const std::vector<PointXYZCov>& points, const std::vector<double>* var_weights, double var_weight_sum, bool use_var_weights)
 {
   LineOptions lo;
@@ -1154,7 +1200,8 @@ void VoxelPlane::computeLineTilt(const std::vector<PointXYZCov>& points, const s
     if (count && std::fabs(g) < fl) ++floored;
     return (i < a) ? -m : m;   // ascending eigenvalues: e_i <= e_a when i < a
   };
-  Eigen::Matrix2d L[3] = {Eigen::Matrix2d::Zero(), Eigen::Matrix2d::Zero(), Eigen::Matrix2d::Zero()};
+  Eigen::Matrix3d L[3] = {Eigen::Matrix3d::Zero(), Eigen::Matrix3d::Zero(), Eigen::Matrix3d::Zero()};
+  Eigen::Matrix3d X = Eigen::Matrix3d::Zero();   // R80: hard rows only
   for (int i = 0; i < rows; ++i) {
     ia[i] = (i == 0) ? 1 : 0;
     ib[i] = (i == 2) ? 1 : 2;
@@ -1168,23 +1215,38 @@ void VoxelPlane::computeLineTilt(const std::vector<PointXYZCov>& points, const s
     const V3D z = pt.point - plane_.center;
     const double zz[3] = {u[0].dot(z), u[1].dot(z), u[2].dot(z)};
     const M3D C = sensor_only ? pt.sensor_cov : M3D(pt.sensor_cov + pt.pos_cov);
+    V3D gbv[2] = {V3D::Zero(), V3D::Zero()}, gdv[2] = {V3D::Zero(), V3D::Zero()};   // R80: the two hard rows' coefficient vectors, for their cross-covariance
     for (int i = 0; i < rows; ++i) {
       const int a = ia[i], b = ib[i];
       const V3D gb = (w / gap_b[i]) * (zz[b] * u[i] + zz[i] * u[b]);
-      const V3D Cgb = C * gb;
+      const V3D gd = (-w) * u[i];   // the plane-offset (centre-shift) direction of row i
+      if (!smooth && i < 2) { gbv[i] = gb; gdv[i] = gd; }
+      const V3D Cgb = C * gb, Cgd = C * gd;
       L[i](1, 1) += gb.dot(Cgb);
+      L[i](1, 2) += gb.dot(Cgd);
+      L[i](2, 2) += gd.dot(Cgd);
       if (smooth) {
         const V3D ga = (w / gap_a[i]) * (zz[a] * u[i] + zz[i] * u[a]);
-        L[i](0, 0) += ga.dot(C * ga);
+        const V3D Cga = C * ga;
+        L[i](0, 0) += ga.dot(Cga);
         L[i](0, 1) += ga.dot(Cgb);
+        L[i](0, 2) += ga.dot(Cgd);
       }
+    }
+    if (!smooth) {
+      const V3D Cgb1 = C * gbv[1], Cgd1 = C * gdv[1];
+      X(1, 1) += gbv[0].dot(Cgb1); X(1, 2) += gbv[0].dot(Cgd1);
+      X(2, 1) += gdv[0].dot(Cgb1); X(2, 2) += gdv[0].dot(Cgd1);
     }
   }
   for (int i = 0; i < rows; ++i) {
     L[i](1, 0) = L[i](0, 1);
+    L[i](2, 0) = L[i](0, 2);
+    L[i](2, 1) = L[i](1, 2);
     line_tilt_L_[i] = L[i];
     line_tilt_valid_[i] = true;
   }
+  if (!smooth) { line_tilt_X_ = X; line_tilt_X_valid_ = true; }
   g_r77_tilt_voxels.fetch_add(1, std::memory_order_relaxed);
   if (floored) g_r77_tilt_floored_axes.fetch_add(floored, std::memory_order_relaxed);
 }
@@ -1194,14 +1256,18 @@ bool VoxelPlane::lineTiltVar(int row, const V3D& d, bool smooth, double& out) co
   if (row < 0 || row > 2 || !line_tilt_valid_[row]) return false;
   const V3D u[3] = {plane_.normal, y_normal_, x_normal_};
   const int a = (row == 0) ? 1 : 0, b = (row == 2) ? 1 : 2;
-  const double lb = u[b].dot(d);
-  double v;
-  if (smooth) {
-    const double la = u[a].dot(d);
-    v = la * la * line_tilt_L_[row](0, 0) + 2.0 * la * lb * line_tilt_L_[row](0, 1) + lb * lb * line_tilt_L_[row](1, 1);
-  } else {
-    v = lb * lb * line_tilt_L_[row](1, 1);
-  }
+  // l = (u_a . d, u_b . d, 1); hard rows carry no axis-a tilt, so their l_a is 0 (the L(0, .) entries are zero for them anyway).
+  const Eigen::Vector3d l(smooth ? u[a].dot(d) : 0.0, u[b].dot(d), 1.0);
+  const double v = l.dot(line_tilt_L_[row] * l);
+  out = (v > 0.0 && std::isfinite(v)) ? v : 0.0;
+  return true;
+}
+
+bool VoxelPlane::lineDistanceTiltVar(double c0, double c1, double s, double& out) const
+{
+  if (!line_tilt_valid_[0] || !line_tilt_valid_[1] || !line_tilt_X_valid_) return false;
+  const Eigen::Vector3d l(0.0, s, 1.0);
+  const double v = c0 * c0 * l.dot(line_tilt_L_[0] * l) + c1 * c1 * l.dot(line_tilt_L_[1] * l) + 2.0 * c0 * c1 * l.dot(line_tilt_X_ * l);
   out = (v > 0.0 && std::isfinite(v)) ? v : 0.0;
   return true;
 }
@@ -1213,6 +1279,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
                         int frame_idx)
 {
   line_tilt_valid_[0] = line_tilt_valid_[1] = line_tilt_valid_[2] = false;   // R77 (F-453)
+  line_tilt_X_valid_ = false;
   plane_var_.setZero();
   covariance_.setZero();
   plane_ = {};

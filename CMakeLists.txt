@@ -286,6 +286,12 @@ add_executable(test_line_variance_r77 tests/test_line_variance_r77.cpp src/lio/v
 target_include_directories(test_line_variance_r77 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
 target_link_libraries(test_line_variance_r77 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
 add_test(NAME line_variance_r77 COMMAND test_line_variance_r77)
+# R80 (F-453): rows = distance for hard line voxels (same sources as test_line_variance_r77; the D4 source-contract check reads src/map/voxelmap.cpp).
+add_executable(test_line_distance_r80 tests/test_line_distance_r80.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
+target_include_directories(test_line_distance_r80 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+target_compile_definitions(test_line_distance_r80 PRIVATE LIVO_R80_VOXELMAP_SRC="${CMAKE_CURRENT_SOURCE_DIR}/src/map/voxelmap.cpp")
+target_link_libraries(test_line_distance_r80 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
+add_test(NAME line_distance_r80 COMMAND test_line_distance_r80)
 
 # R78 (planning agent's patch): which point set the IEKF uses (lio/iekf_point_stream); header only, ROS-free.
 add_executable(test_iekf_stream_r78 tests/test_iekf_stream_r78.cpp)
@@ -296,6 +302,11 @@ add_test(NAME iekf_stream_r78 COMMAND test_iekf_stream_r78)
 add_executable(test_snapshot_frames_r79 tests/test_snapshot_frames_r79.cpp)
 target_include_directories(test_snapshot_frames_r79 PUBLIC include)
 add_test(NAME snapshot_frames_r79 COMMAND test_snapshot_frames_r79)
+
+# R80: per-message LiDAR log helpers + pushLidar overlap rule (header-only, ROS-free)
+add_executable(test_lidar_msg_log_r80 tests/test_lidar_msg_log_r80.cpp)
+target_include_directories(test_lidar_msg_log_r80 PUBLIC include)
+add_test(NAME lidar_msg_log_r80 COMMAND test_lidar_msg_log_r80)
 
 # R70 (planning agent's patch): block information scale identities (ROS-free, Eigen only).
 add_executable(test_info_scale tests/test_info_scale.cpp src/lio/info_scale.cpp)

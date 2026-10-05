@@ -166,7 +166,10 @@ struct DataQueues
   void setStartTime(double timestamp);
 
   void pushImu(const ImuSample& msg);
-  void pushLidar(std::vector<PointXYZT>&& msg);
+  // R80 (F-389): returns true when the message was queued, false when it was discarded because its first point is earlier than the last point of the previously
+  // accepted message (the rule is unchanged; callers that ignore the result behave exactly as before). latestLidarTime() is that last point time (0.0 before the first message).
+  bool pushLidar(std::vector<PointXYZT>&& msg);
+  double latestLidarTime();
   // See dry_run_lidar_queue's doc comment above.
   void pushDryRunLidar(std::vector<PointXYZT>&& msg);
   void pushImage(const ImageData& msg);

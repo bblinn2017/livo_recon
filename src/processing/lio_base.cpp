@@ -238,12 +238,12 @@ void logLineRows(int frame_idx, int iteration, const std::vector<Residual>& resi
   std::ofstream& o = log.stream(&first);
   if (first) {
     o << "scan_id,iter,n_rows,n_points,n_plane_rows,n_line_u0,n_line_u1,n_smooth_u0,n_smooth_u1,n_smooth_u2,n_pts_with_line_rows,sum_fit_var_line,sum_tilt_var,sum_sigma2_line,sum_sigma2_plane,"
-         "gap_fits,gap_d1,gap_d2,tilt_voxels,tilt_floored_axes,tilt_fallbacks\n";
+         "gap_fits,gap_d1,gap_d2,tilt_voxels,tilt_floored_axes,tilt_fallbacks,n_line_dist\n";   // R80: n_line_dist appended
   }
-  long cnt[6] = {0, 0, 0, 0, 0, 0};
+  long cnt[7] = {0, 0, 0, 0, 0, 0, 0};
   double s_fit = 0.0, s_tilt = 0.0, s_sig_line = 0.0, s_sig_plane = 0.0;
   for (const auto& r : residuals) {
-    const int k = (r.row_kind >= 0 && r.row_kind <= 5) ? r.row_kind : 0;
+    const int k = (r.row_kind >= 0 && r.row_kind <= 6) ? r.row_kind : 0;
     ++cnt[k];
     if (k == 0) { s_sig_plane += r.sigma_squared; continue; }
     s_fit += r.plane_var_term; s_tilt += r.tilt_var_term; s_sig_line += r.sigma_squared;
@@ -251,7 +251,7 @@ void logLineRows(int frame_idx, int iteration, const std::vector<Residual>& resi
   const VoxelPlaneR77Counters c = voxelPlaneR77Counters();
   o << frame_idx << ',' << iteration << ',' << residuals.size() << ',' << (cnt[0] + cnt[1] + cnt[3]) << ',' << cnt[0] << ',' << cnt[1] << ',' << cnt[2] << ',' << cnt[3] << ',' << cnt[4] << ',' << cnt[5]
     << ',' << (cnt[1] + cnt[3]) << ',' << std::setprecision(10) << s_fit << ',' << s_tilt << ',' << s_sig_line << ',' << s_sig_plane
-    << ',' << c.gap_fits << ',' << c.gap_d1 << ',' << c.gap_d2 << ',' << c.tilt_voxels << ',' << c.tilt_floored_axes << ',' << c.tilt_fallbacks << '\n';
+    << ',' << c.gap_fits << ',' << c.gap_d1 << ',' << c.gap_d2 << ',' << c.tilt_voxels << ',' << c.tilt_floored_axes << ',' << c.tilt_fallbacks << ',' << cnt[6] << '\n';
   o.flush();
 }
 
@@ -350,7 +350,7 @@ void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const s
   std::ofstream& so = shadow ? shslog.stream(&sfirst) : slog.stream(&sfirst);
   if (first)
     o << "frame,iter,idx,source_index,t,r,sigma_squared,plane_var_term,plane_key,node_id,tier,vis,"
-         "hrot_x,hrot_y,hrot_z,hpos_x,hpos_y,hpos_z,wx,wy,wz,bx,by,bz,row_kind\n";
+         "hrot_x,hrot_y,hrot_z,hpos_x,hpos_y,hpos_z,wx,wy,wz,bx,by,bz,row_kind,floor_term,sigma_diag_squared,s_prior_pose,sigma_gate_squared\n";   // R80: the last four appended (F-449/F-464: sigma_squared = floor_term + sigma_diag_squared + plane_var_term; s_prior_pose = H P- H^T of the row; sigma_gate_squared = the variance the admission test used)
   if (sfirst) so << "frame,iter,n_resid,px,py,pz,rvx,rvy,rvz\n";
   const V3D rv = Log(st.rot());
   so << frame_idx << ',' << iteration << ',' << residuals.size() << ',' << std::setprecision(17) << st.pos().x() << ','
@@ -363,7 +363,8 @@ void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const s
       << ',' << r.point_cross_normal.x() << ',' << r.point_cross_normal.y() << ',' << r.point_cross_normal.z()
       << ',' << r.normal.x() << ',' << r.normal.y() << ',' << r.normal.z()
       << ',' << r.world_point.x() << ',' << r.world_point.y() << ',' << r.world_point.z()
-      << ',' << r.raw_body_point.x() << ',' << r.raw_body_point.y() << ',' << r.raw_body_point.z() << ',' << r.row_kind << '\n';
+      << ',' << r.raw_body_point.x() << ',' << r.raw_body_point.y() << ',' << r.raw_body_point.z() << ',' << r.row_kind
+      << ',' << r.floor_term << ',' << r.sigma_diag_squared << ',' << r.s_prior_pose << ',' << r.sigma_gate_squared << '\n';
   }
   o.flush(); so.flush();
 }
