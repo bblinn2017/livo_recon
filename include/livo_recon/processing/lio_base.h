@@ -65,6 +65,10 @@ struct LioProcOptions
   // History (30-50): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-30
   int    dry_run_point_filter_num = 0;
 
+  // R78 (split: all points to the map, every k-th point to the IEKF): which point set the IEKF residuals use. "primary" (default, bit-identical to R77): the set the
+  // map is built from. "second": the second decimation stream (dry_run_point_filter_num, include/livo_recon/lio/iekf_stream.h). iekf estimator only.
+  std::string iekf_point_stream = "primary";
+
   // CQ-60 item 5: the shared per-dof NEES logger (utils/eval/nees_logger.h)
   // -- report-only, default false, shared by both estimator paths (unlike
   // most of this struct's coupled-vs-iekf-specific fields, this one

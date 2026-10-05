@@ -36,11 +36,12 @@ DROP_FROM_RETURN = {"r73_f417_residuals.csv.gz",
                      "lio_gt_matched_compact.csv.gz", "crossframe_frames.csv.gz", "crossframe_axes.csv",
                      "live_point_cov_compact.csv.gz", "motion_q_scan_all.csv.gz", "frame_window_all.csv.gz"}   # R74: duplicates residual_dump_all.csv.gz (same rows, weight and class); stays in the host bundle and archive, not in the return (return size, rule 5.12a)
 KEEP_IF_ARM_HAS = {"r73_f417_residuals.csv.gz": "_n200_"}   # R74 addendum 1 (Bryce: return it for calibration samples N=200 only): a dropped file is still returned for an arm whose name contains this
-F1_GROUPS = {"VX", "LN", "SM", "DET", "FB", "IDN", "SMK", "GAP", "SWP"}   # R77: smoke (SMK), gap-floor (GAP) and voxel-sweep (SWP) groups as well;   # R76: FB (the full-bag grid) and IDN (identity arms) as well;   # R74 addendum 5: these groups' other per-frame compact files stay in the host archive; only frame-1 files are returned
+F1_GROUPS = {"VX", "LN", "SM", "DET", "FB", "IDN", "SMK", "GAP", "SWP", "STA", "SPL", "CTL", "IF3", "YAW", "ML1", "ROOT", "SNP", "REF"}   # R78: its groups (Stage A, split, controls, information-matched thinning, yaw, max layer 1, root 1.4, snapshot, refuse); R77: smoke (SMK), gap-floor (GAP) and voxel-sweep (SWP) groups as well;   # R76: FB (the full-bag grid) and IDN (identity arms) as well;   # R74 addendum 5: these groups' other per-frame compact files stay in the host archive; only frame-1 files are returned
 F1_KEEP = {"residual_dump_all.csv.gz", "r73_f417_residuals.csv.gz", "r74_plane_table.csv.gz",
            "r74_plane_check.json", "r73_f417_hth_frames.csv", "r73_f417_classes.csv",
            "r73_f417_consistency.csv", "pos_trace_all.csv.gz", "compress_manifest.json",
-           "sensor_stamps_summary.json", "line_rows_per_scan_all.csv.gz"}   # R77 (F-451)
+           "sensor_stamps_summary.json", "line_rows_per_scan_all.csv.gz",   # R77 (F-451)
+           "snapshot_nodes_all.csv.gz"}   # R78 (F-428): every node of the post-calibration snapshot
 LEVELS = {0: (25, None, 0), 1: (25, 5, 0), 2: (50, 10, 0), 3: (100, 25, 45)}   # (step, keep-arm step (None = every scan), onset-window trim after onset+70)
 
 def g(d, *ks):
@@ -225,7 +226,7 @@ def main():
             f.write("R74 identity arm (eee_01 60 s, fixed-Q, no new option on; F-419 extension changes round-off only, so the verdict is the 0.005 mm metric gate in r74_gates.txt; digest equality with R73 is reported as a fact)\n")
             d0 = sha.get(REF60, "")
             f.write("  %s  %s  R73 reference digest starts %s -> %s\n" % (d0 or "(missing)", REF60, R73_DIGEST_60S, "IDENTICAL to R73" if d0.startswith(R73_DIGEST_60S) else "DIFFERENT or missing"))
-        for pre, rep in (("r74_own_det_", "r74_vox_"), ("r75_own_det_", "r75_line_"), ("r76_own_det_id_", "r76_id_"), ("r76_own_det_fb_", "r76_fb_"), ("r77_own_det_id_", "r77_id_"), ("r77_own_det_fb_", "r77_fb_")):   # R75: the control's original is the r75_line_ arm of the same name
+        for pre, rep in (("r74_own_det_", "r74_vox_"), ("r75_own_det_", "r75_line_"), ("r76_own_det_id_", "r76_id_"), ("r76_own_det_fb_", "r76_fb_"), ("r77_own_det_id_", "r77_id_"), ("r77_own_det_fb_", "r77_fb_"), ("r78_own_det_id_", "r78_id_"), ("r78_own_det_fb_", "r78_ct_")):   # R75: the control's original is the r75_line_ arm of the same name
             for x in [x for x in sha if x.startswith(pre)]:
                 orig = x.replace(pre, rep)
                 f.write("determinism: %s  %s  vs %s  %s  -> %s\n" % (sha.get(x, "") or "(missing)", x, sha.get(orig, "") or "(missing)", orig, "IDENTICAL" if sha.get(x) and sha.get(x) == sha.get(orig) else "DIFFERENT or missing"))

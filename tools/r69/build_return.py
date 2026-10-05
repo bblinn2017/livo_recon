@@ -47,6 +47,14 @@ REQUIRED_AGENT_R77 = ["report.md", "STATE.md", "agent_edits.patch", "code_answer
 REQUIRED_DIRS_NONEMPTY_R77 = ["listener", "launch/checkup_cycles", "checks"]
 GENERATED_R77 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r77_gates.txt", "r77_identity_vs_old.csv", "duplicates.tsv", "summaries_all.json",
                  "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "compact", "queue"]
+# R78: id + refuse + smoke listener run (queues r78_id, r78_ref), then the full-bag run (r78_fb)
+REQUIRED_AGENT_R78 = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R78_tree.tar.gz", "unit_tests/ctest_output.txt", "checks/build_log_tail.txt",
+                      "checks/r78_selftest_output.txt", "launch/launch_command.txt", "launch/containers_file.txt", "launch/launch_time.txt", "launch/checkup_cycles",
+                      "listener/id/listener_ledger.jsonl", "listener/id/listener_final.json", "listener/fb/listener_ledger.jsonl", "listener/fb/listener_final.json",
+                      "stop_reasons.csv", "harness_answers.md"]
+REQUIRED_DIRS_NONEMPTY_R78 = ["listener", "launch/checkup_cycles", "checks"]
+GENERATED_R78 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r78_gates.txt", "r78_identity_vs_old.csv", "duplicates.tsv", "summaries_all.json",
+                 "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "compact", "queue"]
 PART = 28 * 1000 * 1000
 STORED_EXTS = (".gz", ".zip")   # already-compressed; ZIP_STORED saves time, not space (a .tar.gz is caught by .gz)
 
@@ -263,13 +271,13 @@ def main():
     ap.add_argument("--manifest", required=True); ap.add_argument("--queue-dir", required=True); ap.add_argument("--date", required=True)
     ap.add_argument("--params", default=None); ap.add_argument("--limit-mb", type=float, default=28.0); ap.add_argument("--allow-missing", action="store_true")
     ap.add_argument("--r73-runs", default=None, help="directory holding the R73 arm dirs (r73_sh_* shadow arms and plain controls) for the F-426 comparison")
-    ap.add_argument("--round", default="R74", choices=["R74", "R75", "R76", "R77"], help="R75 / R76 / R77: that round's names, required-agent list and gates script (R7x_INSTRUCTIONS.md section 13)")
+    ap.add_argument("--round", default="R74", choices=["R74", "R75", "R76", "R77", "R78"], help="R75 / R76 / R77: that round's names, required-agent list and gates script (R7x_INSTRUCTIONS.md section 13)")
     ap.add_argument("--step0-delivered", action="store_true", help="STEP0 data was delivered in the stage-1b return: check it against STEP0/STEP0_SHA256.txt and do NOT pack it again (only the three index files are packed)")
     a = ap.parse_args()
     here = os.path.dirname(os.path.abspath(__file__))
     RND = a.round
-    gates_py, gates_txt = {"R77": ("r77_gates.py", "r77_gates.txt"), "R76": ("r76_gates.py", "r76_gates.txt"), "R75": ("r75_gates.py", "r75_gates.txt")}.get(RND, ("r74_gates.py", "r74_gates.txt"))
-    req_agent, req_dirs, gen_items = {"R77": (REQUIRED_AGENT_R77, REQUIRED_DIRS_NONEMPTY_R77, GENERATED_R77), "R76": (REQUIRED_AGENT_R76, REQUIRED_DIRS_NONEMPTY_R76, GENERATED_R76), "R75": (REQUIRED_AGENT_R75, REQUIRED_DIRS_NONEMPTY_R75, GENERATED_R75)}.get(RND, (REQUIRED_AGENT, REQUIRED_DIRS_NONEMPTY, GENERATED))
+    gates_py, gates_txt = {"R78": ("r78_gates.py", "r78_gates.txt"), "R77": ("r77_gates.py", "r77_gates.txt"), "R76": ("r76_gates.py", "r76_gates.txt"), "R75": ("r75_gates.py", "r75_gates.txt")}.get(RND, ("r74_gates.py", "r74_gates.txt"))
+    req_agent, req_dirs, gen_items = {"R78": (REQUIRED_AGENT_R78, REQUIRED_DIRS_NONEMPTY_R78, GENERATED_R78), "R77": (REQUIRED_AGENT_R77, REQUIRED_DIRS_NONEMPTY_R77, GENERATED_R77), "R76": (REQUIRED_AGENT_R76, REQUIRED_DIRS_NONEMPTY_R76, GENERATED_R76), "R75": (REQUIRED_AGENT_R75, REQUIRED_DIRS_NONEMPTY_R75, GENERATED_R75)}.get(RND, (REQUIRED_AGENT, REQUIRED_DIRS_NONEMPTY, GENERATED))
     q = os.path.join(a.ret, "queue"); os.makedirs(q, exist_ok=True)
     for f in glob.glob(os.path.join(a.manifest, "*")):
         if os.path.isfile(f):
@@ -289,12 +297,14 @@ def main():
     if os.path.exists(pairs_f):
         subprocess.call([sys.executable, os.path.join(here, "r71_spline_tools.py"), "pairs", "--scan-table", os.path.join(a.ret, "arm_scan_all.csv.gz"), "--pairs", open(pairs_f).read().strip(), "--out", a.ret])
     sp = os.path.join(a.manifest, "switch_pairs.json")
-    if os.path.exists(sp) and a.r73_runs and RND not in ("R76", "R77"):   # R76: the F-426 tables come from r76_step0_f426.py (the archive layout and the missing t_rel_s are handled there)
+    if os.path.exists(sp) and a.r73_runs and RND not in ("R76", "R77", "R78"):   # R76: the F-426 tables come from r76_step0_f426.py (the archive layout and the missing t_rel_s are handled there)
         subprocess.call([sys.executable, os.path.join(here, "r74_switch_reduce.py"), "part1", "--shadow-dirs", a.r73_runs, "--pairs", sp, "--out", a.ret])
         subprocess.call([sys.executable, os.path.join(here, "r74_switch_reduce.py"), "part2", "--runs", a.runs, "--controls", a.r73_runs, "--pairs", sp, "--out", a.ret])
     gcmd = [sys.executable, os.path.join(here, gates_py), "--runs", a.runs, "--out", os.path.join(a.ret, gates_txt)]
-    if RND in ("R76", "R77"):
+    if RND in ("R76", "R77", "R78"):
         gcmd += ["--refs", os.path.join(a.manifest, "identity_refs.json"), "--csv", os.path.join(a.ret, "%s_identity_vs_old.csv" % RND.lower())]
+        if RND == "R78":
+            gcmd += ["--refs-fb", os.path.join(a.manifest, "identity_refs_fb.csv.gz")]
     subprocess.call(gcmd)   # FAIL is reported in the file, not fatal here
     arm_ids = [r["arm"] for r in csv.DictReader(open(a.arms), delimiter="\t")]
     engagement_all(a.runs, arm_ids, os.path.join(a.ret, "engagement_all.txt"))

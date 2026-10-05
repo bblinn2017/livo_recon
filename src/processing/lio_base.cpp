@@ -406,6 +406,10 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   paramWarn<bool>(pnh, "lio/live_point_cov_en", opts_.live_point_cov_en, false);    // R69: live_point_cov.csv (write-only)
   paramWarn<int>(pnh, "lio/first_frame_dump_frames", opts_.first_frame_dump_frames, 1);  // R69: solve dump for frames 1..K (1 = unchanged)
   paramWarn<int>(pnh, "lio/dry_run_point_filter_num", opts_.dry_run_point_filter_num, 0);
+  // R78: which point set the IEKF residuals use (the map always uses the primary set). Refused as dead without the second stream.
+  cfg.mode("lio/iekf_point_stream", opts_.iekf_point_stream, "primary", { "primary", "second" });
+  if (opts_.iekf_point_stream == "second" && !(opts_.dry_run_point_filter_num >= 1))
+    throw std::invalid_argument("lio/iekf_point_stream = second needs lio/dry_run_point_filter_num >= 1 (the second decimation stream it reads); the key is dead without it");
   paramWarn<bool>(pnh, "eval/nees_per_dof_en", opts_.nees_per_dof_en, false);
   paramWarn<int>(pnh, "eval/nees_tier1_window_scans", opts_.nees_tier1_window_scans, 489);
   paramWarn<bool>(pnh, "eval/state_trace_en", opts_.state_trace_en, true);

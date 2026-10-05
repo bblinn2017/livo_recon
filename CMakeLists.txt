@@ -287,6 +287,11 @@ target_include_directories(test_line_variance_r77 PUBLIC include ${EIGEN3_INCLUD
 target_link_libraries(test_line_variance_r77 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
 add_test(NAME line_variance_r77 COMMAND test_line_variance_r77)
 
+# R78 (planning agent's patch): which point set the IEKF uses (lio/iekf_point_stream); header only, ROS-free.
+add_executable(test_iekf_stream_r78 tests/test_iekf_stream_r78.cpp)
+target_include_directories(test_iekf_stream_r78 PUBLIC include)
+add_test(NAME iekf_stream_r78 COMMAND test_iekf_stream_r78)
+
 # R70 (planning agent's patch): block information scale identities (ROS-free, Eigen only).
 add_executable(test_info_scale tests/test_info_scale.cpp src/lio/info_scale.cpp)
 target_include_directories(test_info_scale PUBLIC include ${EIGEN3_INCLUDE_DIRS})

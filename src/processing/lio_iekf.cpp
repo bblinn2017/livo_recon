@@ -14,6 +14,7 @@
 #include "livo_recon/lio/voxelplane.h"   // voxelPlaneInformationFitCount()
 #include "livo_recon/lio/lio_accumulator.h"
 #include "livo_recon/utils/algo/covariance_math.h"
+#include "livo_recon/lio/iekf_stream.h"   // R78
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <array>
@@ -616,6 +617,16 @@ std::string LioProcIekf::engagementReport() const
     if (shadow_scans_ == 0) o << "   <-- INERT: shadow selected and no scan inside the window was processed";
     if (shadow_map_changed_scans_ > 0) o << "   <-- INVALID: the shadow pass changed the voxel map";
   }
+  if (opts_.iekf_point_stream != "primary")   // R78
+  {
+    o << "\n  lio/iekf_point_stream=" << opts_.iekf_point_stream << " dry_run_point_filter_num=" << opts_.dry_run_point_filter_num
+      << " frames=" << stream_frames_ << " frames_second=" << stream_second_ << " frames_fallback=" << stream_fallback_
+      << " mean_points_map=" << (stream_frames_ > 0 ? static_cast<double>(stream_sum_primary_) / stream_frames_ : 0.0)
+      << " mean_points_iekf=" << (stream_frames_ > 0 ? static_cast<double>(stream_sum_iekf_) / stream_frames_ : 0.0);
+    if (stream_frames_ == 0) o << "   <-- INERT: iekf_point_stream selected and no frame reached the update";
+    else if (stream_second_ == 0) o << "   <-- INERT: the second stream was never used (every frame fell back to the primary set)";
+    else if (stream_fallback_ > 0) o << "   <-- PARTLY ENGAGED: " << stream_fallback_ << " frames fell back to the primary set (their second-stream set was empty)";
+  }
   if (opts_.scan_log_en) o << "\n  lio/scan_log_en=true  (scan_log.csv written)";
   o << "\n[engagement] a flag marked INERT above did not test anything; the "
        "cell is invalid, not null.";
@@ -836,7 +847,8 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
   if (voxel_map_->isEmpty()) return {};
   ensureStationaryReference(mg);
 
-  if (opts_.dry_run_point_filter_num > 0 && opts_.log_debug_en)
+  // R78: with lio/iekf_point_stream = second the second stream is the IEKF input, not a diagnostic; the shadow pass would only repeat it.
+  if (opts_.dry_run_point_filter_num > 0 && opts_.log_debug_en && opts_.iekf_point_stream == "primary")
     runDryRunShadowPass(mg);
 
   logStateTrace("post_imu", mg, 0, 0);
@@ -905,6 +917,15 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
     mg.prior_pos = state_propagat_.pos();
     mg.prior_rot = state_propagat_.rot();
     mg.prior_vel = state_propagat_.vel();
+    // R78: which point set this frame's residuals are built from. The map update (after this block) always reads mg.points.
+    IekfStreamPick stream_pick;
+    const std::vector<PointXYZCov>& iekf_points =
+        pickIekfPoints(opts_.iekf_point_stream == "second", mg.points, mg.dry_run_points, stream_pick);
+    ++stream_frames_;
+    if (stream_pick.second_used) ++stream_second_;
+    if (stream_pick.fell_back) ++stream_fallback_;
+    stream_sum_primary_ += static_cast<long>(mg.points.size());
+    stream_sum_iekf_ += static_cast<long>(iekf_points.size());
     bool any_solved = false;
     for (; iter < opts_.max_iterations; iter++) {
       const StateGroup iteration_before = *state_;
@@ -923,7 +944,7 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
       // already-partially-corrected state, which is not the quantity NIS
       // is defined over.
       setDiagnosticGnIteration(iter);
-      double error = estimateStateCorrection(mg.points, dtheta, dt, /*allow_consistency_log=*/iter == 0);
+      double error = estimateStateCorrection(iekf_points, dtheta, dt, /*allow_consistency_log=*/iter == 0);   // R78: iekf_points is mg.points unless lio/iekf_point_stream = second
       if (capture_update) recordIteration(drv_rec_, iter, dtheta, dt);   // R73
       if (iter == 0 && q_gain_opts_.on() && !residuals_.empty()) updateQGainFromResiduals();   // R72 (F-401)
       writeStationaryIterationDiagnostics(

@@ -27,6 +27,8 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
 {
   ConfigResolver cfg(pnh);
   loadSharedParameters(cfg, pnh);
+  if (opts_.iekf_point_stream != "primary")
+    throw std::invalid_argument("lio/iekf_point_stream = second is implemented for estimator/mode=iekf only (R78); refused under coupled");
   if (opts_.shadow.on())
     throw std::invalid_argument("lio/shadow/mode=on is implemented for estimator/mode=iekf only (R73 F-414); refused under coupled");
   if (opts_.scan_log_en)

@@ -257,6 +257,9 @@ def r74_analyses(D, T, row, keep):
     # F-428: plane test values vs the frame-1 residual dump (needs both files; arms that did not ask for the snapshot have neither)
     if os.path.exists(os.path.join(D, "post_calibration_voxelmap.csv")) and has_dump and truthy(row, "plane_check"):
         res["plane_check"] = run([sys.executable, os.path.join(T, "r74_plane_check.py"), "--dir", D, "--out", D], log)
+    # F-428 (R78): every node of the snapshot, one row each (the arms without a snapshot have no file; nothing runs)
+    if os.path.exists(os.path.join(D, "post_calibration_voxelmap.csv")):
+        res["snapshot_nodes"] = run([sys.executable, os.path.join(T, "r78_snapshot_reduce.py"), "--dir", D, "--out", D], log)
     # F-406
     if os.path.exists(os.path.join(D, "step_cap.csv")):
         info["step_cap_rows"] = step_cap_reduce(D)

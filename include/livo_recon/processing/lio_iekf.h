@@ -83,6 +83,8 @@ private:
   ZuptOptions  zupt_opts_;
   ZuptDetector zupt_det_;
   long   zupt_scans_ = 0, zupt_stationary_ = 0, zupt_applied_ = 0;
+  // R78: iekf_point_stream engagement (frames that reached the update; frames that used the second stream; frames that fell back; summed set sizes).
+  long   stream_frames_ = 0, stream_second_ = 0, stream_fallback_ = 0, stream_sum_primary_ = 0, stream_sum_iekf_ = 0;
   double zupt_vnorm_sum_ = 0.0, zupt_vnorm_max_ = 0.0;
   void applyZuptIfStationary(MeasureGroup& mg);
 };
