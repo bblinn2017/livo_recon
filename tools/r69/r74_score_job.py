@@ -18,10 +18,11 @@ Exit code 0 only if the reducers ran, the window check passed and every archived
 import argparse, csv, fnmatch, glob, gzip, hashlib, json, lzma, os, shutil, subprocess, sys, zipfile
 
 SCHEMA = 4
+SNAP_FRAMES = ["voxelmap_snapshot_f%d.csv" % i for i in range(2, 22)]   # R79: at most 20 frames (include/livo_recon/map/snapshot_frames.h kMaxSnapshotFrames)
 R73_NEW = ["scan_log.csv", "shadow_scan.csv", "shadow_cov.csv", "shadow_residual_dump.csv", "shadow_residual_dump_state.csv", "coupled_update_iter.csv", "coupled_update_scan.csv"]
 # Written only when their flag / failure applies. "Optional" here means ONLY "the scorer does not demand it of an arm that did not ask for it": an arm that asked for a file lists it in the
 # requires column of arm_table.tsv (derived from its overrides) and the scorer FAILS the arm when it is absent (F-409/F-420: a requested log is never optional).
-R73_OPTIONAL = {"step_cap.csv", "q_adapt.csv", "zupt.csv", "coupled_failure_dump.txt", "line_rows_per_scan.csv"} | {"coupled_record_f%d.txt" % i for i in range(1, 6)} | set(R73_NEW)
+R73_OPTIONAL = {"step_cap.csv", "q_adapt.csv", "zupt.csv", "coupled_failure_dump.txt", "line_rows_per_scan.csv"} | {"coupled_record_f%d.txt" % i for i in range(1, 6)} | set(R73_NEW) | set(SNAP_FRAMES)
 SMALL = ["bootstrap_preparation.txt", "bootstrap_map_seed.txt", "state_reference.txt", "results_lio.txt", "gravity_alignment.txt",
          "imu_first_scans.csv", "calibration_p0.txt", "config.yaml", "engagement.txt", "run.log", "pose_control_first_frame_solve.csv",
          "plane_fit_reasons.csv",
@@ -35,6 +36,7 @@ BIG = ["state_trace.csv", "lio_gt_matched.csv", "imu_cov_growth.csv", "frame_sta
        "joint_knot_all_scans.csv", "joint_knot_scan_summary.csv",           # coupled knot diagnostics (full diag only)
        "step_cap.csv", "q_adapt.csv", "zupt.csv",                             # R72 write-only logs (present only when the flag is on)
        "line_rows_per_scan.csv",                                              # R77 (F-451) write-only per-scan line-row log (present only when lio.line_rows_log_en is on)
+       ] + SNAP_FRAMES + [                                                    # R79 (F-464, F-441, F-440): voxelmap_snapshot_f2..f21.csv (present only when voxel_map.map.snapshot_frames lists them)
        "coupled_failure_dump.txt"] + ["coupled_record_f%d.txt" % i for i in range(1, 6)] + R73_NEW   # R72 F-398 (present only on failure / when record_frames > 0); R73 logs (only when their flag is on)
 
 
@@ -183,6 +185,11 @@ def gz_copy(D, name, new, keep_rows=None):
     return int(len(df))
 
 
+def rc_run_ok(D):
+    """R79: the early reducer is asked for only when its two sources are in the arm dir (a failed arm has none; r74_analyses is not called for failed arms anyway)."""
+    return os.path.exists(os.path.join(D, "state_trace.csv")) or os.path.exists(os.path.join(D, "state_trace.csv.gz"))
+
+
 def truthy(row, key):
     return str((row or {}).get(key, "0")).strip() in ("1", "true", "True", "yes")
 
@@ -257,9 +264,13 @@ def r74_analyses(D, T, row, keep):
     # F-428: plane test values vs the frame-1 residual dump (needs both files; arms that did not ask for the snapshot have neither)
     if os.path.exists(os.path.join(D, "post_calibration_voxelmap.csv")) and has_dump and truthy(row, "plane_check"):
         res["plane_check"] = run([sys.executable, os.path.join(T, "r74_plane_check.py"), "--dir", D, "--out", D], log)
-    # F-428 (R78): every node of the snapshot, one row each (the arms without a snapshot have no file; nothing runs)
+    # R79 (F-464, F-441, F-440): every snapshot of the arm (post-calibration = map frame 1, voxelmap_snapshot_f<N>.csv = map frame N) in ONE file with a map_frame column, one row per node
+    # (replaces the R78 snapshot_nodes_all.csv.gz; the arms without a snapshot have no file; nothing runs)
     if os.path.exists(os.path.join(D, "post_calibration_voxelmap.csv")):
-        res["snapshot_nodes"] = run([sys.executable, os.path.join(T, "r78_snapshot_reduce.py"), "--dir", D, "--out", D], log)
+        res["snapshot_frames"] = run([sys.executable, os.path.join(T, "r79_early_reduce.py"), "--dir", D, "--out", D, "--snapshots"], log)
+    # R79: the first frames of the state / covariance and of the update (HtH, Htz, step) of the arms whose arm_table `early` column is 1 (the reducer fails when either source is absent)
+    if truthy(row, "early") and rc_run_ok(D):
+        res["early_state"] = run([sys.executable, os.path.join(T, "r79_early_reduce.py"), "--dir", D, "--out", D, "--early"], log)
     # F-406
     if os.path.exists(os.path.join(D, "step_cap.csv")):
         info["step_cap_rows"] = step_cap_reduce(D)

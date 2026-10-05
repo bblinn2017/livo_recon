@@ -700,6 +700,10 @@ struct VoxelOpts
   // exact map queried by the first post-calibration LIO frame.
   bool snapshot_post_calibration = false;
 
+  // R79 (F-464, F-441, F-440): frames N >= 2 whose queried map is written as voxelmap_snapshot_f<N>.csv (see map/snapshot_frames.h). Empty = off (default,
+  // bit-identical). Needs snapshot_post_calibration; parsed and validated in VoxelMap::loadParameters.
+  std::vector<int> snapshot_frames;
+
   // R73 (F-414 secondary control): when true, live frames (advance_live_frame) advance frame_idx_ but insert NOTHING, so the map stays
   // exactly the calibration (bootstrap) map for the whole run. Default false is bit-identical. A frozen map removes the map-feedback
   // path from a comparison; it is only a valid control between runs whose end-of-calibration map digests agree (see scan_log.csv).

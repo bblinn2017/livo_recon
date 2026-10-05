@@ -6,7 +6,7 @@
 Inputs: state_trace.csv(.gz) (two rows per scan: post_imu, post_lio) and state_reference.txt (the reference pose; eee_01 is stationary for its first ~48 s, so the error of a
 scan against it needs no alignment). All values are of the POSTERIOR (post_lio) row.
 Writes
-  pos_trace_all.csv.gz        scan_id, t_abs, t_rel_s, px, py, pz, yaw_rad   (t_abs and t_rel_s with 6 decimals, F-422)          (one row per scan; the alignment-free collapse timing of F-400 compares two arms of the SAME bag
+  pos_trace_all.csv.gz        scan_id, t_abs, t_rel_s, px, py, pz, yaw_rad, qw, qx, qy, qz (R79)   (t_abs and t_rel_s with 6 decimals, F-422)          (one row per scan; the alignment-free collapse timing of F-400 compares two arms of the SAME bag
                               scan by scan, norm of the position difference; no alignment is involved because both start from the same reference)
   r74_f416_frame_errors.csv   arm, frame(=scan_id), t_abs, t_rel_s, ep_x_mm, ep_y_mm, ep_z_mm, ep_norm_mm, eR_x_mrad, eR_y_mrad, eR_z_mrad (= yaw error), yaw_err_mrad, eR_norm_mrad,
                               excursion_10_mm (max ep_norm over scans 1..first, the same on every row of the arm), first_scan, n_scans
@@ -53,9 +53,12 @@ def trel_of(post, bag_start):
 
 
 def pos_trace(post, bag_start=None):
+    """R79 (Bryce 2026-10-05, F-439: 'add them'): qw, qx, qy, qz appended AFTER yaw_rad (the state_trace.csv posterior quaternion as written, not renormalised), so a reader of the
+    R74-R78 columns is unaffected and F-439 can rotate the lever arm with the full orientation instead of the yaw only."""
     R = rotations(post)
     return pd.DataFrame({"scan_id": post["scan_id"].astype(int).to_numpy(), "t_abs": post["t_abs"].to_numpy(float), "t_rel_s": trel_of(post, bag_start), "px": post["px"].to_numpy(float),
-                         "py": post["py"].to_numpy(float), "pz": post["pz"].to_numpy(float), "yaw_rad": np.arctan2(R[:, 1, 0], R[:, 0, 0])})
+                         "py": post["py"].to_numpy(float), "pz": post["pz"].to_numpy(float), "yaw_rad": np.arctan2(R[:, 1, 0], R[:, 0, 0]),
+                         "qw": post["qw"].to_numpy(float), "qx": post["qx"].to_numpy(float), "qy": post["qy"].to_numpy(float), "qz": post["qz"].to_numpy(float)})
 
 
 def frame_errors(post, ref_path, arm, first=10):

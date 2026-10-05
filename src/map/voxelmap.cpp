@@ -1,6 +1,7 @@
 #include "livo_recon/lio/line_residual.h"
 #include "livo_recon/lio/plane_test_values.h"
 #include "livo_recon/map/voxelmap.h"
+#include "livo_recon/map/snapshot_frames.h"
 #include "livo_recon/lio/voxelplane.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/config_resolve.h"
@@ -184,6 +185,15 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "voxel_map/plane/centred_accumulation", opts_->centred_accumulation, false);
   paramWarn<bool>(pnh, "voxel_map/map/snapshot_post_calibration",
                   opts_->snapshot_post_calibration, false);
+  {   // R79: snapshot frames N >= 2, one comma-separated string key (job overrides carry scalars only); empty = off. Refused when contradictory (map/snapshot_frames.h).
+    std::string snapshot_frames;
+    paramWarn<std::string>(pnh, "voxel_map/map/snapshot_frames", snapshot_frames, std::string());
+    try {
+      opts_->snapshot_frames = parseSnapshotFrames(snapshot_frames, opts_->snapshot_post_calibration);
+    } catch (const std::invalid_argument& e) {
+      throw std::runtime_error(std::string("[config] refused: ") + e.what());
+    }
+  }
   paramWarn<std::string>(pnh, "voxel_map/map/bootstrap_mode", bootstrap_mode_, "aggregate");
   if (bootstrap_mode_ != "aggregate" && bootstrap_mode_ != "sequential")
     throw std::runtime_error("voxel_map/map/bootstrap_mode must be aggregate or sequential");
@@ -760,6 +770,9 @@ void VoxelMap::updateMapInternal(MeasureGroup& mg, bool advance_live_frame) {
   }
   if (advance_live_frame && opts_->snapshot_post_calibration && frame_idx_ == 1)
     writePostCalibrationSnapshot();
+  // R79 (F-464, F-441, F-440): frame_idx_ has been advanced above, so here it is the index of the frame that will QUERY this map.
+  if (advance_live_frame && !opts_->snapshot_frames.empty() && snapshotFrameWanted(opts_->snapshot_frames, frame_idx_))
+    writeSnapshotFile(snapshotFrameFileName(frame_idx_), frame_idx_, false);
 }
 
 namespace
@@ -845,6 +858,11 @@ VoxelMapScanStats VoxelMap::computeScanStats()
 
 void VoxelMap::writePostCalibrationSnapshot() const
 {
+  writeSnapshotFile("post_calibration_voxelmap.csv", 0, true);
+}
+
+void VoxelMap::writeSnapshotFile(const std::string& filename, int snapshot_frame_label, bool with_support) const
+{
   std::vector<VoxelPlaneSnapshot> rows;
   for (const auto& entry : voxel_map_)
     if (entry.second) entry.second->appendPlaneSnapshots(entry.first, rows);
@@ -855,7 +873,7 @@ void VoxelMap::writePostCalibrationSnapshot() const
     if (a.layer != b.layer) return a.layer < b.layer;
     return a.node_id < b.node_id;
   });
-  std::ofstream out(debugLogPath("post_calibration_voxelmap.csv"));
+  std::ofstream out(debugLogPath(filename));
   out << "snapshot_frame,node_id,root_key_x,root_key_y,root_key_z,layer,"
          "cell_center_x,cell_center_y,cell_center_z,cell_min_x,cell_min_y,cell_min_z,"
          "cell_max_x,cell_max_y,cell_max_z,status,retired,initialized,is_plane,full,"
@@ -878,29 +896,32 @@ void VoxelMap::writePostCalibrationSnapshot() const
         out << m(r,c);
       }
   };
-  std::vector<BootstrapObservationStatsRow> support_rows;
-  for (const auto& entry : voxel_map_)
-    if (entry.second) entry.second->appendBootstrapObservationSupport(entry.first, support_rows);
-  std::sort(support_rows.begin(), support_rows.end(), [](const auto& a, const auto& b) {
-    if (a.node_id != b.node_id) return a.node_id < b.node_id;
-    return a.observation_id < b.observation_id;
-  });
+  if (with_support) {   // R79: only the post-calibration snapshot writes the observation-support companion file (as before)
+    std::vector<BootstrapObservationStatsRow> support_rows;
+    for (const auto& entry : voxel_map_)
+      if (entry.second) entry.second->appendBootstrapObservationSupport(entry.first, support_rows);
+    std::sort(support_rows.begin(), support_rows.end(), [](const auto& a, const auto& b) {
+      if (a.node_id != b.node_id) return a.node_id < b.node_id;
+      return a.observation_id < b.observation_id;
+    });
 
-  std::ofstream support_out(debugLogPath("post_calibration_voxel_observation_support.csv"));
-  support_out << "snapshot_frame,node_id,root_key_x,root_key_y,root_key_z,layer,observation_id,point_count,"
-                 "sum_x,sum_y,sum_z,sum_xx,sum_xy,sum_xz,sum_yx,sum_yy,sum_yz,sum_zx,sum_zy,sum_zz\n";
-  support_out << std::setprecision(17);
-  for (const auto& r : support_rows) {
-    support_out << "0," << r.node_id << ',' << r.root_key.x << ',' << r.root_key.y << ',' << r.root_key.z
-                << ',' << r.layer << ',' << r.observation_id << ',' << r.point_count
-                << ',' << r.sum_p.x() << ',' << r.sum_p.y() << ',' << r.sum_p.z();
-    for (int rr = 0; rr < 3; ++rr)
-      for (int cc = 0; cc < 3; ++cc) support_out << ',' << r.sum_pp(rr, cc);
-    support_out << '\n';
+    std::ofstream support_out(debugLogPath("post_calibration_voxel_observation_support.csv"));
+    support_out << "snapshot_frame,node_id,root_key_x,root_key_y,root_key_z,layer,observation_id,point_count,"
+                   "sum_x,sum_y,sum_z,sum_xx,sum_xy,sum_xz,sum_yx,sum_yy,sum_yz,sum_zx,sum_zy,sum_zz\n";
+    support_out << std::setprecision(17);
+    for (const auto& r : support_rows) {
+      support_out << "0," << r.node_id << ',' << r.root_key.x << ',' << r.root_key.y << ',' << r.root_key.z
+                  << ',' << r.layer << ',' << r.observation_id << ',' << r.point_count
+                  << ',' << r.sum_p.x() << ',' << r.sum_p.y() << ',' << r.sum_p.z();
+      for (int rr = 0; rr < 3; ++rr)
+        for (int cc = 0; cc < 3; ++cc) support_out << ',' << r.sum_pp(rr, cc);
+      support_out << '\n';
+    }
+
   }
 
   for (const auto& r : rows) {
-    out << "0," << r.node_id << ',' << r.root_key.x << ',' << r.root_key.y << ','
+    out << snapshot_frame_label << ',' << r.node_id << ',' << r.root_key.x << ',' << r.root_key.y << ','
         << r.root_key.z << ',' << r.layer << ',';
     vec(r.cell_center); out << ','; vec(r.cell_min); out << ','; vec(r.cell_max);
     out << ',' << r.status << ',' << r.retired << ',' << r.initialized << ','

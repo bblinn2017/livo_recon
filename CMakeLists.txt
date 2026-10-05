@@ -292,6 +292,11 @@ add_executable(test_iekf_stream_r78 tests/test_iekf_stream_r78.cpp)
 target_include_directories(test_iekf_stream_r78 PUBLIC include)
 add_test(NAME iekf_stream_r78 COMMAND test_iekf_stream_r78)
 
+# R79 (planning agent's patch): which frames write a voxel-map snapshot (voxel_map/map/snapshot_frames); header only, ROS-free.
+add_executable(test_snapshot_frames_r79 tests/test_snapshot_frames_r79.cpp)
+target_include_directories(test_snapshot_frames_r79 PUBLIC include)
+add_test(NAME snapshot_frames_r79 COMMAND test_snapshot_frames_r79)
+
 # R70 (planning agent's patch): block information scale identities (ROS-free, Eigen only).
 add_executable(test_info_scale tests/test_info_scale.cpp src/lio/info_scale.cpp)
 target_include_directories(test_info_scale PUBLIC include ${EIGEN3_INCLUDE_DIRS})

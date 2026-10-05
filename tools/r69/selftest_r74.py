@@ -72,7 +72,7 @@ def main():
         pd.DataFrame(tr).to_csv(os.path.join(ref, "state_trace.csv"), index=False, float_format="%.17g")
         subprocess.check_call([sys.executable, os.path.join(HERE, "r74_frame_errors.py"), "--dir", ref, "--out", ref, "--no-errors"], stdout=subprocess.DEVNULL)
         pt = pd.read_csv(os.path.join(ref, "pos_trace_all.csv.gz"), dtype={"t_abs": str, "t_rel_s": str})
-        if list(pt.columns) != ["scan_id", "t_abs", "t_rel_s", "px", "py", "pz", "yaw_rad"]:
+        if list(pt.columns) != ["scan_id", "t_abs", "t_rel_s", "px", "py", "pz", "yaw_rad", "qw", "qx", "qy", "qz"]:  # R79: raw quaternion columns appended (F-439)
             fails.append("T2 pos_trace columns %s" % list(pt.columns))
         else:
             if abs(float(pt["t_rel_s"].iloc[2]) - 0.3) > 1.5e-6 or len(pt["t_abs"].iloc[0].split(".")[1]) != 6:

@@ -165,6 +165,9 @@ private:
   void appendDisc(int32_t id, const PlaneVizInfo& p);
   void appendDot(int32_t id, const PlaneVizInfo& p);
   void writePostCalibrationSnapshot() const;
+  // R79: the snapshot writer of R47..R78 with the file name, the value of the snapshot_frame column and the observation-support companion file as parameters.
+  // writePostCalibrationSnapshot() == writeSnapshotFile("post_calibration_voxelmap.csv", 0, true) (bit-identical output).
+  void writeSnapshotFile(const std::string& filename, int snapshot_frame_label, bool with_support) const;
 };
 
 }
