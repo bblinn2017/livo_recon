@@ -1,4 +1,20 @@
-whole zip sha256 bc32797d3f97417ceddd16f054c5330b709afa882afa685c91086ec16e5803af (64339078 bytes)
-parts: 3
-reassembly of all parts equals the whole: PASS
-reassembly with part01 dropped is rejected (sha differs): PASS
+PASS R81_RETURN_2026-10-06.zip.00.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.01.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.02.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.03.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.04.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.05.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.06.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.07.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.08.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.09.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.10.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.11.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.12.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.13.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.14.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.15.sha256: OK
+PASS R81_RETURN_2026-10-06.zip.16.sha256: OK
+PASS reassembly (parts joined in suffix order) sha256 equals the recorded whole-zip hash
+PASS reassembly with part 01 dropped is rejected (hash differs)
+PASS reassembly with parts 00 and 01 swapped is rejected (hash differs)

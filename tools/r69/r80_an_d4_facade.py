@@ -10,6 +10,8 @@ that value, the point count, the plane's distance to the sensor and eig1. Existi
 
 Class definitions
   ground     |world normal z| >= NZ_GROUND (0.8), the value of tools/r69/r80_window_reduce.py NZ_GROUND; the normal is the dump's hpos_z (r.normal, world frame; logResidualDump writes hpos = r.normal).
+  R81 F-480: --ground-height H is accepted as the same number as --elevated-above (one height for the whole round, Bryce: H = 0.0 for every bag; both given and different = refused). The ground CLASS of
+             this tool stays the normal rule (the tool is about facade points the normal rule labels ground); only the elevated cut is the height.
   elevated   world point z (dump column wz) > --elevated-above. NO DEFAULT: the script refuses to run without it (the user decides the height; z is in the map's world frame, whose origin is the
              start pose, so the height is relative to that frame, not to the floor).
 Join: dump rows of frame N with the snapshot of map_frame N by node_id (map frame 1 = post_calibration_voxelmap.csv; see r80_an_d3_snapshot_join.py). A row whose node is not in the snapshot of its
@@ -208,6 +210,16 @@ def selftest():
     r = subprocess.run([sys.executable, me, "--root", root], capture_output=True, text=True)
     if r.returncode == 0 or "elevated-above" not in r.stderr:
         fails.append("ran without --elevated-above (rc %s)" % r.returncode)
+    # R81: --ground-height is the same number; both given and different is refused; same value accepted
+    r = subprocess.run([sys.executable, me, "--root", root, "--elevated-above", "1.0", "--ground-height", "0.0"], capture_output=True, text=True)
+    if r.returncode == 0 or "differ" not in r.stderr:
+        fails.append("differing --elevated-above/--ground-height accepted (rc %s)" % r.returncode)
+    r = subprocess.run([sys.executable, me, "--root", root, "--ground-height", "1.4"], capture_output=True, text=True)
+    if r.returncode != 0 or "elevated = wz > 1.4" not in r.stdout:
+        fails.append("--ground-height alone did not act as --elevated-above 1.4 (rc %s) %s" % (r.returncode, r.stderr[-200:]))
+    r = subprocess.run([sys.executable, me, "--root", root, "--ground-height", "1.4", "--elevated-above", "1.4"], capture_output=True, text=True)
+    if r.returncode != 0:
+        fails.append("equal --ground-height/--elevated-above refused")
     for bad in (None, float("nan")):
         try:
             groups_for_arm(D, S, ST, bad); fails.append("groups_for_arm accepted height %r" % bad)
@@ -227,20 +239,25 @@ def selftest():
         pass
     print("SELFTEST r80_an_d4_facade", "FAIL " + "; ".join(fails) if fails else
           "PASS (elevated ground-class selection incl. the |nz| = 0.8 boundary, facade and low-ground rows excluded, rows without a snapshot node counted; sqrt(eig0), point_count, eig1, raw pair, plane distance 0.09 from the "
-          "planted plane; sensor offset via Rodrigues; height changes the set; the script refuses to run without --elevated-above; summary quantiles; missing state file fails)")
+          "planted plane; sensor offset via Rodrigues; height changes the set; the script refuses to run without --elevated-above/--ground-height; --ground-height is the same number; summary quantiles; missing state file fails)")
     return 1 if fails else 0
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--root"); ap.add_argument("--out"); ap.add_argument("--iter", default="first"); ap.add_argument("--selftest", action="store_true")
-    ap.add_argument("--elevated-above", type=float, default=None, help="world z in metres; REQUIRED, no default")
+    ap.add_argument("--elevated-above", type=float, default=None, help="world z in metres; REQUIRED (this or --ground-height), no default")
+    ap.add_argument("--ground-height", type=float, default=None, help="R81 F-480: the same number as --elevated-above (Bryce: one height H for ground/above-ground and for D4 elevated; 0.0 for every bag). Both given and different = refused")
     ap.add_argument("--sensor-offset-body", type=float, nargs=3, default=None, metavar=("X", "Y", "Z"))
     a = ap.parse_args()
     if a.selftest:
         sys.exit(selftest())
+    if a.ground_height is not None:
+        if a.elevated_above is not None and a.elevated_above != a.ground_height:
+            sys.exit("--elevated-above %g and --ground-height %g differ: R81 uses ONE height H for both" % (a.elevated_above, a.ground_height))
+        a.elevated_above = a.ground_height
     if a.elevated_above is None:
-        sys.exit("--elevated-above is required (no default): the user decides the height above which a ground-class row counts as elevated")
+        sys.exit("--elevated-above (or --ground-height) is required (no default): the user decides the height above which a ground-class row counts as elevated")
     if not a.root:
         sys.exit("--root is required")
     run(a.root, a.elevated_above, a.out, a.iter, a.sensor_offset_body)

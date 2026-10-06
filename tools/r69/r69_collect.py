@@ -21,7 +21,7 @@ checks. Not recoverable from a thinned table: per-scan values outside the window
 DEVIATION FROM BASELINE (alignment-free): dev_from_baseline_mm[scan] = || ep(arm, scan) - ep(baseline, scan) || in mm (ep = displacement from the arm's own first-scan
 reference). Baseline = 00_id_baseline_full (eee_01 full), 00_id_baseline_60s (60 s), 00_id_baseline_48s (48 s), E_<seq>_baseline_full (other sequences).
 Summary columns: dev_max_mm, dev_max_scan, dev_first_scan_above_<X>mm (X = 25,50,100,200,500; scans after the onset scan), dev_at_scan_<S>, dev_rms_scans_541_on_mm."""
-import argparse, glob, gzip, json, os, shutil
+import argparse, glob, gzip, json, os, re, shutil, subprocess, sys, tempfile
 import numpy as np
 import pandas as pd
 
@@ -38,8 +38,9 @@ DROP_FROM_RETURN = {"r73_f417_residuals.csv.gz",
                      "live_point_cov_compact.csv.gz", "motion_q_scan_all.csv.gz", "frame_window_all.csv.gz"}   # R74: duplicates residual_dump_all.csv.gz (same rows, weight and class); stays in the host bundle and archive, not in the return (return size, rule 5.12a)
 KEEP_IF_ARM_HAS = {"r73_f417_residuals.csv.gz": "_n200_", "motion_q_scan_all.csv.gz": "r80_b3_eee_02_mq"}   # R80 (F-437 / D2): the R80 BASE3 eee_02 motion-Q arm replaces the R79 arm name; R79 (F-437): the motion-Q trace of that ONE arm is returned (substring of the arm name; the file is every row of motion_q_scan.csv); R74 addendum 1 (Bryce: return it for calibration samples N=200 only): a dropped file is still returned for an arm whose name contains the value
 F1_GROUPS = {"DP", "MG", "VX", "LN", "SM", "DET", "FB", "IDN", "SMK", "GAP", "SWP", "STA", "SPL", "CTL", "IF3", "YAW", "ML1", "ROOT", "SNP", "REF", "NB", "QV", "DX", "EC",
-             "B3", "B1", "ZD", "GP", "NG", "PC", "DB", "TL", "EC3", "SC", "SW", "SMK"}   # R80: BASE3 / BASE1, D7 detect-only (ZD), F-433 (GP), F-476 (NG), D8 (PC), F-469 (DB), TAIL-1 (TL), D3 (EC3), D5 (SC), D1 sweep (SW), smoke (SMK; already listed)   # R79: F-463 (NB), F-401 / F-418 (QV), F-464 (DX), F-441 / F-440 (EC); R78: its groups (Stage A, split, controls, information-matched thinning, yaw, max layer 1, root 1.4, snapshot, refuse); R77: smoke (SMK), gap-floor (GAP) and voxel-sweep (SWP) groups as well;   # R76: FB (the full-bag grid) and IDN (identity arms) as well;   # R74 addendum 5: these groups' other per-frame compact files stay in the host archive; only frame-1 files are returned
-F1_KEEP = {"residual_dump_all.csv.gz", "r73_f417_residuals.csv.gz", "r74_plane_table.csv.gz",
+             "B3", "B1", "ZD", "GP", "NG", "PC", "DB", "TL", "EC3", "SC", "SW", "SMK",
+             "SWT", "RR", "N478", "N467", "N470", "N485B", "N469", "N468", "N485C", "N474", "N479", "OWN", "ID"}   # R81: the SPEC groups (families) as well; the fine groups of the RR reruns (GP, B3, B1, MG, ZD, NG, PC, DB, DP, EC3, SC) are already listed   # R80: BASE3 / BASE1, D7 detect-only (ZD), F-433 (GP), F-476 (NG), D8 (PC), F-469 (DB), TAIL-1 (TL), D3 (EC3), D5 (SC), D1 sweep (SW), smoke (SMK; already listed)   # R79: F-463 (NB), F-401 / F-418 (QV), F-464 (DX), F-441 / F-440 (EC); R78: its groups (Stage A, split, controls, information-matched thinning, yaw, max layer 1, root 1.4, snapshot, refuse); R77: smoke (SMK), gap-floor (GAP) and voxel-sweep (SWP) groups as well;   # R76: FB (the full-bag grid) and IDN (identity arms) as well;   # R74 addendum 5: these groups' other per-frame compact files stay in the host archive; only frame-1 files are returned
+F1_KEEP = {"state_reference.txt", "residual_dump_all.csv.gz", "r73_f417_residuals.csv.gz", "r74_plane_table.csv.gz",
            "r74_plane_check.json", "r73_f417_hth_frames.csv", "r73_f417_classes.csv",
            "r73_f417_consistency.csv", "pos_trace_all.csv.gz", "compress_manifest.json",
            "sensor_stamps_summary.json", "line_rows_per_scan_all.csv.gz",   # R77 (F-451)
@@ -50,12 +51,13 @@ F1_KEEP = {"residual_dump_all.csv.gz", "r73_f417_residuals.csv.gz", "r74_plane_t
            "zupt_all.csv.gz",       # R80 (F-467): gzip copy of zupt.csv, group ZD only (see GROUP_ONLY_FILES)
            "q_adapt_all.csv.gz",    # R80 (F-476): gzip copy of q_adapt.csv, group NG only
            "step_cap.csv.gz",       # R80 (F-403): written by step_cap_reduce, group SC only
+           "early_grid_arm_all.csv.gz", "f485_2b_arm_all.csv.gz",   # R81 (F-474 / F-485 2B): per-arm early-frame and ground-row-dump summaries if the reducers write them under these names (the collector-level early_grid_summary.csv / f485_2b_summary.csv are generated)
            "motion_q_scan_all.csv.gz"}   # R79 (F-437): returned only for the arm named in KEEP_IF_ARM_HAS (the DROP_FROM_RETURN rule filters every other arm first)
 GROUP_ONLY_FILES = {"zupt_all.csv.gz": {"ZD"}, "q_adapt_all.csv.gz": {"NG"}, "step_cap.csv.gz": {"SC"}}   # R80: a returned file that belongs to one group only (other groups never produce these, this is a second guard)
 # R80 (D1, Bryce 2026-10-05): the voxel-size sweep (group SW, 1224 arms) returns SUMMARIES ONLY (phase_summary.csv rows, arm_scan_all, summaries_all.json: all built for every arm below,
 # independent of this rule); per-arm compact files stay in the host archive. ONE exception: pos_trace_all.csv.gz of an SW arm whose gt_max_mm is above SW_TRACE_GT_MM, because the project
 # collapse rule (rule 4.15 c; tools/r69/r80_sweep_zones.py) is 'departure >= 500 mm AND gt_max_mm > 500' and its departure needs the trace. gt_max_mm <= 500 can never be collapsed, so no trace is needed.
-SW_GROUPS = {"SW"}
+SW_GROUPS = {"SW", "SWT"}   # R81: SWT = the rt voxel sweep rerun (576 arms), summaries only like R80 SW
 SW_TRACE_FILE = "pos_trace_all.csv.gz"
 SW_TRACE_GT_MM = 500.0   # mm; the gt_max_mm limb of the collapse rule (same constant as COLLAPSE_GT_MM in r80_sweep_zones.py)
 LEVELS = {-1: (None, None, 0), 0: (25, None, 0), 1: (25, 5, 0), 2: (50, 10, 0), 3: (100, 25, 45)}   # R80 (F-381): level -1 keeps every scan of every arm (no thinning)   # (step, keep-arm step (None = every scan), onset-window trim after onset+70)
@@ -81,6 +83,37 @@ def return_file(base, arm, group, gt_max_mm=None):
     if base in GROUP_ONLY_FILES and group not in GROUP_ONLY_FILES[base]:
         return False
     return True
+
+
+def write_plane_fit_counts(runs, arms, out):
+    """R81 (F-469): <out>/plane_fit_trace_counts_all.csv, written by the collector itself (R80 relied on a manual reduce). Calls tools/r69/plane_fit_trace_counts.py (the same script, beside this file)
+    for the arms that have plane-fit-trace output (raw plane_fit_trace.csv[.gz] or the reducer's plane_fit_trace_counts.csv); the script writes a .csv.gz and a status csv, and this function
+    leaves the plain-csv name the R81 contract lists. No arm with trace output -> no file and a printed note (the gate / required_outputs flag it for the arms that must have it)."""
+    if not arms:
+        print("plane_fit_trace_counts_all.csv: no arm has plane-fit-trace output; not written")
+        return None
+    tool = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plane_fit_trace_counts.py")
+    tmp = tempfile.mkdtemp()
+    try:
+        al = os.path.join(tmp, "arms.txt"); open(al, "w").write("\n".join(arms) + "\n")
+        try:
+            subprocess.check_call([sys.executable, tool, "--runs", runs, "--arms", al, "--out", tmp])
+        except (subprocess.CalledProcessError, OSError) as e:   # loud, not fatal: the collector's other outputs are still wanted; the required-output check then flags the missing file
+            print("ERROR plane_fit_trace_counts_all.csv: %s failed (%r); file not written" % (tool, e))
+            return None
+        gz = os.path.join(tmp, "plane_fit_trace_counts_all.csv.gz")
+        st = os.path.join(tmp, "plane_fit_trace_counts_status.csv")
+        if os.path.exists(st):
+            shutil.copy(st, os.path.join(out, "plane_fit_trace_counts_status.csv"))
+        if not os.path.exists(gz):
+            print("plane_fit_trace_counts_all.csv: plane_fit_trace_counts.py wrote no counts for %d arm(s) (see plane_fit_trace_counts_status.csv)" % len(arms))
+            return None
+        df = pd.read_csv(gz)
+        df.to_csv(os.path.join(out, "plane_fit_trace_counts_all.csv"), index=False)
+        print("plane_fit_trace_counts_all.csv: %d rows, %d arms" % (len(df), df["arm"].nunique()))
+        return len(df)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def g(d, *ks):
@@ -182,6 +215,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", required=True); ap.add_argument("--arms", required=True); ap.add_argument("--out", required=True)
     ap.add_argument("--level", type=int, default=0, choices=sorted(LEVELS)); ap.add_argument("--params", default=None)
+    ap.add_argument("--ref-completeness", action="append", default=None, help="R81: completeness.csv of an older return (R80, R80C) whose state_trace digests are the identity references; repeatable")
     a = ap.parse_args()
     pj = json.load(open(a.params)) if a.params and os.path.exists(a.params) else {}
     os.makedirs(os.path.join(a.out, "summaries"), exist_ok=True)
@@ -191,14 +225,20 @@ def main():
     summaries_all = {}
     rows, comp, scans, ols, reasons, tcounts = [], [], [], [], [], []
     sha, manifests, stamps = {}, {}, {}
+    pft_arms = []
     base_tabs = {}
     def load_base(nm):
         fp = os.path.join(a.runs, nm, "arm_scan.csv")
         return pd.read_csv(fp, dtype={"t": str}) if os.path.exists(fp) else None
     for key, nm in BASE.items():
         base_tabs[key] = load_base(nm)
+    for key in ("full",):   # R81: the rt BASE3 arm of the same bag is the baseline when the R80 name is not in this runs dir
+        if base_tabs.get(key) is None:
+            base_tabs[key] = load_base("r81_rt_mg_eee_01_fq")
     for sq in sorted(set(plan.seq) - {"eee_01"}):
-        base_tabs["seq:" + sq] = load_base("r80_mg_%s_fq" % sq)   # R80: the whole-bag message-log arm (lines off, 0.425, pfn 3, fixed-Q) of the bag; R79: the same-batch lines-off 0.425 m fixed-Q control of the bag (R74: r74_qb_<bag>_fq)
+        base_tabs["seq:" + sq] = load_base("r80_mg_%s_fq" % sq)
+        if base_tabs["seq:" + sq] is None:
+            base_tabs["seq:" + sq] = load_base("r81_rt_mg_%s_fq" % sq)   # R80: the whole-bag message-log arm (lines off, 0.425, pfn 3, fixed-Q) of the bag; R79: the same-batch lines-off 0.425 m fixed-Q control of the bag (R74: r74_qb_<bag>_fq)
     for _, p in plan.iterrows():
         D = os.path.join(a.runs, p.arm)
         sj = os.path.join(D, "arm_summary.json")
@@ -217,7 +257,7 @@ def main():
         cdir = os.path.join(a.out, "compact", p.arm)
         for pat in ("*_compact.csv.gz", "*_windows.csv.gz", "*_blocks.csv", "*_all.csv.gz", "plane_trace_window.csv.gz", "sensor_stamps_summary.json", "compress_manifest.json",
                     "residual_info_*", "crossframe_*", "knot_windows.csv", "knot_trend_stationary.csv",
-                    "r72_*", "r73_*", "r74_*", "step_cap.csv.gz", "shadow_*_all.csv.gz", "scan_log_all.csv.gz", "residual_dump_*all.csv.gz", "coupled_update_*_all.csv.gz", "pos_trace_all.csv.gz"):   # R71-R73 analysis outputs
+                    "r72_*", "r73_*", "r74_*", "step_cap.csv.gz", "shadow_*_all.csv.gz", "scan_log_all.csv.gz", "residual_dump_*all.csv.gz", "coupled_update_*_all.csv.gz", "pos_trace_all.csv.gz", "state_reference.txt", "*_all.csv"):   # R71-R73 analysis outputs; R81 (fix 7): "*_all.csv" added (plain .csv outputs such as window_row_summary_all.csv matched no pattern in R80; return_file still filters by F1_KEEP)
             for fp in glob.glob(os.path.join(D, pat)):
                 if not return_file(os.path.basename(fp), p.arm, str(p.get("group", "")), gt_max):
                     continue
@@ -227,12 +267,29 @@ def main():
         if os.path.exists(ssj):
             stamps[p.arm] = json.load(open(ssj))
         if S is None:
-            continue
+            # R81 AGENT FIX: an arm whose own duration never reaches the
+            # engagement window (N474/RRX/some OWN arms -- r74_score_job.py
+            # writes arm.json, not arm_summary.json, when n_scans==0/
+            # windows_used=={}) was previously skipped entirely, leaving it
+            # out of phase_summary.csv even though it exited cleanly. The
+            # round's own design (R81_INSTRUCTIONS.md section 10.1: "the 720
+            # N474 arms ... return phase-summary rows only") expects a row
+            # regardless. meta (arm.json) is already the flat
+            # tier/duration_s/exit_code/wall_s/kind/seq structure flat()
+            # expects under "meta", so wrap it and proceed with whatever
+            # metric fields are actually available (mostly None/absent).
+            if not meta:
+                continue
+            onset_default = 485 if p.seq == "eee_01" else int((pj.get(p.seq) or {}).get("onset_scan", 485))
+            S = {"arm": p.arm, "kind": meta.get("kind", p.kind), "meta": meta,
+                 "definitions": {"onset_scan": onset_default}}
         row = flat(S)
         summaries_all[p.arm] = S
         full = str(p.duration_s) == "full"
         keep_arm = int(p.keep_raw) == 1
         onset = int((pj.get(p.seq) or {}).get("onset_scan", 485)) if p.seq != "eee_01" else 485
+        if any(os.path.exists(os.path.join(D, f)) for f in ("plane_fit_trace.csv", "plane_fit_trace.csv.gz", "plane_fit_trace_counts.csv")):
+            pft_arms.append(p.arm)   # R81 (F-469): arms with plane-fit-trace output; the counts file is built below by plane_fit_trace_counts.py
         for fn, acc in (("arm_scan.csv", scans), ("arm_ol_tau.csv", ols), ("plane_fit_reasons.csv", reasons), ("plane_fit_trace_counts.csv", tcounts)):
             fp = os.path.join(D, fn)
             if not os.path.exists(fp):
@@ -257,6 +314,7 @@ def main():
         if acc:
             big = pd.concat(acc)
             big.to_csv(os.path.join(a.out, nm + ".csv.gz"), index=False, float_format="%.5g", compression="gzip")   # t is a pre-formatted string column (4 decimals)
+    write_plane_fit_counts(a.runs, pft_arms, a.out)
     json.dump(summaries_all, open(os.path.join(a.out, "summaries_all.json"), "w"), default=lambda o: None)
     json.dump(manifests, open(os.path.join(a.out, "compress_manifests.json"), "w"), indent=1)
     json.dump(stamps, open(os.path.join(a.out, "sensor_stamps_summaries.json"), "w"), indent=1)
@@ -270,6 +328,30 @@ def main():
             for x in [x for x in sha if x.startswith(pre)]:
                 orig = x.replace(pre, rep)
                 f.write("determinism: %s  %s  vs %s  %s  -> %s\n" % (sha.get(x, "") or "(missing)", x, sha.get(orig, "") or "(missing)", orig, "IDENTICAL" if sha.get(x) and sha.get(x) == sha.get(orig) else "DIFFERENT or missing"))
+        # R81 (fix 8): the R80 whole-bag and sweep determinism repeats pair with names the prefix swap above cannot build (r80_own_det_x_<bag> -> r80_mg_<bag>_fq; r80_own_det_sw_* -> r80_sw_*); R80 listed only the dp pair
+        pairs81 = [(x, "r80_mg_" + x[len("r80_own_det_x_"):] + "_fq") for x in sha if x.startswith("r80_own_det_x_")] + [(x, "r80_sw_" + x[len("r80_own_det_sw_"):]) for x in sha if x.startswith("r80_own_det_sw_")]
+        # R81: determinism arms of this manifest: the arm table's `ref` column names the arm repeated; without the column, r81_own_det_<bag> repeats r81_rt_mg_<bag>_fq
+        for _, pr in plan.iterrows():
+            if str(pr.get("arm_kind") or pr.get("kind", "")).startswith("det") or pr.arm.startswith("r81_own_det"):
+                ref = str(pr.get("ref", "") or "")
+                if not ref or ref == "nan":
+                    m = re.search(r"([a-z]+_\d\d)", pr.arm)
+                    ref = "r81_rt_mg_%s_fq" % m.group(1) if m else ""
+                if ref:
+                    pairs81.append((pr.arm, ref))
+        for x, orig in pairs81:
+            f.write("determinism: %s  %s  vs %s  %s  -> %s\n" % (sha.get(x, "") or "(missing)", x, sha.get(orig, "") or "(missing)", orig, "IDENTICAL" if sha.get(x) and sha.get(x) == sha.get(orig) else "DIFFERENT or missing"))
+        # R81: identity arms against the OLD returns: the reference digest comes from a completeness.csv of the R80 / R80C return (--ref-completeness, repeatable); metric identity is judged by r81_gates.py / r81_identity_hold.py
+        refd = {}
+        for rc in (a.ref_completeness or []):
+            if os.path.exists(rc):
+                rcd = pd.read_csv(rc)
+                if "arm" in rcd.columns and "state_trace_sha256_run_id_blanked" in rcd.columns:
+                    refd.update({r_.arm: str(r_.state_trace_sha256_run_id_blanked) for r_ in rcd.itertuples() if str(r_.state_trace_sha256_run_id_blanked) not in ("", "nan")})
+        for _, pr in plan.iterrows():
+            if str(pr.get("arm_kind") or pr.get("kind", "")) == "id" and str(pr.get("ref", "") or "") not in ("", "nan"):
+                d1, d0 = sha.get(pr.arm, ""), refd.get(str(pr.ref), "")
+                f.write("identity: %s  %s  vs %s  %s  -> %s\n" % (d1 or "(missing)", pr.arm, d0 or "(no reference digest)", pr.ref, "IDENTICAL" if d1 and d1 == d0 else "DIFFERENT or missing (a fact; the verdict is the 0.005 mm metric gate)"))
     print("collected %d/%d arms" % (len(rows), len(plan)))
 
 if __name__ == "__main__":

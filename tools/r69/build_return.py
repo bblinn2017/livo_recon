@@ -66,11 +66,21 @@ GENERATED_R79 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv",
 # R80: id (the pfn 3 window arm: smoke + identity) then the run (window arms + whole-bag message logs)
 REQUIRED_AGENT_R80 = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R80_tree.tar.gz", "unit_tests/ctest_output.txt", "checks/build_log_tail.txt",
                       "checks/r80_selftest_output.txt", "launch/launch_command.txt", "launch/containers_file.txt", "launch/launch_time.txt", "launch/checkup_cycles",
-                      "listener/id/listener_ledger.jsonl", "listener/id/listener_final.json", "listener/run/listener_ledger.jsonl", "listener/run/listener_final.json",
+                      "listener/id/listener_ledger.jsonl", "listener/id/listener_final.json",   # R81 fix (item 9): the R80 listener layout has only the id stream and the run stream is not a listener output
                       "stop_reasons.csv", "harness_answers.md"]
 REQUIRED_DIRS_NONEMPTY_R80 = ["listener", "launch/checkup_cycles", "checks"]
 GENERATED_R80 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r80_gates.txt", "r80_identity_vs_old.csv", "duplicates.tsv", "summaries_all.json",
                  "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "compact", "queue"]
+# R81: id (identity + smoke + refuse arms, runs FIRST and alone) then nine bag listeners (one spec per bag covers its two queues r81_<bag> and r81_<bag>_s, rule 1.16).
+# listener/<name>/ = the listener ledger of that spec. The identity-hold result (r81_identity_hold.py output) is agent-authored.
+R81_BAGS = ["eee_01", "eee_02", "eee_03", "nya_01", "nya_02", "nya_03", "sbs_01", "sbs_02", "sbs_03"]
+REQUIRED_AGENT_R81 = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R81_tree.tar.gz", "unit_tests/ctest_output.txt", "checks/build_log_tail.txt",
+                      "checks/r81_selftest_output.txt", "checks/r81_identity_hold.txt", "launch/launch_command.txt", "launch/containers_file.txt", "launch/launch_time.txt", "launch/checkup_cycles",
+                      "listener/id/listener_ledger.jsonl", "listener/id/listener_final.json"] + \
+                     ["listener/%s/%s" % (b, f) for b in R81_BAGS for f in ("listener_ledger.jsonl", "listener_final.json")] + ["stop_reasons.csv", "harness_answers.md"]
+REQUIRED_DIRS_NONEMPTY_R81 = ["listener", "launch/checkup_cycles", "checks"]
+GENERATED_R81 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r81_gates.txt", "r81_identity_vs_old.csv", "duplicates.tsv", "summaries_all.json",
+                 "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "plane_fit_trace_counts_all.csv", "compact", "queue"]   # R81 (F-469): the collector writes plane_fit_trace_counts_all.csv itself
 PART = 28 * 1000 * 1000
 STORED_EXTS = (".gz", ".zip")   # already-compressed; ZIP_STORED saves time, not space (a .tar.gz is caught by .gz)
 
@@ -286,13 +296,14 @@ def main():
     ap.add_argument("--manifest", required=True); ap.add_argument("--queue-dir", required=True); ap.add_argument("--date", required=True)
     ap.add_argument("--params", default=None); ap.add_argument("--limit-mb", type=float, default=28.0); ap.add_argument("--allow-missing", action="store_true")
     ap.add_argument("--r73-runs", default=None, help="directory holding the R73 arm dirs (r73_sh_* shadow arms and plain controls) for the F-426 comparison")
-    ap.add_argument("--round", default="R74", choices=["R74", "R75", "R76", "R77", "R78", "R79", "R80"], help="R75 / R76 / R77: that round's names, required-agent list and gates script (R7x_INSTRUCTIONS.md section 13)")
+    ap.add_argument("--round", default="R74", choices=["R74", "R75", "R76", "R77", "R78", "R79", "R80", "R81"], help="R75 / R76 / R77: that round's names, required-agent list and gates script (R7x_INSTRUCTIONS.md section 13)")
+    ap.add_argument("--gate-args", default=None, help="R81: extra arguments for r81_gates.py as one quoted string (e.g. \"--grid-retime r80c_grid.json --grid-bag grid_check/r80d_grid_bag.json --early-grid <file>\")")
     ap.add_argument("--step0-delivered", action="store_true", help="STEP0 data was delivered in the stage-1b return: check it against STEP0/STEP0_SHA256.txt and do NOT pack it again (only the three index files are packed)")
     a = ap.parse_args()
     here = os.path.dirname(os.path.abspath(__file__))
     RND = a.round
-    gates_py, gates_txt = {"R80": ("r80_gates.py", "r80_gates.txt"), "R79": ("r79_gates.py", "r79_gates.txt"), "R78": ("r78_gates.py", "r78_gates.txt"), "R77": ("r77_gates.py", "r77_gates.txt"), "R76": ("r76_gates.py", "r76_gates.txt"), "R75": ("r75_gates.py", "r75_gates.txt")}.get(RND, ("r74_gates.py", "r74_gates.txt"))
-    req_agent, req_dirs, gen_items = {"R80": (REQUIRED_AGENT_R80, REQUIRED_DIRS_NONEMPTY_R80, GENERATED_R80), "R79": (REQUIRED_AGENT_R79, REQUIRED_DIRS_NONEMPTY_R79, GENERATED_R79), "R78": (REQUIRED_AGENT_R78, REQUIRED_DIRS_NONEMPTY_R78, GENERATED_R78), "R77": (REQUIRED_AGENT_R77, REQUIRED_DIRS_NONEMPTY_R77, GENERATED_R77), "R76": (REQUIRED_AGENT_R76, REQUIRED_DIRS_NONEMPTY_R76, GENERATED_R76), "R75": (REQUIRED_AGENT_R75, REQUIRED_DIRS_NONEMPTY_R75, GENERATED_R75)}.get(RND, (REQUIRED_AGENT, REQUIRED_DIRS_NONEMPTY, GENERATED))
+    gates_py, gates_txt = {"R81": ("r81_gates.py", "r81_gates.txt"), "R80": ("r80_gates.py", "r80_gates.txt"), "R79": ("r79_gates.py", "r79_gates.txt"), "R78": ("r78_gates.py", "r78_gates.txt"), "R77": ("r77_gates.py", "r77_gates.txt"), "R76": ("r76_gates.py", "r76_gates.txt"), "R75": ("r75_gates.py", "r75_gates.txt")}.get(RND, ("r74_gates.py", "r74_gates.txt"))
+    req_agent, req_dirs, gen_items = {"R81": (REQUIRED_AGENT_R81, REQUIRED_DIRS_NONEMPTY_R81, GENERATED_R81), "R80": (REQUIRED_AGENT_R80, REQUIRED_DIRS_NONEMPTY_R80, GENERATED_R80), "R79": (REQUIRED_AGENT_R79, REQUIRED_DIRS_NONEMPTY_R79, GENERATED_R79), "R78": (REQUIRED_AGENT_R78, REQUIRED_DIRS_NONEMPTY_R78, GENERATED_R78), "R77": (REQUIRED_AGENT_R77, REQUIRED_DIRS_NONEMPTY_R77, GENERATED_R77), "R76": (REQUIRED_AGENT_R76, REQUIRED_DIRS_NONEMPTY_R76, GENERATED_R76), "R75": (REQUIRED_AGENT_R75, REQUIRED_DIRS_NONEMPTY_R75, GENERATED_R75)}.get(RND, (REQUIRED_AGENT, REQUIRED_DIRS_NONEMPTY, GENERATED))
     q = os.path.join(a.ret, "queue"); os.makedirs(q, exist_ok=True)
     for f in glob.glob(os.path.join(a.manifest, "*")):
         if os.path.isfile(f):
@@ -304,7 +315,7 @@ def main():
             n[st] += 1
             f.write("%s\t%s\n" % (os.path.basename(jd.rstrip("/")), st))
         f.write("# totals: %s\n" % n)
-    cmd = [sys.executable, os.path.join(here, "r69_collect.py"), "--runs", a.runs, "--arms", a.arms, "--out", a.ret, "--level", ("-1" if a.round == "R80" else "0")]   # R80 (F-381): no thinning; the SW sweep arms are kept out of arm_scan_all by the collector
+    cmd = [sys.executable, os.path.join(here, "r69_collect.py"), "--runs", a.runs, "--arms", a.arms, "--out", a.ret, "--level", ("-1" if a.round in ("R80", "R81") else "0")]   # R80 (F-381): no thinning; the SW sweep arms are kept out of arm_scan_all by the collector
     if a.params:
         cmd += ["--params", a.params]
     subprocess.check_call(cmd)
@@ -327,6 +338,16 @@ def main():
             for jd in sorted(j for qd in a.queue_dir.split(",") for j in glob.glob(os.path.join(qd, "*/"))):
                 df.write(os.path.basename(jd.rstrip("/")) + "\n")
         gcmd += ["--dispatched", disp]
+    if RND == "R81":   # R81: the gate reads the manifest directory itself (arm_table.tsv, jobs_*.json, required_outputs.json); grids and reference returns come in through --gate-args
+        gcmd = [sys.executable, os.path.join(here, gates_py), "--manifest", a.manifest, "--runs", a.runs, "--out", os.path.join(a.ret, gates_txt), "--csv", os.path.join(a.ret, "r81_identity_vs_old.csv"),
+                "--dispatched", os.path.join(q, "dispatched_arms.txt")]
+        with open(os.path.join(q, "dispatched_arms.txt"), "w") as df:
+            for jd in sorted(j for qd in a.queue_dir.split(",") for j in glob.glob(os.path.join(qd, "*/"))):
+                df.write(os.path.basename(jd.rstrip("/")) + "\n")
+        if a.gate_args:
+            import shlex
+            gcmd += shlex.split(a.gate_args)
+        gcmd += ["--hold-file", os.path.join(a.ret, "HOLD_FROM_GATES.txt")]   # a FAIL of a DET or IDENT row writes this file (nothing is deleted); the agent places it as the dispatcher's HOLD.txt (r81_hold_check.sh)
     subprocess.call(gcmd)   # FAIL is reported in the file, not fatal here
     arm_ids = [r["arm"] for r in csv.DictReader(open(a.arms), delimiter="\t")]
     engagement_all(a.runs, arm_ids, os.path.join(a.ret, "engagement_all.txt"))
@@ -363,6 +384,9 @@ def main():
             print("   %s  %s  %s  [%s] %s" % (r[0], r[1], r[2], r[4], r[5]))
         print("   (%d more)" % max(0, len(miss) - 60) if len(miss) > 60 else "", "agent/generated missing: %d (see RETURN_CHECKLIST.md)" % gmiss)
         return 3
+    if RND == "R81":   # R81 (F-496): packing is done by r81_pack_return.py (split -b 28M -d -a 2, a .sha256 per part, reassembly proof, duplicates by pos_trace hash); this script stops here
+        print("R81: checklist passed. Now run: python3 tools/r69/r81_pack_return.py --dir %s --required %s --name R81_RETURN_%s" % (a.ret, os.path.join(a.manifest, "required_outputs.json"), a.date))
+        return 0
     zp = "%s_RETURN_%s.zip" % (RND, a.date)
     allf = files_of(a.ret, ".")
     base = os.path.dirname(os.path.abspath(a.ret.rstrip("/")))

@@ -10,6 +10,8 @@
 //   QA6 nis_gate state machine: for NIS = 2,2,0.5,0.5 the gain is exactly 1.25, 1.5625, 1+0.95*0.5625, 1+0.95*(that) (1e-14);
 //       the whiteness gate blocks inflation when |lag1| > whiteness_max and counts it.
 //   QA7 apply selects which variance sees the gain.
+//   QA9 (R81, F-478) nis_smooth: NIS = 1 keeps the gain exactly 1; constant NIS = 2 (clip ln 2, slope 0.1, decay 0.95) converges to NIS^2 = 4 (1e-9); the clip bounds ln NIS (NIS = 100 acts as NIS = 2);
+//       NIS = 0.5 converges to 0.25; min_gain bounds it; control: the same NIS = 2 stream through nis_gate overshoots 4 (the hard rule is not the smooth law).
 #include "livo_recon/lio/q_adapt.h"
 
 #include <cstdio>
@@ -146,6 +148,25 @@ int main()
     CHECK(y.gainAcc() == 1.0 && y.gainGyr() == 2.0, "QA7 apply=gyr");
   }
 
+  {   // QA9 (R81, F-478): smooth NIS gain
+    QGainOptions o; o.mode = "nis_smooth"; o.nis_slope = 0.1; o.nis_clip = std::log(2.0); o.decay = 0.95; o.min_gain = 0.25; o.max_gain = 100.0;
+    CHECK(QGainOptions().nis_clip == 0.0 && QGainOptions().nis_slope == 0.1, "QA9 nis_clip has no default (0 = absent, refused by the loader); nis_slope defaults to 0.1");
+    QGain g; g.configure(o);
+    for (int i = 0; i < 50; ++i) g.update(stat(1, 1.0, 0));
+    CHECK(g.gain() == 1.0, "QA9 NIS = 1 keeps the gain exactly 1");
+    for (int i = 0; i < 2000; ++i) g.update(stat(1, 2.0, 0));
+    CHECK(close(g.gain(), 4.0, 1e-9), "QA9 constant NIS = 2 converges to NIS^(slope/(1-decay)) = 4");
+    QGain c; c.configure(o);
+    for (int i = 0; i < 2000; ++i) c.update(stat(1, 100.0, 0));
+    CHECK(close(c.gain(), 4.0, 1e-9), "QA9 the clip makes NIS = 100 act as NIS = 2");
+    QGain d; d.configure(o);
+    for (int i = 0; i < 2000; ++i) d.update(stat(1, 0.5, 0));
+    CHECK(close(d.gain(), 0.25, 1e-9), "QA9 constant NIS = 0.5 converges to 0.25");
+    QGainOptions hard; hard.mode = "nis_gate"; hard.nis_hi = 1.3; hard.inflate = 1.25; hard.decay = 0.95; hard.max_gain = 100.0;
+    QGain h; h.configure(hard);
+    for (int i = 0; i < 2000; ++i) h.update(stat(1, 2.0, 0));
+    CHECK(h.gain() > 4.0 * 1.0001, "QA9 control: the hard gate on the same stream goes far above 4 (the check can tell the laws apart)");
+  }
   {   // QA8 (R80, F-476): the deflating side of the NIS gate; nis_lo = 0 is the one-sided gate bit for bit
     QGainOptions o; o.mode = "nis_gate"; o.nis_hi = 1.5; o.inflate = 1.25; o.decay = 0.95; o.max_gain = 100.0;
     o.nis_lo = 0.75; o.deflate = 0.8; o.min_gain = 0.25;

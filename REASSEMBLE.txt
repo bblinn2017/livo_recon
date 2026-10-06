@@ -1,1 +1,1 @@
-cat R79_RETURN_2026-10-04.zip.part* > R79_RETURN_2026-10-04.zip && sha256sum R79_RETURN_2026-10-04.zip   # the hash must equal the first line of R79_return.sha256; unzip only then
+cat R80_RETURN_2026-10-05.zip.part* > R80_RETURN_2026-10-05.zip && sha256sum R80_RETURN_2026-10-05.zip   # the hash must equal the first line of R80_return.sha256; unzip only then

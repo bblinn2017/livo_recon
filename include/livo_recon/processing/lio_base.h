@@ -133,6 +133,9 @@ struct LioProcOptions
   // R73 (F-417): also dump the residuals of the LAST executed iteration of each listed frame (iteration index recorded in the
   // iter column). Sub-key of lio/residual_dump_frames (refused when that list is empty). Default false is bit-identical.
   bool residual_dump_last_iter = false;
+  // R81 (F-485 2B): append voxel_point_count and voxel_distinct_frames (of each row's voxel) to residual_dump.csv and shadow_residual_dump.csv. Sub-key of lio/residual_dump_frames (refused when that list is empty).
+  // Default false leaves the header and rows byte-identical.
+  bool residual_dump_voxel_info = false;
 
   // R73 (F-414): shadow LIO update (see lio/shadow_options.h). mode off (default) is bit-identical. iekf estimator only.
   ShadowOptions shadow;

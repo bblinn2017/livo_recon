@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """R80 reducer of the takeoff-window dump (F-449a) and the per-message LiDAR log (F-389). Python only; reads the raw logs of ONE arm, writes the compact `*_all` files that r69_collect returns.
 
-    python3 r80_window_reduce.py --dir <arm dir> --out <arm dir> [--window] [--msglog]
+    python3 r80_window_reduce.py --dir <arm dir> --out <arm dir> [--window] [--msglog] [--ground-height H]
     python3 r80_window_reduce.py --selftest
 
 Window (Bryce 2026-10-05: 'state and covariance for pfn1 and pfn3, both Q, at scans 515-530 ... the per-iteration state, the vertical velocity and its variance, and the covariance rows for position and
@@ -15,6 +15,8 @@ finds the offset by matching the position.
   window_dump_state_all.csv.gz   residual_dump_state.csv rows, frames LO .. HI (position and rotation vector at the start of each dumped iteration)
   window_row_summary_all.csv     one row per (frame, iter, class) for frames LO .. HI: rows, sum of weights, mean r^2 / sigma^2, rows with r^2 > 9 sigma^2 (the WEIGHT variance), rows with r^2 > 9 sigma_gate^2 (the
                                  variance the gate used: must be 0), sigma_gate / sigma^2 / plane-variance / prior-pose quantiles. class = ground (|world normal z| >= NZ_GROUND) or other.
+                                 R81 F-480: with --ground-height H the class is by HEIGHT instead: ground = world point z (dump column wz) <= H, otherwise above_ground (the label "other" is
+                                 used only by the default normal rule). Bryce's value is H = 0.0 for every bag. Not given = the normal rule, outputs identical to the R80 reducer.
   window_ground_rows_all.csv.gz  every GROUND row of frames GLO .. GHI (both dumped iterations): frame, iter, idx, source_index, t, r, sigma_squared, plane_var_term, floor_term, sigma_diag_squared, s_prior_pose, sigma_gate_squared,
                                  plane_key, node_id, tier, vis, normal (hpos_*), world point (wx, wy, wz), row_kind, w = 1 / sigma_squared, r2_over_sigma2.
 Msg log:
@@ -28,6 +30,20 @@ LO, HI = 515, 530
 GLO, GHI = 518, 524
 WIDE = 1
 NZ_GROUND = 0.8
+GROUND_HEIGHT = None  # R81 F-480: None = the normal rule (|world normal z| >= NZ_GROUND); a number H = height rule (ground iff wz <= H); set by --ground-height or the ground_height argument
+
+
+def ground_mask(df, ground_height=None):
+    """Boolean Series: row is ground. ground_height None -> |hpos_z| >= NZ_GROUND (R80 rule); else wz <= ground_height (R81 F-480, world z, map frame whose origin is the start pose)."""
+    if ground_height is None:
+        return df["hpos_z"].abs() >= NZ_GROUND
+    if not np.isfinite(ground_height):
+        raise SystemExit("--ground-height must be a finite number")
+    return df["wz"] <= ground_height
+
+
+def rule_text(ground_height=None):
+    return ("|world normal z| >= %.2f" % NZ_GROUND) if ground_height is None else ("world z (wz) <= %g" % ground_height)
 SIGMA_NUM = 3.0     # lio gate: r^2 <= sigma_num_squared (9) * (...); the 9 is the gate's own value, recorded here only to count the rows that exceed it
 GROUND_COLS = ["frame", "iter", "idx", "source_index", "t", "r", "sigma_squared", "plane_var_term", "floor_term", "sigma_diag_squared", "s_prior_pose", "plane_key", "node_id", "tier", "vis",
                "hpos_x", "hpos_y", "hpos_z", "wx", "wy", "wz", "row_kind", "sigma_gate_squared"]
@@ -68,7 +84,7 @@ def _quant(x, q):
     return float(np.quantile(x, q)) if len(x) else float("nan")
 
 
-def reduce_dump(src, out):
+def reduce_dump(src, out, ground_height=None):
     p = _path(src, "residual_dump.csv")
     need = GROUND_COLS + ["frame"]
     ground, summ = [], []
@@ -83,7 +99,7 @@ def reduce_dump(src, out):
         ch = ch.copy()
         ch["w"] = 1.0 / ch["sigma_squared"]
         ch["r2_over_sigma2"] = ch["r"] ** 2 / ch["sigma_squared"]
-        ch["class"] = np.where(ch["hpos_z"].abs() >= NZ_GROUND, "ground", "other")
+        ch["class"] = np.where(ground_mask(ch, ground_height), "ground", "other" if ground_height is None else "above_ground")
         for (fr, it, cl), g in ch.groupby(["frame", "iter", "class"]):
             acc.setdefault((fr, it, cl), []).append(g)
         gr = ch[(ch["class"] == "ground") & (ch["frame"] >= GLO) & (ch["frame"] <= GHI)]
@@ -102,20 +118,21 @@ def reduce_dump(src, out):
     S = pd.DataFrame(summ)[SUMMARY_COLS]
     S.to_csv(os.path.join(out, "window_row_summary_all.csv"), index=False, float_format="%.9g")
     if not ground:
-        raise SystemExit("no ground rows (|normal z| >= %.2f) in frames %d..%d of residual_dump.csv" % (NZ_GROUND, GLO, GHI))
+        raise SystemExit("no ground rows (%s) in frames %d..%d of residual_dump.csv" % (rule_text(ground_height), GLO, GHI))
     G = pd.concat(ground, ignore_index=True)
     G.to_csv(os.path.join(out, "window_ground_rows_all.csv.gz"), index=False, float_format="%.9g", compression="gzip")
     return {"summary_rows": int(len(S)), "ground_rows": int(len(G))}
 
 
-def reduce_window(src, out):
+def reduce_window(src, out, ground_height=None):
     n = {}
     n["window_state_all.csv.gz"] = _window(src, "state_trace.csv", "scan_id", LO - WIDE, HI + WIDE, "window_state_all.csv.gz", out)
     n["window_iter_all.csv.gz"] = _window(src, "iekf_factor_iteration.csv", "scan_id", LO, HI, "window_iter_all.csv.gz", out, need=("v_before_x", "v_after_z"))
     n["window_update_diag_all.csv.gz"] = _window(src, "lio_update_diag.csv", "frame", LO, HI, "window_update_diag_all.csv.gz", out)
     n["window_frame_stats_all.csv.gz"] = _window(src, "frame_stats.txt", "frame_idx", LO, HI, "window_frame_stats_all.csv.gz", out, need=("n_residuals", "n_miss_coverage", "n_miss_mismatch"))
     n["window_dump_state_all.csv.gz"] = _window(src, "residual_dump_state.csv", "frame", LO, HI, "window_dump_state_all.csv.gz", out)
-    n.update(reduce_dump(src, out))
+    n.update(reduce_dump(src, out, ground_height))
+    n["ground_rule"] = rule_text(ground_height)
     return n
 
 
@@ -148,7 +165,7 @@ def fake_arm(d, ground_only_in=None, drop=None):
                 nz = 0.95 if k % 5 < 2 else 0.2
                 s2 = 0.01 * (1 + k % 7)
                 rows.append(dict(frame=f, iter=i, idx=k, source_index=k, t=0.0, r=0.05 * (1 if k % 11 else 8), sigma_squared=s2, plane_var_term=0.001 * (1 + k % 3), plane_key=1, node_id=k % 17, tier=0, vis=0,
-                                 hpos_x=0.0, hpos_y=np.sqrt(1 - nz * nz), hpos_z=nz, wx=0., wy=0., wz=0., row_kind=0, floor_term=0.005, sigma_diag_squared=s2 - 0.005 - 0.001, s_prior_pose=0.001, sigma_gate_squared=6 * s2))
+                                 hpos_x=0.0, hpos_y=np.sqrt(1 - nz * nz), hpos_z=nz, wx=0., wy=0., wz=[-0.5, 0.0, 0.3, 2.0][k % 4], row_kind=0, floor_term=0.005, sigma_diag_squared=s2 - 0.005 - 0.001, s_prior_pose=0.001, sigma_gate_squared=6 * s2))
     dd = pd.DataFrame(rows)
     ml = pd.DataFrame([dict(zip(MSG_COLS, [m, m, 1.0 + m * .1, 0.9 + m * .1, .1, 20000, 9000, 1.0, 1.1, 0.0, 0.1, 0.1, 1.0, -0.01, 0])) for m in range(50)])
     for name, df in (("state_trace.csv", st), ("iekf_factor_iteration.csv", it), ("lio_update_diag.csv", ud), ("frame_stats.txt", fs), ("residual_dump_state.csv", ds), ("residual_dump.csv", dd), ("lidar_msg_log.csv", ml)):
@@ -189,6 +206,29 @@ def selftest():
         fails.append("column order")
     if reduce_msglog(d, d) != 50 or len(pd.read_csv(os.path.join(d, "lidar_msg_log_all.csv.gz"))) != 50:
         fails.append("msg log")
+    # R81 F-480 height rule: wz = -0.5, 0.0, 0.3, 2.0 cyclic in k; H = 0.0 -> ground iff k % 4 in {0, 1} (the wz == H boundary row is ground), independent of the normal
+    h = tempfile.mkdtemp(); fake_arm(h)
+    nh = reduce_window(h, h, ground_height=0.0)
+    GH = pd.read_csv(os.path.join(h, "window_ground_rows_all.csv.gz")); SH = pd.read_csv(os.path.join(h, "window_row_summary_all.csv"))
+    if len(GH) != (GHI - GLO + 1) * 2 * 100 or (GH.wz > 0.0).any() or not (GH.wz == 0.0).any() or not (GH.hpos_z.abs() < NZ_GROUND).any():
+        fails.append("height rule ground rows: %d (want %d), max wz %s" % (len(GH), (GHI - GLO + 1) * 2 * 100, GH.wz.max()))
+    if set(SH["class"]) != {"ground", "above_ground"} or SH.n_rows.sum() != (HI - LO + 1) * 2 * 200 or not (SH[SH["class"] == "ground"].n_rows == 100).all():
+        fails.append("height rule summary classes %s" % sorted(set(SH["class"])))
+    if nh["ground_rule"] != "world z (wz) <= 0" or n["ground_rule"] != "|world normal z| >= 0.80":
+        fails.append("ground_rule text %r / %r" % (nh["ground_rule"], n["ground_rule"]))
+    # default (None) reproduces the R80 output exactly: same bytes as a second default run, and the classes are ground/other
+    d2 = tempfile.mkdtemp(); fake_arm(d2); reduce_window(d2, d2)
+    if open(os.path.join(d, "window_row_summary_all.csv"), "rb").read() != open(os.path.join(d2, "window_row_summary_all.csv"), "rb").read() or set(SM["class"]) != {"ground", "other"}:
+        fails.append("default run differs or classes changed")
+    try:
+        reduce_window(h, h, ground_height=float("nan")); fails.append("NaN ground height accepted")
+    except SystemExit:
+        pass
+    e = tempfile.mkdtemp(); fake_arm(e)
+    try:
+        reduce_window(e, e, ground_height=-9.0); fails.append("a height with no ground rows did not fail")
+    except SystemExit:
+        pass
     # failures
     for drop in ("iekf_factor_iteration.csv", "residual_dump.csv", "frame_stats.txt", "lidar_msg_log.csv"):
         e = tempfile.mkdtemp(); fake_arm(e, drop=drop)
@@ -213,7 +253,7 @@ def selftest():
     except SystemExit:
         pass
     print("SELFTEST r80_window_reduce", "FAIL " + "; ".join(fails) if fails else
-          "PASS (window files cut to frames %d..%d (state %d..%d), ground rows frames %d..%d both iterations only |nz| >= %.1f, summary per frame/iter/class, w and r2/sigma2 derived; missing file, old-build dump, no ground rows and empty msg log each fail)" % (
+          "PASS (R81 height rule: wz <= H incl. the boundary, independent of the normal, classes ground/above_ground; default byte-identical and classes ground/other; NaN H and an empty ground set fail) (window files cut to frames %d..%d (state %d..%d), ground rows frames %d..%d both iterations only |nz| >= %.1f, summary per frame/iter/class, w and r2/sigma2 derived; missing file, old-build dump, no ground rows and empty msg log each fail)" % (
               LO, HI, LO - WIDE, HI + WIDE, GLO, GHI, NZ_GROUND))
     return 1 if fails else 0
 
@@ -221,12 +261,14 @@ def selftest():
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir"); ap.add_argument("--out"); ap.add_argument("--window", action="store_true"); ap.add_argument("--msglog", action="store_true"); ap.add_argument("--selftest", action="store_true")
+    ap.add_argument("--ground-height", type=float, default=None, help="R81 F-480: ground = world z <= H (Bryce: 0.0 for every bag); default not given = |world normal z| >= %g" % NZ_GROUND)
     a = ap.parse_args()
     if a.selftest:
         sys.exit(selftest())
     if not (a.window or a.msglog):
         sys.exit("nothing to do: give --window and/or --msglog")
     if a.window:
-        print("window", reduce_window(a.dir, a.out or a.dir))
+        print("ground rule:", rule_text(a.ground_height))
+        print("window", reduce_window(a.dir, a.out or a.dir, a.ground_height))
     if a.msglog:
         print("msglog", reduce_msglog(a.dir, a.out or a.dir))

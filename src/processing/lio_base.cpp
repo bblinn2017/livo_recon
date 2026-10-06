@@ -339,7 +339,7 @@ void logResidualGeometry(int frame_idx, const std::vector<Residual>& residuals)
 // propagated state), plus the linearisation state. Lets the information each residual claims (w_i h_i h_i^T) be compared
 // offline with what the residuals jointly deliver (leverage, per-plane groups, split-half and cross-frame solutions).
 // h_rot / h_pos are the rotation and position Jacobian rows (point_cross_normal, normal); w_i = 1 / sigma_squared.
-void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const std::vector<Residual>& residuals, bool shadow = false)
+void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const std::vector<Residual>& residuals, bool shadow = false, bool voxel_info = false)
 {
   static PersistentLogStream log("residual_dump.csv");
   static PersistentLogStream slog("residual_dump_state.csv");
@@ -350,7 +350,8 @@ void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const s
   std::ofstream& so = shadow ? shslog.stream(&sfirst) : slog.stream(&sfirst);
   if (first)
     o << "frame,iter,idx,source_index,t,r,sigma_squared,plane_var_term,plane_key,node_id,tier,vis,"
-         "hrot_x,hrot_y,hrot_z,hpos_x,hpos_y,hpos_z,wx,wy,wz,bx,by,bz,row_kind,floor_term,sigma_diag_squared,s_prior_pose,sigma_gate_squared\n";   // R80: the last four appended (F-449/F-464: sigma_squared = floor_term + sigma_diag_squared + plane_var_term; s_prior_pose = H P- H^T of the row; sigma_gate_squared = the variance the admission test used)
+         "hrot_x,hrot_y,hrot_z,hpos_x,hpos_y,hpos_z,wx,wy,wz,bx,by,bz,row_kind,floor_term,sigma_diag_squared,s_prior_pose,sigma_gate_squared"
+      << (voxel_info ? ",voxel_point_count,voxel_distinct_frames" : "") << '\n';   // R81 (F-485 2B): the two voxel columns only with lio/residual_dump_voxel_info; the default header is byte-identical. R80: the last four appended (F-449/F-464: sigma_squared = floor_term + sigma_diag_squared + plane_var_term; s_prior_pose = H P- H^T of the row; sigma_gate_squared = the variance the admission test used)
   if (sfirst) so << "frame,iter,n_resid,px,py,pz,rvx,rvy,rvz\n";
   const V3D rv = Log(st.rot());
   so << frame_idx << ',' << iteration << ',' << residuals.size() << ',' << std::setprecision(17) << st.pos().x() << ','
@@ -364,7 +365,9 @@ void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const s
       << ',' << r.normal.x() << ',' << r.normal.y() << ',' << r.normal.z()
       << ',' << r.world_point.x() << ',' << r.world_point.y() << ',' << r.world_point.z()
       << ',' << r.raw_body_point.x() << ',' << r.raw_body_point.y() << ',' << r.raw_body_point.z() << ',' << r.row_kind
-      << ',' << r.floor_term << ',' << r.sigma_diag_squared << ',' << r.s_prior_pose << ',' << r.sigma_gate_squared << '\n';
+      << ',' << r.floor_term << ',' << r.sigma_diag_squared << ',' << r.s_prior_pose << ',' << r.sigma_gate_squared;
+    if (voxel_info) o << ',' << r.voxel_point_count << ',' << r.voxel_distinct_frames;   // R81 (F-485 2B)
+    o << '\n';
   }
   o.flush(); so.flush();
 }
@@ -376,7 +379,7 @@ void LioProcBase::dumpResidualsIfListed(int iteration, bool shadow) const
   if (std::find(opts_.residual_dump_frames.begin(), opts_.residual_dump_frames.end(), voxel_map_->frame_idx_) ==
       opts_.residual_dump_frames.end())
     return;
-  logResidualDump(voxel_map_->frame_idx_, iteration, *state_, residuals_, shadow);
+  logResidualDump(voxel_map_->frame_idx_, iteration, *state_, residuals_, shadow, opts_.residual_dump_voxel_info);
 }
 
 LioProcBase::LioProcBase(NodeContext& ctx)
@@ -501,6 +504,9 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
     // R73 (F-417): last-iteration dump; refused unless a frame list is given.
     cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "lio/residual_dump_frames is non-empty", "lio/residual_dump_last_iter",
                      opts_.residual_dump_last_iter, false);
+    // R81 (F-485 2B): two more columns (voxel_point_count, voxel_distinct_frames) in residual_dump.csv; refused unless a frame list is given. Default false is byte-identical.
+    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "lio/residual_dump_frames is non-empty", "lio/residual_dump_voxel_info",
+                     opts_.residual_dump_voxel_info, false);
   }
   paramWarn<bool>(pnh, "lio/residual_geometry_en", opts_.residual_geometry_en, false);   // R70: residual_geometry.csv (write-only)
   paramWarn<bool>(pnh, "lio/line_rows_log_en", opts_.line_rows_log_en, false);   // R77 (F-451): line_rows_per_scan.csv (write-only)
@@ -989,7 +995,7 @@ double LioProcBase::estimateStateCorrection(
     logLineRows(voxel_map_->frame_idx_, diagnostic_gn_iteration_, residuals_);
   if (!opts_.residual_dump_frames.empty() && diagnostic_gn_iteration_ == 0 &&
       std::find(opts_.residual_dump_frames.begin(), opts_.residual_dump_frames.end(), voxel_map_->frame_idx_) != opts_.residual_dump_frames.end())
-    logResidualDump(voxel_map_->frame_idx_, diagnostic_gn_iteration_, *state_, residuals_);   // R71: write-only per-residual dump
+    logResidualDump(voxel_map_->frame_idx_, diagnostic_gn_iteration_, *state_, residuals_, false, opts_.residual_dump_voxel_info);   // R71: write-only per-residual dump
 
   if (opts_.log_debug_en && diagnostic_gn_iteration_ >= 0) {
     static PersistentLogStream log("iekf_factor_iteration.csv");

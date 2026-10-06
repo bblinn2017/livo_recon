@@ -1,5 +1,6 @@
 #include "livo_recon/lio/line_residual.h"
 #include "livo_recon/lio/plane_test_values.h"
+#include "livo_recon/lio/plane_var_r81.h"
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/map/snapshot_frames.h"
 #include "livo_recon/lio/voxelplane.h"
@@ -428,6 +429,18 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
           "fire. Set one of them.");
     if (opts_->plane_gap_floor_en && !(opts_->weight_sigma_r2 > 0.0))
       cfg.requireCombination("voxel_map/plane/plane_gap_floor_en = true needs imu/sensor/range_err > 0 (the floor is range_err^2); it would be inert at 0.");
+    // ── R81 (F-468, F-485 Part 3): scan term and clamp on the plane variance term of the weight and the gate. Both default 0.0 = off (bit-identical to R80). ──
+    // Read unconditionally (every plane_var_mode, pca and debiased): the term is formed in VoxelPlane::gate(), which all of them reach. Negative, NaN and infinite are refused.
+    cfg.get<double>("voxel_map/plane/plane_var_min", opts_->plane_var_min, 0.0);
+    cfg.get<double>("voxel_map/plane/plane_var_scan_s2", opts_->plane_var_scan_s2, 0.0);
+    {
+      const std::string pv_err = planeVarR81Error(opts_->plane_var_min, opts_->plane_var_scan_s2);
+      if (!pv_err.empty()) cfg.requireCombination(pv_err);
+    }
+    if ((opts_->plane_var_min > 0.0 || opts_->plane_var_scan_s2 > 0.0) && opts_->line_enabled)
+      cfg.requireCombination(
+          "voxel_map/plane/plane_var_min / plane_var_scan_s2 > 0 together with voxel_map/plane/line_residual/enabled = true: line, distance and smooth rows take their own fit variance "
+          "(rows[i].fit_var) and never see the plane variance term these keys change, so on line voxels the keys would be silently inert. Turn the lines off (R81 arms run lines off).");
     // R65: eigengap-denominator rejection on the debiased path (default true = R64).
     cfg.nested<bool>(opts_->plane_fit_mode == "debiased" && eigengap, "voxel_map/plane/plane_fit_mode=debiased,plane_var_mode=eigengap",
                      "voxel_map/plane/debias_denominator_guard", opts_->debias_denominator_guard, true);
@@ -530,6 +543,8 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/plane_fit_mode:            " << opts_->plane_fit_mode
       << "\n  plane/line_residual:             enabled " << (opts_->line_enabled ? "true" : "false") << " / form " << opts_->line_form << " / rule " << opts_->line_rule << " / rel_sigmas " << opts_->line_rel_sigmas << " / shape_ratio " << opts_->line_shape_ratio << " / enum " << opts_->line_residual_enum << " / variance " << opts_->line_variance << " / rows " << opts_->line_rows
       << "\n  plane/plane_gap_floor_en:        " << (opts_->plane_gap_floor_en ? "true" : "false")
+      << "\n  plane/plane_var_min:             " << opts_->plane_var_min << (opts_->plane_var_min > 0.0 ? "   (R81 ENGAGED: plane_var_term = max(plane_var_term, plane_var_min))" : "   (off)")
+      << "\n  plane/plane_var_scan_s2:         " << opts_->plane_var_scan_s2 << (opts_->plane_var_scan_s2 > 0.0 ? "   (R81 ENGAGED: plane_var_term += s2 / max(1, distinct frames), before the clamp)" : "   (off)")
       << "\n  plane/plane_var_mode:            " << opts_->plane_var_mode
       << "\n  plane/plane_fit_pose_cov_mode:   " << opts_->plane_fit_pose_cov_mode
       << "\n  plane/bin_weight_mode_fit:       " << opts_->bin_weight_mode_fit

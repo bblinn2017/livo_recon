@@ -77,7 +77,7 @@ inline InnovationStats innovationStats(const std::vector<InnovationRow>& rows, c
 // ---------------------------------------------------------------- (2) bounded scalar gain
 struct QGainOptions
 {
-  std::string mode = "off";   // "off" | "innovation_scale" | "nis_gate"
+  std::string mode = "off";   // "off" | "innovation_scale" | "nis_gate" | "nis_smooth"
   std::string apply = "both"; // "both" | "acc" | "gyr"   which IMU variance the gain multiplies
   double forgetting = 0.9;    // innovation_scale: g <- g * clamp(rho)^(1 - forgetting)
   double min_gain = 1.0;      // gain bounds (min 1 = inflate only)
@@ -89,6 +89,8 @@ struct QGainOptions
   double inflate = 1.25;      // nis_gate: gain multiplier on an inflating scan
   double decay = 0.95;        // nis_gate: g <- 1 + decay (g - 1) on a non-inflating scan
   double whiteness_max = 0.0; // nis_gate: when > 0, scans with |lag1| above this are NOT inflated (map-error signature)
+  double nis_slope = 0.1;     // R81 (F-478): nis_smooth: ln g <- decay * ln g + nis_slope * clip(ln NIS, -nis_clip, +nis_clip); steady state g = NIS^(nis_slope / (1 - decay))
+  double nis_clip = 0.0;      // R81 (F-478): nis_smooth: clip of ln NIS (> 0, no default: the value is Bryce's, see claude/r81-designs-pending.md)
   bool on() const { return mode != "off"; }
 };
 
@@ -110,6 +112,16 @@ public:
     {
       const double rho = std::min(std::max(s.rho, 1.0 / o_.rho_clamp), o_.rho_clamp);
       g_ = g_ * std::pow(rho, 1.0 - o_.forgetting);
+    }
+    else if (o_.mode == "nis_smooth")
+    {
+      // R81 (F-478): the smooth version of the NIS gate. No threshold: every scan moves ln g by nis_slope * clip(ln NIS, +-nis_clip) after the
+      // decay. NIS = 1 leaves ln g decaying toward 0; the gain is then bounded by [min_gain, max_gain] as for the other modes.
+      const double ln_nis = std::min(std::max(std::log(std::max(s.nis, 1e-300)), -o_.nis_clip), o_.nis_clip);
+      const double ln_g = o_.decay * std::log(g_) + o_.nis_slope * ln_nis;
+      g_ = std::exp(ln_g);
+      if (g_ > last_) ++inflating_;
+      else if (g_ < last_) ++deflating_;
     }
     else if (o_.mode == "nis_gate")
     {

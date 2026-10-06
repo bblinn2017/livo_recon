@@ -341,11 +341,12 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
 
   // ── R72 (F-401): innovation-driven Q gain (opt-in). Sub-keys are refused unless their mode is selected; a configuration that
   // could not change anything (gain bounds both 1, forgetting 1, inflate 1) is refused as inert. ──
-  cfg.mode("imu/process_noise/gain/mode", q_gain_opts_.mode, "off", { "off", "innovation_scale", "nis_gate" });
+  cfg.mode("imu/process_noise/gain/mode", q_gain_opts_.mode, "off", { "off", "innovation_scale", "nis_gate", "nis_smooth" });
   {
     const bool ia = q_gain_opts_.mode == "innovation_scale";
     const bool ng = q_gain_opts_.mode == "nis_gate";
-    const bool any = ia || ng;
+    const bool ns = q_gain_opts_.mode == "nis_smooth";   // R81 (F-478)
+    const bool any = ia || ng || ns;
     cfg.nestedMode(any, "imu/process_noise/gain/mode!=off", "imu/process_noise/gain/apply", q_gain_opts_.apply, "both", { "both", "acc", "gyr" });
     cfg.nested<double>(any, "imu/process_noise/gain/mode!=off", "imu/process_noise/gain/min_gain", q_gain_opts_.min_gain, 1.0);
     cfg.nested<double>(any, "imu/process_noise/gain/mode!=off", "imu/process_noise/gain/max_gain", q_gain_opts_.max_gain, 100.0);
@@ -355,8 +356,10 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
     cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/nis_lo", q_gain_opts_.nis_lo, 0.0);   // R80 (F-476)
     cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/deflate", q_gain_opts_.deflate, 1.0);   // R80 (F-476)
     cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/inflate", q_gain_opts_.inflate, 1.25);
-    cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/decay", q_gain_opts_.decay, 0.95);
+    cfg.nested<double>(ng || ns, "imu/process_noise/gain/mode=nis_gate or nis_smooth", "imu/process_noise/gain/decay", q_gain_opts_.decay, 0.95);   // R81 (F-478): ONE read shared by the two modes (two nested() calls on one key would make a set decay a dead-scope refusal in whichever mode did not read it)
     cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/whiteness_max", q_gain_opts_.whiteness_max, 0.0);
+    cfg.nested<double>(ns, "imu/process_noise/gain/mode=nis_smooth", "imu/process_noise/gain/nis_slope", q_gain_opts_.nis_slope, 0.1);   // R81 (F-478)
+    cfg.nested<double>(ns, "imu/process_noise/gain/mode=nis_smooth", "imu/process_noise/gain/nis_clip", q_gain_opts_.nis_clip, 0.0);   // R81 (F-478)
     if (any)
     {
       if (akf_q_.enabled())
@@ -372,6 +375,12 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
         throw std::invalid_argument("imu/process_noise/gain/forgetting must be in [0,1] and rho_clamp >= 1");
       if (q_gain_opts_.forgetting == 1.0)
         throw std::invalid_argument("imu/process_noise/gain/mode=innovation_scale with forgetting == 1 never moves the gain (inert)");
+    }
+    if (ns)
+    {
+      if (!(q_gain_opts_.nis_slope > 0.0) || !std::isfinite(q_gain_opts_.nis_slope) || !(q_gain_opts_.nis_clip > 0.0) || !std::isfinite(q_gain_opts_.nis_clip) ||
+          !(q_gain_opts_.decay >= 0.0 && q_gain_opts_.decay < 1.0))
+        throw std::invalid_argument("imu/process_noise/gain nis_smooth: nis_slope > 0 and finite, nis_clip > 0 and finite (no default: absent = 0 = refused; the value is Bryce's), decay in [0,1)");
     }
     if (ng)
     {
@@ -553,6 +562,17 @@ std::string LioProcIekf::engagementReport() const
     }
     o << "\n  voxel_map/plane/weight_floor/mode = "
       << vm->opts()->weight_floor_mode;
+    if (vm->opts()->plane_var_min > 0.0 || vm->opts()->plane_var_scan_s2 > 0.0)   // R81 (F-468, F-485): written only when a key is on, so the default report is unchanged
+    {
+      const VoxelPlaneR81Counters c81 = voxelPlaneR81Counters();
+      o << "\n  voxel_map/plane/plane_var_min = " << vm->opts()->plane_var_min << " plane_var_scan_s2 = " << vm->opts()->plane_var_scan_s2
+        << " rows=" << c81.rows << " scan_rows=" << c81.scan_rows << " mean_n_scans=" << (c81.scan_rows > 0 ? static_cast<double>(c81.sum_n_scans) / c81.scan_rows : 0.0)
+        << " clamped=" << c81.clamped << " clamped_fraction=" << (c81.rows > 0 ? static_cast<double>(c81.clamped) / c81.rows : 0.0);
+      if (c81.rows == 0)
+        o << "   <-- INERT: a plane variance key was set and no row reached the variance term";
+      else if (vm->opts()->plane_var_min > 0.0 && c81.clamped == 0 && !(vm->opts()->plane_var_scan_s2 > 0.0))
+        o << "   <-- NOT ENGAGED: plane_var_min never raised a row (a valid null: every plane variance term was already above it)";
+    }
   }
 
   if (akf_q_.enabled())

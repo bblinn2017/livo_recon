@@ -8,9 +8,11 @@
 //   GRID          : the R74 plane fixture (9 x 9 grid, e0 tiny, e1 = e2 = 0.0667): every gap far above any floor.
 //   V0  preconditions (the fixtures give the planes and eigenvalue orders the other checks rely on).
 //   V1  defaults (line_var_plane_equivalent false, plane_gap_floor_en false): no tilt matrix is made, no R77 counter moves, plane_var_ is what update() gave.
-//   V2  hard rows, finite-difference check: for rows 0 and 1, lineTiltVar(row, d, hard) equals (u2 . d)^2 Var(theta_i2) with Var(theta_i2) computed INDEPENDENTLY by central
-//       finite differences of the covariance eigenvectors of the perturbed points, propagated with the same per-point covariance (relative 1e-3).
-//   V3  smooth rows, same finite-difference check for rows 0, 1, 2 with both tilt axes (floor made inactive with weight_sigma_r2 = 1e-12).
+//   V2  hard rows, finite-difference check: for rows 0 and 1, lineTiltVar(row, d, hard) equals Var(delta_r_i) for l = (0, u2.d, 1), with Var(delta_r_i) computed
+//       INDEPENDENTLY by central finite differences of delta_r_i = la*theta_ia + lb*theta_ib - u_i.dc (dc = the fit centre's own shift under the same point
+//       perturbation), propagated with the same per-point covariance (relative 1e-3). R81 (F-482): updated to F-453's formula, which adds the centre-shift/offset
+//       term (voxelplane.cpp's computeLineTilt) that the pre-F-453 version of this check (tilt-only, Var(theta_i2) alone) never modeled -- see numericVar().
+//   V3  smooth rows, same finite-difference check for rows 0, 1, 2 with both tilt axes and the offset term (floor made inactive with weight_sigma_r2 = 1e-12).
 //   V4  floor: with a floor above a tilt gap (weight_sigma_r2 = 1e-3 > 6e-4) the floored axis variance of smooth row 0 scales by (gap / floor)^2 exactly, the unfloored one is unchanged, tilt_floored_axes moved.
 //   V5  residual glue: on a line voxel, hard/absolute, plane_equivalent adds exactly tilt_var_term to the u0 fit variance and extra_tilt_var[0] to the u1 fit variance of the
 //       fit_only residual of the same point (and tilt is > 0); fit_only reports tilt 0.
@@ -150,28 +152,35 @@ double thetaOf(const std::vector<PointXYZCov>& P, const Eig& base, int i, int a)
   return base.U.col(a).dot(ui);
 }
 
-// L(a_idx, b_idx) for row i, axes (a, b): sum_k J_a,k^T Cov_k J_b,k with Cov_k = sensor covariance (the test's pose-cov mode is sensor_only)
-Eigen::Matrix2d numericL(const std::vector<PointXYZCov>& P, int i, int a, int b)
+// R81 (F-482/F-453): independent finite-difference variance of the residual tilt delta_r_i = la * theta_ia + lb * theta_ib - u_i . dc, where dc is the shift of the
+// fit's own centre (mean of the points) under the same point perturbation -- this is production's full h_k = -w_k u_i + sum_a (u_a.d) g_ia,k (voxelplane.cpp's
+// computeLineTilt comment), not just the tilt term. u_i is the BASE eigenvector (no sign ambiguity needed for the centre term, which has none). Replaces the
+// pre-F-453 numericL, which omitted the centre-shift/offset contribution entirely and so understated Var by the L(.,2) terms of line_tilt_L_.
+double numericVar(const std::vector<PointXYZCov>& P, int i, int a, int b, double la, double lb)
 {
   const Eig base = eigOf(P);
+  const V3D ui = base.U.col(i);
+  V3D c0 = V3D::Zero();
+  for (const auto& p : P) c0 += p.point;
+  c0 /= static_cast<double>(P.size());
   const double eps = 1e-6;
-  Eigen::Matrix2d L = Eigen::Matrix2d::Zero();
+  double var = 0.0;
   for (size_t k = 0; k < P.size(); ++k) {
-    V3D Ja = V3D::Zero(), Jb = V3D::Zero();
+    V3D J = V3D::Zero();
     for (int c = 0; c < 3; ++c) {
       std::vector<PointXYZCov> Pp = P, Pm = P;
       Pp[k].point(c) += eps;
       Pm[k].point(c) -= eps;
-      Ja(c) = (thetaOf(Pp, base, i, a) - thetaOf(Pm, base, i, a)) / (2.0 * eps);
-      Jb(c) = (thetaOf(Pp, base, i, b) - thetaOf(Pm, base, i, b)) / (2.0 * eps);
+      V3D cp = V3D::Zero(); for (const auto& p : Pp) cp += p.point; cp /= static_cast<double>(Pp.size());
+      V3D cm = V3D::Zero(); for (const auto& p : Pm) cm += p.point; cm /= static_cast<double>(Pm.size());
+      const double fp = la * thetaOf(Pp, base, i, a) + lb * thetaOf(Pp, base, i, b) - ui.dot(cp - c0);
+      const double fm = la * thetaOf(Pm, base, i, a) + lb * thetaOf(Pm, base, i, b) - ui.dot(cm - c0);
+      J(c) = (fp - fm) / (2.0 * eps);
     }
     const M3D C = P[k].sensor_cov;
-    L(0, 0) += Ja.dot(C * Ja);
-    L(1, 1) += Jb.dot(C * Jb);
-    L(0, 1) += Ja.dot(C * Jb);
+    var += J.dot(C * J);
   }
-  L(1, 0) = L(0, 1);
-  return L;
+  return var;
 }
 
 bool relNear(double a, double b, double rel) { return std::abs(a - b) <= rel * std::max(std::abs(a), std::abs(b)) + 1e-300; }
@@ -218,13 +227,12 @@ int main()
     const V3D u[3] = {p->plane_.normal, p->y_normal_, p->x_normal_};
     const V3D d = 0.17 * u[2] + 0.004 * u[1] + 0.001 * u[0];
     for (int row = 0; row < 2; ++row) {
-      // hard rows tilt toward u2 only: axis index b = 2; (a unused: pass the other small axis, only L(1,1) is read)
+      // hard rows tilt toward u2 only: l = (0, u2.d, 1) -- F-453 (R81, F-482) includes the centre-shift/offset term, so `expect` is Var(delta_r_i), not Var(theta_i2) alone
       const int a = row == 0 ? 1 : 0;
-      const Eigen::Matrix2d Ln = numericL(box, row, a, 2);
-      const double expect = std::pow(u[2].dot(d), 2) * Ln(1, 1);
+      const double expect = numericVar(box, row, a, 2, 0.0, u[2].dot(d));
       double got = -1.0;
       CHECK(p->lineTiltVar(row, d, false, got), "V2 hard: lineTiltVar returns a value");
-      const std::string tag = "V2 hard row " + std::to_string(row) + ": tilt variance equals (u2 . d)^2 Var(theta_i2) from finite differences (rel 1e-3)";
+      const std::string tag = "V2 hard row " + std::to_string(row) + ": tilt variance equals Var(delta_r_i) from finite differences (rel 1e-3)";
       CHECK(expect > 0.0 && relNear(got, expect, 1e-3), tag.c_str());
       CHECK(!relNear(got, 2.0 * expect, 1e-3), "V7 control: a doubled expected tilt variance is rejected");
     }
@@ -238,12 +246,12 @@ int main()
     const V3D d = 0.17 * u[2] + 0.004 * u[1] + 0.001 * u[0];
     for (int row = 0; row < 3; ++row) {
       const int a = (row == 0) ? 1 : 0, b = (row == 2) ? 1 : 2;
-      const Eigen::Matrix2d Ln = numericL(box, row, a, b);
       const double la = u[a].dot(d), lb = u[b].dot(d);
-      const double expect = la * la * Ln(0, 0) + 2.0 * la * lb * Ln(0, 1) + lb * lb * Ln(1, 1);
+      // F-453 (R81, F-482): l = (la, lb, 1) -- `expect` is Var(delta_r_i) including the centre-shift/offset term, not Var(tilt) alone
+      const double expect = numericVar(box, row, a, b, la, lb);
       double got = -1.0;
       CHECK(p->lineTiltVar(row, d, true, got), "V3 smooth: lineTiltVar returns a value");
-      const std::string tag = "V3 smooth row " + std::to_string(row) + ": tilt variance equals the finite-difference value (rel 1e-3)";
+      const std::string tag = "V3 smooth row " + std::to_string(row) + ": tilt variance equals Var(delta_r_i) from finite differences (rel 1e-3)";
       CHECK(expect > 0.0 && relNear(got, expect, 1e-3), tag.c_str());
     }
   }

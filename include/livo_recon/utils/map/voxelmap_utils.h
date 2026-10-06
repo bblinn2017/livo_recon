@@ -72,6 +72,11 @@ struct Residual
   // feeds the state estimate.
   int vis_state = -1;
 
+  // R81 (F-485 2B): the owning voxel's point count (VoxelPlane::pointsSize()) and distinct-frame count (VoxelPlane::distinctFrames()) at the time the row was built,
+  // copied in VoxelPlane::computeResidual(). Write-only: read only by the residual dump when lio/residual_dump_voxel_info is true. -1 on a path that does not set them.
+  int voxel_point_count = -1;
+  int voxel_distinct_frames = -1;
+
   // This plane's own fit-uncertainty contribution (n * plane_var * n),
   // added into sigma_squared by LioProc::buildResiduals().
   double plane_var_term = 0.0;
@@ -743,6 +748,14 @@ struct VoxelOpts
   // Default false is bit-identical to R76. Read only with plane_fit_mode = pca and plane_var_mode = eigengap; refused together with plane_var_denom_floor_en
   // (that flag rejects planes whose gap is below 2.5e-4, which a 4e-4 floor would make unreachable).
   bool plane_gap_floor_en = false;
+
+  // R81 (F-468, F-485 Part 3): plane variance term of the weight AND the gate (VoxelPlane::gate(); res.sigma_squared adds the same value). Both default 0.0 = off: the branch is skipped, bit-identical to R80.
+  //   plane_var_scan_s2 (>= 0, finite): plane_var_term += s2 / max(1, distinct frames of the voxel as of its last fit). Applied first.
+  //   plane_var_min     (>= 0, finite): plane_var_term = max(plane_var_term, plane_var_min). Applied second.
+  // Point-to-plane rows only: refused together with voxel_map/plane/line_residual/enabled = true (line and distance rows take their own fit variance and would silently not see it).
+  // See lio/plane_var_r81.h.
+  double plane_var_min = 0.0;
+  double plane_var_scan_s2 = 0.0;
 };
 using VoxelOptsPtr = std::shared_ptr<VoxelOpts>;
 
