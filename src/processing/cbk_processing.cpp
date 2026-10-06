@@ -81,12 +81,13 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
   // R80C (F-484): lidar overlap policy and its grid (see CbkProcOptions::lidar_overlap_policy). Sub-options are refused unless the mode needs them.
   pnh.param<std::string>("cbk/lidar/overlap_policy", opts_.lidar_overlap_policy, "discard");   // plain param, not paramWarn: the default path prints exactly what R80 printed
   markParamConsumed("cbk/lidar/overlap_policy");   // R80C agent fix: plain pnh.param() does not register with checkAllParamsConsumed() the way paramWarn() does
-  if (opts_.lidar_overlap_policy != "discard" && opts_.lidar_overlap_policy != "retime" && opts_.lidar_overlap_policy != "retime_trim")
-    throw std::invalid_argument("cbk/lidar/overlap_policy must be discard, retime or retime_trim (got '" + opts_.lidar_overlap_policy + "')");
+  if (opts_.lidar_overlap_policy != "discard" && opts_.lidar_overlap_policy != "retime" && opts_.lidar_overlap_policy != "retime_trim" && opts_.lidar_overlap_policy != "restamp")   // R80D: restamp added
+    throw std::invalid_argument("cbk/lidar/overlap_policy must be discard, retime, retime_trim or restamp (got '" + opts_.lidar_overlap_policy + "')");
   const bool retime_on = (opts_.lidar_overlap_policy != "discard");
-  const bool retime_keys_given = pnh.hasParam("cbk/lidar/retime_t0_s") || pnh.hasParam("cbk/lidar/retime_period_s") || pnh.hasParam("cbk/lidar/retime_seq0");
+  const bool retime_keys_given = pnh.hasParam("cbk/lidar/retime_t0_s") || pnh.hasParam("cbk/lidar/retime_period_s") || pnh.hasParam("cbk/lidar/retime_seq0") || pnh.hasParam("cbk/lidar/retime_ref_offset_s");   // R80D: retime_ref_offset_s added
   if (!retime_on && retime_keys_given)
-    throw std::invalid_argument("cbk/lidar/retime_t0_s, retime_period_s and retime_seq0 are only valid with cbk/lidar/overlap_policy = retime or retime_trim");
+    throw std::invalid_argument("cbk/lidar/retime_t0_s, retime_period_s, retime_seq0 and retime_ref_offset_s are only valid with cbk/lidar/overlap_policy = retime, retime_trim or restamp");
+  opts_.lidar_retime_ref_offset_s = opts_.lidar_time_offset;   // R80D: default, so the offset term is exactly 0.0 unless the key says otherwise
   if (retime_on)
   {
     pnh.param<double>("cbk/lidar/retime_t0_s", opts_.lidar_retime_t0_s, 0.0);
@@ -95,6 +96,8 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
     markParamConsumed("cbk/lidar/retime_t0_s");       // R80C agent fix: see overlap_policy's markParamConsumed above
     markParamConsumed("cbk/lidar/retime_period_s");
     markParamConsumed("cbk/lidar/retime_seq0");
+    pnh.param<double>("cbk/lidar/retime_ref_offset_s", opts_.lidar_retime_ref_offset_s, opts_.lidar_time_offset);   // R80D
+    markParamConsumed("cbk/lidar/retime_ref_offset_s");
     if (!(opts_.lidar_retime_t0_s > 1.0e8) || !(opts_.lidar_retime_period_s > 0.09 && opts_.lidar_retime_period_s < 0.11) || opts_.lidar_retime_seq0 < 0)
       throw std::invalid_argument("cbk/lidar/overlap_policy = " + opts_.lidar_overlap_policy +
                                   " needs cbk/lidar/retime_t0_s (> 1e8 s), cbk/lidar/retime_period_s (0.09 to 0.11 s) and cbk/lidar/retime_seq0 (>= 0)");
@@ -166,6 +169,7 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  cbk/lidar/retime_t0_s: " << std::fixed << std::setprecision(9) << opts_.lidar_retime_t0_s
       << "\n  cbk/lidar/retime_period_s: " << opts_.lidar_retime_period_s << std::defaultfloat << std::setprecision(6)
       << "\n  cbk/lidar/retime_seq0: " << opts_.lidar_retime_seq0
+      << "\n  cbk/lidar/retime_ref_offset_s: " << opts_.lidar_retime_ref_offset_s                         // R80D
       << "\n  cbk/lidar/type:   " << lidar_type_str
       << "\n  cbk/imu/acc_type: " << opts_.imu_acc_type
       << "\n  cbk/imu/gyr_type: " << opts_.imu_gyr_type
@@ -333,9 +337,9 @@ void CbkProc::lidarCallbackPcl(const sensor_msgs::PointCloud2::ConstPtr& msg)
 {
   TimedScope ts(profiler_, "cbk/lidar");
   const double header_scan_time = msg->header.stamp.toSec() + opts_.lidar_time_offset;
-  // R80C (F-484): under retime / retime_trim the scan time is the clean-grid time of the message's seq, not its own header; the discard policy is exactly the R80 line above.
+  // R80C (F-484): under retime / retime_trim / restamp (R80D) the scan time is the grid time of the message's seq (plus the R80D offset term, exactly 0.0 unless cbk/lidar/time_offset differs from retime_ref_offset_s), not its own header; the discard policy is exactly the R80 line above.
   const bool retime = (opts_.lidar_overlap_policy != "discard");
-  const double scan_time = retime ? retimeScanTime(msg->header.seq, opts_.lidar_retime_seq0, opts_.lidar_retime_t0_s, opts_.lidar_retime_period_s) : header_scan_time;
+  const double scan_time = retime ? retimeScanTimeWithOffset(msg->header.seq, opts_.lidar_retime_seq0, opts_.lidar_retime_t0_s, opts_.lidar_retime_period_s, opts_.lidar_time_offset, opts_.lidar_retime_ref_offset_s) : header_scan_time;
   const double retime_shift = scan_time - header_scan_time;   // exactly 0.0 under discard
   {
     // engagement and magnitude (rule 3.3): counted per message, printed on the first message, every 500th, and an error if the policy is on and never moved a scan time

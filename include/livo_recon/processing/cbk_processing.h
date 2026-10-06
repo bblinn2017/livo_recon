@@ -54,6 +54,12 @@ struct CbkProcOptions
   double lidar_retime_t0_s = 0.0;
   double lidar_retime_period_s = 0.0;
   int    lidar_retime_seq0 = 0;
+  // R80D (Bryce 2026-10-05, F-484 / F-491). Two additions to the R80C options. (1) overlap_policy "restamp": the same grid mechanism as "retime" (scan time = t0 + (seq - seq0) * period, pushLidar
+  // unchanged, no trimming), but t0 and period are the NTU VIRAL authors' restamp.py rule: t0 = first header of the bag (+ the time offset the manifest bakes in), period = (last header - first
+  // header) / (N - 1). The key set is the same three keys. (2) retime_ref_offset_s: the lidar_time_offset that was baked into retime_t0_s. The scan time gets the extra term
+  // (lidar_time_offset - retime_ref_offset_s), so a cbk/lidar/time_offset sweep moves a retime / retime_trim / restamp grid; when the two are equal the term is exactly 0.0 and the scan time is bit for
+  // bit the R80C value. Unset = lidar_time_offset (term exactly 0.0). A sub-option: an error with discard.
+  double lidar_retime_ref_offset_s = 0.0;
   // Keep only every point_filter_num-th point of each raw scan, applied at
   // ingestion before undistortion/voxel downsampling -- mirrors
   // FAST-LIVO2's preprocess/point_filter_num (Preprocess::process's

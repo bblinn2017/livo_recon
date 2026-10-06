@@ -312,6 +312,9 @@ add_test(NAME lidar_msg_log_r80 COMMAND test_lidar_msg_log_r80)
 add_executable(test_lidar_retime_r80c tests/test_lidar_retime_r80c.cpp)
 target_include_directories(test_lidar_retime_r80c PUBLIC include)
 add_test(NAME lidar_retime_r80c COMMAND test_lidar_retime_r80c)
+add_executable(test_lidar_offset_r80d tests/test_lidar_offset_r80d.cpp)
+target_include_directories(test_lidar_offset_r80d PUBLIC include)
+add_test(NAME lidar_offset_r80d COMMAND test_lidar_offset_r80d)
 
 # R70 (planning agent's patch): block information scale identities (ROS-free, Eigen only).
 add_executable(test_info_scale tests/test_info_scale.cpp src/lio/info_scale.cpp)
