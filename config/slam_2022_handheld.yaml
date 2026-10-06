@@ -70,6 +70,30 @@ calib:
     apply_to_state:
       gyro_bias: true
       accel_bias: true
+  # 2026-10-06: ported from config/ntu_viral.yaml (Bryce) -- was previously
+  # absent here entirely, silently running on whatever calib_processing.cpp's
+  # own compiled defaults are. Every value below is IDENTICAL to that
+  # compiled default (mode=configured, autocov_lags=20,
+  # known_pos_variance/known_vel_variance=1e-12,
+  # bg_model_floor/ba_radial_model_floor=-1.0,
+  # numerical_eigenvalue_floor=1e-12 -- see calib_processing.cpp's own
+  # paramWarn() calls), so this is a documentation-parity addition with ZERO
+  # behavior change -- not a tuning port. EXCEPT
+  # tilt_ba_ambiguity_accel_std, deliberately left OFF (-1.0, the compiled
+  # "disabled" sentinel) rather than copying ntu_viral.yaml's 0.0856 --
+  # that value is derived specifically from "the VN-100's published static
+  # pitch/roll accuracy" (NTU's own IMU model, see ntu_viral.yaml's comment),
+  # not a generic constant; HILTI's Alphasense IMU has different noise
+  # characteristics and has not had an equivalent value derived for it.
+  p0:
+    mode: configured
+    autocov_lags: 20
+    known_pos_variance: 1.0e-12
+    known_vel_variance: 1.0e-12
+    tilt_ba_ambiguity_accel_std: -1.0  # NOT ported from NTU -- see comment above
+    bg_model_floor: -1.0
+    ba_radial_model_floor: -1.0
+    numerical_eigenvalue_floor: 1.0e-12
 state:
   est:
     bg: true
@@ -99,6 +123,23 @@ state:
     bg: [0., 0., 0.]
 imu:
   process_noise:
+    # 2026-10-06: ported from config/ntu_viral.yaml (Bryce). "model" and
+    # the whole "motion:" sub-block below are dead-scope for every R82
+    # Hilti job this round (every job's own override pins
+    # imu/process_noise/model to "fixed" directly), so this addition has
+    # ZERO behavior change for R82 -- added for documentation parity /
+    # future rounds that might run Hilti under model=motion without an
+    # explicit per-job override. Every "motion:" value below is IDENTICAL
+    # to imu_processing.cpp's own compiled default (beta=0.9,
+    # acc_scale=0.3, gyro_scale=10.0, acc/gyro_max_dynamic_variance=0.5/0.3)
+    # -- not a tuning port, just stating the default explicitly.
+    model: fixed
+    motion:
+      beta: 0.9
+      acc_scale: 0.3
+      gyro_scale: 10.0
+      acc_max_dynamic_variance: 0.5
+      gyro_max_dynamic_variance: 0.3
     fixed:
       # Ported from FAST-LIVO2's HILTI22_handheld configuration; this is a
       # starting point rather than a livo_recon-specific optimum.
@@ -117,6 +158,7 @@ imu:
     # HILTI, defaulting to no downsampling at all) was the single largest
     # lever found for both HILTI collapse-rate and baseline accuracy.
     ds_leaf_size: 0.1
+    mode: first  # 2026-10-06: ported from ntu_viral.yaml; also the compiled default (hashing.h's DsMode docs) -- documentation parity, zero behavior change
 
   # sensor.angle_err_deg=0.05 (matching FAST-LIVO2's beam_err) was tried
   # and REVERTED 2026-08-13: an isolation sweep found it (combined with a
