@@ -29,6 +29,17 @@ outputs:
   # quiet for seconds at a time mid-frame while blocked on a GPU kernel).
   auto_terminate_on_idle: true
   auto_terminate_idle_secs: 5.0
+  # 2026-10-06 (Bryce): HILTI default ON, unlike NTU_VIRAL (which relies on
+  # a per-job override, outputs.odom.export is false by default,
+  # pub_processing.cpp:31) -- run_job.sh's livo_recon completion gate
+  # (scripts/parallel/run_job.sh, the non-robot_gcp branch) unconditionally
+  # requires odometry.txt to exist for a DONE verdict regardless of GT mode,
+  # so a Hilti job manifest that forgets this key (as R82's did, for all 49
+  # jobs) silently guarantees every arm FAILED even on a fully successful
+  # run. Defaulting it on here means that specific manifest-generation
+  # mistake can't recur for HILTI.
+  odom:
+    export: true
   profiler:
     export_path: "/tmp/livo_recon_profile.txt"
   path: ""          # base directory for COLMAP dataset export (empty = disabled)
