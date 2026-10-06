@@ -308,6 +308,11 @@ add_executable(test_lidar_msg_log_r80 tests/test_lidar_msg_log_r80.cpp)
 target_include_directories(test_lidar_msg_log_r80 PUBLIC include)
 add_test(NAME lidar_msg_log_r80 COMMAND test_lidar_msg_log_r80)
 
+# R80C (F-484): retime grid time and retime_trim point count (header-only, ROS-free)
+add_executable(test_lidar_retime_r80c tests/test_lidar_retime_r80c.cpp)
+target_include_directories(test_lidar_retime_r80c PUBLIC include)
+add_test(NAME lidar_retime_r80c COMMAND test_lidar_retime_r80c)
+
 # R70 (planning agent's patch): block information scale identities (ROS-free, Eigen only).
 add_executable(test_info_scale tests/test_info_scale.cpp src/lio/info_scale.cpp)
 target_include_directories(test_info_scale PUBLIC include ${EIGEN3_INCLUDE_DIRS})

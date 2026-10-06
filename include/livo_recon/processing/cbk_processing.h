@@ -45,6 +45,15 @@ struct CbkProcOptions
   // trajectory during sustained fast motion (see git history/session notes
   // around the eee_01 t=73-85s Y-axis bias investigation).
   double lidar_time_offset = 0.0;
+  // R80C (Bryce 2026-10-05, F-484). What to do about the lidar message start time (header stamp is the driver's publish time: it trails a clean 10 Hz grid by a 0 to 35 ms sawtooth) and about the
+  // overlap with the previous accepted message. One enumerated mode (rule 3.4): "discard" (default; R80 behaviour bit for bit: scan time = header + lidar_time_offset, pushLidar drops an overlapping
+  // message), "retime" (scan time = t0 + (seq - seq0) * period, the per-bag lower-envelope grid; pushLidar unchanged), "retime_trim" (retime, then the points earlier than the last accepted
+  // point are removed from the message before the push, so none is discarded). retime_t0_s, retime_period_s and retime_seq0 are sub-options: required with retime / retime_trim, an error with discard.
+  // PointCloud2 callback only.
+  std::string lidar_overlap_policy = "discard";
+  double lidar_retime_t0_s = 0.0;
+  double lidar_retime_period_s = 0.0;
+  int    lidar_retime_seq0 = 0;
   // Keep only every point_filter_num-th point of each raw scan, applied at
   // ingestion before undistortion/voxel downsampling -- mirrors
   // FAST-LIVO2's preprocess/point_filter_num (Preprocess::process's
