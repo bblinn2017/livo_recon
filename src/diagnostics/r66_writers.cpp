@@ -30,20 +30,4 @@ void writeFrameWindowRow(std::size_t frame_index, double t_abs_s, std::size_t n_
   out.flush();
 }
 
-void writeCoupledScanStatus(long scan_id, double t_abs_s, const std::string& report, int iterations_this_scan,
-                            int thrown, const std::string& what)
-{
-  static PersistentLogStream log("coupled_scan_status.csv");
-  bool first = false;
-  std::ofstream& out = log.stream(&first);
-  if (first) out << "scan_id,t_abs_s,t_rel_s,report,iterations_this_scan,thrown,exception_message\n";
-  auto clean = [](std::string x) {
-    for (char& c : x) if (c == ',' || c == '\n' || c == '\r') c = ';';
-    return x;
-  };
-  out << scan_id << ',' << std::setprecision(17) << t_abs_s << ',' << tRelString(t_abs_s) << ',' << clean(report) << ',' << iterations_this_scan
-      << ',' << thrown << ',' << clean(what) << '\n';
-  out.flush();
-}
-
 }  // namespace livo_recon

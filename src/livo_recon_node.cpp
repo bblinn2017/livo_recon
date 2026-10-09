@@ -28,16 +28,18 @@ std::unique_ptr<livo_recon::LioProcBase> makeLioProc(ros::NodeHandle& pnh, livo_
   std::string mode;
   livo_recon::paramWarn<std::string>(pnh, "estimator/mode", mode, "iekf");
   if (mode == "coupled")
-    return std::make_unique<livo_recon::LioProcCoupled>(ctx);
+    throw std::runtime_error(
+        "[config] refused: estimator/mode='coupled' -- the coupled joint-knot "
+        "estimator was removed (R89); must be 'iekf'");
   if (mode == "decoupled")
     throw std::runtime_error(
         "[config] refused: estimator/mode='decoupled' was RENAMED to 'iekf' "
         "(the plain IEKF on IMU-deskewed points; the spline is gone) -- "
-        "must be 'iekf' or 'coupled'");
+        "must be 'iekf'");
   if (mode != "iekf")
     throw std::runtime_error(
         "[config] refused: estimator/mode='" + mode + "' -- must be "
-        "'iekf' or 'coupled'");
+        "'iekf'");
   return std::make_unique<livo_recon::LioProcIekf>(ctx);
 }
 }  // namespace

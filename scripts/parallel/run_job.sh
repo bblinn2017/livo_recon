@@ -42,7 +42,7 @@ mkdir -p "$OUT_DIR"
 # previous job on this container so the `-s` copy guards further down can only pick up THIS run's file.
 rm -f /tmp/gravity_alignment.txt /tmp/imu_first_scans.csv /tmp/calibration_p0.txt \
       /tmp/state_trace.csv /tmp/state_reference.txt /tmp/imu_cov_growth.csv \
-      /tmp/joint_knot_lidar_information.csv /tmp/lio_gt_matched.csv /tmp/motion_q_scan.csv \
+      /tmp/lio_gt_matched.csv /tmp/motion_q_scan.csv \
       /tmp/cq74_eigenspectrum.txt
 chmod 0777 "$OUT_DIR"  # written as root; keep host-side (non-root) cleanup/inspection working
 # PACKAGE comes from job.env (written by gen_jobs.py's --package flag);
@@ -236,21 +236,7 @@ else  # livo_recon
   # sets outputs/debug_log_dir), found missing from SM-1's own OUT_DIR
   # during that card's first run.
   [[ -s /tmp/engagement.txt ]] && cp /tmp/engagement.txt "$OUT_DIR/engagement.txt"
-  # joint_knot_*.csv/.txt (R36, 2026-09-27): the coupled_joint_knots estimator's
-  # PersistentLogStream diagnostics (debugLogPath default dir /tmp, same gap
-  # class as spline_q.csv/engagement.txt above), found missing from a
-  # coupled_joint_knots_r36_smoke cell's own OUT_DIR during Validation 2's
-  # first smoke test.
-  [[ -s /tmp/joint_knot_iterations.csv ]] && cp /tmp/joint_knot_iterations.csv "$OUT_DIR/joint_knot_iterations.csv"
-  [[ -s /tmp/joint_knot_states.csv ]] && cp /tmp/joint_knot_states.csv "$OUT_DIR/joint_knot_states.csv"
-  [[ -s /tmp/joint_knot_first_frame_state_chain.csv ]] && cp /tmp/joint_knot_first_frame_state_chain.csv "$OUT_DIR/joint_knot_first_frame_state_chain.csv"
-  [[ -s /tmp/joint_knot_first_frame_matrices.txt ]] && cp /tmp/joint_knot_first_frame_matrices.txt "$OUT_DIR/joint_knot_first_frame_matrices.txt"
-  # joint_knot_corrections.csv/joint_knot_scan_summary.csv (R37, 2026-09-27):
-  # two new diagnostic files added by R37's prior/diagnostics repair, same
-  # /tmp-default gap class as the four files immediately above.
-  [[ -s /tmp/joint_knot_corrections.csv ]] && cp /tmp/joint_knot_corrections.csv "$OUT_DIR/joint_knot_corrections.csv"
-  [[ -s /tmp/joint_knot_scan_summary.csv ]] && cp /tmp/joint_knot_scan_summary.csv "$OUT_DIR/joint_knot_scan_summary.csv"
-  # state_trace.csv/state_reference.txt/imu_cov_growth.csv/joint_knot_lidar_information.csv
+  # state_trace.csv/state_reference.txt/imu_cov_growth.csv
   # (R61, 2026-09-29): same /tmp-default gap class as the files above -- the R61 state-trace
   # patch's new PersistentLogStream diagnostics were missing from a livo_recon job's own OUT_DIR
   # (no job in this manifest sets outputs/debug_log_dir, so they default to /tmp) during R61's
@@ -259,7 +245,6 @@ else  # livo_recon
   [[ -s /tmp/state_trace.csv ]] && cp /tmp/state_trace.csv "$OUT_DIR/state_trace.csv"
   [[ -s /tmp/state_reference.txt ]] && cp /tmp/state_reference.txt "$OUT_DIR/state_reference.txt"
   [[ -s /tmp/imu_cov_growth.csv ]] && cp /tmp/imu_cov_growth.csv "$OUT_DIR/imu_cov_growth.csv"
-  [[ -s /tmp/joint_knot_lidar_information.csv ]] && cp /tmp/joint_knot_lidar_information.csv "$OUT_DIR/joint_knot_lidar_information.csv"
   [[ -s /tmp/lio_gt_matched.csv ]] && cp /tmp/lio_gt_matched.csv "$OUT_DIR/lio_gt_matched.csv"
   [[ -s /tmp/motion_q_scan.csv ]] && cp /tmp/motion_q_scan.csv "$OUT_DIR/motion_q_scan.csv"
   # R62: gravity_alignment.txt, imu_first_scans.csv (new) and calibration_p0.txt (R59, never copied before): same /tmp-default gap class.

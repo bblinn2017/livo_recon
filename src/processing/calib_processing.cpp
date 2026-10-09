@@ -1,5 +1,6 @@
 #include "livo_recon/processing/calib_processing.h"
 #include "livo_recon/utils/algo/symmetrize.h"
+#include "livo_recon/lio/p0_pin.h"
 
 #include <algorithm>
 #include <cmath>
@@ -66,6 +67,10 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
                     opts_.p0_known_pos_variance, 1e-12);
   paramWarn<double>(pnh, "calib/p0/known_vel_variance",
                     opts_.p0_known_vel_variance, 1e-12);
+  // R89: the attitude block of P0. Negative (default) keeps the calibration-derived block; 0 or more sets it to that constant
+  // (0 = exactly zero, cross terms included).
+  paramWarn<double>(pnh, "calib/p0/known_theta_variance",
+                    opts_.p0_known_theta_variance, -1.0);
   paramWarn<double>(pnh, "calib/p0/tilt_ba_ambiguity_accel_std",
                     opts_.p0_tilt_ba_ambiguity_accel_std, -1.0);
   paramWarn<double>(pnh, "calib/p0/bg_model_floor",
@@ -80,10 +85,13 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
   opts_.p0_autocov_lags = std::max(0, opts_.p0_autocov_lags);
   if (opts_.p0_mode != "configured" && opts_.p0_mode != "calibration_derived")
     throw std::invalid_argument("calib/p0/mode must be configured or calibration_derived");
+  // R89: zero is allowed (a known state: P0 is positive semi-definite and the IMU propagation makes the covariance positive before
+  // anything is inverted); only negative or non-finite values are refused.
   if (!std::isfinite(opts_.p0_known_pos_variance) ||
       !std::isfinite(opts_.p0_known_vel_variance) ||
-      opts_.p0_known_pos_variance <= 0.0 || opts_.p0_known_vel_variance <= 0.0)
-    throw std::invalid_argument("calib/p0 known-state variances must be finite and positive");
+      !std::isfinite(opts_.p0_known_theta_variance) ||
+      opts_.p0_known_pos_variance < 0.0 || opts_.p0_known_vel_variance < 0.0)
+    throw std::invalid_argument("calib/p0 known-state variances must be finite and not negative");
   if (!std::isfinite(opts_.p0_tilt_ba_ambiguity_accel_std) ||
       !std::isfinite(opts_.p0_bg_model_floor) ||
       !std::isfinite(opts_.p0_ba_radial_model_floor) ||
@@ -105,6 +113,8 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  p0/autocov_lags: " << opts_.p0_autocov_lags
       << "\n  p0/known_pos_variance: " << opts_.p0_known_pos_variance
       << "\n  p0/known_vel_variance: " << opts_.p0_known_vel_variance
+      << "\n  p0/known_theta_variance: " << opts_.p0_known_theta_variance
+      << (opts_.p0_known_theta_variance < 0.0 ? " (negative: calibration-derived attitude block)" : "")
       << "\n  p0/tilt_ba_ambiguity_accel_std: "
       << opts_.p0_tilt_ba_ambiguity_accel_std
       << "\n  p0/model_floors(bg,ba_radial): " << opts_.p0_bg_model_floor << ", "
@@ -114,41 +124,31 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
   return oss.str();
 }
 
+// R89: the known blocks of P0 (calibration_derived mode only). Position and velocity are listed only when their variance is exactly 0
+// (pinned); attitude whenever known_theta_variance >= 0. A run that sets none of these builds P0 exactly as before.
+std::vector<p0::KnownBlock> CalibProc::knownP0Blocks() const
+{
+  std::vector<p0::KnownBlock> b;
+  if (opts_.p0_mode != "calibration_derived") return b;
+  if (opts_.p0_known_theta_variance >= 0.0) b.push_back({StateGroup::idxR(), opts_.p0_known_theta_variance});
+  if (opts_.p0_known_pos_variance == 0.0) b.push_back({StateGroup::idxP(), 0.0});
+  if (opts_.p0_known_vel_variance == 0.0) b.push_back({StateGroup::idxV(), 0.0});
+  return b;
+}
+
 void CalibProc::stabilizeP0()
 {
-  Eigen::MatrixXd& P = state_->covMut();
-  P = symmetrized(P);
-  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(P);
-  if (es.info() != Eigen::Success)
-    throw std::runtime_error("P0 stabilization eigensolve failed");
-  const double min_before = es.eigenvalues().minCoeff();
-  if (min_before < opts_.p0_numerical_eigenvalue_floor)
-  {
-    const Eigen::VectorXd values =
-        es.eigenvalues().cwiseMax(opts_.p0_numerical_eigenvalue_floor);
-    P = es.eigenvectors() * values.asDiagonal() * es.eigenvectors().transpose();
-    P = symmetrized(P);
-  }
-  Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> check(P);
-  if (check.info() != Eigen::Success)
-    throw std::runtime_error("stabilized P0 verification eigensolve failed");
-  double min_after = check.eigenvalues().minCoeff();
-  if (min_after < opts_.p0_numerical_eigenvalue_floor)
-  {
-    const double lift = opts_.p0_numerical_eigenvalue_floor - min_after +
-        std::numeric_limits<double>::epsilon() *
-        std::max(1.0, opts_.p0_numerical_eigenvalue_floor);
-    P.diagonal().array() += lift;
-    Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> lifted(P);
-    if (lifted.info() != Eigen::Success)
-      throw std::runtime_error("lifted P0 verification eigensolve failed");
-    min_after = lifted.eigenvalues().minCoeff();
-  }
+  const std::vector<p0::KnownBlock> blocks = knownP0Blocks();
+  const std::vector<int> pinned = p0::pinnedIndices(blocks);
+  const p0::StabilizeResult r = p0::stabilize(state_->covMut(), pinned, opts_.p0_numerical_eigenvalue_floor);
+  const double min_before = r.min_before;
+  const double min_after = r.min_after;
   state_->setP0Stabilization(min_before,
       opts_.p0_numerical_eigenvalue_floor, min_after);
   ROS_INFO_STREAM("[calib/P0] SPD stabilization: min_before=" << min_before
       << " floor=" << opts_.p0_numerical_eigenvalue_floor
-      << " min_after=" << min_after);
+      << " min_after=" << min_after
+      << " pinned_states=" << pinned.size());
 }
 
 bool CalibProc::collectSamples()
@@ -391,6 +391,10 @@ void CalibProc::applyCalibrationDerivedP0(
   if (state_->estBG())
     P.block(state_->idxBG(), state_->idxBG(), 3, 3) =
         gyro_mean_cov + bg_floor * M3D::Identity();
+
+  // R89: known blocks (exact zero position/velocity; a constant or zero attitude block). Cross terms of those rows and columns are
+  // cleared: removing states from a positive semi-definite matrix leaves it positive semi-definite.
+  p0::applyKnownBlocks(P, knownP0Blocks());
 
   // Gravity magnitude/direction is deliberately left at state/cov/gravity:
   // one stationary accelerometer mean cannot separate gravity from b_a.

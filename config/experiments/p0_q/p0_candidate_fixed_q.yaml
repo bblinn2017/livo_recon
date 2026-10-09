@@ -15,6 +15,3 @@ state:
 imu:
   process_noise:
     model: fixed
-estimator:
-  coupled:
-    gating_state_uncertainty: false

@@ -6,9 +6,7 @@ VIRAL configuration is the baseline (`rot_tilt=rot_yaw=pos=vel=1e-2`,
 not change accelerometer/gyroscope measurement noise or bias random-walk
 process noise.
 
-Use real `eee_01` data and a 30-second duration for every cell. Run all four
-architectures (splineless, decoupled spline, coupled measurement time, and
-coupled tail time), using `max_iter` as the only enabled iteration stop.
+Use real `eee_01` data and a 30-second duration for every cell. Run the iekf estimator (the other architectures were removed), using `max_iter` as the only enabled iteration stop.
 
 Run order:
 

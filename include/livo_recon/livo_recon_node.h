@@ -6,7 +6,6 @@
 #include "livo_recon/processing/calib_processing.h"
 #include "livo_recon/processing/imu_processing.h"
 #include "livo_recon/processing/lio_iekf.h"
-#include "livo_recon/processing/lio_coupled.h"
 #include "livo_recon/processing/vio_processing.h"
 #include "livo_recon/processing/combined_processing.h"
 #include "livo_recon/processing/evo_processing.h"

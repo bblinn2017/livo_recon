@@ -3,6 +3,8 @@
 #include "livo_recon/node_context.h"
 #include "livo_recon/utils/data/measures.h"
 #include "livo_recon/utils/log/profiler.h"
+#include "livo_recon/lio/p0_pin.h"
+#include <vector>
 
 namespace livo_recon
 {
@@ -52,6 +54,9 @@ struct CalibProcOptions
   int p0_autocov_lags = 20;
   double p0_known_pos_variance = 1e-12;
   double p0_known_vel_variance = 1e-12;
+  // R89: attitude block of P0 in calibration_derived mode. Negative: the calibration-derived block (unchanged). 0 or more: that constant on
+  // the diagonal with no cross terms (0 = exactly zero).
+  double p0_known_theta_variance = -1.0;
   // Standard deviation of the ONE transverse specific-force ambiguity
   // shared equally (in acceleration-equivalent units) by gravity tilt and
   // accelerometer bias. Negative conservatively derives it from the larger
@@ -105,6 +110,7 @@ private:
                                         const M3D& acc_mean_cov,
                                         const M3D& gyro_mean_cov);
   void        stabilizeP0();
+  std::vector<p0::KnownBlock> knownP0Blocks() const;
   M3D         computeInitialRotation(const V3D& acc_bias) const;
   void        prepareBootstrapObservations();
 

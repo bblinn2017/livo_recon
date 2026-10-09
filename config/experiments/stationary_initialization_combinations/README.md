@@ -1,8 +1,9 @@
 # Combined stationary-initialization campaign
 
 Load one fragment after `ntu_viral.yaml`. Use real NTU VIRAL `eee_01`, exactly
-30 seconds, VIO disabled, `max_iter` as the only numerical stop, and the
-coupled measurement-time estimator with state-aware gating enabled.
+30 seconds, VIO disabled and `max_iter` as the only numerical stop. These fragments
+were written for the coupled estimator, which was removed in R89; run them
+with the iekf estimator only.
 
 The matched baseline is the unmodified `ntu_viral.yaml`. Run the seven cells
 in numerical order so effects can be attributed incrementally:

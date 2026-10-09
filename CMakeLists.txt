@@ -123,7 +123,6 @@ add_executable(livo_recon_node
   src/diagnostics/eval/nees_logger.cpp
   src/diagnostics/gt_interp.cpp
   src/diagnostics/stationary_diagnostic_writer.cpp
-  src/diagnostics/init_consistency.cpp
   src/diagnostics/state_trace.cpp
   src/diagnostics/calibration_p0_writer.cpp
   src/diagnostics/motion_q_writer.cpp
@@ -141,9 +140,6 @@ add_executable(livo_recon_node
   src/processing/lio_iekf.cpp
   src/processing/lio_iekf_shadow.cpp
   src/lio/shadow_lio.cpp
-  src/processing/lio_coupled.cpp
-  src/processing/lio_coupled_process.cpp
-  src/processing/lio_coupled_update_log.cpp
   src/processing/combined_processing.cpp
   src/processing/evo_processing.cpp
   src/lio/voxelplane.cpp
@@ -152,8 +148,6 @@ add_executable(livo_recon_node
   src/lio/deskew.cpp
   src/lio/residual_redundancy.cpp
   src/lio/info_scale.cpp
-  src/lio/joint_knot_estimator.cpp
-  src/diagnostics/joint_knots/joint_knot_diagnostic_writer.cpp
   src/map/voxelmap.cpp
   src/map/akf_map.cpp
   src/map/surface_map.cpp
@@ -224,9 +218,8 @@ target_link_libraries(cache_tracker_output_livo_recon
   tbb
 )
 
-# Canonical coupled joint-knot tests.
+# Unit tests.
 add_subdirectory(tests/active)
-add_subdirectory(tests/joint_knots)
 add_subdirectory(tests/reference_math)
 
 # R66: the R52 stationary-map research library, its CLI and its test were removed (harness parked and retired by Bryce).
@@ -363,8 +356,7 @@ target_link_libraries(test_info_scale Eigen3::Eigen)
 add_test(NAME info_scale COMMAND test_info_scale)
 
 # R72 (planning agent's patch; R82: step cap F-403 retired): Q-adaptation alternatives (F-401), failure dump round trip (F-398).
-# ROS-free header-only modules, Eigen only. (The solver-level failure-capture test, test_joint_knot_failure_capture, is picked up by
-# tests/joint_knots/CMakeLists.txt's glob.)
+# ROS-free header-only modules, Eigen only.
 foreach(r72_test q_adapt failure_capture symmetrize renamed_keys shadow_options bag_clock row_flush plane_test_values line_residual line_residual_r75 line_residual_r76 process_noise_switch)
   add_executable(test_${r72_test} tests/test_${r72_test}.cpp)
   target_include_directories(test_${r72_test} PUBLIC include ${EIGEN3_INCLUDE_DIRS})
@@ -383,6 +375,12 @@ add_executable(test_binned_bins_r88 tests/test_binned_bins_r88.cpp)
 target_include_directories(test_binned_bins_r88 PUBLIC include ${EIGEN3_INCLUDE_DIRS})
 target_link_libraries(test_binned_bins_r88 Eigen3::Eigen)
 add_test(NAME binned_bins_r88 COMMAND test_binned_bins_r88)
+
+# R89 (planning agent's patch): exact-zero known blocks of P0 (header-only, Eigen only).
+add_executable(test_p0_pin_r89 tests/test_p0_pin_r89.cpp)
+target_include_directories(test_p0_pin_r89 PUBLIC include ${EIGEN3_INCLUDE_DIRS})
+target_link_libraries(test_p0_pin_r89 Eigen3::Eigen)
+add_test(NAME p0_pin_r89 COMMAND test_p0_pin_r89)
 # R88: VoxelPlane::refitFromBins() and VoxelNode's binned debiased branch (same source set as test_plane_var_r81).
 add_executable(test_binned_node_r88 tests/test_binned_node_r88.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
 target_include_directories(test_binned_node_r88 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})

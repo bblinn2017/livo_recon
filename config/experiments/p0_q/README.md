@@ -1,8 +1,7 @@
 # R44 P0 and motion-Q controls
 
-Load one P0 file after `ntu_viral.yaml` and `coupled_joint_knots.yaml`:
+Load one P0 file after `ntu_viral.yaml` (the coupled estimator and `p0_configured_control.yaml` were removed in R89):
 
-- `p0_configured_control.yaml`: configured P0 + fixed Q baseline.
 - `p0_candidate_fixed_q.yaml`: selected R43 candidate + fixed Q.
 
 For phase 2, load either motion-Q file after `p0_candidate_fixed_q.yaml`.

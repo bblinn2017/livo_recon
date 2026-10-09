@@ -82,6 +82,10 @@ calib:
     # solves nonsingular while representing those known constraints.
     known_pos_variance: 1.0e-12
     known_vel_variance: 1.0e-12
+    # R89: attitude block of P0 in calibration_derived mode. Negative = the calibration-derived block (unchanged); 0 or more = that
+    # constant on the diagonal with no cross terms (0 = exactly zero). known_pos_variance / known_vel_variance may also be exactly 0
+    # (a known state; the IMU propagation makes the covariance positive before anything is inverted).
+    known_theta_variance: -1.0
     # Balanced roll/pitch-vs-b_a ambiguity in acceleration units. 0.0856
     # m/s^2 = g * 0.5 degrees, using the VN-100's published static pitch/roll
     # accuracy as the initial conservative ambiguity scale. Each side gets

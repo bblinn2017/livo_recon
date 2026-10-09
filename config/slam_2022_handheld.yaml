@@ -101,6 +101,7 @@ calib:
     autocov_lags: 20
     known_pos_variance: 1.0e-12
     known_vel_variance: 1.0e-12
+    known_theta_variance: -1.0
     tilt_ba_ambiguity_accel_std: -1.0  # NOT ported from NTU -- see comment above
     bg_model_floor: -1.0
     ba_radial_model_floor: -1.0
