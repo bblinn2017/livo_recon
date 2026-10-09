@@ -1,7 +1,9 @@
 #include "livo_recon/lio/voxelplane.h"
 #include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/lio/line_residual.h"
+#include "livo_recon/lio/voxel_class.h"
 #include "livo_recon/lio/plane_var_r81.h"
+#include "livo_recon/lio/plane_var_diag.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include <fstream>
 #include <sstream>
@@ -29,6 +31,21 @@ std::atomic<long> g_r77_gap_fits{0}, g_r77_gap_d1{0}, g_r77_gap_d2{0};
 std::atomic<long> g_r77_tilt_voxels{0}, g_r77_tilt_floored_axes{0}, g_r77_tilt_fallbacks{0};
 // R81 (F-468, F-485): engagement of plane_var_scan_s2 / plane_var_min (counted only while a key is on), read by voxelPlaneR81Counters().
 std::atomic<long> g_r81_rows{0}, g_r81_scan_rows{0}, g_r81_clamped{0}, g_r81_sum_nscans{0};
+// R82 (D2, F-502): write-only plane variance diagnostic (only touched when plane_var_diag_en is true), read by voxelPlaneVarDiagSnapshot().
+PlaneVarDiag g_r82_pvdiag;
+// R82 (D4): the line rule of line_residual as LineOptions, built the same way at every call site.
+template <class O> LineOptions fitLineOptions(const O& o)
+{
+  LineOptions lo;
+  lo.mode = static_cast<LineMode>(o.line_residual_enum);
+  lo.plane_threshold = o.plane_threshold;
+  lo.rel_sigmas = o.line_rel_sigmas;
+  lo.shape_ratio = o.line_shape_ratio;
+  lo.sensor_noise_var = o.weight_sigma_r2;
+  return lo;
+}
+// R82 (D4, F-500): engagement of the fit-time line classification / equivalence (see VoxelPlaneR82Counters).
+std::atomic<long> g_r82_line_classified{0}, g_r82_line_accepted{0}, g_r82_e1_tiny{0}, g_r82_e0_clamped{0}, g_r82_gaps_floored{0}, g_r82_tilt_moment{0}, g_r82_tilt_meancov{0};
 // Engagement counter for the information plane model.  A run configured with
 // plane_var_mode = "information" that never increments this built no plane
 // under the model and is an INERT cell, not a null result -- the same
@@ -66,6 +83,8 @@ struct FitTraceState
   std::map<int, std::array<long, kNCounters>> counts;   // key = frame * 2 + (debiased ? 1 : 0)
   std::vector<std::string> rows;
   std::map<int, int> rows_per_frame;   // per-frame row cap = plane_fit_trace_max_rows / (plane_fit_trace_frames + 1)
+  std::vector<std::string> eig_rows;   // R83B (A1/B4): plane_fit_eigs.csv rows, same frame window and row cap as rows above
+  std::map<int, int> eig_rows_per_frame;
 };
 FitTraceState& fitTraceState() { static FitTraceState s; return s; }
 
@@ -92,7 +111,7 @@ void fitCount(const VoxelOpts& o, int frame, bool debiased, int idx)
 // e0_final = the value compared against thr. have_cov=false records the count only (no row).
 void fitRecord(const VoxelOpts& o, int frame, bool debiased, int reason, double N, int F, bool have_cov,
                const V3D& mean, const M3D& raw_cov, const M3D& sens_cov, const V3D& eig_used,
-               double e0_final, double thr, bool was_plane)
+               double e0_final, double thr, bool was_plane, int layer)
 {
   if (!fitDiagWanted(o, frame)) return;
   fitCount(o, frame, debiased, reason);
@@ -101,7 +120,7 @@ void fitRecord(const VoxelOpts& o, int frame, bool debiased, int reason, double 
   V3D re = V3D::Constant(std::numeric_limits<double>::quiet_NaN());
   double sens_n = std::numeric_limits<double>::quiet_NaN();
   if (rs.info() == Eigen::Success) {
-    re = rs.eigenvalues();
+    re = rs.eigenvalues();   // ascending order (SelfAdjointEigenSolver's own convention) -- already "sorted" for B4
     const V3D n0 = rs.eigenvectors().col(0);
     sens_n = n0.dot(sens_cov * n0);
   }
@@ -116,6 +135,16 @@ void fitRecord(const VoxelOpts& o, int frame, bool debiased, int reason, double 
   const int cap = std::max(1, o.plane_fit_trace_max_rows / (o.plane_fit_trace_frames + 1));
   int& used = s.rows_per_frame[frame];
   if (used < cap) { s.rows.push_back(oss.str()); ++used; }
+  if (o.plane_fit_eigs_en) {
+    int& eused = s.eig_rows_per_frame[frame];
+    if (eused < cap) {
+      std::ostringstream eoss;
+      eoss << std::setprecision(9) << frame << ',' << (debiased ? "debiased" : "pca") << ',' << layer << ','
+           << (int)N << ',' << F << ',' << reason << ',' << re(0) << ',' << re(1) << ',' << re(2) << '\n';
+      s.eig_rows.push_back(eoss.str());
+      ++eused;
+    }
+  }
 }
 
 // CQ-35: ofs is a function-local static, opened once (truncating) and kept
@@ -618,6 +647,13 @@ void voxelPlaneFitTraceFlush()
     for (const auto& r : s.rows) ofs << r;
     ofs.flush();
   }
+  if (!s.eig_rows.empty()) {   // R83B (A1/B4)
+    static PersistentLogStream log("plane_fit_eigs.csv");
+    std::ofstream& ofs = log.stream();
+    ofs << "frame,path,layer,N,F,reason,eig0,eig1,eig2\n";   // eig0<=eig1<=eig2, raw (uncorrected) scatter
+    for (const auto& r : s.eig_rows) ofs << r;
+    ofs.flush();
+  }
 }
 
 void voxelPlaneFrameStatsReset()
@@ -631,6 +667,21 @@ void voxelPlaneFrameStatsRead(int& denom_rejected_count, double& max_plane_var_t
 {
   denom_rejected_count = g_denom_rejected_count.load(std::memory_order_relaxed);
   max_plane_var_trace = g_max_plane_var_trace.load(std::memory_order_relaxed);
+}
+
+PlaneVarDiagSnapshot voxelPlaneVarDiagSnapshot() { return g_r82_pvdiag.snapshot(); }   // R82 (D2)
+
+VoxelPlaneR82Counters voxelPlaneR82Counters()
+{
+  VoxelPlaneR82Counters c;
+  c.line_classified = g_r82_line_classified.load(std::memory_order_relaxed);
+  c.line_accepted = g_r82_line_accepted.load(std::memory_order_relaxed);
+  c.e1_tiny_kept = g_r82_e1_tiny.load(std::memory_order_relaxed);
+  c.e0_clamped = g_r82_e0_clamped.load(std::memory_order_relaxed);
+  c.gaps_floored = g_r82_gaps_floored.load(std::memory_order_relaxed);
+  c.tilt_voxels_moment = g_r82_tilt_moment.load(std::memory_order_relaxed);
+  c.tilt_voxels_meancov = g_r82_tilt_meancov.load(std::memory_order_relaxed);
+  return c;
 }
 
 VoxelPlaneR81Counters voxelPlaneR81Counters()
@@ -762,6 +813,8 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
   plane_var_term = (J_nq * plane_var_ * J_nq.transpose()).value();
   // R81 (F-468, F-485 Part 3): scan term first, then the clamp (see lio/plane_var_r81.h). Both keys default to 0.0: this block is then skipped and plane_var_term is untouched, bit for bit.
   // distinct_frames_ is the voxel's distinct-frame count as of its LAST FIT (VoxelNode::distinct_frames_, handed to the plane by noteFrames() on the pca path and by addPoints() on the debiased path).
+  if (opts_->plane_var_diag_en)   // R82 (D2): write-only; the value is read BEFORE the scan term and the clamp below
+    g_r82_pvdiag.add(plane_var_term, plane_var_term + (opts_->plane_var_scan_s2 > 0.0 ? opts_->plane_var_scan_s2 / static_cast<double>(std::max(1, distinct_frames_)) : 0.0), distinct_frames_);
   if (opts_->plane_var_scan_s2 > 0.0 || opts_->plane_var_min > 0.0) {
     bool scan_added = false, clamped = false;
     plane_var_term = planeVarR81Apply(plane_var_term, opts_->plane_var_scan_s2, opts_->plane_var_min, distinct_frames_, &scan_added, &clamped);
@@ -1210,7 +1263,7 @@ void VoxelPlane::computeLineTilt(const std::vector<PointXYZCov>& points, const s
   lo.shape_ratio = opts_->line_shape_ratio;
   lo.sensor_noise_var = opts_->weight_sigma_r2;
   const bool smooth = (lo.mode == LineMode::Smooth);
-  if (!smooth && !isLineVoxel(lo, eigen_values_(0), eigen_values_(1), points_size_, eigen_values_(2))) return;
+  if (!smooth && !(opts_->line_classify_at_fit ? is_line_ : isLineVoxel(lo, eigen_values_(0), eigen_values_(1), points_size_, eigen_values_(2)))) return;   // R82: with classify_at_fit the class was decided at fit time
   const int rows = smooth ? 3 : 2;
   const int N = static_cast<int>(points.size());
   if (N < 1) return;
@@ -1299,11 +1352,42 @@ bool VoxelPlane::lineDistanceTiltVar(double c0, double c1, double s, double& out
   return true;
 }
 
+void VoxelPlane::computeLineTiltDebiased(int form)
+{
+  LineOptions lo;
+  lo.mode = static_cast<LineMode>(opts_->line_residual_enum);
+  lo.plane_threshold = opts_->plane_threshold;
+  lo.rel_sigmas = opts_->line_rel_sigmas;
+  lo.shape_ratio = opts_->line_shape_ratio;
+  lo.sensor_noise_var = opts_->weight_sigma_r2;
+  const bool smooth = (lo.mode == LineMode::Smooth);
+  if (!smooth && !(opts_->line_classify_at_fit ? is_line_ : isLineVoxel(lo, eigen_values_(0), eigen_values_(1), points_size_, eigen_values_(2)))) return;   // R82: with classify_at_fit the class was decided at fit time
+  const double N = N_acc_;
+  if (!(N >= 1.0)) return;
+  const V3D u[3] = {plane_.normal, y_normal_, x_normal_};
+  const double e[3] = {eigen_values_(0), eigen_values_(1), eigen_values_(2)};
+  LineTiltResult r;
+  if (form == 2) {
+    r = lineTiltFromMoments(u, e, smooth, opts_->weight_sigma_r2, N, plane_.center, V_, W_, Scov_);
+    g_r82_tilt_moment.fetch_add(1, std::memory_order_relaxed);
+  } else {
+    const V3D mean_rel = Sp_ / N;
+    const M3D raw_cov = Spp_ / N - mean_rel * mean_rel.transpose();
+    r = lineTiltFromMeanCov(u, e, smooth, opts_->weight_sigma_r2, N, raw_cov, M3D(Scov_ / N));
+    g_r82_tilt_meancov.fetch_add(1, std::memory_order_relaxed);
+  }
+  const int rows = smooth ? 3 : 2;
+  for (int i = 0; i < rows; ++i) { line_tilt_L_[i] = r.L[i]; line_tilt_valid_[i] = true; }
+  if (!smooth) { line_tilt_X_ = r.X; line_tilt_X_valid_ = true; }
+  g_r77_tilt_voxels.fetch_add(1, std::memory_order_relaxed);
+  if (r.floored) g_r77_tilt_floored_axes.fetch_add(r.floored, std::memory_order_relaxed);
+}
+
 void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
                         const std::vector<double>* weights_in,
                         const RunningMoments* running,
                         const std::vector<double>* var_weights_in,
-                        int frame_idx)
+                        int frame_idx, int layer_idx)
 {
   line_tilt_valid_[0] = line_tilt_valid_[1] = line_tilt_valid_[2] = false;   // R77 (F-453)
   line_tilt_X_valid_ = false;
@@ -1311,10 +1395,12 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   covariance_.setZero();
   plane_ = {};
   is_plane_ = false;
+  is_line_ = false;   // R82 (D4)
 
   const int N = (int)points.size();
   points_size_ = (total_count >= 0) ? total_count : N;
   trace_frame_ = frame_idx;
+  trace_layer_ = layer_idx;
   if (N < 3) return;
 
   // `weights`: supplied by the caller (VoxelNode always pre-bins whenever
@@ -1375,7 +1461,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
       sc /= N;
     }
     fitRecord(*opts_, trace_frame_, false, reason, static_cast<double>(points_size_), 0, true, plane_.center,
-              covariance_, sc, eig_used, e0_final, opts_->plane_threshold, false);
+              covariance_, sc, eig_used, e0_final, opts_->plane_threshold, false, trace_layer_);
   };
 
   Eigen::SelfAdjointEigenSolver<M3D> solver(covariance_);
@@ -1384,7 +1470,8 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   eigen_values_ = solver.eigenvalues();
   const M3D evecs = solver.eigenvectors();
 
-  if (eigen_values_(1) < 1e-8 || eigen_values_(2) < 1e-8)
+  // R82 (D4): with classify_at_fit only a cluster with no direction (e2 < 1e-8) is degenerate; a voxel with e1 < 1e-8 <= e2 is a perfect line and is classified below. Off: the R81 test, bit for bit.
+  if (opts_->line_classify_at_fit ? (eigen_values_(2) < 1e-8) : (eigen_values_(1) < 1e-8 || eigen_values_(2) < 1e-8))
   { pcaTrace(kREig12Small, eigen_values_, eigen_values_(0)); return; }
 
   if (opts_->sensor_noise_floor_eig0) {
@@ -1414,7 +1501,11 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
     // candidate can't be distinguished from non-planar, so reject rather
     // than risk denom1=eigen_values_(0)-eigen_values_(1) collapsing to
     // ~zero in the plane_var_ Jacobian below.
-    if (eigen_values_(0) >= eigen_values_(1)) { pcaTrace(kRFloorReject, eigen_values_, eigen_values_(0)); return; }
+    if (eigen_values_(0) >= eigen_values_(1)) {
+      if (!opts_->line_classify_at_fit) { pcaTrace(kRFloorReject, eigen_values_, eigen_values_(0)); return; }
+      eigen_values_(0) = eigen_values_(1);   // R82 (D4): keep the eigenvalue order (a line's e1 sits at the noise floor by definition)
+      g_r82_e0_clamped.fetch_add(1, std::memory_order_relaxed);
+    }
   }
 
   // Acceptance is min-eigenvalue-only, matching FAST-LIVO2's init_plane()
@@ -1427,6 +1518,15 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   is_plane_ = eigen_values_(0) < opts_->plane_threshold;
   pcaTrace(is_plane_ ? kRAccept : kRThreshold, eigen_values_, eigen_values_(0));
   if (!is_plane_) return;
+  if (opts_->line_classify_at_fit) {   // R82 (D4): reject / plane / line decided once, here, from the final eigenvalues
+    const VoxelClassResult cr = classifyVoxel(fitLineOptions(*opts_), eigen_values_(0), eigen_values_(1), eigen_values_(2), points_size_, opts_->plane_threshold);
+    is_line_ = (cr.cls == VoxelClass::Line);
+    if (is_line_) {
+      g_r82_line_classified.fetch_add(1, std::memory_order_relaxed);
+      g_r82_line_accepted.fetch_add(1, std::memory_order_relaxed);
+      if (cr.e1_tiny_kept) g_r82_e1_tiny.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
 
   // NOTE: no denom1/denom2 near-degenerate-eigengap guard here, unlike
   // refitDebiased() below -- tried applying the same guard to this PCA
@@ -1630,9 +1730,10 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
 
 void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_count,
                            int distinct_frames, bool trust_sensor_noise,
-                           int frame_idx)
+                           int frame_idx, int layer_idx, bool refit)
 {
   trace_frame_ = frame_idx;
+  trace_layer_ = layer_idx;
   for (const auto& pt : points) {
     const V3D& p = pt.point;
     // History (734-755): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-734
@@ -1673,6 +1774,15 @@ void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_cou
   }
   points_size_ = (total_count >= 0) ? total_count : (int)N_acc_;
   if (distinct_frames > 0) distinct_frames_ = distinct_frames;
+  if (!refit) {
+    // R87: admission rule said no fit yet. The sums above are updated; the previous fit (or no fit) stays untouched. A voxel that already
+    // is a plane still takes the occupancy update for these points (occupancy is accumulation-driven; applyPlaneConfidence() is a no-op).
+    if (is_plane_) {
+      for (const auto& pt : points) updateOccupancy(pt.point, frame_idx);
+      recomputeOccupancyCache();
+    }
+    return;
+  }
   refitDebiased();
 
   // T3-0e: occupancy uses whatever tangent frame refitDebiased() just left
@@ -1691,6 +1801,42 @@ void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_cou
   }
 }
 
+void VoxelPlane::refitFromBins(const binned::BinSet& bins, const binned::Options& bin_opts, const std::vector<PointXYZCov>& batch,
+                               int distinct_frames, int frame_idx, int layer_idx, bool refit)
+{
+  trace_frame_ = frame_idx;
+  trace_layer_ = layer_idx;
+  points_size_ = static_cast<int>(bins.numBins());   // isInit() = points_size_ > min_init_points: here, occupied bins
+  if (distinct_frames > 0) distinct_frames_ = distinct_frames;
+  if (!refit) {
+    if (is_plane_) {
+      for (const auto& pt : batch) updateOccupancy(pt.point, frame_idx);
+      recomputeOccupancyCache();
+    }
+    return;
+  }
+  if (opts_->centred_accumulation && !ref_set_ && !batch.empty()) { ref_ = batch.front().point; ref_set_ = true; }
+  const V3D ref = (opts_->centred_accumulation && ref_set_) ? ref_ : V3D(V3D::Zero());
+  const binned::Moments m = bins.moments(bin_opts, ref);
+  N_acc_ = m.n;
+  Sp_ = m.sp;
+  Spp_ = m.spp;
+  Scov_ = m.scov;
+  Scov_sensor_ = m.scov_sensor;
+  sum_sensor_var_ = m.sum_sensor_var;
+  for (int a = 0; a < 3; ++a) {
+    W_[a] = m.w[a];
+    for (int b = 0; b < 3; ++b) V_[a][b] = m.v[a][b];
+  }
+  refitDebiased();
+  if (is_plane_) {
+    for (const auto& pt : batch) updateOccupancy(pt.point, frame_idx);
+    recomputeOccupancyCache();
+    applyPlaneConfidence();
+    updateMaxPlaneVarTrace(plane_var_.trace());
+  }
+}
+
 void VoxelPlane::refitDebiased()
 {
   const bool was_plane_before = is_plane_;   // R64: read only by the hysteresis factor and the diagnostics
@@ -1698,13 +1844,16 @@ void VoxelPlane::refitDebiased()
   covariance_.setZero();
   plane_ = {};
   is_plane_ = false;
+  is_line_ = false;   // R82 (D4)
   // History (808-812): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-808
   last_fit_j_ = 0;
+  line_tilt_valid_[0] = line_tilt_valid_[1] = line_tilt_valid_[2] = false;   // R82 (D4): the pca update() clears these at its start; the debiased refit did not (they were never set there before R82)
+  line_tilt_X_valid_ = false;
 
   const double N = N_acc_;
   if (N < 3) {
     fitRecord(*opts_, trace_frame_, true, kRNLt3, N, distinct_frames_, false, V3D::Zero(), M3D::Zero(),
-              M3D::Zero(), V3D::Zero(), 0.0, 0.0, was_plane_before);
+              M3D::Zero(), V3D::Zero(), 0.0, 0.0, was_plane_before, trace_layer_);
     return;
   }
 
@@ -1755,7 +1904,7 @@ void VoxelPlane::refitDebiased()
   }
   auto dbgTrace = [&](int reason, const V3D& eig_used, double e0_final, double thr) {
     fitRecord(*opts_, trace_frame_, true, reason, N, distinct_frames_, true, mean, raw_cov, sens_mean_cov,
-              eig_used, e0_final, thr, was_plane_before);
+              eig_used, e0_final, thr, was_plane_before, trace_layer_);
   };
   // CQ-56 item 3: recorded as soon as covariance_ is computed, regardless
   // of whether this fit goes on to be accepted as a plane -- the
@@ -1769,8 +1918,12 @@ void VoxelPlane::refitDebiased()
   eigen_values_ = solver.eigenvalues();
   const M3D evecs = solver.eigenvectors();
 
-  if (eigen_values_(1) < 1e-8 || eigen_values_(2) < 1e-8)
-  { dbgTrace(kREig12Small, eigen_values_, eigen_values_(0), opts_->plane_threshold); return; }
+  // R82 (D4, F-500): with classify_at_fit only a cluster with no direction (e2 < 1e-8) is degenerate here (same rule as the pca fit); the class itself is decided below, from the final eigenvalues. Off: the R81 test, bit for bit.
+  const bool cls_fit = opts_->line_classify_at_fit;
+  if (cls_fit ? (eigen_values_(2) < 1e-8) : (eigen_values_(1) < 1e-8 || eigen_values_(2) < 1e-8)) {
+    dbgTrace(kREig12Small, eigen_values_, eigen_values_(0), opts_->plane_threshold);
+    return;
+  }
 
   // R64 "lambda0_only": correct only the out-of-plane eigenvalue, first order, along the raw normal.
   if (opts_->debias_mode == "lambda0_only") {
@@ -1790,8 +1943,11 @@ void VoxelPlane::refitDebiased()
       debugLogNoiseFloor(dbg.str());
     }
     eigen_values_(0) = std::max(eigen_values_(0), sensor_floor);
-    if (eigen_values_(0) >= eigen_values_(1))
-    { dbgTrace(kRFloorReject, eigen_values_, eigen_values_(0), opts_->plane_threshold); return; }
+    if (eigen_values_(0) >= eigen_values_(1)) {
+      if (!cls_fit) { dbgTrace(kRFloorReject, eigen_values_, eigen_values_(0), opts_->plane_threshold); return; }
+      eigen_values_(0) = eigen_values_(1);   // R82 (D4): keep the eigenvalue order the pca fit always has (a line's e1 sits at the noise floor by definition)
+      g_r82_e0_clamped.fetch_add(1, std::memory_order_relaxed);
+    }
   }
 
   // Non-finite is still a hard reject (NaN/Inf from a degenerate solve) --
@@ -1803,9 +1959,17 @@ void VoxelPlane::refitDebiased()
   const double threshold_eff = opts_->plane_threshold * (was_plane_before ? opts_->plane_threshold_hysteresis : 1.0);
   is_plane_ = eigen_values_(0) < threshold_eff;
   if (!is_plane_) { dbgTrace(kRThreshold, eigen_values_, eigen_values_(0), threshold_eff); return; }
+  if (cls_fit) {   // R82 (D4): reject / plane / line decided once, here, from the final eigenvalues (same function as the pca fit)
+    const VoxelClassResult cr = classifyVoxel(fitLineOptions(*opts_), eigen_values_(0), eigen_values_(1), eigen_values_(2), points_size_, threshold_eff);
+    is_line_ = (cr.cls == VoxelClass::Line);
+    if (is_line_) {
+      g_r82_line_classified.fetch_add(1, std::memory_order_relaxed);
+      if (cr.e1_tiny_kept) g_r82_e1_tiny.fetch_add(1, std::memory_order_relaxed);
+    }
+  }
 
-  const double denom1 = eigen_values_(0) - eigen_values_(1);
-  const double denom2 = eigen_values_(0) - eigen_values_(2);
+  double denom1 = eigen_values_(0) - eigen_values_(1);
+  double denom2 = eigen_values_(0) - eigen_values_(2);
   // Near-degenerate-eigengap guard, debiased-mode-only (see update()'s
   // comment on why this was NOT kept for PCA mode -- it measurably changed
   // PCA's own output there, unlike here where it's the confirmed fix for
@@ -1821,8 +1985,18 @@ void VoxelPlane::refitDebiased()
   // plane_var_ is assembled directly in the (theta1, theta2, d) chart and
   // never divides by lambda0 - lambda_m.  This guard, plane_var_denom_floor_en
   // and kPlaneVarCeiling below are all artefacts of the incumbent form.
-  const bool denom_rejected = !info_mode && opts_->debias_denominator_guard &&   // R65: key debias_denominator_guard (default true)
+  // R82 (Bryce 2026-10-06): ONE gap floor for every voxel in both fits. With plane_gap_floor_en the guard below is not applied and the two gaps are floored at the sensor noise variance (weight_sigma_r2), keeping the sign
+  // of the eigenvalue order (the pca fit's rule, F-433), so plane_var_ never divides by a near-zero gap. Off: the R81 guard, bit for bit.
+  const bool gap_floor = !info_mode && opts_->plane_gap_floor_en;
+  bool denom_rejected = !info_mode && !gap_floor && opts_->debias_denominator_guard &&   // R65: key debias_denominator_guard (default true)
       (std::fabs(denom1) < eps_denom || std::fabs(denom2) < eps_denom);
+  if (gap_floor) {
+    const double fl = opts_->weight_sigma_r2;
+    bool floored = false;
+    if (std::fabs(denom1) < fl) { denom1 = (denom1 > 0.0) ? fl : -fl; floored = true; }
+    if (std::fabs(denom2) < fl) { denom2 = (denom2 > 0.0) ? fl : -fl; floored = true; }
+    if (floored) g_r82_gaps_floored.fetch_add(1, std::memory_order_relaxed);
+  }
   if (opts_->log_debug_en) {
     std::ostringstream dbg;
     dbg << "[debiased_denom] N=" << N << " F=" << distinct_frames_
@@ -1929,6 +2103,8 @@ void VoxelPlane::refitDebiased()
   last_fit_j_ = (int)N;
   updateMaxPlaneVarTrace(plane_var_.trace());
   dbgTrace(kRAccept, eigen_values_, eigen_values_(0), threshold_eff);
+  if (is_line_) g_r82_line_accepted.fetch_add(1, std::memory_order_relaxed);
+  if (opts_->line_var_plane_equivalent && opts_->debiased_line_form != 0) computeLineTiltDebiased(opts_->debiased_line_form);   // R82 (D4)
 
   if (opts_->log_debug_en) {
     std::ostringstream dbg;

@@ -1,45 +1,91 @@
 Test project /root/catkin_ws/build
       Start  1: surface_core
- 1/20 Test  #1: surface_core ...............................   Passed    0.01 sec
+ 1/43 Test  #1: surface_core ...............................   Passed    0.01 sec
       Start  2: gravity_s2
- 2/20 Test  #2: gravity_s2 .................................   Passed    0.01 sec
+ 2/43 Test  #2: gravity_s2 .................................   Passed    0.01 sec
       Start  3: debias_modes
- 3/20 Test  #3: debias_modes ...............................   Passed    0.01 sec
+ 3/43 Test  #3: debias_modes ...............................   Passed    0.01 sec
       Start  4: point_cov
- 4/20 Test  #4: point_cov ..................................   Passed    0.01 sec
-      Start  5: voxel_history
- 5/20 Test  #5: voxel_history ..............................   Passed    0.00 sec
-      Start  6: info_scale
- 6/20 Test  #6: info_scale .................................   Passed    0.00 sec
-      Start  7: step_cap
- 7/20 Test  #7: step_cap ...................................   Passed    0.00 sec
-      Start  8: q_adapt
- 8/20 Test  #8: q_adapt ....................................   Passed    0.00 sec
-      Start  9: zupt
- 9/20 Test  #9: zupt .......................................   Passed    0.00 sec
-      Start 10: failure_capture
-10/20 Test #10: failure_capture ............................   Passed    0.00 sec
-      Start 11: symmetrize
-11/20 Test #11: symmetrize .................................   Passed    0.01 sec
-      Start 12: renamed_keys
-12/20 Test #12: renamed_keys ...............................   Passed    0.00 sec
-      Start 13: shadow_options
-13/20 Test #13: shadow_options .............................   Passed    0.00 sec
-      Start 14: test_bootstrap_observation_moments
-14/20 Test #14: test_bootstrap_observation_moments .........   Passed    0.00 sec
-      Start 15: test_joint_knot_calibration_p0
-15/20 Test #15: test_joint_knot_calibration_p0 .............   Passed    0.00 sec
-      Start 16: test_joint_knot_estimator
-16/20 Test #16: test_joint_knot_estimator ..................   Passed    0.01 sec
-      Start 17: test_joint_knot_failure_capture
-17/20 Test #17: test_joint_knot_failure_capture ............   Passed    0.01 sec
-      Start 18: test_joint_knot_init_consistency
-18/20 Test #18: test_joint_knot_init_consistency ...........   Passed    0.00 sec
-      Start 19: test_joint_knot_motion_q
-19/20 Test #19: test_joint_knot_motion_q ...................   Passed    0.00 sec
-      Start 20: test_reference_temporal_lidar_covariance
-20/20 Test #20: test_reference_temporal_lidar_covariance ...   Passed    0.00 sec
+ 4/43 Test  #4: point_cov ..................................   Passed    0.01 sec
+      Start  5: r83b_instrumentation
+ 5/43 Test  #5: r83b_instrumentation .......................   Passed    0.00 sec
+      Start  6: voxel_history
+ 6/43 Test  #6: voxel_history ..............................   Passed    0.00 sec
+      Start  7: plane_var_symmetry
+ 7/43 Test  #7: plane_var_symmetry .........................   Passed    0.00 sec
+      Start  8: line_residual_glue
+ 8/43 Test  #8: line_residual_glue .........................   Passed    0.00 sec
+      Start  9: line_variance_r77
+ 9/43 Test  #9: line_variance_r77 ..........................   Passed    0.01 sec
+      Start 10: line_distance_r80
+10/43 Test #10: line_distance_r80 ..........................   Passed    0.18 sec
+      Start 11: plane_var_r81
+11/43 Test #11: plane_var_r81 ..............................   Passed    0.01 sec
+      Start 12: iekf_stream_r78
+12/43 Test #12: iekf_stream_r78 ............................   Passed    0.00 sec
+      Start 13: snapshot_frames_r79
+13/43 Test #13: snapshot_frames_r79 ........................   Passed    0.00 sec
+      Start 14: lidar_msg_log_r80
+14/43 Test #14: lidar_msg_log_r80 ..........................   Passed    0.00 sec
+      Start 15: lidar_retime_r80c
+15/43 Test #15: lidar_retime_r80c ..........................   Passed    0.00 sec
+      Start 16: point_time_r82
+16/43 Test #16: point_time_r82 .............................   Passed    0.00 sec
+      Start 17: first_pose_align_r82
+17/43 Test #17: first_pose_align_r82 .......................   Passed    0.00 sec
+      Start 18: plane_var_diag_r82
+18/43 Test #18: plane_var_diag_r82 .........................   Passed    0.02 sec
+      Start 19: line_tilt_r82
+19/43 Test #19: line_tilt_r82 ..............................   Passed    0.00 sec
+      Start 20: debiased_line_r82
+20/43 Test #20: debiased_line_r82 ..........................   Passed    0.00 sec
+      Start 21: voxel_class_r82
+21/43 Test #21: voxel_class_r82 ............................   Passed    0.00 sec
+      Start 22: lidar_offset_r80d
+22/43 Test #22: lidar_offset_r80d ..........................   Passed    0.00 sec
+      Start 23: info_scale
+23/43 Test #23: info_scale .................................   Passed    0.00 sec
+      Start 24: q_adapt
+24/43 Test #24: q_adapt ....................................   Passed    0.00 sec
+      Start 25: failure_capture
+25/43 Test #25: failure_capture ............................   Passed    0.00 sec
+      Start 26: symmetrize
+26/43 Test #26: symmetrize .................................   Passed    0.01 sec
+      Start 27: renamed_keys
+27/43 Test #27: renamed_keys ...............................   Passed    0.00 sec
+      Start 28: shadow_options
+28/43 Test #28: shadow_options .............................   Passed    0.00 sec
+      Start 29: bag_clock
+29/43 Test #29: bag_clock ..................................   Passed    0.00 sec
+      Start 30: row_flush
+30/43 Test #30: row_flush ..................................   Passed    0.35 sec
+      Start 31: plane_test_values
+31/43 Test #31: plane_test_values ..........................   Passed    0.04 sec
+      Start 32: line_residual
+32/43 Test #32: line_residual ..............................   Passed    0.04 sec
+      Start 33: line_residual_r75
+33/43 Test #33: line_residual_r75 ..........................   Passed    0.00 sec
+      Start 34: line_residual_r76
+34/43 Test #34: line_residual_r76 ..........................   Passed    0.00 sec
+      Start 35: process_noise_switch
+35/43 Test #35: process_noise_switch .......................   Passed    0.00 sec
+      Start 36: test_bootstrap_observation_moments
+36/43 Test #36: test_bootstrap_observation_moments .........   Passed    0.00 sec
+      Start 37: test_joint_knot_calibration_p0
+37/43 Test #37: test_joint_knot_calibration_p0 .............   Passed    0.00 sec
+      Start 38: test_joint_knot_estimator
+38/43 Test #38: test_joint_knot_estimator ..................   Passed    0.02 sec
+      Start 39: test_joint_knot_failure_capture
+39/43 Test #39: test_joint_knot_failure_capture ............   Passed    0.01 sec
+      Start 40: test_joint_knot_init_consistency
+40/43 Test #40: test_joint_knot_init_consistency ...........   Passed    0.00 sec
+      Start 41: test_joint_knot_lazy_prior
+41/43 Test #41: test_joint_knot_lazy_prior .................   Passed    0.01 sec
+      Start 42: test_joint_knot_motion_q
+42/43 Test #42: test_joint_knot_motion_q ...................   Passed    0.00 sec
+      Start 43: test_reference_temporal_lidar_covariance
+43/43 Test #43: test_reference_temporal_lidar_covariance ...   Passed    0.00 sec
 
-100% tests passed, 0 tests failed out of 20
+100% tests passed, 0 tests failed out of 43
 
-Total Test time (real) =   0.13 sec
+Total Test time (real) =   0.84 sec

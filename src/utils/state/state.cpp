@@ -1,6 +1,7 @@
 #include "livo_recon/utils/state/state.h"
 #include "livo_recon/utils/log/param_warn.h"
 
+#include <algorithm>
 #include <cmath>
 #include <stdexcept>
 
@@ -164,27 +165,12 @@ M3D poseCovFromBlocks(const M3D& rot, const V3D& p_body, const M3D& P_RR, const 
 }
 }  // namespace
 
-M3D StateGroup::poseCovAtPoint(const V3D& p_body, double t_point, bool for_insertion) const
+M3D StateGroup::poseCovAtPoint(const V3D& p_body, bool for_insertion) const
 {
-  if (!point_cov_propagated_ && !(for_insertion && point_cov_insertion_prior_))
-    return poseCovAt(p_body);   // bit-identical default path
-
-  M3D out;
-  if (for_insertion && point_cov_insertion_prior_ && prior_pose_block_valid_) {
-    out = poseCovFromBlocks(rot_, p_body, prior_pose_block_.block<3,3>(0,0), prior_pose_block_.block<3,3>(3,3),
-                            prior_pose_block_.block<3,3>(0,3));
-  } else {
-    out = poseCovAt(p_body);
-  }
-  if (point_cov_propagated_ && !rel_head_times_.empty() && rel_blocks_.size() == rel_head_times_.size()) {
-    // last step whose head is at or before t_point (clamped): noise accrued from that head to the scan end, which
-    // is at most one IMU period longer than the exact t_point-to-end interval (conservative).
-    std::size_t k = 0;
-    while (k + 1 < rel_head_times_.size() && rel_head_times_[k + 1] <= t_point) ++k;
-    const auto& B = rel_blocks_[k];
-    out += poseCovFromBlocks(rot_, p_body, B.block<3,3>(0,0), B.block<3,3>(3,3), B.block<3,3>(0,3));
-  }
-  return out;
+  if (for_insertion && point_cov_insertion_prior_ && prior_pose_block_valid_)
+    return poseCovFromBlocks(rot_, p_body, prior_pose_block_.block<3,3>(0,0), prior_pose_block_.block<3,3>(3,3),
+                             prior_pose_block_.block<3,3>(0,3));
+  return poseCovAt(p_body);   // bit-identical default path
 }
 
 PointXYZCov StateGroup::toCamera(const PointXYZCov& pt_body) const

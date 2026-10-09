@@ -362,11 +362,12 @@ def main():
     json.dump(meta, open(os.path.join(D, "arm.json"), "w"))
     seq = meta.get("seq", "eee_01")
     bp = json.load(open(a.params))
+    is_ef = row is not None and row.get("tier") == "EF"    # R72: early-frame arms are ~15-30 s long; windows / reducers of the full-bag pipeline do not apply
+    is_hilti = row is not None and row.get("group") == "HIL"   # R82 AGENT FIX: HIL arms have no whole-bag-sweep onset concept (no retime grid, bag_params.json never had a Hilti seq entry) -- treat like EF for the bag_params/window-assertion mechanism below
     want = bp.get(seq)
-    if not want:
+    if not want and not is_hilti and not is_ef:   # R82 AGENT FIX: an EF-tier arm on a Hilti seq (e.g. the OWN exp04 smoke arm) has neither a bag_params entry nor a window check to satisfy -- is_ef already exempts it from the window check below, so it must be exempted here too
         problems.append("no bag_params entry for seq %s" % seq); ok = False
     keep = row is not None and row.get("keep_raw") == "1"
-    is_ef = row is not None and row.get("tier") == "EF"    # R72: early-frame arms are ~15-30 s long; windows / reducers of the full-bag pipeline do not apply
     onset = int(want["onset_scan"]) if want else 485
     T = a.tools_dir
     rcs = {}
@@ -432,8 +433,8 @@ def main():
         pass
     defs = S.get("definitions", {})
     wc = {"expected": {k: want[k] for k in ("onset_scan", "stat_last", "trans_last")} if want else None, "used": defs}
-    wok = True if is_ef else bool(want) and all(int(defs.get(k, -1)) == int(want[k]) for k in ("onset_scan", "stat_last", "trans_last"))
-    if rc_run == 0 and not wok and not is_ef:
+    wok = True if (is_ef or is_hilti) else bool(want) and all(int(defs.get(k, -1)) == int(want[k]) for k in ("onset_scan", "stat_last", "trans_last"))
+    if rc_run == 0 and not wok and not is_ef and not is_hilti:
         problems.append("window mismatch: used %s expected %s" % (defs, wc["expected"])); ok = False
     print("windows used %s expected %s -> %s" % (defs, wc["expected"], "OK" if wok else "MISMATCH"))
     for k, v in rcs.items():

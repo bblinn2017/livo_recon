@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """R69: gather every reduced arm into compact return tables. Nothing here interprets results.
 
-python3 r69_collect.py --runs <runs_dir> --arms r72_manifest/arm_table.tsv --out <out_dir> [--level 0] [--params bag_params.json]
+python3 r69_collect.py --runs <runs_dir> --arms r85_manifest/arm_table.tsv --out <out_dir> [--level -1] [--params bag_params.json] [--ref-completeness <completeness.csv of an older return>]
+R85: groups L0 and L2R are sweep groups (summaries only; pos_trace_all.csv.gz only when gt_max_mm > 500); group SHT and the OWN arms return the F1_KEEP files, which now include
+short_scan_all.csv.gz (copied by the "*_all.csv.gz" pattern into compact/<arm>/). Determinism pairs (arm_table arm_kind det_fb, det_sht: arm vs its `ref` arm) and identity pairs
+(arm_kind id: arm vs its `ref`, an r84_ arm, digest from --ref-completeness = the R84 return's completeness.csv) are written to identity_controls.txt as facts.
 Writes into <out_dir>:
   phase_summary.csv            one row per arm (flat reducer metrics) plus the alignment-free deviation-from-baseline columns (below)
   arm_scan_all.csv.gz          every arm's per-scan table THINNED by --level (levels below). Column dev_from_baseline_mm added. Exact scan times in column t (4 decimals).
@@ -36,10 +39,12 @@ DROP_FROM_RETURN = {"r73_f417_residuals.csv.gz",
                      "frame_stats_compact.csv.gz", "frame_stats_blocks.csv", "frame_stats_windows.csv.gz",
                      "lio_gt_matched_compact.csv.gz", "crossframe_frames.csv.gz", "crossframe_axes.csv",
                      "live_point_cov_compact.csv.gz", "motion_q_scan_all.csv.gz", "frame_window_all.csv.gz"}   # R74: duplicates residual_dump_all.csv.gz (same rows, weight and class); stays in the host bundle and archive, not in the return (return size, rule 5.12a)
-KEEP_IF_ARM_HAS = {"r73_f417_residuals.csv.gz": "_n200_", "motion_q_scan_all.csv.gz": "r80_b3_eee_02_mq"}   # R80 (F-437 / D2): the R80 BASE3 eee_02 motion-Q arm replaces the R79 arm name; R79 (F-437): the motion-Q trace of that ONE arm is returned (substring of the arm name; the file is every row of motion_q_scan.csv); R74 addendum 1 (Bryce: return it for calibration samples N=200 only): a dropped file is still returned for an arm whose name contains the value
+KEEP_IF_ARM_HAS = {"r73_f417_residuals.csv.gz": "_n200_", "motion_q_scan_all.csv.gz": ("r80_b3_eee_02_mq", "_mqs_")}   # R83: the motion-Q trace of every MQS arm (name contains _mqs_) is returned too: the scale-family analysis needs the per-scan Q (size not verified, see REPORT)   # R80 (F-437 / D2): the R80 BASE3 eee_02 motion-Q arm replaces the R79 arm name; R79 (F-437): the motion-Q trace of that ONE arm is returned (substring of the arm name; the file is every row of motion_q_scan.csv); R74 addendum 1 (Bryce: return it for calibration samples N=200 only): a dropped file is still returned for an arm whose name contains the value
 F1_GROUPS = {"DP", "MG", "VX", "LN", "SM", "DET", "FB", "IDN", "SMK", "GAP", "SWP", "STA", "SPL", "CTL", "IF3", "YAW", "ML1", "ROOT", "SNP", "REF", "NB", "QV", "DX", "EC",
              "B3", "B1", "ZD", "GP", "NG", "PC", "DB", "TL", "EC3", "SC", "SW", "SMK",
-             "SWT", "RR", "N478", "N467", "N470", "N485B", "N469", "N468", "N485C", "N474", "N479", "OWN", "ID"}   # R81: the SPEC groups (families) as well; the fine groups of the RR reruns (GP, B3, B1, MG, ZD, NG, PC, DB, DP, EC3, SC) are already listed   # R80: BASE3 / BASE1, D7 detect-only (ZD), F-433 (GP), F-476 (NG), D8 (PC), F-469 (DB), TAIL-1 (TL), D3 (EC3), D5 (SC), D1 sweep (SW), smoke (SMK; already listed)   # R79: F-463 (NB), F-401 / F-418 (QV), F-464 (DX), F-441 / F-440 (EC); R78: its groups (Stage A, split, controls, information-matched thinning, yaw, max layer 1, root 1.4, snapshot, refuse); R77: smoke (SMK), gap-floor (GAP) and voxel-sweep (SWP) groups as well;   # R76: FB (the full-bag grid) and IDN (identity arms) as well;   # R74 addendum 5: these groups' other per-frame compact files stay in the host archive; only frame-1 files are returned
+             "SWT", "RR", "N478", "N467", "N470", "N485B", "N469", "N468", "N485C", "N474", "N479", "OWN", "ID", "F503", "D1", "D2", "D4", "D5", "D6", "HIL", "DST", "MXL", "D1B", "D4P", "MQS",
+             "T3", "L2R", "CMP",
+             "L0", "SHT"}   # R85: L0 (whole-bag layer-0 sweep, summaries only, see SW_GROUPS) and SHT (60 s early-behaviour tier; returns the F1_KEEP files incl. short_scan_all.csv.gz); L2R is the layer-2 reference group of R84 and R85; T3 and CMP stay known so an R84 arm table can still be collected (no R85 arm uses them)   # R84: Tier-3 (T3), layer-2 reference (L2R; both sweep groups, see SW_GROUPS) and comparison (CMP; returns the F1_KEEP files) groups   # R83: the new arm-table groups (VSW is a sweep group, see SW_GROUPS)   # R82: the new arm-table groups (F498 is a sweep group, see SW_GROUPS)   # R81: the SPEC groups (families) as well; the fine groups of the RR reruns (GP, B3, B1, MG, ZD, NG, PC, DB, DP, EC3, SC) are already listed   # R80: BASE3 / BASE1, D7 detect-only (ZD), F-433 (GP), F-476 (NG), D8 (PC), F-469 (DB), TAIL-1 (TL), D3 (EC3), D5 (SC), D1 sweep (SW), smoke (SMK; already listed)   # R79: F-463 (NB), F-401 / F-418 (QV), F-464 (DX), F-441 / F-440 (EC); R78: its groups (Stage A, split, controls, information-matched thinning, yaw, max layer 1, root 1.4, snapshot, refuse); R77: smoke (SMK), gap-floor (GAP) and voxel-sweep (SWP) groups as well;   # R76: FB (the full-bag grid) and IDN (identity arms) as well;   # R74 addendum 5: these groups' other per-frame compact files stay in the host archive; only frame-1 files are returned
 F1_KEEP = {"state_reference.txt", "residual_dump_all.csv.gz", "r73_f417_residuals.csv.gz", "r74_plane_table.csv.gz",
            "r74_plane_check.json", "r73_f417_hth_frames.csv", "r73_f417_classes.csv",
            "r73_f417_consistency.csv", "pos_trace_all.csv.gz", "compress_manifest.json",
@@ -48,16 +53,20 @@ F1_KEEP = {"state_reference.txt", "residual_dump_all.csv.gz", "r73_f417_residual
            "snapshot_frames_all.csv.gz", "state_trace_early_all.csv.gz", "lio_update_diag_early_all.csv.gz", "residual_dump_state_all.csv.gz",   # R79 (F-464, F-441, F-440)
            "window_state_all.csv.gz", "window_iter_all.csv.gz", "window_update_diag_all.csv.gz", "window_frame_stats_all.csv.gz", "window_dump_state_all.csv.gz", "window_row_summary_all.csv",
            "window_ground_rows_all.csv.gz", "lidar_msg_log_all.csv.gz",   # R80 (F-449a, F-389)
-           "zupt_all.csv.gz",       # R80 (F-467): gzip copy of zupt.csv, group ZD only (see GROUP_ONLY_FILES)
+           "time_cov.csv.gz", "zupt_all.csv.gz",       # R82 (F-501): time_cov.csv.gz of the omega smoke arm;  # R80 (F-467): gzip copy of zupt.csv, group ZD only (see GROUP_ONLY_FILES)
            "q_adapt_all.csv.gz",    # R80 (F-476): gzip copy of q_adapt.csv, group NG only
            "step_cap.csv.gz",       # R80 (F-403): written by step_cap_reduce, group SC only
            "early_grid_arm_all.csv.gz", "f485_2b_arm_all.csv.gz",   # R81 (F-474 / F-485 2B): per-arm early-frame and ground-row-dump summaries if the reducers write them under these names (the collector-level early_grid_summary.csv / f485_2b_summary.csv are generated)
+           "point_cov_window.csv.gz", "peak_rss.txt",   # R83: D1B per-scan window covariance (gzip copy of point_cov_window.csv) and the D4P / memory-queue peak RSS file; both group-bound, see GROUP_ONLY_FILES
+           "short_scan_all.csv.gz",   # R85 (F-526): per-scan residual / voxel-count table of a 60 s arm (r85_short_reduce.py); group-bound, see GROUP_ONLY_FILES
            "motion_q_scan_all.csv.gz"}   # R79 (F-437): returned only for the arm named in KEEP_IF_ARM_HAS (the DROP_FROM_RETURN rule filters every other arm first)
-GROUP_ONLY_FILES = {"zupt_all.csv.gz": {"ZD"}, "q_adapt_all.csv.gz": {"NG"}, "step_cap.csv.gz": {"SC"}}   # R80: a returned file that belongs to one group only (other groups never produce these, this is a second guard)
+GROUP_ONLY_FILES = {"zupt_all.csv.gz": {"ZD", "D6", "OWN"}, "q_adapt_all.csv.gz": {"NG"}, "step_cap.csv.gz": {"SC"}, "point_cov_window.csv.gz": {"D1B", "OWN"}, "peak_rss.txt": {"D4P", "OWN"}, "short_scan_all.csv.gz": {"SHT", "OWN"}}   # R85: the short-tier table belongs to the SHT arms and the OWN short determinism / smoke arms only   # R80: a returned file that belongs to one group only (other groups never produce these, this is a second guard)
 # R80 (D1, Bryce 2026-10-05): the voxel-size sweep (group SW, 1224 arms) returns SUMMARIES ONLY (phase_summary.csv rows, arm_scan_all, summaries_all.json: all built for every arm below,
 # independent of this rule); per-arm compact files stay in the host archive. ONE exception: pos_trace_all.csv.gz of an SW arm whose gt_max_mm is above SW_TRACE_GT_MM, because the project
 # collapse rule (rule 4.15 c; tools/r69/r80_sweep_zones.py) is 'departure >= 500 mm AND gt_max_mm > 500' and its departure needs the trace. gt_max_mm <= 500 can never be collapsed, so no trace is needed.
-SW_GROUPS = {"SW", "SWT"}   # R81: SWT = the rt voxel sweep rerun (576 arms), summaries only like R80 SW
+SW_GROUPS = {"SW", "SWT", "F498", "VSW", "T3", "L2R", "L0"}   # R85: L0 (whole-bag layer-0 sweep, 288 arms) and L2R (198 layer-2 references) are sweep groups: summaries only, trace only when gt_max_mm > 500 (T3 kept for an R84 arm table)   # R82: F498 = the edge-length sweep (summaries only, trace when gt_max_mm > 500); R83: VSW = the same sweep in the other overlap mode (dc), same rule; R84: T3 and L2R = the Tier-3 and layer-2 reference sweeps, same rule
+R83_EXTRAS = False   # R83 (planner question 2 of the manifest report): the per-arm point_cov_window.csv, peak_rss.txt and (MQS) motion_q_scan are ARCHIVE items in required_outputs.json (where: archive); the collector returns a compact copy of them only with --r83-extras
+R83_EXTRA_FILES = {"point_cov_window.csv.gz", "peak_rss.txt"}
 SW_TRACE_FILE = "pos_trace_all.csv.gz"
 SW_TRACE_GT_MM = 500.0   # mm; the gt_max_mm limb of the collapse rule (same constant as COLLAPSE_GT_MM in r80_sweep_zones.py)
 LEVELS = {-1: (None, None, 0), 0: (25, None, 0), 1: (25, 5, 0), 2: (50, 10, 0), 3: (100, 25, 45)}   # R80 (F-381): level -1 keeps every scan of every arm (no thinning)   # (step, keep-arm step (None = every scan), onset-window trim after onset+70)
@@ -74,8 +83,15 @@ def sw_wants_trace(gt_max_mm):
 
 def return_file(base, arm, group, gt_max_mm=None):
     """Single decision: is compact file `base` of `arm` (arm-table group `group`) copied into the return? gt_max_mm only matters for SW arms."""
-    if base in DROP_FROM_RETURN and KEEP_IF_ARM_HAS.get(base, "\0") not in arm:
+    if base in R83_EXTRA_FILES and not R83_EXTRAS:
         return False
+    if base in DROP_FROM_RETURN:
+        keys = KEEP_IF_ARM_HAS.get(base, "\0")
+        keys = (keys,) if isinstance(keys, str) else keys
+        if base == "motion_q_scan_all.csv.gz" and not R83_EXTRAS:
+            keys = tuple(k for k in keys if k != "_mqs_")
+        if not any(k in arm for k in keys):
+            return False
     if group in SW_GROUPS:
         return base == SW_TRACE_FILE and sw_wants_trace(gt_max_mm)
     if group in F1_GROUPS and base not in F1_KEEP:
@@ -114,6 +130,24 @@ def write_plane_fit_counts(runs, arms, out):
         return len(df)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def write_peak_rss_all(runs, arms, out):
+    """R83: <out>/peak_rss_all.csv = arm, text (peak_rss.txt, whitespace collapsed, first 300 characters), aborted (1 when an ABORTED_RSS marker file, or the text ABORTED_RSS in peak_rss.txt / arm.json, exists). Header only when no arm has peak_rss.txt.
+    The format of peak_rss.txt is the coding agent's (the instructions state it); nothing is parsed here."""
+    rows = []
+    for arm in arms:
+        D = os.path.join(runs, arm); fp = os.path.join(D, "peak_rss.txt")
+        txt = open(fp, errors="replace").read() if os.path.exists(fp) else None
+        marker = os.path.isdir(D) and any(n.upper().startswith("ABORTED_RSS") for n in os.listdir(D))
+        aj = os.path.join(D, "arm.json")
+        ab = marker or (txt is not None and "ABORTED_RSS" in txt) or (os.path.exists(aj) and "ABORTED_RSS" in open(aj, errors="replace").read())
+        if txt is None and not ab:
+            continue
+        rows.append({"arm": arm, "text": " ".join((txt or "").split())[:300], "aborted": int(bool(ab))})
+    pd.DataFrame(rows, columns=["arm", "text", "aborted"]).to_csv(os.path.join(out, "peak_rss_all.csv"), index=False)
+    print("peak_rss_all.csv: %d arms, %d aborted" % (len(rows), sum(r["aborted"] for r in rows)))
+    return len(rows)
 
 
 def g(d, *ks):
@@ -215,8 +249,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", required=True); ap.add_argument("--arms", required=True); ap.add_argument("--out", required=True)
     ap.add_argument("--level", type=int, default=0, choices=sorted(LEVELS)); ap.add_argument("--params", default=None)
+    ap.add_argument("--r83-extras", action="store_true", help="R83: also return compact copies of point_cov_window.csv (gzip), peak_rss.txt and the motion-Q trace of the MQS arms (they are archive items by default)")
     ap.add_argument("--ref-completeness", action="append", default=None, help="R81: completeness.csv of an older return (R80, R80C) whose state_trace digests are the identity references; repeatable")
     a = ap.parse_args()
+    global R83_EXTRAS
+    R83_EXTRAS = bool(a.r83_extras)
     pj = json.load(open(a.params)) if a.params and os.path.exists(a.params) else {}
     os.makedirs(os.path.join(a.out, "summaries"), exist_ok=True)
     plan = pd.read_csv(a.arms, sep="\t")
@@ -256,6 +293,7 @@ def main():
         gt_max = S.get("gt_max_mm") if S else None
         cdir = os.path.join(a.out, "compact", p.arm)
         for pat in ("*_compact.csv.gz", "*_windows.csv.gz", "*_blocks.csv", "*_all.csv.gz", "plane_trace_window.csv.gz", "sensor_stamps_summary.json", "compress_manifest.json",
+                    "time_cov.csv.gz",   # R82 AGENT FIX (section 11 item 4 flagged this unverified): p6's new time_cov.csv has no "_all"/"_compact"/"_windows" suffix so it matched no existing pattern; confirmed via build_return.py's F-501 check finding it archived but never collected
                     "residual_info_*", "crossframe_*", "knot_windows.csv", "knot_trend_stationary.csv",
                     "r72_*", "r73_*", "r74_*", "step_cap.csv.gz", "shadow_*_all.csv.gz", "scan_log_all.csv.gz", "residual_dump_*all.csv.gz", "coupled_update_*_all.csv.gz", "pos_trace_all.csv.gz", "state_reference.txt", "*_all.csv"):   # R71-R73 analysis outputs; R81 (fix 7): "*_all.csv" added (plain .csv outputs such as window_row_summary_all.csv matched no pattern in R80; return_file still filters by F1_KEEP)
             for fp in glob.glob(os.path.join(D, pat)):
@@ -263,6 +301,16 @@ def main():
                     continue
                 os.makedirs(cdir, exist_ok=True)
                 shutil.copy(fp, cdir)
+        # R83: files that no pattern above matches (no _all / _compact suffix) -- the same gap that hid time_cov.csv in R82. point_cov_window.csv is gzipped on the way (per-scan, D1B only); peak_rss.txt is copied as is.
+        for raw, base in (("point_cov_window.csv", "point_cov_window.csv.gz"), ("point_cov_window.csv.gz", "point_cov_window.csv.gz"), ("peak_rss.txt", "peak_rss.txt")):
+            fp = os.path.join(D, raw)
+            if os.path.exists(fp) and return_file(base, p.arm, str(p.get("group", "")), gt_max):
+                os.makedirs(cdir, exist_ok=True)
+                if raw.endswith(".csv"):
+                    with open(fp, "rb") as fi, gzip.open(os.path.join(cdir, base), "wb", compresslevel=6) as fo:
+                        shutil.copyfileobj(fi, fo)
+                else:
+                    shutil.copy(fp, os.path.join(cdir, base))
         ssj = os.path.join(D, "sensor_stamps_summary.json")
         if os.path.exists(ssj):
             stamps[p.arm] = json.load(open(ssj))
@@ -280,9 +328,7 @@ def main():
             # metric fields are actually available (mostly None/absent).
             if not meta:
                 continue
-            onset_default = 485 if p.seq == "eee_01" else int((pj.get(p.seq) or {}).get("onset_scan", 485))
-            S = {"arm": p.arm, "kind": meta.get("kind", p.kind), "meta": meta,
-                 "definitions": {"onset_scan": onset_default}}
+            S = {"arm": p.arm, "kind": meta.get("kind", p.kind), "meta": meta}
         row = flat(S)
         summaries_all[p.arm] = S
         full = str(p.duration_s) == "full"
@@ -315,6 +361,7 @@ def main():
             big = pd.concat(acc)
             big.to_csv(os.path.join(a.out, nm + ".csv.gz"), index=False, float_format="%.5g", compression="gzip")   # t is a pre-formatted string column (4 decimals)
     write_plane_fit_counts(a.runs, pft_arms, a.out)
+    write_peak_rss_all(a.runs, list(plan.arm), a.out)   # R83
     json.dump(summaries_all, open(os.path.join(a.out, "summaries_all.json"), "w"), default=lambda o: None)
     json.dump(manifests, open(os.path.join(a.out, "compress_manifests.json"), "w"), indent=1)
     json.dump(stamps, open(os.path.join(a.out, "sensor_stamps_summaries.json"), "w"), indent=1)

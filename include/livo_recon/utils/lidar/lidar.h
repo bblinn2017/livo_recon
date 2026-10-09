@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 #include <cstdint>
 #include <livox_ros_driver/CustomMsg.h>
@@ -8,6 +9,7 @@
 #include "livo_recon/utils/algo/math.h"
 #include "livo_recon/utils/data/data_wrappers.h"
 #include "livo_recon/utils/data/measures.h"
+#include "livo_recon/utils/lidar/point_time.h"
 
 namespace livo_recon
 {
@@ -33,9 +35,10 @@ std::vector<PointXYZT> pointsFromLivoxMsg(
 // blind-radius/measures->isValid() filtering as pointsFromLivoxMsg.
 // point_filter_num > 1 keeps only every point_filter_num-th point of the
 // raw scan (see CbkProcOptions::point_filter_num).
+// R82 (F-504): PointTimeSpec / PointTimeStats (utils/lidar/point_time.h) select and report the per-point time read; the default spec is the R81 read bit for bit.
 std::vector<PointXYZT> pointsFromPointCloud2(
     const sensor_msgs::PointCloud2& msg, double scan_time,
     double blind_sqr, const MeasuresPtr& measures,
-    int point_filter_num = 1);
+    int point_filter_num = 1, const PointTimeSpec& spec = PointTimeSpec(), PointTimeStats* stats = nullptr);
 
 }  // namespace livo_recon

@@ -5,6 +5,7 @@
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/map/akf_map.h"
 #include "livo_recon/map/surface_map.h"
+#include "livo_recon/map/binned_voxelmap.h"
 
 namespace livo_recon
 {
@@ -21,11 +22,14 @@ MapBackendPtr createMapBackend(const std::string& backend_name, StateGroupPtr st
   if (backend_name == "surface") {
     return std::make_shared<SurfaceMap>(state, profiler, data_queues);
   }
+  if (backend_name == "binned") {   // R88: VoxelMap whose debiased nodes keep bins (map/binned_voxelmap.h)
+    return std::make_shared<BinnedVoxelMap>(state, profiler, data_queues);
+  }
   // Fail loudly rather than silently falling back to "voxel", matching
   // this codebase's "fail loud on unexpected config" convention (see
   // run_job.sh's CACHE_FILE check for the same philosophy).
   throw std::runtime_error("createMapBackend: unknown voxel_map/backend '" + backend_name +
-                            "' (expected 'voxel', 'akf' or 'surface')");
+                            "' (expected 'voxel', 'akf', 'surface' or 'binned')");
 }
 
 }  // namespace livo_recon

@@ -38,6 +38,9 @@ struct ImuProcOptions
 
   // Per-IMU-step trace of the first three propagations (imu_first_scans.csv).
   bool first_scans_log_en = false;
+  // R83B (A6/B5): per-IMU-step motion-Q + per-axis clamp flags, every scan, not just the first three
+  // (motion_q_step.csv). Independent of first_scans_log_en. Default off.
+  bool motion_q_step_log_en = false;
 
   // R66: bias process model. "random_walk" (default) is the existing behaviour, bit-identical.
   // "gauss_markov": b_{k+1} = mu + e^{-dt/tau} (b_k - mu) + w, var w = sigma^2 (1 - e^{-2 dt/tau}); mu is the

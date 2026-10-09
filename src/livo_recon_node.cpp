@@ -192,6 +192,7 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
   mg.rot_before_imu = ctx_.state->rot();
   mg.vel_before_imu = ctx_.state->vel();
   mg.cov_before_imu = ctx_.state->cov();
+  lio_proc_->logPreImuState(mg);   // R86B: write-only pre_imu state_trace row (no-op unless eval/state_trace_pre_imu_frames > 0)
 
   // R73 (F-414): the shadow starts from the driver's posterior of the previous scan (its state right now), BEFORE the driver propagates.
   if (shadow_) shadow_->propagateFromDriver(mg, *ctx_.state);

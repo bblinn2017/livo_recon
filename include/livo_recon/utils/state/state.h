@@ -171,21 +171,13 @@ public:
   // own (R,P) covariance block, itself PSD).
   M3D poseCovAt(const V3D& p_body) const;
 
-  // R65 (F-169). Per-point pose covariance for a point captured at frame-relative time t_point.
-  //   base    : the (R,P) covariance block of the state (posterior at map insertion, prior in the residual gate),
-  //             or, for insertion with pointCovInsertionPrior(), the frame's PRIOR (R,P) block.
-  //   rel     : if pointCovPropagated(), plus the noise accrued from the point's own time to the scan end,
-  //             propagated through the IMU transitions (see setRelCovProfile); same Jacobian J(p_body).
-  // With the defaults (end_pose, posterior) the result is bit-identical to poseCovAt(p_body).
-  M3D poseCovAtPoint(const V3D& p_body, double t_point, bool for_insertion) const;
-  void setPointCovModel(bool propagated, bool insertion_prior)
-  { point_cov_propagated_ = propagated; point_cov_insertion_prior_ = insertion_prior; }
-  bool pointCovPropagated() const { return point_cov_propagated_; }
+  // R65 (F-169). Per-point pose covariance used for the residual gate (for_insertion = false: the state's own (R,P) block) and for
+  // map insertion (for_insertion = true: the state's block, or with pointCovInsertionPrior() the frame's PRIOR (R,P) block).
+  // With the defaults (posterior) the result is bit-identical to poseCovAt(p_body). R83B: the time-dependent terms (R65 propagated,
+  // R83 window accumulation) were removed on Bryce's instruction (2026-10-07).
+  M3D poseCovAtPoint(const V3D& p_body, bool for_insertion) const;
+  void setPointCovInsertionPrior(bool insertion_prior) { point_cov_insertion_prior_ = insertion_prior; }
   bool pointCovInsertionPrior() const { return point_cov_insertion_prior_; }
-  // head_times[k]: time of IMU step k's head (same base as PointXYZCov::t); blocks[k]: 6x6 (R,P) covariance of the
-  // noise accrued from head_times[k] to the scan end. Empty vectors clear the profile (rel term zero).
-  void setRelCovProfile(std::vector<double> head_times, std::vector<Eigen::Matrix<double, 6, 6>> blocks)
-  { rel_head_times_ = std::move(head_times); rel_blocks_ = std::move(blocks); }
   // Frame's prior (R,P) 6x6 block, captured where prior_cov_ is fixed for the frame.
   void setPriorPoseBlock(const Eigen::MatrixXd& prior_cov)
   {
@@ -247,10 +239,7 @@ private:
   V3D pos_, vel_, bias_gyr_, bias_acc_, gravity_;
   Eigen::MatrixXd cov_;   // dimState() × dimState()
   // R65 (F-169) per-point pose covariance model
-  bool point_cov_propagated_ = false;
   bool point_cov_insertion_prior_ = false;
-  std::vector<double> rel_head_times_;
-  std::vector<Eigen::Matrix<double, 6, 6>> rel_blocks_;
   Eigen::Matrix<double, 6, 6> prior_pose_block_ = Eigen::Matrix<double, 6, 6>::Zero();
   bool prior_pose_block_valid_ = false;
   V3D var_acc_, var_gyr_, cov_bias_gyr_, cov_bias_acc_;

@@ -76,6 +76,9 @@ struct Residual
   // copied in VoxelPlane::computeResidual(). Write-only: read only by the residual dump when lio/residual_dump_voxel_info is true. -1 on a path that does not set them.
   int voxel_point_count = -1;
   int voxel_distinct_frames = -1;
+  // R83 (F-428 follow-up, Bryce 2026-10-06 on whether subdividing voxels is useful): octree layer of the owning node (0 = root), copied in VoxelNode::findPlaneResidual().
+  // Write-only, read only by the residual dump under lio/residual_dump_voxel_info. -1 on a path that does not set it.
+  int voxel_layer = -1;
 
   // This plane's own fit-uncertainty contribution (n * plane_var * n),
   // added into sigma_squared by LioProc::buildResiduals().
@@ -502,6 +505,9 @@ struct VoxelOpts
   bool plane_fit_reasons_en = false;
   int  plane_fit_trace_frames = 0;
   int  plane_fit_trace_max_rows = 200000;
+  // R83B (A1/B4): same frame window as plane_fit_trace_frames, same row cap, but one row per fit attempt with the
+  // voxel's layer and the sorted eigenvalues of the raw (uncorrected) scatter -> plane_fit_eigs.csv. Default off.
+  bool plane_fit_eigs_en = false;
 
   // History (364-384): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-364
   std::string bin_weight_mode_fit = "count";
@@ -744,8 +750,21 @@ struct VoxelOpts
   std::string line_rows = "per_normal";
   bool line_rows_distance = false;   // resolved once at load from line_rows
 
+  // R82 (D4, F-500, Bryce 2026-10-06). Line model at FIT time, in both fits.
+  //   line_classify_at_fit (bool, key voxel_map/plane/line_residual/classify_at_fit, read with line_residual/enabled = true, form hard only; default false = bit-identical to R81): both fits (pca update(), debiased refitDebiased())
+  //     decide reject / plane / line ONCE, right after the eigenvalues are final, with the one function classifyVoxel (include/livo_recon/lio/voxel_class.h), and store the class (VoxelPlane::isLine()). Changes against R81 when on:
+  //     (1) a voxel with e1 < 1e-8 <= e2 is a perfect line and is kept (R81 rejected it in both fits); e2 < 1e-8 still rejects.
+  //     (2) the debiased fit no longer rejects e0 >= e1 after the sensor floor: e0 is set equal to e1 (the order the pca fit always has).
+  //     (3) the debiased eigengap-denominator guard is not applied; the gaps are floored by plane_gap_floor_en (REQUIRED with plane_var_mode = eigengap, in both fits).
+  //   debiased_line_equiv (off | mean_cov | moment): the plane_equivalent line variance on the debiased fit (the tilt matrices computeLineTilt builds from points on the pca path). moment = exact, from the debiased fit's own moment accumulators
+  //     (include/livo_recon/lio/line_tilt_moments.h); mean_cov = the mean-covariance approximation. line_residual/variance = plane_equivalent with plane_fit_mode = debiased REQUIRES one of the two (refused with off).
+  bool line_classify_at_fit = false;
+  std::string debiased_line_equiv = "off";
+  int debiased_line_form = 0;   // 0 off, 1 mean_cov, 2 moment; resolved once at load
+
   // R77 (F-433): floor the eigenvalue gaps |e0-e1| and |e0-e2| of the eigengap plane variance at the sensor noise variance (weight_sigma_r2), keeping the plane.
-  // Default false is bit-identical to R76. Read only with plane_fit_mode = pca and plane_var_mode = eigengap; refused together with plane_var_denom_floor_en
+  // R82 (Bryce 2026-10-06): ONE gap floor for every voxel in BOTH fits. On the debiased fit it replaces the eigengap-denominator guard (that fit rejected a plane whose gap was below max(1e-8, 0.1 plane_threshold)); the floor keeps the sign of the eigenvalue order.
+  // Default false is bit-identical to R81. Read with plane_fit_mode = pca or debiased and plane_var_mode = eigengap; refused together with plane_var_denom_floor_en
   // (that flag rejects planes whose gap is below 2.5e-4, which a 4e-4 floor would make unreachable).
   bool plane_gap_floor_en = false;
 
@@ -756,6 +775,18 @@ struct VoxelOpts
   // See lio/plane_var_r81.h.
   double plane_var_min = 0.0;
   double plane_var_scan_s2 = 0.0;
+  // R82 (D2, F-502): write-only diagnostic of the plane variance term (quantiles before / after the scan term, fractions below the candidate floors, mean 1/n); see lio/plane_var_diag.h. Default false.
+  bool plane_var_diag_en = false;
+
+  // R88: the "binned" map type (voxel_map/backend = binned, src/map/binned_voxelmap.cpp; accumulator in map/binned/binned_bins.h). Set by BinnedVoxelMap::loadParameters() only; the default map never touches them.
+  //   binned_enabled        : the debiased branch of VoxelNode::insertPoints() keeps returns in bins and fits from the occupied bins.
+  //   binned_bin_fraction   : bin edge = this x the node's own edge (0 < f <= 1).
+  //   binned_cov_mode       : 0 average (C / k), 1 shrunk (C / k^2).
+  //   binned_weight_mode    : 0 count (w = k), 1 uniform (w = 1).
+  bool   binned_enabled = false;
+  double binned_bin_fraction = 0.2;
+  int    binned_cov_mode = 0;
+  int    binned_weight_mode = 0;
 };
 using VoxelOptsPtr = std::shared_ptr<VoxelOpts>;
 
@@ -962,6 +993,11 @@ struct VoxelStats
   std::atomic<long long> init_count{0};
   std::atomic<long long> update_frames_sum{0};
   std::atomic<long long> update_count{0};
+
+  // R88 (binned map only): returns put into bins, bins opened, fits made from bins. Written by VoxelNode, read by the engagement report (an enabled map with binned_points == 0 is INERT).
+  std::atomic<long long> binned_points{0};
+  std::atomic<long long> binned_new_bins{0};
+  std::atomic<long long> binned_fits{0};
 
   int total() const { return open + converged + disabled; }
 

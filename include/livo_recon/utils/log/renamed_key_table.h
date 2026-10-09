@@ -37,15 +37,52 @@ inline const std::vector<std::string>& removedKeyTable()
       "imu/process_noise/disturbance/qc_gyr",
       "imu/process_noise/continuous_prior/mode",
       "imu/process_noise/continuous_prior/qc_acc",
-      "imu/process_noise/continuous_prior/qc_gyr"};
+      "imu/process_noise/continuous_prior/qc_gyr",
+      // R82: F-476 (two-sided NIS gate) and F-403 (hard cap on the iekf step) were retired by Bryce and their code removed.
+      "imu/process_noise/gain/nis_lo",
+      "imu/process_noise/gain/deflate",
+      "lio/ekf/step_cap/mode",
+      "lio/ekf/step_cap/rotation_rad",
+      "lio/ekf/step_cap/position_m",
+      // R83: the zero-velocity pseudo-update (F-401, calibrated thresholds F-508) was a dead lever in R82 and was removed by Bryce (2026-10-06).
+      "lio/zupt/mode",
+      "lio/zupt/threshold_mode",
+      "lio/zupt/gyro_thresh",
+      "lio/zupt/acc_thresh",
+      "lio/zupt/calib_scans",
+      "lio/zupt/calib_margin_acc",
+      "lio/zupt/calib_margin_gyro",
+      "lio/zupt/enter_scans",
+      "lio/zupt/sigma_v",
+      // R84 (F-521): the time-dependent point-covariance formulations were removed by Bryce (2026-10-07): R65 propagated mode, R83 window
+      // accumulation (lio/point_cov/window_s, process-noise accumulation; the replacement is a different model under a new key) and the R82
+      // shared per-scan timing term. lio/point_cov/insertion_source is kept.
+      "lio/point_cov/mode",
+      "lio/point_cov/window_s",
+      "lio/time_cov/mode",
+      "lio/time_cov/sigma_s",
+      // R85 (F-520 removal): the sample-window covariance (positional spread over sample times) was tested in R84 (216 arms), showed no consistent
+      // sign against window 0 and was retired by Bryce (2026-10-08). There is no replacement key.
+      "lio/point_cov/sample_window_s"};
   return t;
+}
+
+// The release and followup that removed `key` (R74 F-427 for the first eight keys, R82 F-476 / F-403 for the next five, R83 F-401 / F-508 for lio/zupt/*, R84 F-521 for the temporal point-covariance keys, R85 F-520 for lio/point_cov/sample_window_s).
+inline std::string removedKeyOrigin(const std::string& key)
+{
+  if (key == "imu/process_noise/gain/nis_lo" || key == "imu/process_noise/gain/deflate") return "R82 (F-476)";
+  if (key.rfind("lio/ekf/step_cap/", 0) == 0) return "R82 (F-403)";
+  if (key.rfind("lio/zupt/", 0) == 0) return "R83 (F-401, F-508)";
+  if (key == "lio/point_cov/sample_window_s") return "R85 (F-520)";
+  if (key == "lio/point_cov/mode" || key == "lio/point_cov/window_s" || key.rfind("lio/time_cov/", 0) == 0) return "R84 (F-521)";
+  return "R74 (F-427)";
 }
 
 // Pure function: the refusal message for a removed key, or "" when `key` is not a removed key.
 inline std::string removedKeyMessage(const std::string& key)
 {
   for (const auto& k : removedKeyTable())
-    if (k == key) return "configuration key '" + key + "' was removed in R74 (F-427) and has no replacement; delete it from the configuration";
+    if (k == key) return "configuration key '" + key + "' was removed in " + removedKeyOrigin(key) + " and has no replacement; delete it from the configuration";
   return std::string();
 }
 

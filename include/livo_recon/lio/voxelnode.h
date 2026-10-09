@@ -1,6 +1,8 @@
 #pragma once
 
 #include "livo_recon/lio/voxelplane.h"
+#include "livo_recon/map/binned/binned_bins.h"
+#include <memory>
 #include <tuple>
 
 namespace livo_recon
@@ -143,7 +145,12 @@ private:
 
   int32_t   node_id_;
   VoxelNode *leaves_[8];
-  int update_count_ = 0;
+  int update_count_ = 0;   // raw points received since the last fit (both paths; R87: also the debiased path)
+  // R87: true once the debiased path has had its first admitted fit (the pca path uses plane_.isInit()). Read by admission::fitWanted().
+  bool debiased_admitted_ = false;
+  // R88 (binned map): this node's bins, created on the first insertion when opts_->binned_enabled. In that mode update_count_ counts bins OPENED since the last fit (before the first fit that is the number of occupied bins),
+  // and the admission rule reads it exactly as it reads raw points elsewhere.
+  std::unique_ptr<binned::BinSet> binset_;
   std::vector<PointXYZCov> points_;
   // R65 (F-158): true when the most recent debiased insertion appended its batch to points_.
   bool batch_stored_in_points_ = false;

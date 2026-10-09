@@ -102,6 +102,24 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
       throw std::invalid_argument("cbk/lidar/overlap_policy = " + opts_.lidar_overlap_policy +
                                   " needs cbk/lidar/retime_t0_s (> 1e8 s), cbk/lidar/retime_period_s (0.09 to 0.11 s) and cbk/lidar/retime_seq0 (>= 0)");
   }
+  // R82 (F-504): per-point time field. Plain params (not paramWarn) so the default path prints exactly what R81 printed; the engagement line below appears only when a key is set.
+  {
+    opts_.point_time_explicit = pnh.hasParam("cbk/lidar/point_time_field") || pnh.hasParam("cbk/lidar/point_time_mode") || pnh.hasParam("cbk/lidar/point_time_ref");
+    pnh.param<std::string>("cbk/lidar/point_time_field", opts_.point_time_field, "t");
+    pnh.param<std::string>("cbk/lidar/point_time_mode", opts_.point_time_mode, "offset_ns_u32");
+    pnh.param<std::string>("cbk/lidar/point_time_ref", opts_.point_time_ref, "header");
+    markParamConsumed("cbk/lidar/point_time_field");
+    markParamConsumed("cbk/lidar/point_time_mode");
+    markParamConsumed("cbk/lidar/point_time_ref");
+    if (opts_.point_time_mode != "offset_ns_u32" && opts_.point_time_mode != "absolute_s_f64")
+      throw std::invalid_argument("cbk/lidar/point_time_mode must be offset_ns_u32 or absolute_s_f64 (got '" + opts_.point_time_mode + "')");
+    if (opts_.point_time_ref != "header" && opts_.point_time_ref != "min_point")
+      throw std::invalid_argument("cbk/lidar/point_time_ref must be header or min_point (got '" + opts_.point_time_ref + "')");
+    if (pnh.hasParam("cbk/lidar/point_time_ref") && opts_.point_time_mode != "absolute_s_f64")
+      throw std::invalid_argument("cbk/lidar/point_time_ref is only valid with cbk/lidar/point_time_mode = absolute_s_f64");
+    if (opts_.point_time_field.empty())
+      throw std::invalid_argument("cbk/lidar/point_time_field must not be empty");
+  }
   // See CbkProcOptions::dry_run_point_filter_num's doc comment -- SAME
   // rosparam key LioProcOptions::dry_run_point_filter_num reads
   // ("lio/dry_run_point_filter_num"), loaded into both Options structs.
@@ -129,6 +147,8 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
   if (retime_on && !lidar_is_pcl)
     throw std::invalid_argument("cbk/lidar/overlap_policy = " + opts_.lidar_overlap_policy + " is implemented for the PointCloud2 callback only (cbk/lidar/type pcl)");
 
+  if (opts_.point_time_explicit && !lidar_is_pcl)
+    throw std::invalid_argument("cbk/lidar/point_time_field, point_time_mode and point_time_ref are implemented for the PointCloud2 callback only (cbk/lidar/type pcl)");
   paramWarn<std::string>(pnh, "cbk/imu/acc_type", opts_.imu_acc_type, "g");
   paramWarn<std::string>(pnh, "cbk/imu/gyr_type", opts_.imu_gyr_type, "rad_s");
 
@@ -170,6 +190,7 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  cbk/lidar/retime_period_s: " << opts_.lidar_retime_period_s << std::defaultfloat << std::setprecision(6)
       << "\n  cbk/lidar/retime_seq0: " << opts_.lidar_retime_seq0
       << "\n  cbk/lidar/retime_ref_offset_s: " << opts_.lidar_retime_ref_offset_s                         // R80D
+      << (opts_.point_time_explicit ? "\n  cbk/lidar/point_time: field=" + opts_.point_time_field + " mode=" + opts_.point_time_mode + (opts_.point_time_mode == "absolute_s_f64" ? " ref=" + opts_.point_time_ref : std::string()) : std::string())   // R82 (F-504): printed only when a key is set
       << "\n  cbk/lidar/type:   " << lidar_type_str
       << "\n  cbk/imu/acc_type: " << opts_.imu_acc_type
       << "\n  cbk/imu/gyr_type: " << opts_.imu_gyr_type
@@ -380,19 +401,46 @@ void CbkProc::lidarCallbackPcl(const sensor_msgs::PointCloud2::ConstPtr& msg)
     debugLogSyncStage(opts_.sync_debug_log_path, oss.str());
   }
 
+  PointTimeSpec pt_spec;   // R82 (F-504): the default spec is the R81 read
+  pt_spec.field = opts_.point_time_field;
+  pt_spec.mode = opts_.point_time_mode == "absolute_s_f64" ? PointTimeSpec::Mode::AbsoluteSecF64 : PointTimeSpec::Mode::OffsetNsU32;
+  pt_spec.ref = opts_.point_time_ref == "min_point" ? PointTimeSpec::Ref::MinPoint : PointTimeSpec::Ref::Header;
+  pt_spec.explicit_spec = opts_.point_time_explicit;
+  PointTimeStats pt_stats;
   std::vector<PointXYZT> points = pointsFromPointCloud2(
-      *msg, scan_time, opts_.blind_sqr, measures_, opts_.point_filter_num);
+      *msg, scan_time, opts_.blind_sqr, measures_, opts_.point_filter_num, pt_spec, &pt_stats);
+  if (opts_.point_time_explicit)
+  {
+    static long long n_pt_msgs = 0;
+    static double pt_off_min = std::numeric_limits<double>::infinity(), pt_off_max = -std::numeric_limits<double>::infinity();
+    static long long pt_nonfinite = 0;
+    ++n_pt_msgs; pt_nonfinite += static_cast<long long>(pt_stats.n_nonfinite);
+    pt_off_min = std::min(pt_off_min, pt_stats.offset_min); pt_off_max = std::max(pt_off_max, pt_stats.offset_max);
+    if (n_pt_msgs == 1 || n_pt_msgs % 500 == 0)
+      ROS_INFO_STREAM("[lidar_point_time] field=" << opts_.point_time_field << " mode=" << opts_.point_time_mode << " msgs=" << n_pt_msgs << " offset_min_s=" << pt_off_min
+                      << " offset_max_s=" << pt_off_max << " nonfinite_points=" << pt_nonfinite);
+  }
   if (opts_.log_sensor_stamps)
     logSensorStamp('L', scan_time, static_cast<std::size_t>(msg->width) * static_cast<std::size_t>(msg->height), points.size());   // R65
   perturbPoints(points, scan_time, opts_.perturb_std_m, opts_.perturb_seed);                                                     // R65
 
   // See lidarCallbackMsg()'s matching comment.
+  // R86A (F-532): under retime_trim the second stream is trimmed against ITS OWN last queued point time, exactly as the primary stream is below. Before R86A it was pushed untrimmed, and
+  // pushDryRunLidar then rejected the whole message wherever the primary stream only trimmed a few points (R86: 40 of 595 frames received a fraction of the second-stream points).
   if (opts_.dry_run_point_filter_num > 0)
   {
     std::vector<PointXYZT> dry_run_points = pointsFromPointCloud2(
-        *msg, scan_time, opts_.blind_sqr, measures_, opts_.dry_run_point_filter_num);
-    if (!dry_run_points.empty())
-      data_queues_->pushDryRunLidar(std::move(dry_run_points));
+        *msg, scan_time, opts_.blind_sqr, measures_, opts_.dry_run_point_filter_num, pt_spec);
+    std::size_t dry_trimmed = 0;
+    if (opts_.lidar_overlap_policy == "retime_trim" && !dry_run_points.empty())
+      dry_trimmed = trimStreamOverlap(dry_run_points, data_queues_->latestDryRunLidarTime());
+    const bool dry_nonempty = !dry_run_points.empty();
+    const bool dry_pushed = dry_nonempty && data_queues_->pushDryRunLidar(std::move(dry_run_points));
+    static long long dr_seen = 0, dr_trim_msgs = 0, dr_trim_pts = 0, dr_pushed = 0, dr_rejected = 0;
+    ++dr_seen; if (dry_trimmed > 0) { ++dr_trim_msgs; dr_trim_pts += static_cast<long long>(dry_trimmed); }
+    if (dry_pushed) ++dr_pushed; else if (dry_nonempty) ++dr_rejected;
+    if (dr_seen == 1 || dr_seen % 100 == 0)
+      ROS_INFO_STREAM("[dry_run_stream] msgs=" << dr_seen << " trimmed_msgs=" << dr_trim_msgs << " trimmed_points=" << dr_trim_pts << " pushed_msgs=" << dr_pushed << " rejected_msgs=" << dr_rejected);
   }
 
   // R80C (F-484), retime_trim only: the points earlier than the last point of the last accepted message are removed here, so the unchanged pushLidar() rule cannot fire. `points` is sorted

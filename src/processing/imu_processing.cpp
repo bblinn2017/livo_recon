@@ -1,5 +1,4 @@
 #include "livo_recon/processing/imu_processing.h"
-#include "livo_recon/utils/state/rel_cov.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/state/state.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
@@ -192,6 +191,7 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
           "is always seeded from the first IMU sample");
   }
   paramWarn<bool>(pnh, "eval/imu_first_scans_en", opts_.first_scans_log_en, false);
+  paramWarn<bool>(pnh, "imu/motion_q_step_log_en", opts_.motion_q_step_log_en, false);   // R83B (A6/B5)
   // R66: bias process model (dependency structure: the four Gauss-Markov numbers exist only under gauss_markov,
   // the random-walk rate keys only under random_walk; a key out of scope is an error, not ignored).
   paramWarn<std::string>(pnh, "imu/process_noise/bias_model", opts_.bias_model, std::string("random_walk"));
@@ -386,7 +386,6 @@ void ImuProc::propagate(MeasureGroup& mg)
 
   mg.poses.reserve(mg.imu_samples.size());
   mg.pose_covariances.clear();
-  if (state_->pointCovPropagated()) state_->setRelCovProfile({}, {});   // R65 (F-169): cleared each scan
   mg.imu_state_transitions.clear();
   mg.imu_process_covariances.clear();
   mg.pose_covariances.reserve(mg.imu_samples.size());
@@ -430,6 +429,8 @@ void ImuProc::propagate(MeasureGroup& mg)
     V3D gyr_dynamic_variance = V3D::Zero();
     V3D debiased_acc_energy = V3D::Zero();
     V3D debiased_gyr_energy = V3D::Zero();
+    bool step_acc_clamped[3] = {false, false, false};   // R83B (A6/B5): this step's per-axis clamp flags
+    bool step_gyr_clamped[3] = {false, false, false};
     if (dynamic_q)
     {
       if ((state_->varAccFloor().array() <= 0.0).any() ||
@@ -488,10 +489,10 @@ void ImuProc::propagate(MeasureGroup& mg)
           debiased_gyr_energy;
       for (int axis = 0; axis < 3; ++axis)
       {
-        if (acc_dynamic_variance(axis) > opts_.motion_acc_max_dynamic_variance)
-          ++acc_clamped;
-        if (gyr_dynamic_variance(axis) > opts_.motion_gyr_max_dynamic_variance)
-          ++gyr_clamped;
+        step_acc_clamped[axis] = acc_dynamic_variance(axis) > opts_.motion_acc_max_dynamic_variance;
+        step_gyr_clamped[axis] = gyr_dynamic_variance(axis) > opts_.motion_gyr_max_dynamic_variance;
+        if (step_acc_clamped[axis]) ++acc_clamped;
+        if (step_gyr_clamped[axis]) ++gyr_clamped;
         acc_dynamic_variance(axis) = std::min(
             acc_dynamic_variance(axis), opts_.motion_acc_max_dynamic_variance);
         gyr_dynamic_variance(axis) = std::min(
@@ -522,6 +523,12 @@ void ImuProc::propagate(MeasureGroup& mg)
           propagation_index_, q_samples - 1, tail.t + data_queues_->start_time,
           opts_.process_noise_model, dynamic_acc, dynamic_gyr,
           debiased_acc_energy, debiased_gyr_energy, var_acc_step, var_gyr_step);
+    if (!is_shadow_ && opts_.motion_q_step_log_en)   // R83B (A6/B5)
+      writeMotionQStepDiagnostic(
+          propagation_index_, q_samples - 1, tail.t + data_queues_->start_time,
+          var_acc_step, var_gyr_step,
+          step_acc_clamped[0], step_acc_clamped[1], step_acc_clamped[2],
+          step_gyr_clamped[0], step_gyr_clamped[1], step_gyr_clamped[2]);
 
     // ---- save head state for pose storage ----
     const M3D rot_at_head = rot_imu;
@@ -689,21 +696,6 @@ void ImuProc::propagate(MeasureGroup& mg)
       break;
   }
 
-
-  // R65 (F-169): noise accrued from each IMU step's head to the scan end, restricted to the (R,P) block, by one backward
-  // sweep over the stored per-step transitions F_k and process covariances Q_k:  R_k = R_{k+1} + M_{k+1} Q_k M_{k+1}^T,
-  // M_k = M_{k+1} F_k  (M_n = I).  Used by StateGroup::poseCovAtPoint(); off (no cost) unless lio/point_cov/mode=propagated.
-  if (state_->pointCovPropagated())
-  {
-    const std::size_t n_steps = mg.poses.size();
-    if (n_steps > 0 && mg.imu_state_transitions.size() == n_steps && mg.imu_process_covariances.size() == n_steps)
-    {
-      std::vector<double> head_times(n_steps);
-      for (std::size_t k = 0; k < n_steps; ++k) head_times[k] = mg.poses[k].t;
-      auto blocks = relCovBlocksBackward(mg.imu_state_transitions, mg.imu_process_covariances, StateGroup::idxR());
-      state_->setRelCovProfile(std::move(head_times), std::move(blocks));
-    }
-  }
 
   if (gm_on && (propagation_index_ == 1 || propagation_index_ % 500 == 0))
     ROS_INFO_STREAM("[imu] gauss_markov engagement: steps=" << gm_steps_ << " max Q bias entry gyr=" << gm_max_q_gyr_

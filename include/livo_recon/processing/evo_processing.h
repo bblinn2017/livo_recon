@@ -119,6 +119,14 @@ struct EvoProcOptions
   bool   compute_roe = false;
   double rpe_delta_s = 1.0;
 
+  // R82 (F-506, Bryce 2026-10-06). evo/dense_gt_metrics: the ground-truth file is DENSE and carries a real orientation (the Hilti 2022 exp04, exp05, exp06, exp14, exp16, exp18 files). Default false:
+  // everything above is exactly the R81 behaviour. true needs gt_source = file and a file whose orientation is not identity everywhere (refused otherwise, rule 3.4), and then (1) the file-mode force-off
+  // of compute_rte / compute_roe is NOT applied (the two keys act as set), (2) ARE is computed without compute_roe (it stays gated on a real ground-truth orientation), the whole-trajectory
+  // Kabsch/Horn alignment of computeAte stays the PRIMARY alignment of every metric, and (3) a SECONDARY alignment on the first matched ground-truth pose (the first scan that has a real ground-truth
+  // bracket: est pose mapped onto the gt pose exactly) reports ATE_first (RMS position error, m) and ARE_first (RMS rotation angle, deg), appended at the END of the [evo/...] line and, with
+  // evo/export_ate_per_frame_csv, as two columns appended at the END of the per-frame csv.
+  bool   dense_gt_metrics = false;
+
   // Whether "nearest" mode (see max_time_diff's doc comment) is computed
   // LIVE when gt_source == "topic". Only affects topic mode -- file mode
   // (HILTI-style sparse checkpoints) has no interp alternative and always
@@ -378,7 +386,11 @@ private:
   // if delta_frames >= matched.size().
   double computeRoe(const std::vector<MatchedPose>& matched, int delta_frames) const;
 
-  struct StageMetrics { double ate = -1.0, rte = -1.0, roe = -1.0, are = -1.0; };
+  struct StageMetrics { double ate = -1.0, rte = -1.0, roe = -1.0, are = -1.0, ate_first = -1.0, are_first = -1.0; };
+
+  // R82 (F-506): the secondary, first-pose alignment. R0 = gt_rot0 * est_rot0^T, t0 = gt_pos0 - R0 * est_pos0 from matched.front(); returns the RMS position error (m) and the RMS rotation
+  // angle of (R0 * est_rot)^T * gt_rot (deg) over all matched poses. false when fewer than 3 poses.
+  static bool firstFrameAlignedErrors(const std::vector<MatchedPose>& matched, double& ate_first_m, double& are_first_deg, M3D& R0, V3D& t0);
 
   // Appends (t_abs, est_pos, est_rot, gt_pos, gt_rot) to `matched` (one
   // stage's independently-accumulated trajectory, for ONE association

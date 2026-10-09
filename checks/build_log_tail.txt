@@ -1,29 +1,52 @@
-[  1%] Built target test_renamed_keys
-[  3%] Built target livo_cuda
-[  5%] Built target test_q_adapt
-[  6%] Built target test_shadow_options
-[  8%] Built target test_symmetrize
-[ 10%] Built target test_failure_capture
-[ 13%] Built target test_info_scale
-[ 13%] Built target test_zupt
-[ 15%] Built target test_step_cap
-[ 16%] Built target surface_core
-[ 16%] Built target test_reference_temporal_lidar_covariance
-[ 20%] Built target test_debias_modes
-[ 22%] Built target state_lib
-[ 27%] Built target joint_knot_test_core
-[ 30%] Built target test_voxel_history
-[ 33%] Built target test_bootstrap_observation_moments
-[ 35%] Built target test_surface_core
-[ 37%] Built target test_joint_knot_calibration_p0
-[ 40%] Built target test_gravity_s2
-[ 42%] Built target test_joint_knot_estimator
-[ 42%] Built target test_point_cov
-[ 44%] Built target test_joint_knot_init_consistency
-[ 45%] Built target test_joint_knot_motion_q
-[ 47%] Built target test_joint_knot_failure_capture
-[ 55%] Built target cache_tracker_output_livo_recon
-[100%] Built target livo_recon_node
+In file included from /root/catkin_ws/src/livo_recon/tests/test_gravity_s2.cpp:12:
+/root/catkin_ws/src/livo_recon/include/livo_recon/utils/state/state.h:20:15: note: because ‘livo_recon::StateGroup’ has user-provided ‘livo_recon::StateGroup& livo_recon::StateGroup::operator=(const livo_recon::StateGroup&)’
+   20 |   StateGroup& operator=(const StateGroup& o);
+      |               ^~~~~~~~
+/root/catkin_ws/src/livo_recon/tests/test_gravity_s2.cpp:110:24: warning: implicitly-declared ‘livo_recon::StateGroup::StateGroup(const livo_recon::StateGroup&)’ is deprecated [-Wdeprecated-copy]
+  110 |     StateGroup minus = base;
+      |                        ^~~~
+In file included from /root/catkin_ws/src/livo_recon/tests/test_gravity_s2.cpp:12:
+/root/catkin_ws/src/livo_recon/include/livo_recon/utils/state/state.h:20:15: note: because ‘livo_recon::StateGroup’ has user-provided ‘livo_recon::StateGroup& livo_recon::StateGroup::operator=(const livo_recon::StateGroup&)’
+   20 |   StateGroup& operator=(const StateGroup& o);
+      |               ^~~~~~~~
+/root/catkin_ws/src/livo_recon/tests/test_point_cov.cpp: In function ‘livo_recon::StateGroup {anonymous}::makeState(std::mt19937&)’:
+/root/catkin_ws/src/livo_recon/tests/test_point_cov.cpp:50:10: warning: implicitly-declared ‘livo_recon::StateGroup::StateGroup(const livo_recon::StateGroup&)’ is deprecated [-Wdeprecated-copy]
+   50 |   return s;
+      |          ^
+In file included from /root/catkin_ws/src/livo_recon/tests/test_point_cov.cpp:8:
+/root/catkin_ws/src/livo_recon/include/livo_recon/utils/state/state.h:20:15: note: because ‘livo_recon::StateGroup’ has user-provided ‘livo_recon::StateGroup& livo_recon::StateGroup::operator=(const livo_recon::StateGroup&)’
+   20 |   StateGroup& operator=(const StateGroup& o);
+      |               ^~~~~~~~
+[ 72%] Linking CXX executable /root/catkin_ws/devel/lib/livo_recon/test_gravity_s2
+[ 72%] Built target test_gravity_s2
+[ 74%] Linking CXX executable /root/catkin_ws/devel/lib/livo_recon/test_point_cov
+[ 74%] Built target test_point_cov
+[ 75%] Linking CXX static library /root/catkin_ws/devel/lib/libjoint_knot_test_core.a
+[ 75%] Built target joint_knot_test_core
+Scanning dependencies of target test_joint_knot_failure_capture
+[ 77%] Linking CXX executable /root/catkin_ws/devel/lib/livo_recon/test_joint_knot_motion_q
+Scanning dependencies of target test_joint_knot_lazy_prior
+Scanning dependencies of target test_joint_knot_estimator
+[ 77%] Linking CXX executable /root/catkin_ws/devel/lib/livo_recon/test_joint_knot_init_consistency
+[ 77%] Linking CXX executable /root/catkin_ws/devel/lib/livo_recon/test_joint_knot_calibration_p0
+[ 77%] Building CXX object livo_recon/tests/joint_knots/CMakeFiles/test_joint_knot_failure_capture.dir/__/test_joint_knot_failure_capture.cpp.o
+[ 78%] Building CXX object livo_recon/tests/joint_knots/CMakeFiles/test_joint_knot_lazy_prior.dir/__/test_joint_knot_lazy_prior.cpp.o
+[ 78%] Building CXX object livo_recon/tests/joint_knots/CMakeFiles/test_joint_knot_estimator.dir/__/test_joint_knot_estimator.cpp.o
+[ 80%] Linking CUDA device code CMakeFiles/cache_tracker_output_livo_recon.dir/cmake_device_link.o
+[ 80%] Linking CXX executable /root/catkin_ws/devel/lib/livo_recon/cache_tracker_output_livo_recon
+[ 82%] Built target cache_tracker_output_livo_recon
+[ 82%] Linking CXX executable /root/catkin_ws/devel/lib/livo_recon/test_joint_knot_lazy_prior
+[ 84%] Linking CXX executable /root/catkin_ws/devel/lib/livo_recon/test_joint_knot_failure_capture
+[ 84%] Built target test_joint_knot_lazy_prior
+[ 84%] Built target test_joint_knot_failure_capture
+[ 84%] Linking CUDA device code CMakeFiles/livo_recon_node.dir/cmake_device_link.o
+[ 85%] Linking CXX executable /root/catkin_ws/devel/lib/livo_recon/livo_recon_node
+[ 97%] Built target livo_recon_node
+[ 98%] Built target test_joint_knot_calibration_p0
+[100%] Linking CXX executable /root/catkin_ws/devel/lib/livo_recon/test_joint_knot_estimator
+[100%] Built target test_joint_knot_init_consistency
+[100%] Built target test_joint_knot_estimator
+[100%] Built target test_joint_knot_motion_q
 Base path: /root/catkin_ws
 Source space: /root/catkin_ws/src
 Build space: /root/catkin_ws/build

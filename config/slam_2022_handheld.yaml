@@ -327,6 +327,12 @@ cbk:
     # covtune3 sweeps as one of the two biggest single levers for HILTI's
     # collapse rate and baseline accuracy, alongside ds_leaf_size (imu.yaml).
     point_filter_num: 3
+    # R83 (F-504, Bryce 2026-10-06: "there should be no setting where it doesn't"): the Hesai
+    # cloud carries per-point `timestamp` as FLOAT64 absolute epoch seconds, so every Hilti run
+    # de-skews with the point's own time. Not an experiment axis any more. point_time_ref is
+    # left at its default (header), the value the R82 pt-on arms ran with.
+    point_time_field: timestamp
+    point_time_mode: absolute_s_f64
   imu:
     # Confirmed 2026-08-12 by reading raw /alphasense/imu linear_acceleration
     # directly from the bag: norm ~9.71-9.74, i.e. already m/s^2 (matches

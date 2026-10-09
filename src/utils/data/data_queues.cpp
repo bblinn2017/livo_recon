@@ -91,14 +91,21 @@ double DataQueues::latestLidarTime()
 // independent bookkeeping from pushLidar()/lidar_mutex above; does NOT
 // touch last_lidar_arrival_ns (ready()'s margin logic is keyed on the
 // PRIMARY stream only, this is a diagnostic-only side channel).
-void DataQueues::pushDryRunLidar(std::vector<PointXYZT>&& msg)
+bool DataQueues::pushDryRunLidar(std::vector<PointXYZT>&& msg)
 {
-  if (msg.empty()) return;
+  if (msg.empty()) return false;
   std::lock_guard<std::mutex> lock(dry_run_lidar_mutex);
-  if (msg.front().t < latest_dry_run_lidar_time) return;
+  if (msg.front().t < latest_dry_run_lidar_time) return false;
   latest_dry_run_lidar_time = msg.back().t;
   for (auto& pt : msg) pt.t -= start_time;
   dry_run_lidar_queue.push_back(std::move(msg));
+  return true;
+}
+
+double DataQueues::latestDryRunLidarTime()
+{
+  std::lock_guard<std::mutex> lock(dry_run_lidar_mutex);
+  return latest_dry_run_lidar_time;
 }
 
 void DataQueues::pushImage(const ImageData& msg)

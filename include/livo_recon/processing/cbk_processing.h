@@ -60,6 +60,14 @@ struct CbkProcOptions
   // (lidar_time_offset - retime_ref_offset_s), so a cbk/lidar/time_offset sweep moves a retime / retime_trim / restamp grid; when the two are equal the term is exactly 0.0 and the scan time is bit for
   // bit the R80C value. Unset = lidar_time_offset (term exactly 0.0). A sub-option: an error with discard.
   double lidar_retime_ref_offset_s = 0.0;
+  // R82 (F-504, Bryce 2026-10-06). Which PointCloud2 field carries the per-point time and how it is read (see PointTimeSpec in utils/lidar/lidar.h). Defaults: field "t", mode offset_ns_u32 (u32
+  // nanoseconds since scan start: the R81 behaviour bit for bit). Hilti 2022 (Hesai) carries "timestamp" as FLOAT64 absolute epoch seconds: point_time_mode = absolute_s_f64 with
+  // point_time_field = timestamp. point_time_ref (header | min_point) is a sub-option of absolute_s_f64 only: the value that is subtracted (message header stamp, or the smallest finite value).
+  // point_time_explicit is true when ANY of the three keys was set: then a missing field or a datatype that does not match the mode is an error. PointCloud2 callback only.
+  std::string point_time_field = "t";
+  std::string point_time_mode = "offset_ns_u32";
+  std::string point_time_ref = "header";
+  bool point_time_explicit = false;
   // Keep only every point_filter_num-th point of each raw scan, applied at
   // ingestion before undistortion/voxel downsampling -- mirrors
   // FAST-LIVO2's preprocess/point_filter_num (Preprocess::process's

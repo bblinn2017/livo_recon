@@ -171,7 +171,10 @@ struct DataQueues
   bool pushLidar(std::vector<PointXYZT>&& msg);
   double latestLidarTime();
   // See dry_run_lidar_queue's doc comment above.
-  void pushDryRunLidar(std::vector<PointXYZT>&& msg);
+  // R86A (F-532): returns true when the message was queued, false when it was empty or rejected because its first point is earlier than the last point of the previously queued dry-run
+  // message (the rule is unchanged). latestDryRunLidarTime() is that last point time (0.0 before the first message). Callers that ignore the result behave as before.
+  bool pushDryRunLidar(std::vector<PointXYZT>&& msg);
+  double latestDryRunLidarTime();
   void pushImage(const ImageData& msg);
   void pushGt(const GtPoseSample& msg);
 

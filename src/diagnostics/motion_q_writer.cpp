@@ -37,6 +37,26 @@ void writeMotionQSampleDiagnostic(
   out.flush();
 }
 
+void writeMotionQStepDiagnostic(
+    size_t scan_index, size_t step_index, double t_abs,
+    const V3D& q_acc, const V3D& q_gyr,
+    bool acc_clamped_x, bool acc_clamped_y, bool acc_clamped_z,
+    bool gyr_clamped_x, bool gyr_clamped_y, bool gyr_clamped_z)
+{
+  static PersistentLogStream log("motion_q_step.csv");
+  bool first = false;
+  std::ofstream& out = log.stream(&first);
+  if (first)
+    out << "scan_index,step_index,t_abs,q_acc_x,q_acc_y,q_acc_z,q_gyr_x,q_gyr_y,q_gyr_z,"
+           "acc_clamped_x,acc_clamped_y,acc_clamped_z,gyr_clamped_x,gyr_clamped_y,gyr_clamped_z\n";
+  out << std::setprecision(17) << scan_index << ',' << step_index << ',' << t_abs << ','
+      << q_acc.x() << ',' << q_acc.y() << ',' << q_acc.z() << ','
+      << q_gyr.x() << ',' << q_gyr.y() << ',' << q_gyr.z() << ','
+      << (acc_clamped_x ? 1 : 0) << ',' << (acc_clamped_y ? 1 : 0) << ',' << (acc_clamped_z ? 1 : 0) << ','
+      << (gyr_clamped_x ? 1 : 0) << ',' << (gyr_clamped_y ? 1 : 0) << ',' << (gyr_clamped_z ? 1 : 0) << '\n';
+  out.flush();
+}
+
 void writeMotionQScanDiagnostic(
     size_t scan_index, double t_abs, const std::string& model, double beta,
     double acc_scale, double gyr_scale,

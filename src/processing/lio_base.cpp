@@ -1,5 +1,6 @@
 #include "livo_recon/utils/log/bag_clock.h"
 #include "livo_recon/processing/lio_base.h"
+#include "livo_recon/diagnostics/dump_rules.h"
 #include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/config_resolve.h"
@@ -351,7 +352,7 @@ void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const s
   if (first)
     o << "frame,iter,idx,source_index,t,r,sigma_squared,plane_var_term,plane_key,node_id,tier,vis,"
          "hrot_x,hrot_y,hrot_z,hpos_x,hpos_y,hpos_z,wx,wy,wz,bx,by,bz,row_kind,floor_term,sigma_diag_squared,s_prior_pose,sigma_gate_squared"
-      << (voxel_info ? ",voxel_point_count,voxel_distinct_frames" : "") << '\n';   // R81 (F-485 2B): the two voxel columns only with lio/residual_dump_voxel_info; the default header is byte-identical. R80: the last four appended (F-449/F-464: sigma_squared = floor_term + sigma_diag_squared + plane_var_term; s_prior_pose = H P- H^T of the row; sigma_gate_squared = the variance the admission test used)
+      << (voxel_info ? ",voxel_point_count,voxel_distinct_frames,voxel_layer" : "") << '\n';   // R81 (F-485 2B): the two voxel columns only with lio/residual_dump_voxel_info; the default header is byte-identical. R80: the last four appended (F-449/F-464: sigma_squared = floor_term + sigma_diag_squared + plane_var_term; s_prior_pose = H P- H^T of the row; sigma_gate_squared = the variance the admission test used)
   if (sfirst) so << "frame,iter,n_resid,px,py,pz,rvx,rvy,rvz\n";
   const V3D rv = Log(st.rot());
   so << frame_idx << ',' << iteration << ',' << residuals.size() << ',' << std::setprecision(17) << st.pos().x() << ','
@@ -366,7 +367,7 @@ void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const s
       << ',' << r.world_point.x() << ',' << r.world_point.y() << ',' << r.world_point.z()
       << ',' << r.raw_body_point.x() << ',' << r.raw_body_point.y() << ',' << r.raw_body_point.z() << ',' << r.row_kind
       << ',' << r.floor_term << ',' << r.sigma_diag_squared << ',' << r.s_prior_pose << ',' << r.sigma_gate_squared;
-    if (voxel_info) o << ',' << r.voxel_point_count << ',' << r.voxel_distinct_frames;   // R81 (F-485 2B)
+    if (voxel_info) o << ',' << r.voxel_point_count << ',' << r.voxel_distinct_frames << ',' << r.voxel_layer;   // R81 (F-485 2B)
     o << '\n';
   }
   o.flush(); so.flush();
@@ -418,6 +419,8 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   paramWarn<int>(pnh, "eval/nees_tier1_window_scans", opts_.nees_tier1_window_scans, 489);
   paramWarn<bool>(pnh, "eval/state_trace_en", opts_.state_trace_en, true);
   paramWarn<std::string>(pnh, "eval/state_trace_run_id", opts_.state_trace_run_id, "run");
+  paramWarn<int>(pnh, "eval/state_trace_pre_imu_frames", opts_.state_trace_pre_imu_frames, 0);   // R86B: pre_imu rows for frames 1..K (0 = none)
+  if (opts_.state_trace_pre_imu_frames < 0) throw std::invalid_argument("eval/state_trace_pre_imu_frames must be >= 0");
   paramWarn<bool>(pnh, "cuda/enable",               cuda_enable_,          false);
 
   // History (134-136): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-134
@@ -451,18 +454,6 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
       if (opts_.info_scale.rotation == 1.0 && opts_.info_scale.position == 1.0)
         throw std::invalid_argument("lio/info_scale/mode=block with rotation == position == 1 is inert (use mode=off)");
     }
-  }
-  // R72 (F-403, F-391): hard cap on the iekf step. Sub-options refused unless mode=hard. Caps must be positive.
-  cfg.mode("lio/ekf/step_cap/mode", opts_.step_cap.mode, "off", { "off", "hard" });
-  {
-    const bool hard = opts_.step_cap.mode == "hard";
-    cfg.nested<double>(hard, "lio/ekf/step_cap/mode=hard", "lio/ekf/step_cap/rotation_rad", opts_.step_cap.rotation_rad, 1e-2);
-    cfg.nested<double>(hard, "lio/ekf/step_cap/mode=hard", "lio/ekf/step_cap/position_m", opts_.step_cap.position_m, 1e-2);
-    if (hard && (!(opts_.step_cap.rotation_rad > 0.0) || !(opts_.step_cap.position_m > 0.0)))
-      throw std::invalid_argument("lio/ekf/step_cap/rotation_rad and /position_m must be > 0");
-    if (hard && cuda_enable_)
-      throw std::invalid_argument("lio/ekf/step_cap/mode=hard is not implemented with cuda/enable=true");
-    ekf_.step_cap = opts_.step_cap;   // off: EkfUpdate never evaluates it (bit-identical)
   }
   // R73 (F-414): shadow LIO update. Sub-keys exist only under mode=on; the motion-Q keys only under process_noise_model=isotropic.
   cfg.mode("lio/shadow/mode", opts_.shadow.mode, "off", { "off", "on" });
@@ -504,6 +495,9 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
     // R73 (F-417): last-iteration dump; refused unless a frame list is given.
     cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "lio/residual_dump_frames is non-empty", "lio/residual_dump_last_iter",
                      opts_.residual_dump_last_iter, false);
+    // R86B: every-iteration dump; refused unless a frame list is given. Default false is byte-identical.
+    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "lio/residual_dump_frames is non-empty", "lio/residual_dump_all_iters",
+                     opts_.residual_dump_all_iters, false);
     // R81 (F-485 2B): two more columns (voxel_point_count, voxel_distinct_frames) in residual_dump.csv; refused unless a frame list is given. Default false is byte-identical.
     cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "lio/residual_dump_frames is non-empty", "lio/residual_dump_voxel_info",
                      opts_.residual_dump_voxel_info, false);
@@ -517,14 +511,13 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   cfg.nested<double>(opts_.open_loop.mode == "propagate_only", "lio/open_loop/mode=propagate_only",
                      "lio/open_loop/reset_period_s", opts_.open_loop.reset_period_s, 0.0);
 
-  // R65 (F-169): per-point pose covariance model. end_pose (default) = R64 behaviour, bit-identical. propagated adds, per
-  // point, the noise accrued from the point's time to the scan end. insertion_source=prior makes map insertion use the
-  // frame's prior (R,P) block, the same basis the residual gate sees; posterior (default) = R64.
+  // R65 (F-169): lio/point_cov/insertion_source=prior makes map insertion use the frame's prior (R,P) block, the same basis the
+  // residual gate sees; posterior (default) = R64. The time-dependent point-covariance terms (lio/point_cov/mode=propagated, R65;
+  // lio/point_cov/window_s, R83; lio/time_cov/*, R82) were removed on Bryce's instruction (2026-10-07) and are refused.
   {
-    std::string pc_mode, pc_ins;
-    cfg.mode("lio/point_cov/mode", pc_mode, "end_pose", { "end_pose", "propagated" });
+    std::string pc_ins;
     cfg.mode("lio/point_cov/insertion_source", pc_ins, "posterior", { "posterior", "prior" });
-    state_->setPointCovModel(pc_mode == "propagated", pc_ins == "prior");
+    state_->setPointCovInsertionPrior(pc_ins == "prior");
   }
 
   // R65 (F-128): measurement-noise inflation for the first N LIO scans (see LioProcOptions::bootstrap_inflate_scans).
@@ -603,6 +596,12 @@ void LioProcBase::ensureStationaryReference(const MeasureGroup& mg)
                       mg.pose_covariances.empty() ? state_->cov() : mg.pose_covariances.front());
 }
 
+
+void LioProcBase::logPreImuState(const MeasureGroup& mg)
+{
+  if (!dump_rules::preImuTraceWanted(opts_.state_trace_pre_imu_frames, static_cast<long>(voxel_map_->frame_idx_))) return;
+  logStateTrace("pre_imu", mg, 0, 0);
+}
 
 void LioProcBase::logStateTrace(const char* phase, const MeasureGroup& mg, int residual_count,
                                 int completed_iterations)
@@ -684,13 +683,13 @@ void LioProcBase::buildResiduals(
     #pragma omp for schedule(static)
     for (int i = 0; i < n; ++i)
     {
-      const PointXYZCov sensor_world = state_->toWorld(pts[i]);
+      PointXYZCov sensor_world = state_->toWorld(pts[i]);
       M3D pose_cov = M3D::Zero();
       if (include_state_uncertainty_in_gate) {
         if (pose_cov_overrides && i < static_cast<int>(pose_cov_overrides->size()))
           pose_cov = (*pose_cov_overrides)[i];
         else
-          pose_cov = state_->poseCovAtPoint(pts[i].point, pts[i].t, false);   // R65: default path == poseCovAt
+          pose_cov = state_->poseCovAtPoint(pts[i].point, false);   // R65: default path == poseCovAt
       }
       WorldPointCov pt_world{sensor_world.point, sensor_world.sensor_cov, pose_cov};
       pt_world.include_pose_cov_in_gate = include_state_uncertainty_in_gate;
@@ -904,41 +903,17 @@ void LioProcBase::applyInfoScaleToEkf(const std::vector<Residual>& residuals) co
     << st.gnorm_before << ',' << st.gnorm_after << ',' << st.discarded_modes << '\n';
 }
 
-void LioProcBase::recordStepCap() const
-{
-  if (!opts_.step_cap.on()) return;   // default: nothing evaluated, nothing written (bit-identical)
-  const StepCapResult& r = ekf_.lastStepCap();
-  ++step_cap_iterations_;
-  step_cap_rot_raw_max_ = std::max(step_cap_rot_raw_max_, r.rot_norm);
-  step_cap_pos_raw_max_ = std::max(step_cap_pos_raw_max_, r.pos_norm);
-  if (r.bound) {
-    ++step_cap_bound_;
-    step_cap_scale_sum_ += r.scale;
-    step_cap_scale_min_ = std::min(step_cap_scale_min_, r.scale);
-  }
-  if (shadow_active_) return;   // R73
-  static PersistentLogStream log("step_cap.csv");
-  bool first = false;
-  std::ofstream& o = log.stream(&first);
-  if (first) o << "frame,iter,rot_raw,pos_raw,scale,bound,cap_rot,cap_pos,rot_applied,pos_applied\n";   // R74 (F-406): applied step norms appended
-  o << std::setprecision(10) << voxel_map_->frame_idx_ << ',' << diagnostic_gn_iteration_ << ',' << r.rot_norm << ','
-    << r.pos_norm << ',' << r.scale << ',' << (r.bound ? 1 : 0) << ',' << opts_.step_cap.rotation_rad << ','
-    << opts_.step_cap.position_m << ',' << r.rot_norm * r.scale << ',' << r.pos_norm * r.scale << '\n';
-}
-
 void LioProcBase::solveSystem(const std::vector<Residual>& residuals) const {
   accumulateLioResiduals(residuals, ekf_);
 
   // CQ-34: see solveSystem_cuda()'s comment above -- same fix, same reason.
   redundancyAndRenorm(residuals);
-
   applyInfoScaleToEkf(residuals);   // R70 (F-320): no-op unless lio/info_scale/mode=block
 
   // Mean-only update against the frame's FIXED prior (prior_cov_/
   // state_propagat_, snapshotted once in processLIO() before this frame's
   // iteration loop began) -- does not touch state_->cov().
   ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
-  recordStepCap();   // R72 (F-403): no-op unless lio/ekf/step_cap/mode=hard
 }
 
 double LioProcBase::estimateStateCorrection(
@@ -993,7 +968,7 @@ double LioProcBase::estimateStateCorrection(
     logResidualGeometry(voxel_map_->frame_idx_, residuals_);
   if (opts_.line_rows_log_en && diagnostic_gn_iteration_ == 0)   // R77 (F-451): write-only per-scan row counts by kind
     logLineRows(voxel_map_->frame_idx_, diagnostic_gn_iteration_, residuals_);
-  if (!opts_.residual_dump_frames.empty() && diagnostic_gn_iteration_ == 0 &&
+  if (!opts_.residual_dump_frames.empty() && dump_rules::residualDumpIterationWanted(opts_.residual_dump_all_iters, diagnostic_gn_iteration_) &&
       std::find(opts_.residual_dump_frames.begin(), opts_.residual_dump_frames.end(), voxel_map_->frame_idx_) != opts_.residual_dump_frames.end())
     logResidualDump(voxel_map_->frame_idx_, diagnostic_gn_iteration_, *state_, residuals_, false, opts_.residual_dump_voxel_info);   // R71: write-only per-residual dump
 

@@ -84,8 +84,6 @@ struct QGainOptions
   double max_gain = 100.0;
   double rho_clamp = 4.0;     // innovation_scale: rho is clamped to [1/rho_clamp, rho_clamp] before use
   double nis_hi = 1.5;        // nis_gate: inflate when NIS exceeds this
-  double nis_lo = 0.0;        // R80 (F-476): nis_gate: deflate when NIS is below this (0 = never deflate: the R72 one-sided gate, bit for bit)
-  double deflate = 1.0;       // R80 (F-476): nis_gate: gain multiplier on a deflating scan (< 1); the gain is then bounded below by min_gain (< 1 needed)
   double inflate = 1.25;      // nis_gate: gain multiplier on an inflating scan
   double decay = 0.95;        // nis_gate: g <- 1 + decay (g - 1) on a non-inflating scan
   double whiteness_max = 0.0; // nis_gate: when > 0, scans with |lag1| above this are NOT inflated (map-error signature)
@@ -130,11 +128,6 @@ public:
       {
         g_ = g_ * o_.inflate;
         ++inflating_;
-      }
-      else if (o_.nis_lo > 0.0 && s.nis < o_.nis_lo)
-      {
-        g_ = g_ * o_.deflate;   // R80 (F-476): the filter is under-confident on this scan (NIS below nis_lo): shrink the step variance
-        ++deflating_;
       }
       else
       {

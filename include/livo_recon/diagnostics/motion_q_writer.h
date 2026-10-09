@@ -17,6 +17,15 @@ void writeMotionQSampleDiagnostic(
     const V3D& debiased_acc_energy, const V3D& debiased_gyr_energy,
     const V3D& q_acc, const V3D& q_gyr);
 
+// R83B (A6/B5): one row per IMU step (not per scan) -- the compact motion_q_scan.csv holds scan means only, which
+// hides the per-step pairing structure the onset analysis needs. acc_clamped/gyr_clamped are THIS STEP's per-axis
+// clamp flags (the var_acc_step/var_gyr_step axis hit its max_dynamic_variance ceiling before scaling down).
+void writeMotionQStepDiagnostic(
+    size_t scan_index, size_t step_index, double t_abs,
+    const V3D& q_acc, const V3D& q_gyr,
+    bool acc_clamped_x, bool acc_clamped_y, bool acc_clamped_z,
+    bool gyr_clamped_x, bool gyr_clamped_y, bool gyr_clamped_z);
+
 void writeMotionQScanDiagnostic(
     size_t scan_index, double t_abs, const std::string& model, double beta,
     double acc_scale, double gyr_scale,

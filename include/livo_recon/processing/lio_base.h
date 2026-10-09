@@ -10,7 +10,6 @@
 #include "livo_recon/lio/deskew.h"
 #include "livo_recon/lio/residual_redundancy.h"
 #include "livo_recon/lio/info_scale.h"
-#include "livo_recon/lio/step_cap.h"
 #include "livo_recon/lio/shadow_options.h"
 
 #include <array>
@@ -83,6 +82,9 @@ struct LioProcOptions
   // R61: raw state + full covariance trace per scan (diagnostics/state_trace.h). Write-only; default ON.
   bool state_trace_en = true;
   std::string state_trace_run_id = "run";
+  // R86B: also write a "pre_imu" state_trace row (the full state and covariance BEFORE the IMU propagation of the scan) for frame indices 1..K.
+  // Write-only. 0 (default) writes nothing and is bit-identical. Frame index = voxel_map_->frame_idx_ when estimateState starts, the same value the post_imu row carries.
+  int state_trace_pre_imu_frames = 0;
 
   // R61: open-loop IMU propagation. "off" (default) = normal operation, bit-identical to before.
   // "propagate_only" skips the LiDAR solve entirely (state and covariance are only propagated by the IMU);
@@ -114,10 +116,6 @@ struct LioProcOptions
   // bit-identical. iekf estimator only.
   InfoScaleOptions info_scale;
 
-  // R72 (F-403, F-391): opt-in hard cap on the per-iteration iekf update step (see step_cap.h). mode "off" (default) is
-  // bit-identical. iekf estimator only; refused under coupled and under cuda.
-  StepCapOptions step_cap;
-
   // R70 (F-340): write-only per-frame geometry of the admitted residuals (iteration 0 only): normal and lever-arm scatter
   // eigenvalues, plane concentration, distance statistics. Backend independent, so surface and octree can be compared.
   bool   residual_geometry_en  = false;
@@ -133,6 +131,11 @@ struct LioProcOptions
   // R73 (F-417): also dump the residuals of the LAST executed iteration of each listed frame (iteration index recorded in the
   // iter column). Sub-key of lio/residual_dump_frames (refused when that list is empty). Default false is bit-identical.
   bool residual_dump_last_iter = false;
+  // R86B: dump the residuals of EVERY iteration (iteration index in the iter column) of each listed frame. Sub-key of lio/residual_dump_frames (refused when that
+  // list is empty). Supersedes residual_dump_last_iter (the last iteration is already one of the dumped iterations). Default false is bit-identical.
+  // Row semantics (unchanged, stated here because the R71 comment above was misleading): the residuals of iteration k are evaluated at the state BEFORE the step of
+  // iteration k; the state in residual_dump_state.csv is the state AFTER that step (solveSystem applies it before the dump is written).
+  bool residual_dump_all_iters = false;
   // R81 (F-485 2B): append voxel_point_count and voxel_distinct_frames (of each row's voxel) to residual_dump.csv and shadow_residual_dump.csv. Sub-key of lio/residual_dump_frames (refused when that list is empty).
   // Default false leaves the header and rows byte-identical.
   bool residual_dump_voxel_info = false;
@@ -204,6 +207,10 @@ public:
   // VIRTUAL: LioProcIekf deskews from the IMU poses; LioProcCoupled deskews
   // from the raw IMU chain.
   virtual void deskewAndDownsample(MeasureGroup& mg) = 0;
+
+  // R86B. Writes the state_trace.csv row "pre_imu" for frames 1..eval/state_trace_pre_imu_frames. Call it before the IMU propagation of the scan, with the state
+  // untouched since the previous scan. No-op by default.
+  void logPreImuState(const MeasureGroup& mg);
 
 
   // Assumes deskewAndDownsample(mg) already ran this frame (mg.points
@@ -364,9 +371,6 @@ protected:
 
   // R70 (F-320): engagement counters of the block information scale (written by solveSystem*, which are const).
   // R72 (F-403): step-cap engagement (iterations seen, iterations where the cap bound, sum of applied/raw scale when bound).
-  mutable long step_cap_iterations_ = 0, step_cap_bound_ = 0;
-  mutable double step_cap_scale_sum_ = 0.0, step_cap_scale_min_ = 1.0, step_cap_rot_raw_max_ = 0.0, step_cap_pos_raw_max_ = 0.0;
-  void recordStepCap() const;
   mutable long info_scale_iterations_ = 0;
   mutable long info_scale_discarded_modes_ = 0;
   mutable double info_scale_trace_ratio_sum_ = 0.0;

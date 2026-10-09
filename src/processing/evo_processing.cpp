@@ -1,5 +1,6 @@
 #include "livo_recon/processing/evo_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
+#include "livo_recon/utils/algo/first_pose_align.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 
 #include <algorithm>
@@ -7,6 +8,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <stdexcept>
 
 namespace livo_recon
 {
@@ -53,6 +55,7 @@ std::string EvoProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "evo/rpe/compute_rte",   opts_.compute_rte,  false);
   paramWarn<bool>(pnh, "evo/rpe/compute_roe",   opts_.compute_roe,  false);
   paramWarn<double>(pnh, "evo/rpe/delta_s",     opts_.rpe_delta_s,  1.0);
+  paramWarn<bool>(pnh, "evo/dense_gt_metrics",  opts_.dense_gt_metrics, false);   // R82 (F-506)
   paramWarn<bool>(pnh, "evo/compute_nearest_live", opts_.compute_nearest_live, false);
   paramWarn<bool>(pnh, "evo/export_ate_per_frame_csv", opts_.export_ate_per_frame_csv, false);
 
@@ -86,7 +89,11 @@ std::string EvoProc::loadParameters(ros::NodeHandle& pnh)
   // evaluation.py is APE/ATE-only for the same reason. Force both off
   // rather than silently returning -1 forever, so a stale yaml setting
   // doesn't look like a live-but-unlucky metric.
-  if (file_mode && (opts_.compute_rte || opts_.compute_roe))
+  if (opts_.dense_gt_metrics && !file_mode)
+    throw std::invalid_argument("evo/dense_gt_metrics = true needs evo/gt_source = file");
+  if (opts_.dense_gt_metrics)
+    oss << "\n  evo/dense_gt_metrics: true (RTE/ROE are NOT forced off for the file; ARE needs no compute_roe; secondary first-pose alignment ATE_first / ARE_first)";
+  if (file_mode && !opts_.dense_gt_metrics && (opts_.compute_rte || opts_.compute_roe))
   {
     oss << "\n  WARNING: rpe/compute_rte and rpe/compute_roe are forced off "
         << "for gt_source=file (sparse checkpoints too widely spaced for a "
@@ -100,9 +107,17 @@ std::string EvoProc::loadParameters(ros::NodeHandle& pnh)
     if (file_mode)
     {
       if (loadGtFile(opts_.gt_file))
+      {
         oss << "\n  loaded " << gt_buffer_.size() << " ground-truth checkpoints from " << opts_.gt_file;
+        if (opts_.dense_gt_metrics && !gt_orientation_seen_)   // R82 (F-506), rule 3.4: a key that was set must act
+          throw std::invalid_argument("evo/dense_gt_metrics = true but the ground-truth file carries no orientation (every quaternion is identity): ARE and the rotation columns would be meaningless");
+      }
       else
+      {
+        if (opts_.dense_gt_metrics)
+          throw std::invalid_argument("evo/dense_gt_metrics = true but the ground-truth file " + opts_.gt_file + " could not be loaded");
         oss << "\n  ERROR: failed to load gt_file " << opts_.gt_file << " -- evo will report nothing";
+      }
     }
     else
     {
@@ -245,6 +260,11 @@ double EvoProc::computeAre(const std::vector<MatchedPose>& matched, const M3D& R
   }
 
   return std::sqrt(sq_err_sum / n) * (180.0 / M_PI);
+}
+
+bool EvoProc::firstFrameAlignedErrors(const std::vector<MatchedPose>& matched, double& ate_first_m, double& are_first_deg, M3D& R0, V3D& t0)
+{
+  return firstPoseAlignedErrors(matched, ate_first_m, are_first_deg, R0, t0);   // utils/algo/first_pose_align.h
 }
 
 double EvoProc::computeRte(const std::vector<MatchedPose>& matched, int delta_frames) const
@@ -412,7 +432,13 @@ EvoProc::StageMetrics EvoProc::logStage(const char* stage_name, const char* mode
   // of any real motion. Stays gated on gtOrientationMeaningful() so it only
   // ever reports something for a ground-truth source that actually measures
   // real orientation.
-  m.are = (opts_.compute_roe && gtOrientationMeaningful()) ? computeAre(matched, R_align) : -1.0;
+  m.are = ((opts_.compute_roe || opts_.dense_gt_metrics) && gtOrientationMeaningful()) ? computeAre(matched, R_align) : -1.0;   // R82 (F-506): dense_gt_metrics needs no compute_roe
+  if (opts_.dense_gt_metrics && gtOrientationMeaningful())
+  {
+    M3D R0; V3D t0;
+    double ate_f = -1.0, are_f = -1.0;
+    if (firstFrameAlignedErrors(matched, ate_f, are_f, R0, t0)) { m.ate_first = ate_f; m.are_first = are_f; }
+  }
 
   dbg << "  ATE=" << m.ate << "m";
   if (m.rte >= 0.0) dbg << "  RTE=" << m.rte << "m";
@@ -429,6 +455,7 @@ EvoProc::StageMetrics EvoProc::logStage(const char* stage_name, const char* mode
                                       : "(NO GT ORIENTATION -- self-rotation "
                                         "magnitude, not an error)");
   if (m.are >= 0.0) dbg << "  ARE=" << m.are << "deg";
+  if (m.ate_first >= 0.0) dbg << "  ATE_first=" << m.ate_first << "m  ARE_first=" << m.are_first << "deg";   // R82 (F-506)
 
   // This frame's own aligned position error VECTOR (not just its scalar
   // contribution to the running ATE) -- R_align/t_align are this call's
@@ -471,6 +498,9 @@ std::string EvoProc::formatModeStats(const char* mode_name, const StageMetrics& 
     oss << "  " << (gt_orientation_meaningful ? "(ROE vs GT orientation)"
                                                : "(ROE: NO GT ORIENTATION -- "
                                                  "self-rotation magnitude, not an error)");
+
+  if (vio.ate_first >= 0.0)   // R82 (F-506): appended at the very end, after the (ROE ...) note, so every existing regex keeps matching
+    oss << "  ATE_first=" << vio.ate_first << "m ARE_first=" << vio.are_first << "deg (first-pose alignment, secondary)";
 
   // Wide enough for the largest values actually seen in practice (a
   // diverged run's ATE can reach 6 figures) without a column overflowing
@@ -808,7 +838,16 @@ std::string EvoProc::exportAtePerFrameCsv() const
            "est_x,est_y,est_z,gt_x,gt_y,gt_z,aligned_x,aligned_y,aligned_z,"
            "err_pos_mm,err_rot_deg,err_x_mm,err_y_mm,err_z_mm,"
            "align_r00,align_r01,align_r02,align_r10,align_r11,align_r12,"
-           "align_r20,align_r21,align_r22,align_tx,align_ty,align_tz\n";
+           "align_r20,align_r21,align_r22,align_tx,align_ty,align_tz";
+    const bool dense_cols = opts_.dense_gt_metrics && gtOrientationMeaningful();   // R82 (F-506): two columns appended at the END, only with the key
+    M3D R0f = M3D::Identity(); V3D t0f = V3D::Zero();
+    if (dense_cols)
+    {
+      double a_, b_;
+      firstFrameAlignedErrors(matched, a_, b_, R0f, t0f);
+      ofs << ",first_err_pos_mm,first_err_rot_deg";
+    }
+    ofs << "\n";
 
     const bool gt_rot_ok = gtOrientationMeaningful();
     double sq_err_sum = 0.0;
@@ -838,7 +877,14 @@ std::string EvoProc::exportAtePerFrameCsv() const
           << "," << (err_vec.z() * 1000.0);
       for (int rr = 0; rr < 3; ++rr)
         for (int cc = 0; cc < 3; ++cc) ofs << ',' << R_align(rr, cc);
-      ofs << ',' << t_align.x() << ',' << t_align.y() << ',' << t_align.z() << "\n";
+      ofs << ',' << t_align.x() << ',' << t_align.y() << ',' << t_align.z();
+      if (dense_cols)
+      {
+        const M3D er = (R0f * m.est_rot).transpose() * m.gt_rot;
+        ofs << ',' << (((R0f * m.est_pos + t0f) - m.gt_pos).norm() * 1000.0) << ','
+            << (std::acos(std::clamp((er.trace() - 1.0) / 2.0, -1.0, 1.0)) * (180.0 / M_PI));
+      }
+      ofs << "\n";
     }
     ofs.flush();
 

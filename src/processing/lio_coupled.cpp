@@ -79,10 +79,6 @@ std::string LioProcCoupled::loadParameters(ros::NodeHandle& pnh)
     cfg.requireCombination(
         "lio/info_scale/mode=block is implemented for estimator/mode=iekf only (the coupled estimator accumulates "
         "joint-knot information, not the 6x6 HtH the block scale acts on)");
-  if (opts_.step_cap.on())
-    cfg.requireCombination(
-        "lio/ekf/step_cap/mode=hard is implemented for estimator/mode=iekf only (the coupled estimator does not use "
-        "EkfUpdate::applyMeanUpdate; its own step knob is estimator/coupled/step_scale)");
   if (state_->gravityS2())
     cfg.requireCombination(
         "state/gravity_model=s2 is not implemented for the coupled estimator "

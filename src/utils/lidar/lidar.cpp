@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <limits>
+#include <stdexcept>
 #include <tuple>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/point_cloud.h>
@@ -76,29 +78,27 @@ std::vector<PointXYZT> pointsFromLivoxMsg(
 std::vector<PointXYZT> pointsFromPointCloud2(
     const sensor_msgs::PointCloud2& msg, double scan_time,
     double blind_sqr, const MeasuresPtr& measures,
-    int point_filter_num)
+    int point_filter_num, const PointTimeSpec& spec, PointTimeStats* stats)
 {
   pcl::PointCloud<pcl::PointXYZI> cloud;
   pcl::fromROSMsg(msg, cloud);
 
   int t_offset = -1;
+  uint8_t t_datatype = 0;
   for (const auto& field : msg.fields)
-    if (field.name == "t") { t_offset = static_cast<int>(field.offset); break; }
+    if (field.name == spec.field) { t_offset = static_cast<int>(field.offset); t_datatype = field.datatype; break; }
+
+  std::vector<double> offsets;
+  std::vector<char> keep_pt;
+  PointTimeStats local;
+  readPointTimeOffsets(msg.data.data(), cloud.size(), msg.point_step, t_offset, t_datatype, spec, msg.header.stamp.toSec(), offsets, keep_pt, local);
+  if (stats) *stats = local;
 
   std::vector<PointXYZT> points = buildLidarPoints(
       cloud.size(), scan_time, blind_sqr, measures, point_filter_num,
       [&](size_t i) {
         const auto& pt = cloud[i];
-
-        double offset_sec = 0.0;
-        if (t_offset >= 0)
-        {
-          uint32_t t_ns = 0;
-          std::memcpy(&t_ns, msg.data.data() + i * msg.point_step + t_offset, sizeof(t_ns));
-          offset_sec = static_cast<double>(t_ns) * 1e-9;
-        }
-
-        return std::make_tuple(V3D(pt.x, pt.y, pt.z), offset_sec, true);
+        return std::make_tuple(V3D(pt.x, pt.y, pt.z), offsets[i], keep_pt[i] != 0);
       });
 
   // An organized Ouster cloud is laid out ring-major (each of the 16 rings

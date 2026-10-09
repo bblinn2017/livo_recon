@@ -1,0 +1,45 @@
+diff -urN -x __pycache__ a/include/livo_recon/utils/map/voxelmap_utils.h b/include/livo_recon/utils/map/voxelmap_utils.h
+--- a/include/livo_recon/utils/map/voxelmap_utils.h	2026-10-06 13:45:53.000000000 -0700
++++ b/include/livo_recon/utils/map/voxelmap_utils.h	2026-10-07 01:25:43.491419139 -0700
+@@ -76,6 +76,9 @@
+   // copied in VoxelPlane::computeResidual(). Write-only: read only by the residual dump when lio/residual_dump_voxel_info is true. -1 on a path that does not set them.
+   int voxel_point_count = -1;
+   int voxel_distinct_frames = -1;
++  // R83 (F-428 follow-up, Bryce 2026-10-06 on whether subdividing voxels is useful): octree layer of the owning node (0 = root), copied in VoxelNode::findPlaneResidual().
++  // Write-only, read only by the residual dump under lio/residual_dump_voxel_info. -1 on a path that does not set it.
++  int voxel_layer = -1;
+ 
+   // This plane's own fit-uncertainty contribution (n * plane_var * n),
+   // added into sigma_squared by LioProc::buildResiduals().
+diff -urN -x __pycache__ a/src/lio/voxelnode.cpp b/src/lio/voxelnode.cpp
+--- a/src/lio/voxelnode.cpp	2026-09-29 17:29:24.000000000 -0700
++++ b/src/lio/voxelnode.cpp	2026-10-07 01:25:43.492185625 -0700
+@@ -398,6 +398,7 @@
+   if (plane_retired_) return false;
+   if (!plane_.computeResidual(pt, res, scan_id)) return false;
+   res.plane_node_id = node_id_;
++  res.voxel_layer = layer_;   // R83: write-only (residual dump under lio/residual_dump_voxel_info)
+   return true;
+ }
+ 
+diff -urN -x __pycache__ a/src/processing/lio_base.cpp b/src/processing/lio_base.cpp
+--- a/src/processing/lio_base.cpp	2026-10-06 13:45:53.000000000 -0700
++++ b/src/processing/lio_base.cpp	2026-10-07 01:25:43.492812501 -0700
+@@ -351,7 +351,7 @@
+   if (first)
+     o << "frame,iter,idx,source_index,t,r,sigma_squared,plane_var_term,plane_key,node_id,tier,vis,"
+          "hrot_x,hrot_y,hrot_z,hpos_x,hpos_y,hpos_z,wx,wy,wz,bx,by,bz,row_kind,floor_term,sigma_diag_squared,s_prior_pose,sigma_gate_squared"
+-      << (voxel_info ? ",voxel_point_count,voxel_distinct_frames" : "") << '\n';   // R81 (F-485 2B): the two voxel columns only with lio/residual_dump_voxel_info; the default header is byte-identical. R80: the last four appended (F-449/F-464: sigma_squared = floor_term + sigma_diag_squared + plane_var_term; s_prior_pose = H P- H^T of the row; sigma_gate_squared = the variance the admission test used)
++      << (voxel_info ? ",voxel_point_count,voxel_distinct_frames,voxel_layer" : "") << '\n';   // R81 (F-485 2B): the two voxel columns only with lio/residual_dump_voxel_info; the default header is byte-identical. R80: the last four appended (F-449/F-464: sigma_squared = floor_term + sigma_diag_squared + plane_var_term; s_prior_pose = H P- H^T of the row; sigma_gate_squared = the variance the admission test used)
+   if (sfirst) so << "frame,iter,n_resid,px,py,pz,rvx,rvy,rvz\n";
+   const V3D rv = Log(st.rot());
+   so << frame_idx << ',' << iteration << ',' << residuals.size() << ',' << std::setprecision(17) << st.pos().x() << ','
+@@ -366,7 +366,7 @@
+       << ',' << r.world_point.x() << ',' << r.world_point.y() << ',' << r.world_point.z()
+       << ',' << r.raw_body_point.x() << ',' << r.raw_body_point.y() << ',' << r.raw_body_point.z() << ',' << r.row_kind
+       << ',' << r.floor_term << ',' << r.sigma_diag_squared << ',' << r.s_prior_pose << ',' << r.sigma_gate_squared;
+-    if (voxel_info) o << ',' << r.voxel_point_count << ',' << r.voxel_distinct_frames;   // R81 (F-485 2B)
++    if (voxel_info) o << ',' << r.voxel_point_count << ',' << r.voxel_distinct_frames << ',' << r.voxel_layer;   // R81 (F-485 2B)
+     o << '\n';
+   }
+   o.flush(); so.flush();

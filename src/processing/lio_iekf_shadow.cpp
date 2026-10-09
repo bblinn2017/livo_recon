@@ -81,8 +81,6 @@ void LioProcIekf::runShadowUpdate(const MeasureGroup& mg)
   const std::vector<Residual> real_residuals = residuals_;
   const EkfUpdate real_ekf = ekf_;
   const ResidualRedundancyStats real_redundancy = redundancy_stats_;
-  const long sc_it = step_cap_iterations_, sc_bound = step_cap_bound_;
-  const double sc_sum = step_cap_scale_sum_, sc_min = step_cap_scale_min_, sc_rot = step_cap_rot_raw_max_, sc_pos = step_cap_pos_raw_max_;
   const long is_it = info_scale_iterations_, is_disc = info_scale_discarded_modes_;
   const double is_tr = info_scale_trace_ratio_sum_;
   const long rn_it = renorm_iterations_, rn_ap = renorm_applied_;
@@ -139,8 +137,6 @@ void LioProcIekf::runShadowUpdate(const MeasureGroup& mg)
   residuals_ = real_residuals;
   ekf_ = real_ekf;
   redundancy_stats_ = real_redundancy;
-  step_cap_iterations_ = sc_it; step_cap_bound_ = sc_bound; step_cap_scale_sum_ = sc_sum; step_cap_scale_min_ = sc_min;
-  step_cap_rot_raw_max_ = sc_rot; step_cap_pos_raw_max_ = sc_pos;
   info_scale_iterations_ = is_it; info_scale_discarded_modes_ = is_disc; info_scale_trace_ratio_sum_ = is_tr;
   renorm_iterations_ = rn_it; renorm_applied_ = rn_ap; renorm_c_sum_ = rn_sum; renorm_c_max_ = rn_max;
   n_miss_coverage_ = n_mc; n_miss_mismatch_ = n_mm; n_statistical_gate_candidates_ = n_gc; n_statistical_gate_rejections_ = n_gr;

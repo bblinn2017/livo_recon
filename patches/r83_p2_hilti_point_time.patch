@@ -1,0 +1,96 @@
+diff -urN -x __pycache__ a/config/slam_2022_handheld.yaml b/config/slam_2022_handheld.yaml
+--- a/config/slam_2022_handheld.yaml	2026-10-06 14:37:36.000000000 -0700
++++ b/config/slam_2022_handheld.yaml	2026-10-07 01:25:28.471759299 -0700
+@@ -327,6 +327,12 @@
+     # covtune3 sweeps as one of the two biggest single levers for HILTI's
+     # collapse rate and baseline accuracy, alongside ds_leaf_size (imu.yaml).
+     point_filter_num: 3
++    # R83 (F-504, Bryce 2026-10-06: "there should be no setting where it doesn't"): the Hesai
++    # cloud carries per-point `timestamp` as FLOAT64 absolute epoch seconds, so every Hilti run
++    # de-skews with the point's own time. Not an experiment axis any more. point_time_ref is
++    # left at its default (header), the value the R82 pt-on arms ran with.
++    point_time_field: timestamp
++    point_time_mode: absolute_s_f64
+   imu:
+     # Confirmed 2026-08-12 by reading raw /alphasense/imu linear_acceleration
+     # directly from the bag: norm ~9.71-9.74, i.e. already m/s^2 (matches
+diff -urN -x __pycache__ a/include/livo_recon/utils/lidar/point_time.h b/include/livo_recon/utils/lidar/point_time.h
+--- a/include/livo_recon/utils/lidar/point_time.h	2026-10-06 14:51:18.000000000 -0700
++++ b/include/livo_recon/utils/lidar/point_time.h	2026-10-07 01:25:28.489893789 -0700
+@@ -59,7 +59,7 @@
+     const uint8_t want = absolute ? kPointFieldFloat64 : kPointFieldUint32;
+     if (datatype != want)
+       throw std::runtime_error("cbk/lidar/point_time_field '" + spec.field + "' has PointField datatype " + std::to_string(static_cast<int>(datatype)) + ", but point_time_mode " +
+-                               (absolute ? "absolute_s_f64 needs FLOAT64 (7)" : "offset_ns_u32 needs UINT32 (6)"));
++                               (absolute ? "absolute_s_f64 needs FLOAT64 (8)" : "offset_ns_u32 needs UINT32 (6)"));
+   }
+   offsets.assign(n_points, 0.0);
+   keep.assign(n_points, 1);
+diff -urN -x __pycache__ a/tests/test_point_time_r82.cpp b/tests/test_point_time_r82.cpp
+--- a/tests/test_point_time_r82.cpp	2026-10-06 13:45:53.000000000 -0700
++++ b/tests/test_point_time_r82.cpp	2026-10-07 01:25:36.279466463 -0700
+@@ -2,6 +2,8 @@
+ #include <cmath>
+ #include <cstdio>
+ #include <cstring>
++#include <stdexcept>
++#include <string>
+ #include <vector>
+ 
+ #include "livo_recon/utils/lidar/point_time.h"
+@@ -59,6 +61,13 @@
+   CHECK(st.field_found);
+   CHECK(throws([&] { readPointTimeOffsets(du.data(), tn.size(), 32, 16, kPointFieldFloat64, ex, hdr, offs, keep, st); }));
+   CHECK(throws([&] { readPointTimeOffsets(d64.data(), v.size(), 32, 16, kPointFieldUint32, a, hdr, offs, keep, st); }));
++  // R83: the datatype codes are the sensor_msgs::PointField ones (UINT32 = 6, FLOAT64 = 8); a FLOAT32 (7) field is refused in absolute mode and the message names FLOAT64 (8), not (7) as R82 did.
++  CHECK(kPointFieldUint32 == 6 && kPointFieldFloat64 == 8);
++  {
++    std::string what;
++    try { readPointTimeOffsets(d64.data(), v.size(), 32, 16, 7, a, hdr, offs, keep, st); } catch (const std::runtime_error& e) { what = e.what(); }
++    CHECK(what.find("FLOAT64 (8)") != std::string::npos && what.find("FLOAT64 (7)") == std::string::npos);
++  }
+   // An empty message is not an error.
+   readPointTimeOffsets(nullptr, 0, 32, 16, kPointFieldFloat64, a, hdr, offs, keep, st);
+   CHECK(offs.empty() && st.n_points == 0 && st.offset_min == 0.0);
+diff -urN -x __pycache__ a/tools/r69/selftest_r83_hilti_point_time.py b/tools/r69/selftest_r83_hilti_point_time.py
+--- a/tools/r69/selftest_r83_hilti_point_time.py	1969-12-31 16:00:00.000000000 -0800
++++ b/tools/r69/selftest_r83_hilti_point_time.py	2026-10-07 01:25:28.472310534 -0700
+@@ -0,0 +1,38 @@
++#!/usr/bin/env python3
++"""selftest_r83_hilti_point_time: the Hilti config always uses the point's own time (F-504, R83).
++
++Pure Python, no ROS. Checks the yaml keys only; the C++ key parser is unchanged.
++  python3 tools/r69/selftest_r83_hilti_point_time.py --config-dir config
++"""
++import argparse, os, sys
++import yaml
++
++
++def lidar(cfg):
++    return ((cfg or {}).get("cbk") or {}).get("lidar") or {}
++
++
++def main():
++    ap = argparse.ArgumentParser()
++    ap.add_argument("--config-dir", default="config")
++    a = ap.parse_args()
++    fails = []
++    h = lidar(yaml.safe_load(open(os.path.join(a.config_dir, "slam_2022_handheld.yaml"))))
++    if h.get("point_time_mode") != "absolute_s_f64":
++        fails.append("slam_2022_handheld.yaml cbk.lidar.point_time_mode is %r, want absolute_s_f64" % h.get("point_time_mode"))
++    if h.get("point_time_field") != "timestamp":
++        fails.append("slam_2022_handheld.yaml cbk.lidar.point_time_field is %r, want timestamp" % h.get("point_time_field"))
++    if "point_time_ref" in h:
++        fails.append("point_time_ref must stay unset (default header, what R82 pt-on ran with); found %r" % h.get("point_time_ref"))
++    n = lidar(yaml.safe_load(open(os.path.join(a.config_dir, "ntu_viral.yaml"))))
++    for k in ("point_time_mode", "point_time_field", "point_time_ref"):
++        if k in n:
++            fails.append("ntu_viral.yaml must not set cbk.lidar.%s (NTU stays on offset_ns_u32, byte-identical to R82)" % k)
++    for f in fails:
++        print("FAIL", f)
++    print("selftest_r83_hilti_point_time:", "FAILED" if fails else "ok")
++    return 1 if fails else 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())

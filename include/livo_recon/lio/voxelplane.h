@@ -1,6 +1,9 @@
 #pragma once
 
 #include "livo_recon/utils/map/voxelmap_utils.h"
+#include "livo_recon/lio/plane_var_diag.h"
+#include "livo_recon/lio/line_tilt_moments.h"
+#include "livo_recon/map/binned/binned_bins.h"
 #include <atomic>
 #include <cstdint>
 
@@ -52,6 +55,8 @@ public:
 
   bool isInit() const { return points_size_ > opts_->min_init_points; }
   bool isPlane() const { return is_plane_; }
+  // R82 (D4): the class decided at fit time when line_residual/classify_at_fit is on (false otherwise, and false for a rejected voxel). A line voxel is also isPlane() (it keeps its eigenvectors for the line rows).
+  bool isLine() const { return is_line_ && is_plane_; }
   bool isFull() const { return points_size_ >= opts_->max_points; }
 
   // scan_id (default -1 -> no logging regardless of opts_ flags): the
@@ -90,19 +95,31 @@ public:
   // updateOccupancy() can stamp occ_anchor_frame_ at (re)anchor time --
   // see that member's own doc comment. Same threading convention as
   // computeResidual()'s scan_id above.
+  // layer_idx (R83B A1/B4): VoxelNode's own layer_, threaded down purely for plane_fit_eigs.csv's layer column --
+  // same threading convention as frame_idx above.
   void update(const std::vector<PointXYZCov>& points, int total_count = -1,
               const std::vector<double>* weights = nullptr,
               const RunningMoments* running = nullptr,
               const std::vector<double>* var_weights = nullptr,
-              int frame_idx = -1);
+              int frame_idx = -1, int layer_idx = -1);
 
   // History (71-102): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-71
   void addPoints(const std::vector<PointXYZCov>& points, int total_count = -1,
                  int distinct_frames = -1, bool trust_sensor_noise = true,
-                 int frame_idx = -1);
+                 int frame_idx = -1, int layer_idx = -1,
+                 bool refit = true);   // R87: false = accumulate only (the admission rule, lio/admission_rule.h, said no fit yet); the previous fit stays
+
+  // R88 (binned map): the debiased path fed from a node's bins instead of from raw points. When refit is true, the debiased accumulators (N_acc_, Sp_, Spp_, Scov_, Scov_sensor_, sum_sensor_var_, V_, W_) are REPLACED by the
+  // statistics of the occupied bins (map/binned/binned_bins.h, under bin_opts) and refitDebiased() runs; the fit itself is the unchanged debiased fit. When refit is false only points_size_ (the number of occupied bins, which is
+  // what isInit() compares with min_init) and the occupancy of an existing plane are updated; the previous fit stays. `batch` is this call's raw points, used for the occupancy update only (and for ref_ when
+  // centred_accumulation is on and ref_ is still unset).
+  void refitFromBins(const binned::BinSet& bins, const binned::Options& bin_opts, const std::vector<PointXYZCov>& batch,
+                     int distinct_frames, int frame_idx, int layer_idx, bool refit);
 
 private:
   void refitDebiased();
+  // R82 (D4): fills line_tilt_L_ / line_tilt_X_ from the debiased fit's moment accumulators (form 2 = exact, 1 = mean-covariance). Same classification test and floors as computeLineTilt.
+  void computeLineTiltDebiased(int form);
   // R77 (F-453): fills line_tilt_L_ / line_tilt_valid_ from the fit's own points (same weights, same covariance choice, same first-order eigenvector perturbation as plane_var_).
   void computeLineTilt(const std::vector<PointXYZCov>& points, const std::vector<double>* var_weights, double var_weight_sum, bool use_var_weights);
 
@@ -197,6 +214,7 @@ private:
 
   int points_size_ = 0;
   bool is_plane_ = false;
+  bool is_line_ = false;   // R82 (D4): set by the fit when classify_at_fit is on
 
   // Occupied-bin count (J) from this plane's last update() call that used
   // weights (0 for an unweighted/unbinned fit, or for a refitDebiased()
@@ -206,6 +224,7 @@ private:
   // debugLogPlaneFitStats()'s own `j` local exactly, just persisted.
   int last_fit_j_ = 0;
   int trace_frame_ = -1;   // R64: frame index of the latest update()/addPoints() call, diagnostics only
+  int trace_layer_ = -1;   // R83B (A1/B4): voxel layer of the latest update()/addPoints() call, diagnostics only
 
   // ── the unified (information) plane model ────────────────────────────
   // See VoxelOpts::plane_var_mode.  All three are written by
@@ -418,6 +437,17 @@ struct VoxelPlaneR81Counters
   long rows = 0, scan_rows = 0, clamped = 0, sum_n_scans = 0;
 };
 VoxelPlaneR81Counters voxelPlaneR81Counters();
+// R82 (D2, F-502): snapshot of the plane variance diagnostic (voxel_map/plane/plane_var_diag_en), cumulative since process start. See lio/plane_var_diag.h.
+PlaneVarDiagSnapshot voxelPlaneVarDiagSnapshot();
+// R82 (D4, F-500): engagement of voxel_map/plane/line_residual/classify_at_fit and debiased_line_equiv, cumulative since process start. line_classified: fits (pca or debiased) the classifier called a line;
+// line_accepted: of those, fits that ended as an accepted voxel; e1_tiny_kept: lines kept although e1 < 1e-8 (the R81 test would have rejected them); e0_clamped: fits whose e0 was set equal to e1 after the sensor floor
+// (the R81 test would have rejected them); gaps_floored: debiased fits whose eigengap denominator the one gap floor lifted (the R81 guard would have rejected them);
+// tilt_voxels_moment / tilt_voxels_meancov: voxels whose line tilt matrices were built on the debiased fit by each form.
+struct VoxelPlaneR82Counters
+{
+  long line_classified = 0, line_accepted = 0, e1_tiny_kept = 0, e0_clamped = 0, gaps_floored = 0, tilt_voxels_moment = 0, tilt_voxels_meancov = 0;
+};
+VoxelPlaneR82Counters voxelPlaneR82Counters();
 // CQ-56 item 3: this frame's largest covariance_.trace() seen across every
 // VoxelPlane refit -- reset by voxelPlaneFrameStatsReset() alongside the
 // other per-frame maxima above.

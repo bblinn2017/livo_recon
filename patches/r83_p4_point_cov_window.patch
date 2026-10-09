@@ -1,0 +1,335 @@
+diff -urN -x __pycache__ a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt	2026-10-07 01:25:19.080257989 -0700
++++ b/CMakeLists.txt	2026-10-07 01:25:43.618447113 -0700
+@@ -267,6 +267,11 @@
+ target_link_libraries(test_point_cov state_lib)
+ add_test(NAME point_cov COMMAND test_point_cov)
+ 
++# R83 (option B): window relative-pose covariance (relCovWindowBlocks, StateGroup::windowCovAtPoint).
++add_executable(test_point_cov_window_r83 tests/test_point_cov_window_r83.cpp)
++target_link_libraries(test_point_cov_window_r83 state_lib)
++add_test(NAME point_cov_window_r83 COMMAND test_point_cov_window_r83)
++
+ add_executable(test_voxel_history tests/test_voxel_history.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
+ target_include_directories(test_voxel_history PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+ target_link_libraries(test_voxel_history ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
+diff -urN -x __pycache__ a/include/livo_recon/diagnostics/state_trace.h b/include/livo_recon/diagnostics/state_trace.h
+--- a/include/livo_recon/diagnostics/state_trace.h	2026-09-29 01:47:47.000000000 -0700
++++ b/include/livo_recon/diagnostics/state_trace.h	2026-10-07 01:25:43.619043893 -0700
+@@ -28,6 +28,11 @@
+ void writeImuCovGrowthRow(size_t scan_index, double t_abs, const Eigen::MatrixXd& P_start,
+                           const Eigen::MatrixXd& P_end, const Eigen::MatrixXd& Q_acc);
+ 
++// R83 (option B): one row per scan, write-only. Position and rotation spread of the window relative-pose blocks over the
++// scan's IMU steps (sqrt of the trace of the (P,P) block in m, of the (R,R) block in rad): median, p95, max.
++void writeWindowCovRow(size_t scan_index, double t_abs, double window_s, size_t n_steps, double sd_p_med, double sd_p_p95,
++                       double sd_p_max, double sd_r_med, double sd_r_p95, double sd_r_max);
++
+ // One-shot: the stationary reference (R,p,v) and the first-frame head covariance P0 the analysis needs to form errors
+ // from state_trace.csv. Written to state_reference.txt by LioProcBase::ensureStationaryReference().
+ void writeStateReference(const Eigen::Matrix3d& R_ref, const Eigen::Vector3d& p_ref, const Eigen::Vector3d& v_ref,
+diff -urN -x __pycache__ a/include/livo_recon/utils/state/rel_cov.h b/include/livo_recon/utils/state/rel_cov.h
+--- a/include/livo_recon/utils/state/rel_cov.h	2026-09-29 17:29:24.000000000 -0700
++++ b/include/livo_recon/utils/state/rel_cov.h	2026-10-07 01:25:43.619421324 -0700
+@@ -30,4 +30,31 @@
+   return out;
+ }
+ 
++// R83 (option B). Window relative-pose covariance. For step k with head time t_k, the (R,P) block of the noise accrued over the
++// steps whose heads lie in [t_k - W/2, t_k + W/2), clipped to the scan and always containing step k itself:
++//     S <- F_j S F_j^T + Q_j  for j = ka..kb-1 (S starts at zero),  out[k] = S.block<6,6>(idx_r, idx_r).
++// Forward accumulation, exact for the stated window; cost O(n_steps * steps_in_window) dim x dim products, once per scan.
++inline std::vector<Eigen::Matrix<double, 6, 6>> relCovWindowBlocks(
++    const std::vector<Eigen::MatrixXd>& F, const std::vector<Eigen::MatrixXd>& Q, const std::vector<double>& head_times,
++    double window_s, int idx_r)
++{
++  const std::size_t n = F.size();
++  std::vector<Eigen::Matrix<double, 6, 6>> out(n, Eigen::Matrix<double, 6, 6>::Zero());
++  if (n == 0 || Q.size() != n || head_times.size() != n || !(window_s > 0.0)) return out;
++  const int dim = static_cast<int>(F[0].rows());
++  const double half = 0.5 * window_s;
++  Eigen::MatrixXd S(dim, dim);
++  std::size_t ka = 0, kb = 0;
++  for (std::size_t k = 0; k < n; ++k)
++  {
++    while (ka < k && head_times[ka] < head_times[k] - half) ++ka;
++    if (kb < k + 1) kb = k + 1;
++    while (kb < n && head_times[kb] < head_times[k] + half) ++kb;
++    S.setZero();
++    for (std::size_t j = ka; j < kb; ++j) S = F[j] * S * F[j].transpose() + Q[j];
++    out[k] = S.block<6, 6>(idx_r, idx_r);
++  }
++  return out;
++}
++
+ }  // namespace livo_recon
+diff -urN -x __pycache__ a/include/livo_recon/utils/state/state.h b/include/livo_recon/utils/state/state.h
+--- a/include/livo_recon/utils/state/state.h	2026-10-01 16:05:00.000000000 -0700
++++ b/include/livo_recon/utils/state/state.h	2026-10-07 01:25:43.619830957 -0700
+@@ -186,6 +186,17 @@
+   // noise accrued from head_times[k] to the scan end. Empty vectors clear the profile (rel term zero).
+   void setRelCovProfile(std::vector<double> head_times, std::vector<Eigen::Matrix<double, 6, 6>> blocks)
+   { rel_head_times_ = std::move(head_times); rel_blocks_ = std::move(blocks); }
++  // R83 (option B, off by default). Window relative-pose variance of the point's pose at its own time, in world frame:
++  // J(p_body) B_k J(p_body)^T with B_k the window block of the IMU step containing t_point (same lookup as the R65 profile).
++  // Added by the caller to the point's SENSOR covariance (an independent per-point variance), never to pose_cov.
++  // Zero matrix when the window is off or the profile is empty.
++  M3D windowCovAtPoint(const V3D& p_body, double t_point) const;
++  void setPointCovWindow(double window_s) { point_cov_window_s_ = window_s; }
++  double pointCovWindowS() const { return point_cov_window_s_; }
++  bool pointCovWindowOn() const { return point_cov_window_s_ > 0.0; }
++  void setWindowCovProfile(std::vector<double> head_times, std::vector<Eigen::Matrix<double, 6, 6>> blocks)
++  { win_head_times_ = std::move(head_times); win_blocks_ = std::move(blocks); }
++  const std::vector<Eigen::Matrix<double, 6, 6>>& windowCovBlocks() const { return win_blocks_; }
+   // Frame's prior (R,P) 6x6 block, captured where prior_cov_ is fixed for the frame.
+   void setPriorPoseBlock(const Eigen::MatrixXd& prior_cov)
+   {
+@@ -251,6 +262,9 @@
+   bool point_cov_insertion_prior_ = false;
+   std::vector<double> rel_head_times_;
+   std::vector<Eigen::Matrix<double, 6, 6>> rel_blocks_;
++  double point_cov_window_s_ = 0.0;   // R83 option B: 0 = off
++  std::vector<double> win_head_times_;
++  std::vector<Eigen::Matrix<double, 6, 6>> win_blocks_;
+   Eigen::Matrix<double, 6, 6> prior_pose_block_ = Eigen::Matrix<double, 6, 6>::Zero();
+   bool prior_pose_block_valid_ = false;
+   V3D var_acc_, var_gyr_, cov_bias_gyr_, cov_bias_acc_;
+diff -urN -x __pycache__ a/src/diagnostics/state_trace.cpp b/src/diagnostics/state_trace.cpp
+--- a/src/diagnostics/state_trace.cpp	2026-10-02 00:58:20.000000000 -0700
++++ b/src/diagnostics/state_trace.cpp	2026-10-07 01:25:43.620231674 -0700
+@@ -74,6 +74,19 @@
+   out.flush();
+ }
+ 
++void writeWindowCovRow(size_t scan_index, double t_abs, double window_s, size_t n_steps, double sd_p_med, double sd_p_p95,
++                       double sd_p_max, double sd_r_med, double sd_r_p95, double sd_r_max)
++{
++  static PersistentLogStream log("point_cov_window.csv");
++  bool first = false;
++  std::ofstream& out = log.stream(&first);
++  if (first)
++    out << "scan_index,t_abs,t_rel_s,window_s,n_steps,sd_p_med_m,sd_p_p95_m,sd_p_max_m,sd_r_med_rad,sd_r_p95_rad,sd_r_max_rad\n";
++  out << std::setprecision(17) << scan_index << ',' << t_abs << ',' << tRelString(t_abs) << ',' << window_s << ',' << n_steps
++      << ',' << sd_p_med << ',' << sd_p_p95 << ',' << sd_p_max << ',' << sd_r_med << ',' << sd_r_p95 << ',' << sd_r_max << '\n';
++  out.flush();
++}
++
+ void writeStateReference(const Eigen::Matrix3d& R_ref, const Eigen::Vector3d& p_ref, const Eigen::Vector3d& v_ref,
+                          const Eigen::MatrixXd& P0)
+ {
+diff -urN -x __pycache__ a/src/processing/imu_processing.cpp b/src/processing/imu_processing.cpp
+--- a/src/processing/imu_processing.cpp	2026-10-05 02:52:52.000000000 -0700
++++ b/src/processing/imu_processing.cpp	2026-10-07 01:25:43.620685157 -0700
+@@ -705,6 +705,36 @@
+     }
+   }
+ 
++  // R83 (option B): window relative-pose covariance per IMU step, once per scan; off (no cost) unless lio/point_cov/window_s > 0.
++  if (state_->pointCovWindowOn())
++  {
++    TimedScope ts_w(profiler_, "imu/window_cov_profile");
++    const std::size_t n_steps = mg.poses.size();
++    if (n_steps > 0 && mg.imu_state_transitions.size() == n_steps && mg.imu_process_covariances.size() == n_steps)
++    {
++      std::vector<double> head_times(n_steps);
++      for (std::size_t k = 0; k < n_steps; ++k) head_times[k] = mg.poses[k].t;
++      auto blocks = relCovWindowBlocks(mg.imu_state_transitions, mg.imu_process_covariances, head_times,
++                                       state_->pointCovWindowS(), StateGroup::idxR());
++      if (!is_shadow_)
++      {
++        std::vector<double> sp(n_steps), sr(n_steps);
++        for (std::size_t k = 0; k < n_steps; ++k)
++        {
++          sr[k] = std::sqrt(std::max(0.0, blocks[k].block<3,3>(0,0).trace()));
++          sp[k] = std::sqrt(std::max(0.0, blocks[k].block<3,3>(3,3).trace()));
++        }
++        auto q = [](std::vector<double>& v, double f) {
++          std::sort(v.begin(), v.end());
++          return v[std::min(v.size() - 1, static_cast<std::size_t>(f * (v.size() - 1) + 0.5))];
++        };
++        writeWindowCovRow(propagation_index_, mg.image.t + data_queues_->start_time, state_->pointCovWindowS(), n_steps,
++                          q(sp, 0.5), q(sp, 0.95), q(sp, 1.0), q(sr, 0.5), q(sr, 0.95), q(sr, 1.0));
++      }
++      state_->setWindowCovProfile(std::move(head_times), std::move(blocks));
++    }
++  }
++
+   if (gm_on && (propagation_index_ == 1 || propagation_index_ % 500 == 0))
+     ROS_INFO_STREAM("[imu] gauss_markov engagement: steps=" << gm_steps_ << " max Q bias entry gyr=" << gm_max_q_gyr_
+                     << " acc=" << gm_max_q_acc_ << " max |b-mu| gyr=" << gm_max_dev_gyr_ << " acc=" << gm_max_dev_acc_);
+diff -urN -x __pycache__ a/src/processing/lio_base.cpp b/src/processing/lio_base.cpp
+--- a/src/processing/lio_base.cpp	2026-10-07 01:25:43.492812501 -0700
++++ b/src/processing/lio_base.cpp	2026-10-07 01:25:43.621232574 -0700
+@@ -528,6 +528,12 @@
+     cfg.mode("lio/point_cov/mode", pc_mode, "end_pose", { "end_pose", "propagated" });
+     cfg.mode("lio/point_cov/insertion_source", pc_ins, "posterior", { "posterior", "prior" });
+     state_->setPointCovModel(pc_mode == "propagated", pc_ins == "prior");
++    // R83 (option B): window relative-pose variance added to each point's sensor covariance. 0 (default) = off, byte-identical.
++    double pc_window_s = 0.0;
++    cfg.get<double>("lio/point_cov/window_s", pc_window_s, 0.0);
++    if (!(pc_window_s >= 0.0 && pc_window_s <= 0.1))
++      throw std::invalid_argument("lio/point_cov/window_s must be in [0, 0.1] seconds");
++    state_->setPointCovWindow(pc_window_s);
+   }
+ 
+   // R65 (F-128): measurement-noise inflation for the first N LIO scans (see LioProcOptions::bootstrap_inflate_scans).
+@@ -682,12 +688,14 @@
+   // SAME team of threads that did the logging, so draining "this thread's
+   // buffer" here is well-defined (see voxelplane.h's doc comment on why
+   // this must be called from inside the same parallel region).
++  const bool window_cov_on = state_->pointCovWindowOn();   // R83 option B
+   #pragma omp parallel num_threads(threads)
+   {
+     #pragma omp for schedule(static)
+     for (int i = 0; i < n; ++i)
+     {
+-      const PointXYZCov sensor_world = state_->toWorld(pts[i]);
++      PointXYZCov sensor_world = state_->toWorld(pts[i]);
++      if (window_cov_on) sensor_world.sensor_cov += state_->windowCovAtPoint(pts[i].point, pts[i].t);   // R83 option B
+       M3D pose_cov = M3D::Zero();
+       if (include_state_uncertainty_in_gate) {
+         if (pose_cov_overrides && i < static_cast<int>(pose_cov_overrides->size()))
+diff -urN -x __pycache__ a/src/utils/state/state.cpp b/src/utils/state/state.cpp
+--- a/src/utils/state/state.cpp	2026-10-01 16:57:35.000000000 -0700
++++ b/src/utils/state/state.cpp	2026-10-07 01:25:43.622037689 -0700
+@@ -1,6 +1,7 @@
+ #include "livo_recon/utils/state/state.h"
+ #include "livo_recon/utils/log/param_warn.h"
+ 
++#include <algorithm>
+ #include <cmath>
+ #include <stdexcept>
+ 
+@@ -187,6 +188,16 @@
+   return out;
+ }
+ 
++M3D StateGroup::windowCovAtPoint(const V3D& p_body, double t_point) const
++{
++  if (!(point_cov_window_s_ > 0.0) || win_head_times_.empty() || win_blocks_.size() != win_head_times_.size())
++    return M3D::Zero();
++  const auto it = std::upper_bound(win_head_times_.begin(), win_head_times_.end(), t_point);
++  const std::size_t k = (it == win_head_times_.begin()) ? 0 : static_cast<std::size_t>(it - win_head_times_.begin()) - 1;
++  const auto& B = win_blocks_[k];
++  return poseCovFromBlocks(rot_, p_body, B.block<3,3>(0,0), B.block<3,3>(3,3), B.block<3,3>(0,3));
++}
++
+ PointXYZCov StateGroup::toCamera(const PointXYZCov& pt_body) const
+ {
+   return {
+diff -urN -x __pycache__ a/tests/test_point_cov_window_r83.cpp b/tests/test_point_cov_window_r83.cpp
+--- a/tests/test_point_cov_window_r83.cpp	1969-12-31 16:00:00.000000000 -0800
++++ b/tests/test_point_cov_window_r83.cpp	2026-10-07 01:25:43.622494425 -0700
+@@ -0,0 +1,112 @@
++// R83 unit test (option B): window relative-pose covariance.
++//   W1 relCovWindowBlocks equals an independent forward simulation over the window [t_k - W/2, t_k + W/2) (clipped, containing k).
++//   W2 window larger than the scan: every block equals the full-scan forward simulation from the first step.
++//   W3 window_s <= 0 or size mismatch: all blocks zero.
++//   W4 windowCovAtPoint with the window off returns exactly zero; with it on equals an independent J B J^T for the block
++//      selected by time (before first head -> block 0, in [head_k, head_k+1) -> block k, after last -> last).
++//   W5 block symmetric and PSD (min eigenvalue >= -1e-15) for every k.
++//   W6 windowCovAtPoint never reads rel_blocks_ / the R65 profile (set a huge R65 profile; result unchanged).
++#include <ros/ros.h>
++#define private public
++#include "livo_recon/utils/state/state.h"
++#undef private
++#include "livo_recon/utils/state/rel_cov.h"
++
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <random>
++
++#define CHECK(c, msg)                                                                       \
++  do {                                                                                      \
++    if (!(c)) { std::fprintf(stderr, "[FAIL] %s  (%s:%d: %s)\n", msg, __FILE__, __LINE__, #c); std::exit(1); } \
++    else { std::printf("[PASS] %s\n", msg); }                                               \
++  } while (0)
++
++using namespace livo_recon;
++using M6 = Eigen::Matrix<double, 6, 6>;
++
++namespace {
++M3D skew(const V3D& v) { M3D k; k << 0, -v.z(), v.y(), v.z(), 0, -v.x(), -v.y(), v.x(), 0; return k; }
++M3D jbj(const M3D& R, const V3D& p, const M6& B)
++{
++  Eigen::Matrix<double, 3, 6> J; J.block<3,3>(0,0) = -R * skew(p); J.block<3,3>(0,3) = M3D::Identity();
++  return J * B * J.transpose();
++}
++}  // namespace
++
++int main()
++{
++  std::mt19937 rng(11);
++  std::normal_distribution<double> N(0, 1);
++  const int dim = 18, n = 12, idxR = 0;
++  const double dt = 0.005;
++  std::vector<Eigen::MatrixXd> F(n), Q(n);
++  std::vector<double> ht(n);
++  for (int k = 0; k < n; ++k) {
++    ht[k] = 0.100 + k * dt;
++    F[k] = Eigen::MatrixXd::Identity(dim, dim) + 0.05 * Eigen::MatrixXd::NullaryExpr(dim, dim, [&]() { return N(rng); });
++    Eigen::MatrixXd A = Eigen::MatrixXd::NullaryExpr(dim, dim, [&]() { return N(rng); });
++    Q[k] = 1e-4 * (A * A.transpose());
++  }
++  auto indep = [&](int k, double W) {
++    const double half = 0.5 * W;
++    int ka = k, kb = k + 1;
++    for (int j = 0; j < n; ++j) if (ht[j] >= ht[k] - half && ht[j] < ht[k] + half) { ka = std::min(ka, j); kb = std::max(kb, j + 1); }
++    Eigen::MatrixXd S = Eigen::MatrixXd::Zero(dim, dim);
++    for (int j = ka; j < kb; ++j) S = F[j] * S * F[j].transpose() + Q[j];
++    return Eigen::MatrixXd(S.block<6,6>(idxR, idxR));
++  };
++  {  // W1
++    for (double W : {0.004, 0.010, 0.0225, 0.040}) {
++      const auto b = relCovWindowBlocks(F, Q, ht, W, idxR);
++      double worst = 0.0;
++      for (int k = 0; k < n; ++k) worst = std::max(worst, (b[k] - indep(k, W)).norm());
++      CHECK(worst < 1e-12, "W1 window blocks equal independent forward simulation");
++    }
++  }
++  {  // W2
++    const auto b = relCovWindowBlocks(F, Q, ht, 1.0, idxR);
++    Eigen::MatrixXd S = Eigen::MatrixXd::Zero(dim, dim);
++    for (int j = 0; j < n; ++j) S = F[j] * S * F[j].transpose() + Q[j];
++    double worst = 0.0;
++    for (int k = 0; k < n; ++k) worst = std::max(worst, (b[k] - S.block<6,6>(idxR, idxR)).norm());
++    CHECK(worst < 1e-12, "W2 whole-scan window equals the full forward simulation for every k");
++  }
++  {  // W3
++    CHECK(relCovWindowBlocks(F, Q, ht, 0.0, idxR)[3].norm() == 0.0, "W3a window 0 gives zero blocks");
++    std::vector<double> bad(n - 1);
++    CHECK(relCovWindowBlocks(F, Q, bad, 0.01, idxR)[3].norm() == 0.0, "W3b size mismatch gives zero blocks");
++  }
++  {  // W4, W5, W6
++    StateGroup s;
++    s.cov_ = Eigen::MatrixXd::Identity(s.dimState(), s.dimState());
++    s.rot_ = Eigen::AngleAxisd(0.7, V3D(0.3, -0.5, 0.8).normalized()).toRotationMatrix();
++    const V3D p(1.3, -0.4, 2.1);
++    CHECK(s.windowCovAtPoint(p, 0.12).norm() == 0.0, "W4a window off returns exactly zero");
++    const double W = 0.0225;
++    auto b = relCovWindowBlocks(F, Q, ht, W, idxR);
++    s.setPointCovWindow(W);
++    CHECK(s.windowCovAtPoint(p, 0.12).norm() == 0.0, "W4b window on, empty profile returns zero");
++    s.setWindowCovProfile(ht, b);
++    const M3D ref0 = jbj(s.rot_, p, b[0]);
++    const M3D ref5 = jbj(s.rot_, p, b[5]);
++    const M3D refL = jbj(s.rot_, p, b[n - 1]);
++    CHECK((s.windowCovAtPoint(p, 0.0) - ref0).norm() < 1e-12, "W4c t before first head uses block 0");
++    CHECK((s.windowCovAtPoint(p, ht[5] + 0.5 * dt) - ref5).norm() < 1e-12, "W4d t inside step 5 uses block 5");
++    CHECK((s.windowCovAtPoint(p, ht[5]) - ref5).norm() < 1e-12, "W4e t equal to head 5 uses block 5");
++    CHECK((s.windowCovAtPoint(p, 9.0) - refL).norm() < 1e-12, "W4f t after last head uses the last block");
++    double asym = 0.0, mineig = 1e9;
++    for (int k = 0; k < n; ++k) {
++      asym = std::max(asym, (b[k] - b[k].transpose()).norm());
++      Eigen::SelfAdjointEigenSolver<M6> es(0.5 * (b[k] + b[k].transpose()));
++      mineig = std::min(mineig, es.eigenvalues().minCoeff());
++    }
++    CHECK(asym < 1e-14 && mineig > -1e-15, "W5 blocks symmetric and PSD");
++    const M3D before = s.windowCovAtPoint(p, ht[5]);
++    s.setRelCovProfile(ht, std::vector<M6>(n, 1e3 * M6::Identity()));
++    CHECK((s.windowCovAtPoint(p, ht[5]) - before).norm() == 0.0, "W6 independent of the R65 profile");
++  }
++  std::printf("ALL PASS\n");
++  return 0;
++}

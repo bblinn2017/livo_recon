@@ -7,7 +7,10 @@ Before running it, YOU write into --ret (agent-authored, R74_INSTRUCTIONS.md sec
 (incl. r74_symmetrize_gate.txt, the selftest outputs), launch/, listener/ and stop_reasons.csv.
 This script adds: phase_summary.csv, arm_scan_all.csv.gz, completeness.csv, identity_controls.txt, r74_gates.txt, r74_f426_part1_*.csv, r74_f426_part2_*.csv, engagement_all.txt,
 duplicates.tsv, summaries_all.json, compress_manifests.json, sensor_stamps_summaries.json, compact/, queue/, RETURN_CHECKLIST.md.
-RETURN_CHECKLIST.md is derived from r74_manifest/required_outputs.json: one row per (follow-up, arm or table, file): follow-up id, file, columns, minimum rows, where it is, status.
+R85: --round R85 (same layout as R84 with R85 names: queues r85_id + r85_<bag> x9, listeners id + nine bags, r85_gates.py / r85_gates.txt / r85_identity_vs_old.csv, manifest dir r85_manifest, collector --level -1; no alignfree step,
+no --r83-extras; the host-side reducers reducers/r85_run_reducers.sh (r85_l0_*.csv, r85_sht_*.csv) are run on the collected return before the checklist, optional --r84-all-arms <csv> joins the R84 cells at 0.30-0.70 m into r85_l0_unified.csv;
+per-arm short_scan_all.csv.gz is checked in compact/<arm>/ from required_outputs.json; packing by r85_pack_return.py after the checklist passes).
+R84: --round R84 (no --r83-extras; listeners id + nine bags; packing by r84_pack_return.py after the checklist passes). RETURN_CHECKLIST.md is derived from r74_manifest/required_outputs.json: one row per (follow-up, arm or table, file): follow-up id, file, columns, minimum rows, where it is, status.
 If ANY required item is absent the script prints the follow-up ids and files and EXITS 3 WITHOUT packing (an item you cannot produce is written as `NOT PRODUCED: <reason>` into a file of that
 name and the script re-run with --allow-missing; the reason also goes in report.md).
 NOTHING is thinned or dropped. The zip is built once; if it is over --limit-mb (default 28) it is BYTE-SPLIT into R74_RETURN_<date>.zip.part00, .part01, ... (28 MB each, fixed size) with
@@ -81,6 +84,45 @@ REQUIRED_AGENT_R81 = ["report.md", "STATE.md", "agent_edits.patch", "code_answer
 REQUIRED_DIRS_NONEMPTY_R81 = ["listener", "launch/checkup_cycles", "checks"]
 GENERATED_R81 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r81_gates.txt", "r81_identity_vs_old.csv", "duplicates.tsv", "summaries_all.json",
                  "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "plane_fit_trace_counts_all.csv", "compact", "queue"]   # R81 (F-469): the collector writes plane_fit_trace_counts_all.csv itself
+# R82: id (identity + smoke + refuse arms, FIRST and alone), nine bag listeners and the Hilti listener; identity-hold result is agent-authored.
+R82_BAGS = ["eee_01", "eee_02", "eee_03", "nya_01", "nya_02", "nya_03", "sbs_01", "sbs_02", "sbs_03", "hilti"]
+REQUIRED_AGENT_R82 = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R82_tree.tar.gz", "unit_tests/ctest_output.txt", "checks/build_log_tail.txt",
+                      "checks/r82_selftest_output.txt", "checks/r82_identity_hold.txt", "launch/launch_command.txt", "launch/containers_file.txt", "launch/launch_time.txt", "launch/checkup_cycles",
+                      "listener/id/listener_ledger.jsonl", "listener/id/listener_final.json"] + \
+                     ["listener/%s/%s" % (b, f) for b in R82_BAGS for f in ("listener_ledger.jsonl", "listener_final.json")] + ["stop_reasons.csv", "harness_answers.md"]
+REQUIRED_DIRS_NONEMPTY_R82 = ["listener", "launch/checkup_cycles", "checks"]
+GENERATED_R82 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r82_gates.txt", "r82_identity_vs_old.csv", "duplicates.tsv", "summaries_all.json",
+                 "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "plane_fit_trace_counts_all.csv", "compact", "queue"]
+# R83: id (identity + smoke + refuse arms, FIRST and alone), nine bag listeners, the Hilti listener and the memory queue (D4P, concurrency 1); the identity-hold result is agent-authored. Packing: r83_pack_return.py (rule 5.12b).
+R83_BAGS = ["eee_01", "eee_02", "eee_03", "nya_01", "nya_02", "nya_03", "sbs_01", "sbs_02", "sbs_03", "hilti", "id", "mem"]   # "mem" = queue r83_mem (D4P); a listener spec per queue as in R82 (to be confirmed by the instructions)
+REQUIRED_AGENT_R83 = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R83_tree.tar.gz", "unit_tests/ctest_output.txt", "checks/build_log_tail.txt",
+                      "checks/r83_selftest_output.txt", "checks/r83_identity_hold.txt", "launch/launch_command.txt", "launch/containers_file.txt", "launch/launch_time.txt", "launch/checkup_cycles",
+                      "listener/id/listener_ledger.jsonl", "listener/id/listener_final.json"] + \
+                     ["listener/%s/%s" % (b, f) for b in R83_BAGS for f in ("listener_ledger.jsonl", "listener_final.json")] + ["stop_reasons.csv", "harness_answers.md"]
+REQUIRED_DIRS_NONEMPTY_R83 = ["listener", "launch/checkup_cycles", "checks"]
+GENERATED_R83 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r83_gates.txt", "r83_identity_vs_old.csv", "duplicates.tsv", "summaries_all.json",
+                 "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "plane_fit_trace_counts_all.csv", "peak_rss_all.csv", "compact", "queue"]   # R83: the collector also writes peak_rss_all.csv (header only when no arm has peak_rss.txt)
+# R84: id (identity + smoke + refuse arms, FIRST and alone) and nine bag listeners; NO Hilti, NO memory queue. Queues: r84_id and r84_<bag>. The identity-hold result (r84_identity_hold.py output) is agent-authored. Packing: r84_pack_return.py.
+R84_BAGS = ["eee_01", "eee_02", "eee_03", "nya_01", "nya_02", "nya_03", "sbs_01", "sbs_02", "sbs_03"]
+R84_QUEUES = ["r84_id"] + ["r84_" + b for b in R84_BAGS]
+R84_LISTENERS = ["id"] + R84_BAGS
+REQUIRED_AGENT_R84 = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R84_tree.tar.gz", "unit_tests/ctest_output.txt", "checks/build_log_tail.txt",
+                      "checks/r84_selftest_output.txt", "checks/r84_identity_hold.txt", "launch/launch_command.txt", "launch/containers_file.txt", "launch/launch_time.txt", "launch/checkup_cycles"] + \
+                     ["listener/%s/%s" % (b, f) for b in R84_LISTENERS for f in ("listener_ledger.jsonl", "listener_final.json")] + ["stop_reasons.csv", "harness_answers.md"]
+REQUIRED_DIRS_NONEMPTY_R84 = ["listener", "launch/checkup_cycles", "checks"]
+GENERATED_R84 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r84_gates.txt", "r84_identity_vs_old.csv", "duplicates.tsv", "summaries_all.json",
+                 "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "plane_fit_trace_counts_all.csv", "compact", "queue"]   # no peak_rss_all.csv in R84
+# R85: id (identity + smoke + refuse arms, FIRST and alone) and nine bag listeners (10 queues: r85_id and r85_<bag>); no Hilti, no memory queue, no alignfree step. The identity-hold result (r85_identity_hold.py output) is agent-authored. Packing: r85_pack_return.py.
+R85_BAGS = ["eee_01", "eee_02", "eee_03", "nya_01", "nya_02", "nya_03", "sbs_01", "sbs_02", "sbs_03"]
+R85_QUEUES = ["r85_id"] + ["r85_" + b for b in R85_BAGS]
+R85_LISTENERS = ["id"] + R85_BAGS
+REQUIRED_AGENT_R85 = ["report.md", "STATE.md", "agent_edits.patch", "code_answers.md", "R85_tree.tar.gz", "unit_tests/ctest_output.txt", "checks/build_log_tail.txt",
+                      "checks/r85_selftest_output.txt", "checks/r85_identity_hold.txt", "launch/launch_command.txt", "launch/containers_file.txt", "launch/launch_time.txt", "launch/checkup_cycles"] + \
+                     ["listener/%s/%s" % (b, f) for b in R85_LISTENERS for f in ("listener_ledger.jsonl", "listener_final.json")] + ["stop_reasons.csv", "harness_answers.md"]
+REQUIRED_DIRS_NONEMPTY_R85 = ["listener", "launch/checkup_cycles", "checks"]
+R85_REDUCER_OUTPUTS = ["r85_l0_rows.csv", "r85_l0_collapse_counts.csv", "r85_l0_paired.csv", "r85_l0_unified.csv", "r85_sht_checkpoints.csv", "r85_sht_paired.csv"]   # written by reducers/r85_run_reducers.sh into --ret (required_outputs.json lists them as generated)
+GENERATED_R85 = ["phase_summary.csv", "arm_scan_all.csv.gz", "completeness.csv", "identity_controls.txt", "r85_gates.txt", "r85_identity_vs_old.csv", "duplicates.tsv", "summaries_all.json",
+                 "compress_manifests.json", "sensor_stamps_summaries.json", "engagement_all.txt", "compact", "queue"] + R85_REDUCER_OUTPUTS   # plane_fit_trace_counts_all.csv is not required in R85 (required_outputs.json does not list it; the collector still writes it when an arm has plane-fit-trace output); per-arm short_scan_all.csv.gz is checked in compact/<arm>/ from required_outputs.json
 PART = 28 * 1000 * 1000
 STORED_EXTS = (".gz", ".zip")   # already-compressed; ZIP_STORED saves time, not space (a .tar.gz is caught by .gz)
 
@@ -296,14 +338,17 @@ def main():
     ap.add_argument("--manifest", required=True); ap.add_argument("--queue-dir", required=True); ap.add_argument("--date", required=True)
     ap.add_argument("--params", default=None); ap.add_argument("--limit-mb", type=float, default=28.0); ap.add_argument("--allow-missing", action="store_true")
     ap.add_argument("--r73-runs", default=None, help="directory holding the R73 arm dirs (r73_sh_* shadow arms and plain controls) for the F-426 comparison")
-    ap.add_argument("--round", default="R74", choices=["R74", "R75", "R76", "R77", "R78", "R79", "R80", "R81"], help="R75 / R76 / R77: that round's names, required-agent list and gates script (R7x_INSTRUCTIONS.md section 13)")
+    ap.add_argument("--round", default="R74", choices=["R74", "R75", "R76", "R77", "R78", "R79", "R80", "R81", "R82", "R83", "R84", "R85"], help="R75 / R76 / R77: that round's names, required-agent list and gates script (R7x_INSTRUCTIONS.md section 13)")
+    ap.add_argument("--r83-extras", action="store_true", help="R83 only (refused for R84 and R85: no such files exist): pass --r83-extras to r69_collect.py (compact copies of point_cov_window.csv, peak_rss.txt and the MQS motion-Q trace in the return)")
     ap.add_argument("--gate-args", default=None, help="R81: extra arguments for r81_gates.py as one quoted string (e.g. \"--grid-retime r80c_grid.json --grid-bag grid_check/r80d_grid_bag.json --early-grid <file>\")")
+    ap.add_argument("--r84-all-arms", default=None, help="R85: r84_layer0_vs_layer2_all_arms.csv (Bryce holds it); passed to reducers/r85_run_reducers.sh so r85_l0_unified.csv also spans 0.30-0.70 m (a file with unidentifiable columns is reported as NOT JOINED, not fatal)")
+    ap.add_argument("--ref-completeness", action="append", default=None, help="R85: completeness.csv of an older return (the R84 return for the identity arms), passed to r69_collect.py; repeatable (without it identity_controls.txt says `no reference digest`)")
     ap.add_argument("--step0-delivered", action="store_true", help="STEP0 data was delivered in the stage-1b return: check it against STEP0/STEP0_SHA256.txt and do NOT pack it again (only the three index files are packed)")
     a = ap.parse_args()
     here = os.path.dirname(os.path.abspath(__file__))
     RND = a.round
-    gates_py, gates_txt = {"R81": ("r81_gates.py", "r81_gates.txt"), "R80": ("r80_gates.py", "r80_gates.txt"), "R79": ("r79_gates.py", "r79_gates.txt"), "R78": ("r78_gates.py", "r78_gates.txt"), "R77": ("r77_gates.py", "r77_gates.txt"), "R76": ("r76_gates.py", "r76_gates.txt"), "R75": ("r75_gates.py", "r75_gates.txt")}.get(RND, ("r74_gates.py", "r74_gates.txt"))
-    req_agent, req_dirs, gen_items = {"R81": (REQUIRED_AGENT_R81, REQUIRED_DIRS_NONEMPTY_R81, GENERATED_R81), "R80": (REQUIRED_AGENT_R80, REQUIRED_DIRS_NONEMPTY_R80, GENERATED_R80), "R79": (REQUIRED_AGENT_R79, REQUIRED_DIRS_NONEMPTY_R79, GENERATED_R79), "R78": (REQUIRED_AGENT_R78, REQUIRED_DIRS_NONEMPTY_R78, GENERATED_R78), "R77": (REQUIRED_AGENT_R77, REQUIRED_DIRS_NONEMPTY_R77, GENERATED_R77), "R76": (REQUIRED_AGENT_R76, REQUIRED_DIRS_NONEMPTY_R76, GENERATED_R76), "R75": (REQUIRED_AGENT_R75, REQUIRED_DIRS_NONEMPTY_R75, GENERATED_R75)}.get(RND, (REQUIRED_AGENT, REQUIRED_DIRS_NONEMPTY, GENERATED))
+    gates_py, gates_txt = {"R85": ("r85_gates.py", "r85_gates.txt"), "R84": ("r84_gates.py", "r84_gates.txt"), "R83": ("r83_gates.py", "r83_gates.txt"), "R82": ("r82_gates.py", "r82_gates.txt"), "R81": ("r81_gates.py", "r81_gates.txt"), "R80": ("r80_gates.py", "r80_gates.txt"), "R79": ("r79_gates.py", "r79_gates.txt"), "R78": ("r78_gates.py", "r78_gates.txt"), "R77": ("r77_gates.py", "r77_gates.txt"), "R76": ("r76_gates.py", "r76_gates.txt"), "R75": ("r75_gates.py", "r75_gates.txt")}.get(RND, ("r74_gates.py", "r74_gates.txt"))
+    req_agent, req_dirs, gen_items = {"R85": (REQUIRED_AGENT_R85, REQUIRED_DIRS_NONEMPTY_R85, GENERATED_R85), "R84": (REQUIRED_AGENT_R84, REQUIRED_DIRS_NONEMPTY_R84, GENERATED_R84), "R83": (REQUIRED_AGENT_R83, REQUIRED_DIRS_NONEMPTY_R83, GENERATED_R83), "R82": (REQUIRED_AGENT_R82, REQUIRED_DIRS_NONEMPTY_R82, GENERATED_R82), "R81": (REQUIRED_AGENT_R81, REQUIRED_DIRS_NONEMPTY_R81, GENERATED_R81), "R80": (REQUIRED_AGENT_R80, REQUIRED_DIRS_NONEMPTY_R80, GENERATED_R80), "R79": (REQUIRED_AGENT_R79, REQUIRED_DIRS_NONEMPTY_R79, GENERATED_R79), "R78": (REQUIRED_AGENT_R78, REQUIRED_DIRS_NONEMPTY_R78, GENERATED_R78), "R77": (REQUIRED_AGENT_R77, REQUIRED_DIRS_NONEMPTY_R77, GENERATED_R77), "R76": (REQUIRED_AGENT_R76, REQUIRED_DIRS_NONEMPTY_R76, GENERATED_R76), "R75": (REQUIRED_AGENT_R75, REQUIRED_DIRS_NONEMPTY_R75, GENERATED_R75)}.get(RND, (REQUIRED_AGENT, REQUIRED_DIRS_NONEMPTY, GENERATED))
     q = os.path.join(a.ret, "queue"); os.makedirs(q, exist_ok=True)
     for f in glob.glob(os.path.join(a.manifest, "*")):
         if os.path.isfile(f):
@@ -315,10 +360,36 @@ def main():
             n[st] += 1
             f.write("%s\t%s\n" % (os.path.basename(jd.rstrip("/")), st))
         f.write("# totals: %s\n" % n)
-    cmd = [sys.executable, os.path.join(here, "r69_collect.py"), "--runs", a.runs, "--arms", a.arms, "--out", a.ret, "--level", ("-1" if a.round in ("R80", "R81") else "0")]   # R80 (F-381): no thinning; the SW sweep arms are kept out of arm_scan_all by the collector
+    if RND == "R84":   # R84: expected queues r84_id + r84_<bag> x9; a listed queue dir that is absent is reported (INFO), never fatal here
+        have = {os.path.basename(qd.rstrip("/")) for qd in a.queue_dir.split(",")}
+        print("R84 queues: %d of %d expected named in --queue-dir%s" % (len(have & set(R84_QUEUES)), len(R84_QUEUES), ("; not named: " + ", ".join(q_ for q_ in R84_QUEUES if q_ not in have)) if set(R84_QUEUES) - have else ""))
+    if RND == "R85":   # R85: expected queues r85_id + r85_<bag> x9 (10 queues); a listed queue dir that is absent is reported (INFO), never fatal here
+        have = {os.path.basename(qd.rstrip("/")) for qd in a.queue_dir.split(",")}
+        print("R85 queues: %d of %d expected named in --queue-dir%s" % (len(have & set(R85_QUEUES)), len(R85_QUEUES), ("; not named: " + ", ".join(q_ for q_ in R85_QUEUES if q_ not in have)) if set(R85_QUEUES) - have else ""))
+    cmd = [sys.executable, os.path.join(here, "r69_collect.py"), "--runs", a.runs, "--arms", a.arms, "--out", a.ret, "--level", ("-1" if a.round in ("R80", "R81", "R82", "R83", "R84", "R85") else "0")]   # R80 (F-381): no thinning; the SW sweep arms are kept out of arm_scan_all by the collector
     if a.params:
         cmd += ["--params", a.params]
+    for rc_ in (a.ref_completeness or []):
+        cmd += ["--ref-completeness", rc_]
+    if a.r83_extras:
+        if RND in ("R84", "R85"):
+            print("--r83-extras is not valid with --round %s (no point_cov_window / peak_rss / motion-Q files exist in %s)" % (RND, RND))
+            return 2
+        cmd += ["--r83-extras"]
     subprocess.check_call(cmd)
+    if RND == "R85":   # R85: host-side reducers on the collected return, run BEFORE the gates so the gate does not report their outputs as missing (phase_summary.csv + compact/<arm>/short_scan_all.csv.gz); exit 1 = some arm missing (tables still written, listed in *_missing.txt), not fatal here: the checklist decides
+        red = os.path.normpath(os.path.join(here, "..", "..", "reducers", "r85_run_reducers.sh"))
+        if os.path.exists(red):
+            rc_red = subprocess.call(["bash", red, a.ret, a.manifest] + ([a.r84_all_arms] if a.r84_all_arms else []))
+            print("r85 reducers: exit %d%s" % (rc_red, " (some arm missing or a join not made: see r85_l0_missing.txt / r85_sht_missing.txt and the output above)" if rc_red else ""))
+        else:
+            print("r85 reducers: %s not found; r85_l0_*.csv and r85_sht_*.csv must be produced by hand (reducers/README_reducers.md)" % red)
+    if RND == "R85":   # R85: two required generated files that nothing else writes into the return root, and that the gates (called below) look for
+        arm_ids0 = [r["arm"] for r in csv.DictReader(open(a.arms), delimiter="\t")]
+        engagement_all(a.runs, arm_ids0, os.path.join(a.ret, "engagement_all.txt"))   # rewritten identically after the gates, as for R74..R84
+        lm = os.path.join(a.manifest, "l2_reference_map.tsv")
+        if os.path.exists(lm):
+            shutil.copy(lm, os.path.join(a.ret, "l2_reference_map.tsv"))   # required_outputs.json (R85-L0): the L0 arm -> layer-2 reference map, copied unchanged from the manifest
     pairs_f = os.path.join(a.manifest, "coupled_pairs.txt")
     if os.path.exists(pairs_f):
         subprocess.call([sys.executable, os.path.join(here, "r71_spline_tools.py"), "pairs", "--scan-table", os.path.join(a.ret, "arm_scan_all.csv.gz"), "--pairs", open(pairs_f).read().strip(), "--out", a.ret])
@@ -338,8 +409,8 @@ def main():
             for jd in sorted(j for qd in a.queue_dir.split(",") for j in glob.glob(os.path.join(qd, "*/"))):
                 df.write(os.path.basename(jd.rstrip("/")) + "\n")
         gcmd += ["--dispatched", disp]
-    if RND == "R81":   # R81: the gate reads the manifest directory itself (arm_table.tsv, jobs_*.json, required_outputs.json); grids and reference returns come in through --gate-args
-        gcmd = [sys.executable, os.path.join(here, gates_py), "--manifest", a.manifest, "--runs", a.runs, "--out", os.path.join(a.ret, gates_txt), "--csv", os.path.join(a.ret, "r81_identity_vs_old.csv"),
+    if RND in ("R81", "R82", "R83", "R84", "R85"):   # R81: the gate reads the manifest directory itself (arm_table.tsv, jobs_*.json, required_outputs.json); grids and reference returns come in through --gate-args
+        gcmd = [sys.executable, os.path.join(here, gates_py), "--manifest", a.manifest, "--runs", a.runs, "--out", os.path.join(a.ret, gates_txt), "--csv", os.path.join(a.ret, RND.lower() + "_identity_vs_old.csv"),
                 "--dispatched", os.path.join(q, "dispatched_arms.txt")]
         with open(os.path.join(q, "dispatched_arms.txt"), "w") as df:
             for jd in sorted(j for qd in a.queue_dir.split(",") for j in glob.glob(os.path.join(qd, "*/"))):
@@ -384,8 +455,8 @@ def main():
             print("   %s  %s  %s  [%s] %s" % (r[0], r[1], r[2], r[4], r[5]))
         print("   (%d more)" % max(0, len(miss) - 60) if len(miss) > 60 else "", "agent/generated missing: %d (see RETURN_CHECKLIST.md)" % gmiss)
         return 3
-    if RND == "R81":   # R81 (F-496): packing is done by r81_pack_return.py (split -b 28M -d -a 2, a .sha256 per part, reassembly proof, duplicates by pos_trace hash); this script stops here
-        print("R81: checklist passed. Now run: python3 tools/r69/r81_pack_return.py --dir %s --required %s --name R81_RETURN_%s" % (a.ret, os.path.join(a.manifest, "required_outputs.json"), a.date))
+    if RND in ("R81", "R82", "R83", "R84", "R85"):   # R81 (F-496): packing is done by <round>_pack_return.py; this script stops here. R83/R84 (rule 5.12b): split only when a part would exceed 28 MB, ONE <name>.sha256 next to the parts, return_ledger.tsv inside the zip, no whole-zip hash file
+        print("%s: checklist passed. Now run: python3 tools/r69/%s_pack_return.py --dir %s --required %s --name %s_RETURN_%s%s" % (RND, RND.lower(), a.ret, os.path.join(a.manifest, "required_outputs.json"), RND, a.date, (" --no-imu-timing" if RND == "R82" else "") + ((" --arm-table " + os.path.join(a.manifest, "arm_table.tsv")) if RND == "R85" else "")))
         return 0
     zp = "%s_RETURN_%s.zip" % (RND, a.date)
     allf = files_of(a.ret, ".")

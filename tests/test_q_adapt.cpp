@@ -167,21 +167,7 @@ int main()
     for (int i = 0; i < 2000; ++i) h.update(stat(1, 2.0, 0));
     CHECK(h.gain() > 4.0 * 1.0001, "QA9 control: the hard gate on the same stream goes far above 4 (the check can tell the laws apart)");
   }
-  {   // QA8 (R80, F-476): the deflating side of the NIS gate; nis_lo = 0 is the one-sided gate bit for bit
-    QGainOptions o; o.mode = "nis_gate"; o.nis_hi = 1.5; o.inflate = 1.25; o.decay = 0.95; o.max_gain = 100.0;
-    o.nis_lo = 0.75; o.deflate = 0.8; o.min_gain = 0.25;
-    QGain g; g.configure(o);
-    g.update(stat(1, 0.5, 0)); CHECK(close(g.gain(), 0.8, 1e-14), "QA8 NIS 0.5 < 0.75 deflates by 0.8");
-    g.update(stat(1, 0.5, 0)); CHECK(close(g.gain(), 0.64, 1e-14), "QA8 deflation compounds");
-    g.update(stat(1, 1.0, 0)); CHECK(close(g.gain(), 1.0 + 0.95 * (0.64 - 1.0), 1e-14), "QA8 NIS between the bounds decays toward 1 from below");
-    for (int i = 0; i < 40; ++i) g.update(stat(1, 0.1, 0));
-    CHECK(close(g.gain(), 0.25, 1e-14) && close(g.minSeen(), 0.25, 1e-14), "QA8 min_gain bounds the deflation");
-    CHECK(g.deflating() == 42 && g.inflating() == 0, "QA8 counters");
-    g.update(stat(1, 2.0, 0)); CHECK(close(g.gain(), 0.25 * 1.25, 1e-14), "QA8 inflation still multiplies the current gain");
-    QGainOptions off = o; off.nis_lo = 0.0; off.deflate = 1.0; off.min_gain = 1.0;
-    QGain h; h.configure(off); h.update(stat(1, 0.1, 0));
-    CHECK(h.gain() == 1.0 && h.deflating() == 0, "QA8 nis_lo = 0 never deflates");
-  }
+  // R82 (F-476 retired): QA8, the two-sided NIS gate (nis_lo, deflate), was removed with the code. min_gain below 1 stays valid for nis_smooth (QA9).
 
   std::printf("ALL PASS\n");
   return 0;

@@ -1,5 +1,6 @@
 #include "livo_recon/lio/voxelnode.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
+#include "livo_recon/lio/admission_rule.h"
 #include <fstream>
 #include <sstream>
 
@@ -141,7 +142,32 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       // scans from a STATIONARY sensor, same vantage point repeated -- see
       // VoxelPlane::addPoints()'s trust_sensor_noise docs); don't trust
       // those points' sensor_cov for the debiasing correction.
-      plane_.addPoints(points_world, -1, distinct_frames_, g_current_frame_idx >= 1, g_current_frame_idx);
+      // R87: the same admission rule as the pca path (lio/admission_rule.h): min_init raw points before the first fit, min_update raw points since the last
+      // fit before a refit, the bootstrap frame (global frame 0) exempt from min_update only. Points are accumulated either way. With min_init 3 and
+      // min_update 1 this reproduces the pre-R87 behaviour (fit at 3 points, refit on every batch).
+      bool refit;
+      if (opts_->binned_enabled) {
+        // R88 (binned map): returns go into bins; min_init / min_update count BINS OPENED (not raw returns); the fit is made from the occupied bins (VoxelPlane::refitFromBins).
+        if (!binset_) binset_.reset(new binned::BinSet(opts_->voxel_size / static_cast<double>(1 << layer_) * opts_->binned_bin_fraction));
+        const bool trusted = g_current_frame_idx >= 1;
+        long long opened = 0;
+        for (const auto& pt : points_world)
+          if (binset_->add(pt.point, pt.sensor_cov, trusted)) ++opened;
+        update_count_ += static_cast<int>(opened);
+        stats_->binned_points.fetch_add(static_cast<long long>(points_world.size()), std::memory_order_relaxed);
+        stats_->binned_new_bins.fetch_add(opened, std::memory_order_relaxed);
+        refit = admission::fitWanted(debiased_admitted_, update_count_, opts_->min_init_points, opts_->min_update_points, g_current_frame_idx == 0);
+        binned::Options bo;
+        bo.cov_mode = opts_->binned_cov_mode == 1 ? binned::CovMode::Shrunk : binned::CovMode::Average;
+        bo.weight_mode = opts_->binned_weight_mode == 1 ? binned::WeightMode::Uniform : binned::WeightMode::Count;
+        plane_.refitFromBins(*binset_, bo, points_world, distinct_frames_, g_current_frame_idx, layer_, refit);
+        if (refit) stats_->binned_fits.fetch_add(1, std::memory_order_relaxed);
+      } else {
+        update_count_ += static_cast<int>(points_world.size());
+        refit = admission::fitWanted(debiased_admitted_, update_count_, opts_->min_init_points, opts_->min_update_points, g_current_frame_idx == 0);
+        plane_.addPoints(points_world, -1, distinct_frames_, g_current_frame_idx >= 1, g_current_frame_idx, layer_, refit);
+      }
+      if (refit) { update_count_ = 0; debiased_admitted_ = true; }
       // R65 (F-158): keep the raw history exactly as the pca path does, so a later subdivision hands
       // the children every point this voxel has seen. Same bound as pca: a batch is appended whole
       // while points_ holds fewer than max_points; once at or above max_points no further batch is
@@ -178,6 +204,7 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
         }
         was_plane = now_plane_immediate;
       }
+      if (!refit) return;   // R87: no fit this call, nothing to book (the pca path returns at the same point)
       if (!plane_.isInit()) return;
       if (!was_init && g_current_frame_idx >= 1 &&
           distinct_frames_ < opts_->min_frames_to_init)
@@ -205,8 +232,8 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       }
     }
 
-    if ((was_init && update_count_ < opts_->min_update_points) ||
-        (!was_init && update_count_ < opts_->min_init_points))
+    // R87: the decision is the shared admission rule; the only change to the pca path is that the bootstrap frame (global frame 0) is no longer gated by min_update.
+    if (!admission::fitWanted(was_init, update_count_, opts_->min_init_points, opts_->min_update_points, g_current_frame_idx == 0))
     {
       return;
     }
@@ -232,9 +259,9 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       std::vector<PointXYZCov> bin_reps;
       std::vector<double> fit_weights, var_weights;
       buildBinReps(bin_reps, fit_weights, var_weights);
-      plane_.update(bin_reps, total_count_, &fit_weights, nullptr, &var_weights, g_current_frame_idx);
+      plane_.update(bin_reps, total_count_, &fit_weights, nullptr, &var_weights, g_current_frame_idx, layer_);
     } else {
-      plane_.update(points_, -1, nullptr, &running_moments_, nullptr, g_current_frame_idx);
+      plane_.update(points_, -1, nullptr, &running_moments_, nullptr, g_current_frame_idx, layer_);
     }
     update_count_ = 0;
     now_plane = plane_.isPlane();
@@ -398,6 +425,7 @@ bool VoxelNode::findPlaneResidual(const WorldPointCov& pt, Residual& res, int sc
   if (plane_retired_) return false;
   if (!plane_.computeResidual(pt, res, scan_id)) return false;
   res.plane_node_id = node_id_;
+  res.voxel_layer = layer_;   // R83: write-only (residual dump under lio/residual_dump_voxel_info)
   return true;
 }
 
