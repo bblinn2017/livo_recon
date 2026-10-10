@@ -1,5 +1,0 @@
-[engagement]  did each flag actually do anything?
-  voxel_map/plane/plane_var_mode = eigengap
-  voxel_map/plane/weight_floor/mode = sensor_range
-  lio/ekf/step_cap mode=hard cap_rot=1e+06 rad cap_pos=1e+06 m iterations=2975 bound=0 mean_scale(bound)=1 min_scale=1 max_raw_rot=0.053601 max_raw_pos=0.105503   <-- NOT ENGAGED: every step stayed inside the caps (a valid null: the cap never bound)
-[engagement] a flag marked INERT above did not test anything; the cell is invalid, not null.

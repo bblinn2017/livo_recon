@@ -122,9 +122,9 @@ struct LioProcOptions
   // bit-identical. iekf estimator only.
   InfoScaleOptions info_scale;
 
-  // R91E: residual binning by constraint direction (see lio/residual_binning.h): a shared shift per direction bin bounds the information a direction can gain from many rows.
-  // mode "off" (default) never enters the function and is bit-identical. iekf estimator only; refused together with residual_redundancy or info_scale, and with
-  // voxel_map/plane/line_residual/rows = distance (the direction of a distance row is set by the noise).
+  // R91E / R91F: residual binning by constraint direction (see lio/residual_binning.h): a shared shift per direction bin bounds the information a direction can gain from many rows.
+  // mode "off" (default) never enters the function and is bit-identical; "direction" = position bins (R91E), "rotation" = rotation bins, "both" = joint (R91F). iekf estimator only; refused
+  // together with residual_redundancy or info_scale, with combined/enable, and with voxel_map/plane/line_residual/rows = distance (the direction of a distance row is set by the noise).
   ResidualBinningOptions residual_binning;
 
   // R70 (F-340): write-only per-frame geometry of the admitted residuals (iteration 0 only): normal and lever-arm scatter
@@ -173,6 +173,9 @@ struct LioProcOptions
 
   // History (161-165): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-161
   DeskewOptions deskew;
+  // R91H: last frame (frame_idx_ at the time of the warp = the `frame` column of the residual dump) on which deskew.rot_warp_scale applies. Read only when
+  // imu/undistort/rot_warp_scale != 1; later frames use the baseline warp. Default 480 (the stationary window ends at about scan 475).
+  int rot_warp_last_frame = 480;
 
   // History (168-172): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-168
   // See VoxelOpts-style modes: "off" is a value of imu/ds/mode, not a magic
@@ -400,6 +403,7 @@ protected:
   mutable long residual_binning_skipped_sum_ = 0;    // rows left out (distance rows, bad variance), summed over iterations
   mutable long residual_binning_bins_sum_ = 0;       // corrected bins, summed over iterations
   mutable double residual_binning_trace_before_sum_ = 0.0, residual_binning_trace_after_sum_ = 0.0;
+  mutable long residual_binning_rot_rows_sum_ = 0, residual_binning_rot_bins_sum_ = 0, residual_binning_solve_failed_sum_ = 0;   // R91F (rotation and both modes)
   void applyResidualBinningToEkf(const std::vector<Residual>& residuals) const;
 };
 

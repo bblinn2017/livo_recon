@@ -1,5 +1,0 @@
-[engagement]  did each flag actually do anything?
-  voxel_map/plane/plane_var_mode = eigengap
-  voxel_map/plane/weight_floor/mode = sensor_range
-  lio/zupt mode=detect_only gyro_thresh=0.02 acc_thresh=0.15 enter_scans=3 sigma_v=0.02 scans=595 stationary=481 applied=0 mean_vnorm_before(applied)=0 max_vnorm_before=0
-[engagement] a flag marked INERT above did not test anything; the cell is invalid, not null.

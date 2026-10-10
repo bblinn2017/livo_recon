@@ -440,8 +440,35 @@ void LioProcIekf::deskewAndDownsample(MeasureGroup& mg)
 {
   TimedScope ts(profiler_, "lio/deskew");
 
+  // R91H: the rotation-warp scale applies on frames 0 .. rot_warp_last_frame (frame_idx_ is the `frame` of the residual dump of this same scan: deskew runs before
+  // estimateState, updateMap increments after). Outside the window, and whenever the scale is 1, the baseline options are used unchanged.
+  const bool rot_warp_on = opts_.deskew.rot_warp_scale != 1.0;
+  const long deskew_frame = voxel_map_ ? static_cast<long>(voxel_map_->frame_idx_) : 0;
+  const bool rot_warp_applied = rot_warp_on && deskew_frame <= static_cast<long>(opts_.rot_warp_last_frame);
+  DeskewOptions deskew_opts = opts_.deskew;
+  if (rot_warp_on && !rot_warp_applied) deskew_opts.rot_warp_scale = 1.0;
+  DeskewRotStats rot_stats;
+
   std::vector<PointXYZCov> deskewed;
-  deskewPoints(state_, mg.poses, mg.image.t, mg.lidar_points, opts_.deskew, deskewed);
+  deskewPoints(state_, mg.poses, mg.image.t, mg.lidar_points, deskew_opts, deskewed, rot_warp_on ? &rot_stats : nullptr);
+
+  if (rot_warp_on)
+  {
+    ++rot_warp_scans_;
+    if (rot_warp_applied) ++rot_warp_scans_applied_;
+    rot_warp_points_ += rot_stats.points;
+    rot_warp_points_rescaled_ += rot_stats.points_rescaled;
+    rot_warp_sum_theta_raw_ += rot_stats.sum_theta_raw;
+    rot_warp_sum_theta_applied_ += rot_stats.sum_theta_applied;
+    if (rot_stats.max_theta_raw > rot_warp_max_theta_raw_) rot_warp_max_theta_raw_ = rot_stats.max_theta_raw;
+    static PersistentLogStream warp_log("deskew_rot_warp.csv");
+    bool first = false;
+    std::ofstream& o = warp_log.stream(&first);
+    if (first) o << "frame,scale_applied,points,points_rescaled,mean_theta_raw_rad,mean_theta_applied_rad,max_theta_raw_rad\n";
+    const double np = rot_stats.points > 0 ? static_cast<double>(rot_stats.points) : 1.0;
+    o << std::setprecision(12) << deskew_frame << ',' << deskew_opts.rot_warp_scale << ',' << rot_stats.points << ',' << rot_stats.points_rescaled << ','
+      << rot_stats.sum_theta_raw / np << ',' << rot_stats.sum_theta_applied / np << ',' << rot_stats.max_theta_raw << '\n';
+  }
 
   if (opts_.dsOn()) {
     DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
@@ -457,7 +484,7 @@ void LioProcIekf::deskewAndDownsample(MeasureGroup& mg)
   if (opts_.dry_run_point_filter_num > 0 && !mg.dry_run_lidar_points.empty())
   {
     std::vector<PointXYZCov> dry_run_deskewed;
-    deskewPoints(state_, mg.poses, mg.image.t, mg.dry_run_lidar_points, opts_.deskew, dry_run_deskewed);
+    deskewPoints(state_, mg.poses, mg.image.t, mg.dry_run_lidar_points, deskew_opts, dry_run_deskewed);   // R91H: same options as the primary stream (counters are primary only)
     if (opts_.dsOn()) {
       DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
       voxelDownsample(dry_run_deskewed, mg.dry_run_points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
@@ -585,19 +612,40 @@ std::string LioProcIekf::engagementReport() const
     if (info_scale_iterations_ == 0)
       o << "   <-- INERT: block information scale selected and never applied";
   }
-  if (opts_.residual_binning.on())   // R91E
+  if (opts_.residual_binning.on())   // R91E / R91F
   {
     const double its = static_cast<double>(residual_binning_iterations_);
-    o << "\n  lio/residual_binning mode=direction axes=" << opts_.residual_binning.axes << " shift_sd_m=" << opts_.residual_binning.shift_sd_m << " min_rows=" << opts_.residual_binning.min_rows
+    const bool rbp = opts_.residual_binning.usesPosition(), rbr = opts_.residual_binning.usesRotation();
+    o << "\n  lio/residual_binning mode=" << opts_.residual_binning.mode << " axes=" << opts_.residual_binning.axes;
+    if (rbp) o << " shift_sd_m=" << opts_.residual_binning.shift_sd_m;
+    if (rbr) o << " rot_shift_sd_rad=" << opts_.residual_binning.rot_shift_sd_rad;
+    o << " min_rows=" << opts_.residual_binning.min_rows
       << " iterations=" << residual_binning_iterations_ << " mean_corrected_rows=" << (its > 0 ? residual_binning_rows_sum_ / its : 0.0)
       << " mean_bins_active=" << (its > 0 ? residual_binning_bins_sum_ / its : 0.0) << " skipped_rows=" << residual_binning_skipped_sum_
       << " mean_trace_before=" << (its > 0 ? residual_binning_trace_before_sum_ / its : 0.0) << " mean_trace_after=" << (its > 0 ? residual_binning_trace_after_sum_ / its : 0.0);
+    if (rbr)   // R91F
+      o << " mean_rot_corrected_rows=" << (its > 0 ? residual_binning_rot_rows_sum_ / its : 0.0) << " mean_rot_bins_active=" << (its > 0 ? residual_binning_rot_bins_sum_ / its : 0.0)
+        << " solve_failed=" << residual_binning_solve_failed_sum_;
     if (residual_binning_iterations_ == 0)
       o << "   <-- INERT: residual binning selected and never applied";
-    else if (residual_binning_rows_sum_ == 0)
-      o << "   <-- NOT ENGAGED: no bin ever reached min_rows";
+    else if ((rbp && residual_binning_rows_sum_ == 0) || (rbr && residual_binning_rot_rows_sum_ == 0))
+      o << "   <-- NOT ENGAGED: no bin of a selected family ever reached min_rows";
     if (residual_binning_skipped_sum_ > 0)
-      o << "   <-- NOTE: rows were skipped (distance rows or rows with a bad variance); expected 0 with rows = per_normal";
+      o << "   <-- NOTE: rows were skipped (distance rows, rows with a bad variance, or a zero rotation lever arm); expected 0 with rows = per_normal";
+    if (residual_binning_solve_failed_sum_ > 0)
+      o << "   <-- NOTE: the 26 x 26 factorisation failed " << residual_binning_solve_failed_sum_ << " time(s); the correction was not applied in those iterations";
+  }
+
+  if (rot_warp_on_report())   // R91H: written only when imu/undistort/rot_warp_scale != 1
+  {
+    const double np = rot_warp_points_ > 0 ? static_cast<double>(rot_warp_points_) : 1.0;
+    o << "\n  imu/undistort/rot_warp_scale = " << opts_.deskew.rot_warp_scale << " last_frame = " << opts_.rot_warp_last_frame << " scans=" << rot_warp_scans_
+      << " scans_applied=" << rot_warp_scans_applied_ << " points=" << rot_warp_points_ << " points_rescaled=" << rot_warp_points_rescaled_
+      << " mean_theta_raw_rad=" << rot_warp_sum_theta_raw_ / np << " mean_theta_applied_rad=" << rot_warp_sum_theta_applied_ / np << " max_theta_raw_rad=" << rot_warp_max_theta_raw_;
+    if (rot_warp_scans_applied_ == 0)
+      o << "   <-- INERT: the rotation-warp scale was set and no scan was warped inside the window";
+    else if (rot_warp_points_rescaled_ == 0)
+      o << "   <-- NOT ENGAGED: no point had a non-zero warp rotation";
   }
 
   if (q_gain_opts_.on())

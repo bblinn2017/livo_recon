@@ -5,6 +5,7 @@
 #include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 
+#include <Eigen/Geometry>
 #include <algorithm>
 #include <cstdlib>
 #include <cstdio>
@@ -52,7 +53,8 @@ void deskewPoints(
     double scan_end_time,
     const std::vector<PointXYZT>& points,
     const DeskewOptions& opts,
-    std::vector<PointXYZCov>& points_out)
+    std::vector<PointXYZCov>& points_out,
+    DeskewRotStats* rot_stats)
 {
   if (points.empty()) { points_out.clear(); return; }
   points_out.resize(points.size());
@@ -91,7 +93,26 @@ void deskewPoints(
 
     const double alpha    = (head.dt > 1e-9) ? dt / head.dt : 0.0;
     const V3D acc_world   = (1.0 - alpha) * head.acc_head + alpha * head.acc_tail;
-    const M3D R_rel       = R_base * Exp(head.gyr, dt);
+    M3D R_rel             = R_base * Exp(head.gyr, dt);
+    // R91H: scale the rotation part only (angle times scale about the same axis, via Eigen::AngleAxis: exact for every angle, no small-angle branch).
+    // Skipped entirely at scale 1 without counters, so the baseline path is the unchanged expression above.
+    if (opts.rot_warp_scale != 1.0 || rot_stats)
+    {
+      const Eigen::AngleAxisd aa(R_rel);
+      const double th = std::abs(aa.angle());
+      if (opts.rot_warp_scale != 1.0)
+      {
+        R_rel = Eigen::AngleAxisd(opts.rot_warp_scale * aa.angle(), aa.axis()).toRotationMatrix();
+        if (rot_stats && th > 0.0) ++rot_stats->points_rescaled;
+      }
+      if (rot_stats)
+      {
+        ++rot_stats->points;
+        rot_stats->sum_theta_raw += th;
+        rot_stats->sum_theta_applied += opts.rot_warp_scale * th;
+        if (th > rot_stats->max_theta_raw) rot_stats->max_theta_raw = th;
+      }
+    }
     const V3D t_rel       = t_base + vel_term * dt + 0.5 * R_end_T * acc_world * dt * dt;
     const V3D p_imu_i   = state->lidarToImu(pt.p);
     const V3D p_imu_end = R_rel * p_imu_i + t_rel;

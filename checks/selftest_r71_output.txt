@@ -1,6 +1,0 @@
-T1 independent: random-split ratio 0.96, by-plane ratio 0.85, ICC -0.008
-T2 plane-level offsets: by-plane ratio 9.00, ICC 0.505
-T3 cross-frame scale 1: realised/believed 1.04
-T3 cross-frame scale 3: realised/believed 2.94
-T4 frames analysed [2] (frame 9 has 5 residuals and must be absent)
-SELFTEST R71 PASS

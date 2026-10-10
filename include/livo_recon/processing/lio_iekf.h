@@ -81,6 +81,12 @@ private:
 
   // R78: iekf_point_stream engagement (frames that reached the update; frames that used the second stream; frames that fell back; summed set sizes).
   long   stream_frames_ = 0, stream_second_ = 0, stream_fallback_ = 0, stream_sum_primary_ = 0, stream_sum_iekf_ = 0;
+
+  // R91H: rotation-warp scale engagement (written only when imu/undistort/rot_warp_scale != 1). Scans warped, scans on which the scale was applied (frame <= rot_warp_last_frame), and
+  // the summed counters of the primary stream over those scans.
+  long   rot_warp_scans_ = 0, rot_warp_scans_applied_ = 0, rot_warp_points_ = 0, rot_warp_points_rescaled_ = 0;
+  double rot_warp_sum_theta_raw_ = 0.0, rot_warp_sum_theta_applied_ = 0.0, rot_warp_max_theta_raw_ = 0.0;
+  bool   rot_warp_on_report() const { return opts_.deskew.rot_warp_scale != 1.0; }
 };
 
 }  // namespace livo_recon

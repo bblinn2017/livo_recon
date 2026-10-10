@@ -21,6 +21,22 @@ struct DeskewOptions
   // instance, since this file has no ImuProc dependency.
   double sigma_r2 = 0.0025;   // (0.05m)^2, ImuProcOptions' own default
   double sigma_a2 = 1.218e-5; // sin(0.2deg)^2, ImuProcOptions' own default
+
+  // R91H (diagnostic, experimental): scale of the ROTATION part of the within-scan warp. Each point is carried to the scan end by
+  // R_rel = R_end^T * R_head * Exp(gyr, dt); with a scale s != 1 the rotation actually applied is the same axis with the angle times s (Eigen::AngleAxis).
+  // s = 1 is the baseline and takes the unchanged code path (R_rel is not touched). s = 0 applies no rotation. The translation part of the warp
+  // (t_rel) is NOT changed. Valid as a test only while the sensor is known to be stationary (there the within-scan IMU rotation is IMU error).
+  double rot_warp_scale = 1.0;
+};
+
+// R91H: counters of the rotation part of the warp for one call (filled only when a pointer is passed). theta = the rotation angle of R_rel in radians.
+struct DeskewRotStats
+{
+  long   points = 0;            // points warped (poses non-empty)
+  long   points_rescaled = 0;   // points whose applied rotation differs from R_rel (scale != 1 and theta > 0)
+  double sum_theta_raw = 0.0;   // sum over points of theta
+  double sum_theta_applied = 0.0;
+  double max_theta_raw = 0.0;
 };
 
 // Isotropic-in-range, anisotropic-in-angle per-point sensor noise model
@@ -53,6 +69,7 @@ void deskewPoints(
     double scan_end_time,
     const std::vector<PointXYZT>& points,
     const DeskewOptions& opts,
-    std::vector<PointXYZCov>& points_out);
+    std::vector<PointXYZCov>& points_out,
+    DeskewRotStats* rot_stats = nullptr);   // R91H: optional counters; nullptr (the default) changes nothing
 
 }  // namespace livo_recon

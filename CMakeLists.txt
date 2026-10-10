@@ -261,6 +261,12 @@ add_executable(test_point_cov tests/test_point_cov.cpp)
 target_link_libraries(test_point_cov state_lib)
 add_test(NAME point_cov COMMAND test_point_cov)
 
+# R91H: rotation-warp scale of deskewPoints (ROS-free, like point_cov)
+add_executable(test_deskew_rot_warp_r91h tests/test_deskew_rot_warp_r91h.cpp src/lio/deskew.cpp)
+target_include_directories(test_deskew_rot_warp_r91h PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+target_link_libraries(test_deskew_rot_warp_r91h state_lib)
+add_test(NAME deskew_rot_warp_r91h COMMAND test_deskew_rot_warp_r91h)
+
 add_executable(test_r83b_instrumentation tests/test_r83b_instrumentation.cpp src/lio/voxelplane.cpp
                src/diagnostics/log/debug_log_dir.cpp src/diagnostics/motion_q_writer.cpp)
 target_include_directories(test_r83b_instrumentation PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
@@ -360,6 +366,12 @@ add_executable(test_residual_binning_r91e tests/test_residual_binning_r91e.cpp)
 target_include_directories(test_residual_binning_r91e PUBLIC include ${EIGEN3_INCLUDE_DIRS})
 target_link_libraries(test_residual_binning_r91e Eigen3::Eigen)
 add_test(NAME residual_binning_r91e COMMAND test_residual_binning_r91e)
+
+# R91F (planning agent's patch): rotation-direction bins and the joint solve (same header, Eigen only).
+add_executable(test_residual_binning_r91f tests/test_residual_binning_r91f.cpp)
+target_include_directories(test_residual_binning_r91f PUBLIC include ${EIGEN3_INCLUDE_DIRS})
+target_link_libraries(test_residual_binning_r91f Eigen3::Eigen)
+add_test(NAME residual_binning_r91f COMMAND test_residual_binning_r91f)
 
 # R72 (planning agent's patch; R82: step cap F-403 retired): Q-adaptation alternatives (F-401), failure dump round trip (F-398).
 # ROS-free header-only modules, Eigen only.

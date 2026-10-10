@@ -1,6 +1,0 @@
-[engagement]  did each flag actually do anything?
-  voxel_map/plane/plane_var_mode = eigengap
-  voxel_map/plane/weight_floor/mode = sensor_range
-  lio/shadow mode=on window=[20,50] process_noise_model=fixed scans_run=31 scans_without_residuals=0 scans_where_the_map_digest_changed=0 shadow_propagations=595
-  lio/scan_log_en=true  (scan_log.csv written)
-[engagement] a flag marked INERT above did not test anything; the cell is invalid, not null.

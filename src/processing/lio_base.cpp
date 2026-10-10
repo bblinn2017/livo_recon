@@ -450,21 +450,27 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
         throw std::invalid_argument("lio/info_scale/mode=block with rotation == position == 1 is inert (use mode=off)");
     }
   }
-  // R91E: residual binning by constraint direction. Sub-keys exist only under mode=direction; shift_sd_m must be > 0 (0 would be inert: use mode=off).
-  cfg.mode("lio/residual_binning/mode", opts_.residual_binning.mode, "off", { "off", "direction" });
+  // R91E / R91F: residual binning by constraint direction. mode direction = position bins (R91E), rotation = rotation bins (R91F), both = joint (R91F). Sub-keys exist only under the
+  // modes that read them: axes and min_rows under any mode but off; shift_sd_m under direction and both; rot_shift_sd_rad under rotation and both. A key set outside its scope is an error
+  // (nested()), so a rotation job that still carries shift_sd_m is refused. Each shift must be > 0 (0 would be inert: use mode=off).
+  cfg.mode("lio/residual_binning/mode", opts_.residual_binning.mode, "off", { "off", "direction", "rotation", "both" });
   {
-    const bool rb = opts_.residual_binning.mode == "direction";
-    cfg.nestedMode(rb, "lio/residual_binning/mode=direction", "lio/residual_binning/axes", opts_.residual_binning.axes, "lattice13", { "lattice13" });
-    cfg.nested<double>(rb, "lio/residual_binning/mode=direction", "lio/residual_binning/shift_sd_m", opts_.residual_binning.shift_sd_m, 0.0006);
-    cfg.nested<int>(rb, "lio/residual_binning/mode=direction", "lio/residual_binning/min_rows", opts_.residual_binning.min_rows, 20);
+    const bool rb = opts_.residual_binning.mode != "off";
+    const bool rbp = opts_.residual_binning.usesPosition(), rbr = opts_.residual_binning.usesRotation();
+    cfg.nestedMode(rb, "lio/residual_binning/mode != off", "lio/residual_binning/axes", opts_.residual_binning.axes, "lattice13", { "lattice13" });
+    cfg.nested<double>(rbp, "lio/residual_binning/mode = direction or both", "lio/residual_binning/shift_sd_m", opts_.residual_binning.shift_sd_m, 0.0006);
+    cfg.nested<double>(rbr, "lio/residual_binning/mode = rotation or both", "lio/residual_binning/rot_shift_sd_rad", opts_.residual_binning.rot_shift_sd_rad, 1.0e-4);
+    cfg.nested<int>(rb, "lio/residual_binning/mode != off", "lio/residual_binning/min_rows", opts_.residual_binning.min_rows, 20);
     if (rb) {
-      if (!std::isfinite(opts_.residual_binning.shift_sd_m) || !(opts_.residual_binning.shift_sd_m > 0.0))
+      if (rbp && (!std::isfinite(opts_.residual_binning.shift_sd_m) || !(opts_.residual_binning.shift_sd_m > 0.0)))
         throw std::invalid_argument("lio/residual_binning/shift_sd_m must be a finite number > 0 (a shift of 0 is the identity: use mode=off)");
+      if (rbr && (!std::isfinite(opts_.residual_binning.rot_shift_sd_rad) || !(opts_.residual_binning.rot_shift_sd_rad > 0.0)))
+        throw std::invalid_argument("lio/residual_binning/rot_shift_sd_rad must be a finite number > 0 (a shift of 0 is the identity: use mode=off)");
       if (opts_.residual_binning.min_rows < 1)
         throw std::invalid_argument("lio/residual_binning/min_rows must be >= 1");
       if (opts_.residual_redundancy.mode != "off" || opts_.info_scale.mode != "off")
-        cfg.requireCombination("lio/residual_binning/mode = direction cannot be combined with lio/residual_redundancy/mode != off or lio/info_scale/mode != off: all three correct the same HtH and Htz "
-                               "and the order of the corrections is not specified in R91E.");
+        cfg.requireCombination("lio/residual_binning/mode != off cannot be combined with lio/residual_redundancy/mode != off or lio/info_scale/mode != off: all three correct the same HtH and Htz "
+                               "and the order of the corrections is not specified.");
       std::string lr_rows = "per_normal";
       bool lr_enabled = false;
       pnh.getParam("voxel_map/plane/line_residual/rows", lr_rows);
@@ -472,10 +478,10 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
       bool combined_en = false;
       pnh.getParam("combined/enable", combined_en);
       if (combined_en)
-        cfg.requireCombination("lio/residual_binning/mode = direction cannot be combined with combined/enable = true: the joint LIO+VIO step builds its own HtH and Htz through "
-                               "accumulateForCombined() and does not call the binning correction (R91E covers the LIO-only solve).");
+        cfg.requireCombination("lio/residual_binning/mode != off cannot be combined with combined/enable = true: the joint LIO+VIO step builds its own HtH and Htz through "
+                               "accumulateForCombined() and does not call the binning correction (the binning covers the LIO-only solve).");
       if (lr_enabled && lr_rows == "distance")
-        cfg.requireCombination("lio/residual_binning/mode = direction needs voxel_map/plane/line_residual/rows = per_normal: the Jacobian direction of a distance row is set by the noise draw, "
+        cfg.requireCombination("lio/residual_binning/mode != off needs voxel_map/plane/line_residual/rows = per_normal: the Jacobian direction of a distance row is set by the noise draw, "
                                "so it cannot key a bin (distance rows would be skipped, leaving the line voxels, which carry nearly all the information, uncorrected).");
     }
   }
@@ -583,6 +589,15 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   cfg.mode("imu/undistort/time_based_process_noise",
            opts_.deskew.time_based_process_noise, "var_acc",
            { "none", "state", "var_acc" });
+  // R91H (experimental, default 1 = baseline, inert): scale of the rotation part of the within-scan warp, applied to frames 0 .. rot_warp_last_frame.
+  // The last-frame key is a sub-option of the scale: setting it while the scale is 1 is refused (nested()).
+  cfg.get<double>("imu/undistort/rot_warp_scale", opts_.deskew.rot_warp_scale, 1.0);
+  if (!std::isfinite(opts_.deskew.rot_warp_scale) || opts_.deskew.rot_warp_scale < 0.0 || opts_.deskew.rot_warp_scale > 1.0)
+    throw std::invalid_argument("imu/undistort/rot_warp_scale must be a finite number in [0, 1] (1 = baseline warp, 0 = no rotation in the warp)");
+  cfg.nested<int>(opts_.deskew.rot_warp_scale != 1.0, "imu/undistort/rot_warp_scale != 1",
+                  "imu/undistort/rot_warp_last_frame", opts_.rot_warp_last_frame, 480);
+  if (opts_.rot_warp_last_frame < 1)
+    throw std::invalid_argument("imu/undistort/rot_warp_last_frame must be >= 1");
 
 }
 
@@ -879,7 +894,7 @@ void LioProcBase::solveSystem_cuda(const std::vector<Residual>& residuals) const
   // gate on ekf.HtH/Htz mutation is what keeps "off" byte-identical, not
   // this call site).
   redundancyAndRenorm(residuals);
-  applyResidualBinningToEkf(residuals);   // R91E: no-op unless lio/residual_binning/mode=direction
+  applyResidualBinningToEkf(residuals);   // R91E/R91F: no-op unless lio/residual_binning/mode != off
   applyInfoScaleToEkf(residuals);
   ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
 }
@@ -928,29 +943,56 @@ void LioProcBase::applyResidualBinningToEkf(const std::vector<Residual>& residua
   residual_binning_bins_sum_ += st.n_bins_active;
   residual_binning_trace_before_sum_ += st.trace_before;
   residual_binning_trace_after_sum_ += st.trace_after;
+  residual_binning_rot_rows_sum_ += st.n_rot_corrected_rows;   // R91F
+  residual_binning_rot_bins_sum_ += st.n_rot_bins_active;
+  residual_binning_solve_failed_sum_ += st.solve_failed;
   if (shadow_active_) return;   // R73: the shadow pass writes no driver file
+  const bool ext = opts_.residual_binning.mode != "direction";   // R91F: modes rotation and both write the extended columns; mode direction writes exactly the R91E files
+  const bool use_p = opts_.residual_binning.usesPosition(), use_r = opts_.residual_binning.usesRotation();
   static PersistentLogStream log("residual_binning.csv");
   bool first = false;
   std::ofstream& o = log.stream(&first);
-  if (first) o << "frame,iter,n_resid,n_corrected_rows,n_skipped_rows,n_bins_active,shift_sd_m,min_rows,trace_before,trace_after,gnorm_before,gnorm_after\n";
+  if (first) {
+    o << "frame,iter,n_resid,n_corrected_rows,n_skipped_rows,n_bins_active,shift_sd_m,min_rows,trace_before,trace_after,gnorm_before,gnorm_after";
+    if (ext) o << ",mode,rot_shift_sd_rad,n_rot_corrected_rows,n_rot_bins_active,solve_failed";   // shift_sd_m / rot_shift_sd_rad are written as 0 when the mode does not use that family
+    o << '\n';
+  }
   o << std::setprecision(17) << voxel_map_->frame_idx_ << ',' << diagnostic_gn_iteration_ << ',' << residuals.size() << ',' << st.n_corrected_rows << ',' << st.n_skipped_rows << ','
-    << st.n_bins_active << ',' << opts_.residual_binning.shift_sd_m << ',' << opts_.residual_binning.min_rows << ',' << st.trace_before << ',' << st.trace_after << ','
-    << st.gnorm_before << ',' << st.gnorm_after << '\n';
+    << st.n_bins_active << ',' << (use_p ? opts_.residual_binning.shift_sd_m : 0.0) << ',' << opts_.residual_binning.min_rows << ',' << st.trace_before << ',' << st.trace_after << ','
+    << st.gnorm_before << ',' << st.gnorm_after;
+  if (ext)
+    o << ',' << opts_.residual_binning.mode << ',' << (use_r ? opts_.residual_binning.rot_shift_sd_rad : 0.0) << ',' << st.n_rot_corrected_rows << ',' << st.n_rot_bins_active << ',' << st.solve_failed;
+  o << '\n';
   // Per-bin sums (v, s, t) for the frames that get a solve snapshot, so the correction can be recomputed offline from the dumped rows and the uncorrected HtH, Htz recovered.
   if (diagnostic_gn_iteration_ >= 0 &&
       dump_rules::firstFrameSolveDumpMode(voxel_map_->frame_idx_, opts_.first_frame_dump_frames, opts_.first_frame_dump_list, opts_.first_frame_dump_slim) != 0) {
     static PersistentLogStream blog("residual_binning_bins.csv");
     bool bfirst = false;
     std::ofstream& b = blog.stream(&bfirst);
-    if (bfirst) b << "frame,iter,bin,ax,ay,az,rows,applied,s,t,v0,v1,v2,v3,v4,v5\n";
+    if (bfirst) b << "frame,iter,bin,ax,ay,az,rows,applied,s,t,v0,v1,v2,v3,v4,v5" << (ext ? ",family" : "") << '\n';
     const double(&axt)[residual_binning::kAxes][3] = residual_binning::axisTable();
     b << std::setprecision(17);
-    for (int k = 0; k < residual_binning::kAxes; ++k) {
-      const residual_binning::BinOut& bo = st.bins[k];
-      b << voxel_map_->frame_idx_ << ',' << diagnostic_gn_iteration_ << ',' << k << ',' << axt[k][0] << ',' << axt[k][1] << ',' << axt[k][2] << ',' << bo.rows << ',' << (bo.applied ? 1 : 0)
-        << ',' << bo.s << ',' << bo.t;
-      for (int j = 0; j < 6; ++j) b << ',' << bo.v[j];
-      b << '\n';
+    for (int fam = 0; fam < 2; ++fam) {   // 0 = position bins (modes direction, both), 1 = rotation bins (modes rotation, both)
+      if (fam == 0 && !use_p) continue;
+      if (fam == 1 && !use_r) continue;
+      for (int k = 0; k < residual_binning::kAxes; ++k) {
+        const residual_binning::BinOut& bo = fam == 0 ? st.bins[k] : st.rot_bins[k];
+        b << voxel_map_->frame_idx_ << ',' << diagnostic_gn_iteration_ << ',' << k << ',' << axt[k][0] << ',' << axt[k][1] << ',' << axt[k][2] << ',' << bo.rows << ',' << (bo.applied ? 1 : 0)
+          << ',' << bo.s << ',' << bo.t;
+        for (int j = 0; j < 6; ++j) b << ',' << bo.v[j];
+        if (ext) b << ',' << (fam == 0 ? 'p' : 'r');
+        b << '\n';
+      }
+    }
+    if (use_p && use_r) {   // R91F: the coupling X_kl of the two families (sum over the rows of position bin k and rotation bin l of w u_pos u_rot)
+      static PersistentLogStream xlog("residual_binning_cross.csv");
+      bool xfirst = false;
+      std::ofstream& x = xlog.stream(&xfirst);
+      if (xfirst) x << "frame,iter,pos_bin,rot_bin,x\n";
+      x << std::setprecision(17);
+      for (int k = 0; k < residual_binning::kAxes; ++k)
+        for (int l = 0; l < residual_binning::kAxes; ++l)
+          x << voxel_map_->frame_idx_ << ',' << diagnostic_gn_iteration_ << ',' << k << ',' << l << ',' << st.cross[k][l] << '\n';
     }
   }
 }
@@ -977,7 +1019,7 @@ void LioProcBase::solveSystem(const std::vector<Residual>& residuals) const {
 
   // CQ-34: see solveSystem_cuda()'s comment above -- same fix, same reason.
   redundancyAndRenorm(residuals);
-  applyResidualBinningToEkf(residuals);   // R91E: no-op unless lio/residual_binning/mode=direction
+  applyResidualBinningToEkf(residuals);   // R91E/R91F: no-op unless lio/residual_binning/mode != off
   applyInfoScaleToEkf(residuals);   // R70 (F-320): no-op unless lio/info_scale/mode=block
 
   // Mean-only update against the frame's FIXED prior (prior_cov_/

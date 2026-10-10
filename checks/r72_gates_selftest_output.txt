@@ -1,1 +1,0 @@
-SELFTEST r72_gates PASS (32 gates all PASS on good data; 15 single breakages each flipped their gate to FAIL; empty dir all MISSING)
