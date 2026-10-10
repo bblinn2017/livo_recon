@@ -19,6 +19,8 @@ std::string BinnedVoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "voxel_map/binned/bin_size_fraction", fraction, 0.2);
   paramWarn<std::string>(pnh, "voxel_map/binned/cov_mode", cov, "average");
   paramWarn<std::string>(pnh, "voxel_map/binned/weight_mode", weight, "count");
+  std::string ucm = "opened";   // R91
+  paramWarn<std::string>(pnh, "voxel_map/binned/update_count_mode", ucm, "opened");
 
   if (!(fraction > 0.0 && fraction <= 1.0))
     throw std::runtime_error("[config] refused: voxel_map/binned/bin_size_fraction=" + std::to_string(fraction) + " -- must be in (0, 1]");
@@ -28,23 +30,26 @@ std::string BinnedVoxelMap::loadParameters(ros::NodeHandle& pnh)
     throw std::runtime_error("[config] refused: voxel_map/binned/cov_mode=" + cov + " -- must be average or shrunk");
   if (!binned::parseWeightMode(weight, wm))
     throw std::runtime_error("[config] refused: voxel_map/binned/weight_mode=" + weight + " -- must be count or uniform");
-  if (o.plane_fit_mode != "debiased")
-    throw std::runtime_error("[config] refused: voxel_map/backend=binned needs voxel_map/plane/plane_fit_mode=debiased (the bins feed the debiased accumulators; the pca path has its own use_bins)");
+  if (ucm != "opened" && ucm != "touched")
+    throw std::runtime_error("[config] refused: voxel_map/binned/update_count_mode=" + ucm + " -- must be opened or touched");
+  if (o.plane_fit_mode != "debiased" && o.plane_fit_mode != "pca")
+    throw std::runtime_error("[config] refused: voxel_map/backend=binned needs voxel_map/plane/plane_fit_mode=debiased or pca (R90: with pca the occupied bins are fitted as one weighted point each)");
   if (o.plane_fit_pose_cov_mode != "sensor_only")
     throw std::runtime_error("[config] refused: voxel_map/backend=binned needs voxel_map/plane/plane_fit_pose_cov_mode=sensor_only (bins keep the sensor covariance only)");
-  if (o.use_bins)
-    throw std::runtime_error("[config] refused: voxel_map/backend=binned and voxel_map/plane/use_bins=true are two different binnings; set use_bins=false");
 
   o.binned_enabled = true;
   o.binned_bin_fraction = fraction;
   o.binned_cov_mode = (cm == binned::CovMode::Shrunk) ? 1 : 0;
   o.binned_weight_mode = (wm == binned::WeightMode::Uniform) ? 1 : 0;
+  o.binned_update_count_mode = (ucm == "touched") ? 1 : 0;
 
   std::ostringstream oss;
   oss << base
       << "\n  binned/bin_size_fraction:        " << fraction << "   (bin edge " << fraction * o.voxel_size << " m at the root voxel)"
       << "\n  binned/cov_mode:                 " << binned::covModeName(cm)
       << "\n  binned/weight_mode:              " << binned::weightModeName(wm)
+      << "\n  binned/plane_fit_mode:           " << o.plane_fit_mode << (o.plane_fit_mode == "pca" ? "   (R90: one weighted point per occupied bin)" : "   (the bins feed the debiased accumulators)")
+      << "\n  binned/update_count_mode:        " << ucm << (ucm == "touched" ? "   (R91: unique bins hit since the last fit)" : "   (bins newly opened since the last fit)")
       << "\n  binned/min_init, min_update:     " << o.min_init_points << ", " << o.min_update_points << "   (counted in bins)";
   return oss.str();
 }

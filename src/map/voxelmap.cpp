@@ -472,41 +472,14 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
                        opts_->plane_threshold_hysteresis, 1.0);
     if (!(opts_->plane_threshold_hysteresis > 0.0) || !std::isfinite(opts_->plane_threshold_hysteresis))
       throw std::runtime_error("voxel_map/plane/plane_threshold_hysteresis must be finite and > 0");
-    // ── binning (mode 2 of the three plane-confidence corrections) ───────
-    // Binning exists ONLY on the pca path.  VoxelNode::insertPoints()'s
-    // debiased branch calls VoxelPlane::addPoints() with the raw
-    // points_world and never touches bins_/buildBinReps(), so use_bins is
-    // read, validated, printed and then does NOTHING in debiased mode.
-    //
-    // That silence was not harmless.  N_acc_ counts every redundant return
-    // and plane_var_ scales as 1/N, so unbinned debiased is over-confident
-    // by the redundancy factor precisely where binning exists to prevent
-    // it -- and because the flag was inert rather than refused, EVERY
-    // pca-vs-debiased comparison this project has run is fit_mode (x)
-    // binning, with no way to tell after the fact which cells meant to bin.
-    // Refusing at startup makes the confound visible on the config that
-    // causes it instead of in a re-analysis two rounds later.
-    //
-    // Not "fixed" by teaching the debiased path to bin: binning is itself a
-    // decimation heuristic (a leaf-size proxy for redundancy) carrying three
-    // constants and two mode enums, and the replacement is a directional
-    // information model that measures redundancy from the geometry that
-    // caused it.  See claude/unified-plane-confidence.md.  Until that lands,
-    // an inert flag is a lie and a refusal is the truth.
-    const bool binning_available = (opts_->plane_fit_mode == "pca");
-    cfg.nested<bool>(binning_available,
-                     "voxel_map/plane/plane_fit_mode=pca  (binning is "
-                     "unimplemented on the debiased path)",
-                     "voxel_map/plane/use_bins", opts_->use_bins, false);
-    cfg.nested<double>(opts_->use_bins, "voxel_map/plane/use_bins=true",
-                       "voxel_map/plane/bin_size_fraction",
-                       opts_->bin_size_fraction, 0.2);
-    cfg.nestedMode(opts_->use_bins, "voxel_map/plane/use_bins=true",
-                   "voxel_map/plane/bin_weight_mode_fit",
-                   opts_->bin_weight_mode_fit, "count", { "count", "uniform" });
-    cfg.nestedMode(opts_->use_bins, "voxel_map/plane/use_bins=true",
-                   "voxel_map/plane/bin_weight_mode_var",
-                   opts_->bin_weight_mode_var, "count", { "count", "uniform" });
+    // ── binning ──────────────────────────────────────────────────────────
+    // R90: the pca-only bin path (voxel_map/plane/use_bins and its three nested keys) is removed. Binning is the binned map type, voxel_map/backend = binned (src/map/binned_voxelmap.cpp), for
+    // both plane fits. A removed key that is still set is REFUSED rather than ignored: an ignored flag would make a run that asks for binning silently run without it.
+    for (const char* removed : { "voxel_map/plane/use_bins", "voxel_map/plane/bin_size_fraction",
+                                 "voxel_map/plane/bin_weight_mode_fit", "voxel_map/plane/bin_weight_mode_var" })
+      if (pnh.hasParam(removed))
+        throw std::runtime_error(std::string("[config] refused: ") + removed + " was removed in R90 (the pca-only bin path); set voxel_map/backend=binned and "
+                                 "voxel_map/binned/{bin_size_fraction,cov_mode,weight_mode} instead");
 
     // ── consistency logging tier ─────────────────────────────────────────
     // See VoxelOpts::log_consistency_mode. The two booleans this replaces
@@ -568,10 +541,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/plane_var_scan_s2:         " << opts_->plane_var_scan_s2 << (opts_->plane_var_scan_s2 > 0.0 ? "   (R81 ENGAGED: plane_var_term += s2 / max(1, distinct frames), before the clamp)" : "   (off)")
       << "\n  plane/plane_var_mode:            " << opts_->plane_var_mode
       << "\n  plane/plane_fit_pose_cov_mode:   " << opts_->plane_fit_pose_cov_mode
-      << "\n  plane/bin_weight_mode_fit:       " << opts_->bin_weight_mode_fit
-      << "\n  plane/bin_weight_mode_var:       " << opts_->bin_weight_mode_var
-      << "\n  plane/bin_size_fraction:         " << opts_->bin_size_fraction
-      << "\n  plane/use_bins:                  " << (opts_->use_bins ? "true" : "false")
       << "\n  plane/log_variance_shares_en:    " << (opts_->log_variance_shares_en ? "true" : "false")
       << "\n  plane/plane_gate_mode:           " << opts_->plane_gate_mode
       << "\n  plane/weight_floor/mode:         " << opts_->weight_floor_mode

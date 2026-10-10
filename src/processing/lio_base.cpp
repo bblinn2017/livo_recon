@@ -1,6 +1,7 @@
 #include "livo_recon/utils/log/bag_clock.h"
 #include "livo_recon/processing/lio_base.h"
 #include "livo_recon/diagnostics/dump_rules.h"
+#include "livo_recon/diagnostics/residual_dump_format.h"
 #include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/config_resolve.h"
@@ -123,7 +124,7 @@ void logFirstFrameIekfSolve(
     const Eigen::MatrixXd& prior_cov, const EkfUpdate& ekf,
     const Eigen::Matrix<double,6,6>& HtH,
     const Eigen::Matrix<double,6,1>& Htz,
-    int max_frame)
+    int max_frame, bool slim = false)
 {
   if (frame_idx < 1 || frame_idx > max_frame) return;
   static PersistentLogStream csv_log("pose_control_first_frame_solve.csv");
@@ -149,6 +150,7 @@ void logFirstFrameIekfSolve(
   std::ofstream& dump = dump_log.stream();
   dump << "=== iekf_solve_snapshot ===\n"
        << "architecture=" << architecture << "\n"
+       << (slim ? "slim=1\n" : "")   // R91C: only the slim form carries this line; the full form is byte-identical to R69..R91
        << "frame_idx=" << frame_idx << "\n"
        << "scan_id=" << scan_id << "\n"
        << "iteration=" << iteration << "\n"
@@ -171,18 +173,18 @@ void logFirstFrameIekfSolve(
   // redundant boxminus computation in place. Removed as dead code, exactly
   // the kind of duplicate-computation this patch exists to eliminate.
   writeFirstFrameSolveMatrix(dump, "prior_cov", prior_cov);
-  writeFirstFrameSolveMatrix(dump, "H_full", ekf.lastHFull());
+  if (!slim) writeFirstFrameSolveMatrix(dump, "H_full", ekf.lastHFull());
   writeFirstFrameSolveMatrix(dump, "A_exact", ekf.lastA());
-  writeFirstFrameSolveMatrix(dump, "K1_exact", ekf.lastK1());
+  if (!slim) writeFirstFrameSolveMatrix(dump, "K1_exact", ekf.lastK1());
   writeFirstFrameSolveMatrix(dump, "HtH", Eigen::MatrixXd(HtH));
   writeFirstFrameSolveVector(dump, "Htz", Eigen::VectorXd(Htz));
   writeFirstFrameSolveVector(dump, "prior_boxminus_propagated", ekf.lastVec());
   writeFirstFrameSolveVector(dump, "prior_boxminus_propagated_rp", ekf.lastVecRp());
-  writeFirstFrameSolveMatrix(dump, "G_exact", ekf.lastG());
+  if (!slim) writeFirstFrameSolveMatrix(dump, "G_exact", ekf.lastG());
   writeFirstFrameSolveVector(dump, "measurement_term_exact", ekf.lastMeasurementTerm());
   writeFirstFrameSolveVector(dump, "prior_term_exact", ekf.lastPriorTerm());
   writeFirstFrameSolveVector(dump, "solution_exact", solution);
-  for (size_t i = 0; i < residuals.size(); ++i) {
+  for (size_t i = 0; i < residuals.size() && !slim; ++i) {   // R91C: the slim form has no per-residual lines (the residual dump carries them)
     const auto& r = residuals[i];
     dump << "residual " << i << " t=" << r.t << " r=" << r.r
          << " sigma_squared=" << r.sigma_squared << " plane_var_term=" << r.plane_var_term
@@ -340,7 +342,7 @@ void logResidualGeometry(int frame_idx, const std::vector<Residual>& residuals)
 // propagated state), plus the linearisation state. Lets the information each residual claims (w_i h_i h_i^T) be compared
 // offline with what the residuals jointly deliver (leverage, per-plane groups, split-half and cross-frame solutions).
 // h_rot / h_pos are the rotation and position Jacobian rows (point_cross_normal, normal); w_i = 1 / sigma_squared.
-void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const std::vector<Residual>& residuals, bool shadow = false, bool voxel_info = false)
+void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const std::vector<Residual>& residuals, bool shadow = false, bool voxel_info = false, bool line_geom = false, bool slim = false)
 {
   static PersistentLogStream log("residual_dump.csv");
   static PersistentLogStream slog("residual_dump_state.csv");
@@ -349,27 +351,13 @@ void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const s
   bool first = false, sfirst = false;
   std::ofstream& o = shadow ? shlog.stream(&first) : log.stream(&first);
   std::ofstream& so = shadow ? shslog.stream(&sfirst) : slog.stream(&sfirst);
-  if (first)
-    o << "frame,iter,idx,source_index,t,r,sigma_squared,plane_var_term,plane_key,node_id,tier,vis,"
-         "hrot_x,hrot_y,hrot_z,hpos_x,hpos_y,hpos_z,wx,wy,wz,bx,by,bz,row_kind,floor_term,sigma_diag_squared,s_prior_pose,sigma_gate_squared"
-      << (voxel_info ? ",voxel_point_count,voxel_distinct_frames,voxel_layer" : "") << '\n';   // R81 (F-485 2B): the two voxel columns only with lio/residual_dump_voxel_info; the default header is byte-identical. R80: the last four appended (F-449/F-464: sigma_squared = floor_term + sigma_diag_squared + plane_var_term; s_prior_pose = H P- H^T of the row; sigma_gate_squared = the variance the admission test used)
+  if (first) residual_dump_format::writeHeader(o, voxel_info, line_geom, slim);   // R91C: the format moved to diagnostics/residual_dump_format.h (default byte-identical, tests/test_residual_dump_format_r91c.cpp)
   if (sfirst) so << "frame,iter,n_resid,px,py,pz,rvx,rvy,rvz\n";
   const V3D rv = Log(st.rot());
   so << frame_idx << ',' << iteration << ',' << residuals.size() << ',' << std::setprecision(17) << st.pos().x() << ','
      << st.pos().y() << ',' << st.pos().z() << ',' << rv.x() << ',' << rv.y() << ',' << rv.z() << '\n';
   o << std::setprecision(9);
-  for (size_t i = 0; i < residuals.size(); ++i) {
-    const auto& r = residuals[i];
-    o << frame_idx << ',' << iteration << ',' << i << ',' << r.source_index << ',' << r.t << ',' << r.r << ',' << r.sigma_squared << ','
-      << r.plane_var_term << ',' << reinterpret_cast<uintptr_t>(r.plane_id) << ',' << r.plane_node_id << ',' << r.match_tier << ',' << r.vis_state
-      << ',' << r.point_cross_normal.x() << ',' << r.point_cross_normal.y() << ',' << r.point_cross_normal.z()
-      << ',' << r.normal.x() << ',' << r.normal.y() << ',' << r.normal.z()
-      << ',' << r.world_point.x() << ',' << r.world_point.y() << ',' << r.world_point.z()
-      << ',' << r.raw_body_point.x() << ',' << r.raw_body_point.y() << ',' << r.raw_body_point.z() << ',' << r.row_kind
-      << ',' << r.floor_term << ',' << r.sigma_diag_squared << ',' << r.s_prior_pose << ',' << r.sigma_gate_squared;
-    if (voxel_info) o << ',' << r.voxel_point_count << ',' << r.voxel_distinct_frames << ',' << r.voxel_layer;   // R81 (F-485 2B)
-    o << '\n';
-  }
+  for (size_t i = 0; i < residuals.size(); ++i) residual_dump_format::writeRow(o, frame_idx, iteration, i, residuals[i], voxel_info, line_geom, slim);
   o.flush(); so.flush();
 }
 }  // namespace
@@ -380,7 +368,7 @@ void LioProcBase::dumpResidualsIfListed(int iteration, bool shadow) const
   if (std::find(opts_.residual_dump_frames.begin(), opts_.residual_dump_frames.end(), voxel_map_->frame_idx_) ==
       opts_.residual_dump_frames.end())
     return;
-  logResidualDump(voxel_map_->frame_idx_, iteration, *state_, residuals_, shadow, opts_.residual_dump_voxel_info);
+  logResidualDump(voxel_map_->frame_idx_, iteration, *state_, residuals_, shadow, opts_.residual_dump_voxel_info, opts_.residual_dump_line_geometry, opts_.residual_dump_slim);
 }
 
 LioProcBase::LioProcBase(NodeContext& ctx)
@@ -410,6 +398,13 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   paramWarn<bool>(pnh, "lio/update_diag_en", opts_.update_diag_en, false);          // R69: lio_update_diag.csv (write-only)
   paramWarn<bool>(pnh, "lio/live_point_cov_en", opts_.live_point_cov_en, false);    // R69: live_point_cov.csv (write-only)
   paramWarn<int>(pnh, "lio/first_frame_dump_frames", opts_.first_frame_dump_frames, 1);  // R69: solve dump for frames 1..K (1 = unchanged)
+  {   // R91C: further frames for the solve snapshot; slim form refused unless the list is given. Empty / false is byte-identical.
+    std::string ff_list;
+    paramWarn<std::string>(pnh, "lio/first_frame_dump_frame_list", ff_list, std::string());
+    opts_.first_frame_dump_list = dump_rules::parseFrameList(ff_list, "lio/first_frame_dump_frame_list");
+    cfg.nested<bool>(!opts_.first_frame_dump_list.empty(), "lio/first_frame_dump_frame_list is non-empty", "lio/first_frame_dump_slim",
+                     opts_.first_frame_dump_slim, false);
+  }
   paramWarn<int>(pnh, "lio/dry_run_point_filter_num", opts_.dry_run_point_filter_num, 0);
   // R78: which point set the IEKF residuals use (the map always uses the primary set). Refused as dead without the second stream.
   cfg.mode("lio/iekf_point_stream", opts_.iekf_point_stream, "primary", { "primary", "second" });
@@ -453,6 +448,35 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
         throw std::invalid_argument("lio/info_scale/rotation and /position must be >= 1");
       if (opts_.info_scale.rotation == 1.0 && opts_.info_scale.position == 1.0)
         throw std::invalid_argument("lio/info_scale/mode=block with rotation == position == 1 is inert (use mode=off)");
+    }
+  }
+  // R91E: residual binning by constraint direction. Sub-keys exist only under mode=direction; shift_sd_m must be > 0 (0 would be inert: use mode=off).
+  cfg.mode("lio/residual_binning/mode", opts_.residual_binning.mode, "off", { "off", "direction" });
+  {
+    const bool rb = opts_.residual_binning.mode == "direction";
+    cfg.nestedMode(rb, "lio/residual_binning/mode=direction", "lio/residual_binning/axes", opts_.residual_binning.axes, "lattice13", { "lattice13" });
+    cfg.nested<double>(rb, "lio/residual_binning/mode=direction", "lio/residual_binning/shift_sd_m", opts_.residual_binning.shift_sd_m, 0.0006);
+    cfg.nested<int>(rb, "lio/residual_binning/mode=direction", "lio/residual_binning/min_rows", opts_.residual_binning.min_rows, 20);
+    if (rb) {
+      if (!std::isfinite(opts_.residual_binning.shift_sd_m) || !(opts_.residual_binning.shift_sd_m > 0.0))
+        throw std::invalid_argument("lio/residual_binning/shift_sd_m must be a finite number > 0 (a shift of 0 is the identity: use mode=off)");
+      if (opts_.residual_binning.min_rows < 1)
+        throw std::invalid_argument("lio/residual_binning/min_rows must be >= 1");
+      if (opts_.residual_redundancy.mode != "off" || opts_.info_scale.mode != "off")
+        cfg.requireCombination("lio/residual_binning/mode = direction cannot be combined with lio/residual_redundancy/mode != off or lio/info_scale/mode != off: all three correct the same HtH and Htz "
+                               "and the order of the corrections is not specified in R91E.");
+      std::string lr_rows = "per_normal";
+      bool lr_enabled = false;
+      pnh.getParam("voxel_map/plane/line_residual/rows", lr_rows);
+      pnh.getParam("voxel_map/plane/line_residual/enabled", lr_enabled);
+      bool combined_en = false;
+      pnh.getParam("combined/enable", combined_en);
+      if (combined_en)
+        cfg.requireCombination("lio/residual_binning/mode = direction cannot be combined with combined/enable = true: the joint LIO+VIO step builds its own HtH and Htz through "
+                               "accumulateForCombined() and does not call the binning correction (R91E covers the LIO-only solve).");
+      if (lr_enabled && lr_rows == "distance")
+        cfg.requireCombination("lio/residual_binning/mode = direction needs voxel_map/plane/line_residual/rows = per_normal: the Jacobian direction of a distance row is set by the noise draw, "
+                               "so it cannot key a bin (distance rows would be skipped, leaving the line voxels, which carry nearly all the information, uncorrected).");
     }
   }
   // R73 (F-414): shadow LIO update. Sub-keys exist only under mode=on; the motion-Q keys only under process_noise_model=isotropic.
@@ -501,6 +525,11 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
     // R81 (F-485 2B): two more columns (voxel_point_count, voxel_distinct_frames) in residual_dump.csv; refused unless a frame list is given. Default false is byte-identical.
     cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "lio/residual_dump_frames is non-empty", "lio/residual_dump_voxel_info",
                      opts_.residual_dump_voxel_info, false);
+    // R91C: line axis columns / 14-column slim form of residual_dump.csv; refused unless a frame list is given. Default false is byte-identical.
+    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "lio/residual_dump_frames is non-empty", "lio/residual_dump_line_geometry",
+                     opts_.residual_dump_line_geometry, false);
+    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "lio/residual_dump_frames is non-empty", "lio/residual_dump_slim",
+                     opts_.residual_dump_slim, false);
   }
   paramWarn<bool>(pnh, "lio/residual_geometry_en", opts_.residual_geometry_en, false);   // R70: residual_geometry.csv (write-only)
   paramWarn<bool>(pnh, "lio/line_rows_log_en", opts_.line_rows_log_en, false);   // R77 (F-451): line_rows_per_scan.csv (write-only)
@@ -850,6 +879,7 @@ void LioProcBase::solveSystem_cuda(const std::vector<Residual>& residuals) const
   // gate on ekf.HtH/Htz mutation is what keeps "off" byte-identical, not
   // this call site).
   redundancyAndRenorm(residuals);
+  applyResidualBinningToEkf(residuals);   // R91E: no-op unless lio/residual_binning/mode=direction
   applyInfoScaleToEkf(residuals);
   ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
 }
@@ -886,6 +916,45 @@ void LioProcBase::redundancyAndRenorm(const std::vector<Residual>& residuals) co
     << ln << ',' << lc << ',' << c << '\n';
 }
 
+void LioProcBase::applyResidualBinningToEkf(const std::vector<Residual>& residuals) const
+{
+  if (!opts_.residual_binning.on()) return;   // default: HtH/Htz untouched (bit-identical)
+  ResidualBinningStats st;
+  { TimedScope ts(profiler_, "lio/ekf/binning");
+    st = applyResidualBinning(residuals, opts_.residual_binning, ekf_.HtH, ekf_.Htz); }
+  ++residual_binning_iterations_;
+  residual_binning_rows_sum_ += st.n_corrected_rows;
+  residual_binning_skipped_sum_ += st.n_skipped_rows;
+  residual_binning_bins_sum_ += st.n_bins_active;
+  residual_binning_trace_before_sum_ += st.trace_before;
+  residual_binning_trace_after_sum_ += st.trace_after;
+  if (shadow_active_) return;   // R73: the shadow pass writes no driver file
+  static PersistentLogStream log("residual_binning.csv");
+  bool first = false;
+  std::ofstream& o = log.stream(&first);
+  if (first) o << "frame,iter,n_resid,n_corrected_rows,n_skipped_rows,n_bins_active,shift_sd_m,min_rows,trace_before,trace_after,gnorm_before,gnorm_after\n";
+  o << std::setprecision(17) << voxel_map_->frame_idx_ << ',' << diagnostic_gn_iteration_ << ',' << residuals.size() << ',' << st.n_corrected_rows << ',' << st.n_skipped_rows << ','
+    << st.n_bins_active << ',' << opts_.residual_binning.shift_sd_m << ',' << opts_.residual_binning.min_rows << ',' << st.trace_before << ',' << st.trace_after << ','
+    << st.gnorm_before << ',' << st.gnorm_after << '\n';
+  // Per-bin sums (v, s, t) for the frames that get a solve snapshot, so the correction can be recomputed offline from the dumped rows and the uncorrected HtH, Htz recovered.
+  if (diagnostic_gn_iteration_ >= 0 &&
+      dump_rules::firstFrameSolveDumpMode(voxel_map_->frame_idx_, opts_.first_frame_dump_frames, opts_.first_frame_dump_list, opts_.first_frame_dump_slim) != 0) {
+    static PersistentLogStream blog("residual_binning_bins.csv");
+    bool bfirst = false;
+    std::ofstream& b = blog.stream(&bfirst);
+    if (bfirst) b << "frame,iter,bin,ax,ay,az,rows,applied,s,t,v0,v1,v2,v3,v4,v5\n";
+    const double(&axt)[residual_binning::kAxes][3] = residual_binning::axisTable();
+    b << std::setprecision(17);
+    for (int k = 0; k < residual_binning::kAxes; ++k) {
+      const residual_binning::BinOut& bo = st.bins[k];
+      b << voxel_map_->frame_idx_ << ',' << diagnostic_gn_iteration_ << ',' << k << ',' << axt[k][0] << ',' << axt[k][1] << ',' << axt[k][2] << ',' << bo.rows << ',' << (bo.applied ? 1 : 0)
+        << ',' << bo.s << ',' << bo.t;
+      for (int j = 0; j < 6; ++j) b << ',' << bo.v[j];
+      b << '\n';
+    }
+  }
+}
+
 void LioProcBase::applyInfoScaleToEkf(const std::vector<Residual>& residuals) const
 {
   if (!opts_.info_scale.on()) return;   // default: HtH/Htz untouched (bit-identical)
@@ -908,6 +977,7 @@ void LioProcBase::solveSystem(const std::vector<Residual>& residuals) const {
 
   // CQ-34: see solveSystem_cuda()'s comment above -- same fix, same reason.
   redundancyAndRenorm(residuals);
+  applyResidualBinningToEkf(residuals);   // R91E: no-op unless lio/residual_binning/mode=direction
   applyInfoScaleToEkf(residuals);   // R70 (F-320): no-op unless lio/info_scale/mode=block
 
   // Mean-only update against the frame's FIXED prior (prior_cov_/
@@ -949,13 +1019,15 @@ double LioProcBase::estimateStateCorrection(
     dt     = ekf_.dt;
   }
 
-  if (voxel_map_->frame_idx_ >= 1 && voxel_map_->frame_idx_ <= opts_.first_frame_dump_frames &&
-      diagnostic_gn_iteration_ >= 0) {
+  const int ff_mode = dump_rules::firstFrameSolveDumpMode(voxel_map_->frame_idx_, opts_.first_frame_dump_frames, opts_.first_frame_dump_list, opts_.first_frame_dump_slim);   // R91C
+  if (ff_mode != 0 && diagnostic_gn_iteration_ >= 0) {
     const double t_abs = pts.empty() ? data_queues_->start_time : pts.front().t + data_queues_->start_time;
     logFirstFrameIekfSolve(
         voxel_map_->frame_idx_, 0, diagnostic_gn_iteration_, t_abs,
         firstFrameArchitectureName(), pts, residuals_, state_before_update, *state_,
-        state_propagat_, prior_cov_, ekf_, ekf_.HtH, ekf_.Htz, opts_.first_frame_dump_frames);
+        state_propagat_, prior_cov_, ekf_, ekf_.HtH, ekf_.Htz,
+        (voxel_map_->frame_idx_ <= opts_.first_frame_dump_frames) ? opts_.first_frame_dump_frames : voxel_map_->frame_idx_,   // R91C: a listed frame beyond 1..K passes its own index so the guard inside admits it
+        ff_mode == 2);
   }
 
   if (opts_.update_diag_en && diagnostic_gn_iteration_ >= 0) {   // R69: write-only per-iteration LiDAR update record
@@ -970,7 +1042,7 @@ double LioProcBase::estimateStateCorrection(
     logLineRows(voxel_map_->frame_idx_, diagnostic_gn_iteration_, residuals_);
   if (!opts_.residual_dump_frames.empty() && dump_rules::residualDumpIterationWanted(opts_.residual_dump_all_iters, diagnostic_gn_iteration_) &&
       std::find(opts_.residual_dump_frames.begin(), opts_.residual_dump_frames.end(), voxel_map_->frame_idx_) != opts_.residual_dump_frames.end())
-    logResidualDump(voxel_map_->frame_idx_, diagnostic_gn_iteration_, *state_, residuals_, false, opts_.residual_dump_voxel_info);   // R71: write-only per-residual dump
+    logResidualDump(voxel_map_->frame_idx_, diagnostic_gn_iteration_, *state_, residuals_, false, opts_.residual_dump_voxel_info, opts_.residual_dump_line_geometry, opts_.residual_dump_slim);   // R71: write-only per-residual dump
 
   if (opts_.log_debug_en && diagnostic_gn_iteration_ >= 0) {
     static PersistentLogStream log("iekf_factor_iteration.csv");

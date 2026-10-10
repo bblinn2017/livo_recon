@@ -355,6 +355,12 @@ target_include_directories(test_info_scale PUBLIC include ${EIGEN3_INCLUDE_DIRS}
 target_link_libraries(test_info_scale Eigen3::Eigen)
 add_test(NAME info_scale COMMAND test_info_scale)
 
+# R91E (planning agent's patch): residual binning by constraint direction (header-only, ROS-free, Eigen only).
+add_executable(test_residual_binning_r91e tests/test_residual_binning_r91e.cpp)
+target_include_directories(test_residual_binning_r91e PUBLIC include ${EIGEN3_INCLUDE_DIRS})
+target_link_libraries(test_residual_binning_r91e Eigen3::Eigen)
+add_test(NAME residual_binning_r91e COMMAND test_residual_binning_r91e)
+
 # R72 (planning agent's patch; R82: step cap F-403 retired): Q-adaptation alternatives (F-401), failure dump round trip (F-398).
 # ROS-free header-only modules, Eigen only.
 foreach(r72_test q_adapt failure_capture symmetrize renamed_keys shadow_options bag_clock row_flush plane_test_values line_residual line_residual_r75 line_residual_r76 process_noise_switch)
@@ -366,6 +372,12 @@ endforeach()
 add_executable(test_dump_rules_r86b tests/test_dump_rules_r86b.cpp)
 target_include_directories(test_dump_rules_r86b PUBLIC include)
 add_test(NAME dump_rules_r86b COMMAND test_dump_rules_r86b)
+add_executable(test_dump_rules_r91c tests/test_dump_rules_r91c.cpp)
+target_include_directories(test_dump_rules_r91c PUBLIC include)
+add_test(NAME dump_rules_r91c COMMAND test_dump_rules_r91c)
+add_executable(test_residual_dump_format_r91c tests/test_residual_dump_format_r91c.cpp)
+target_include_directories(test_residual_dump_format_r91c PUBLIC include)
+add_test(NAME residual_dump_format_r91c COMMAND test_residual_dump_format_r91c)
 add_executable(test_admission_rule_r87 tests/test_admission_rule_r87.cpp)
 target_include_directories(test_admission_rule_r87 PUBLIC include)
 add_test(NAME admission_rule_r87 COMMAND test_admission_rule_r87)
@@ -386,3 +398,15 @@ add_executable(test_binned_node_r88 tests/test_binned_node_r88.cpp src/lio/voxel
 target_include_directories(test_binned_node_r88 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
 target_link_libraries(test_binned_node_r88 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
 add_test(NAME binned_node_r88 COMMAND test_binned_node_r88)
+
+# R90: the pca fit on the binned map type: BinSet::representatives() and VoxelNode's binned pca branch (same source set as test_binned_node_r88).
+add_executable(test_binned_pca_r90 tests/test_binned_pca_r90.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
+target_include_directories(test_binned_pca_r90 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+target_link_libraries(test_binned_pca_r90 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
+add_test(NAME binned_pca_r90 COMMAND test_binned_pca_r90)
+
+# R91: min_init / min_update counted as unique bins touched since the last fit (update_count_mode = touched) against bins newly opened (same source set as test_binned_pca_r90).
+add_executable(test_binned_touch_r91 tests/test_binned_touch_r91.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
+target_include_directories(test_binned_touch_r91 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+target_link_libraries(test_binned_touch_r91 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
+add_test(NAME binned_touch_r91 COMMAND test_binned_touch_r91)

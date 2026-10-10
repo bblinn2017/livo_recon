@@ -79,6 +79,10 @@ struct Residual
   // R83 (F-428 follow-up, Bryce 2026-10-06 on whether subdividing voxels is useful): octree layer of the owning node (0 = root), copied in VoxelNode::findPlaneResidual().
   // Write-only, read only by the residual dump under lio/residual_dump_voxel_info. -1 on a path that does not set it.
   int voxel_layer = -1;
+  // R91C (Bryce 2026-10-09, binning the residuals by direction): the unit vector u2 = VoxelPlane::x_normal_ of the owning voxel (third eigenvector of the point scatter: the line axis of a
+  // line voxel) and the axial coordinate u2 . (p - plane centre) of the point. Write-only: read only by the residual dump under lio/residual_dump_line_geometry. Zero on a path that does not set them.
+  Eigen::Vector3d line_axis = Eigen::Vector3d::Zero();
+  double line_axial = 0.0;
 
   // This plane's own fit-uncertainty contribution (n * plane_var * n),
   // added into sigma_squared by LioProc::buildResiduals().
@@ -271,7 +275,7 @@ struct VoxelMapScanStats
 // instead of re-scanning every accumulated point on every refit -- exact,
 // not an approximation. Only valid when every point contributing to a fit
 // carries equal weight, which is true for VoxelNode's raw points_ path but
-// NOT the separate weighted bin path (see PointBin/useBins()) --
+// NOT the binned map's weighted bin path (voxel_map/backend = binned) --
 // VoxelPlane::update() only consults this when explicitly passed a
 // non-null pointer, and callers must not pass one alongside `weights`.
 struct RunningMoments
@@ -509,13 +513,6 @@ struct VoxelOpts
   // voxel's layer and the sorted eigenvalues of the raw (uncorrected) scatter -> plane_fit_eigs.csv. Default off.
   bool plane_fit_eigs_en = false;
 
-  // History (364-384): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-364
-  std::string bin_weight_mode_fit = "count";
-  std::string bin_weight_mode_var = "count";
-
-  // History (388-396): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-388
-  double bin_size_fraction = 0.2;
-
   // ── the plane covariance: which model produces plane_var_ ────────────
   //
   // "eigengap" is the incumbent: differentiate the fitted eigenVECTOR with
@@ -554,17 +551,7 @@ struct VoxelOpts
   // with plane_var_denom_floor_en and sensor_noise_floor_eig0.
   std::string plane_var_mode = "eigengap";
 
-  // History (399-409): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-399
-  //
-  // pca ONLY.  VoxelNode::insertPoints()'s debiased branch hands the raw
-  // points_world straight to VoxelPlane::addPoints() and never reaches
-  // bins_/buildBinReps(), so this flag has no effect there.  It is nested
-  // under plane_fit_mode=pca in VoxelMap::loadParameters() and setting it on
-  // debiased REFUSES at startup rather than being silently ignored -- see
-  // the comment there for why that confound matters and what replaces
-  // binning.  bin_size_fraction and bin_weight_mode_fit/_var are in turn
-  // nested under this flag.
-  bool use_bins = false;
+  // R90: the pca-only bin path (use_bins, bin_size_fraction, bin_weight_mode_fit/_var) is removed; binning is the binned map type (voxel_map/backend = binned) for both plane fits. The old keys are refused at start-up.
 
   // History (412-425): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-412
   // History (428-445): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-428
@@ -787,6 +774,8 @@ struct VoxelOpts
   double binned_bin_fraction = 0.2;
   int    binned_cov_mode = 0;
   int    binned_weight_mode = 0;
+  // R91: what min_init / min_update count in a binned map. 0 opened (R88 to R90): bins newly opened since the last fit. 1 touched: UNIQUE bins that received a return since the last fit (a bin hit in several scans counts once; before the first fit = occupied bins).
+  int    binned_update_count_mode = 0;
 };
 using VoxelOptsPtr = std::shared_ptr<VoxelOpts>;
 
@@ -998,6 +987,7 @@ struct VoxelStats
   std::atomic<long long> binned_points{0};
   std::atomic<long long> binned_new_bins{0};
   std::atomic<long long> binned_fits{0};
+  std::atomic<long long> binned_touched_at_fit{0};   // R91: sum over binned fits of the unique bins touched since the previous fit (both counter modes record it)
 
   int total() const { return open + converged + disabled; }
 

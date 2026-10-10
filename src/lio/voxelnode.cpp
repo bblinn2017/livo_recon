@@ -36,8 +36,7 @@ void setBootstrapInsertion(bool active) { g_bootstrap_insertion = active; }
 VoxelNode::VoxelNode(VoxelOptsPtr opts, VoxelStatsPtr stats, int layer, const V3D& center)
   : opts_(opts), stats_(stats), plane_(opts), layer_(layer),
     voxel_center_(center), status_(VoxelStatus::OPEN),
-    node_id_(stats->next_node_id.fetch_add(1, std::memory_order_relaxed)),
-    density_weight_leaf_(opts->bin_size_fraction * opts->voxel_size / (1 << layer))
+    node_id_(stats->next_node_id.fetch_add(1, std::memory_order_relaxed))
 {
   for (int i = 0; i < 8; i++)
     leaves_[i] = nullptr;
@@ -57,25 +56,6 @@ int VoxelNode::childIndex(const V3D& p) const
   return (p.x() > voxel_center_.x() ? 4 : 0)
        | (p.y() > voxel_center_.y() ? 2 : 0)
        | (p.z() > voxel_center_.z() ? 1 : 0);
-}
-
-void VoxelNode::buildBinReps(std::vector<PointXYZCov>& reps, std::vector<double>& fit_weights,
-                              std::vector<double>& var_weights) const
-{
-  reps.reserve(bins_.size());
-  fit_weights.reserve(bins_.size());
-  var_weights.reserve(bins_.size());
-  for (const auto& kv : bins_) {
-    const auto& bin = kv.second;
-    const double inv_count = 1.0 / bin.count;
-    PointXYZCov rep;
-    rep.point       = bin.sum_point * inv_count;
-    rep.sensor_cov  = bin.sum_sensor_cov * inv_count;
-    rep.pos_cov     = bin.sum_pos_cov * inv_count;
-    reps.push_back(rep);
-    fit_weights.push_back(opts_->bin_weight_mode_fit == "uniform" ? 1.0 : static_cast<double>(bin.count));
-    var_weights.push_back(opts_->bin_weight_mode_var == "uniform" ? 1.0 : static_cast<double>(bin.count));
-  }
 }
 
 void VoxelNode::passToChildren(const std::vector<PointXYZCov>& points_world,
@@ -153,7 +133,9 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
         long long opened = 0;
         for (const auto& pt : points_world)
           if (binset_->add(pt.point, pt.sensor_cov, trusted)) ++opened;
-        update_count_ += static_cast<int>(opened);
+        // R91: update_count_mode touched = unique bins hit since the last fit (BinSet::dirtyCount()); opened = bins newly opened (R88 to R90).
+        if (opts_->binned_update_count_mode == 1) update_count_ = static_cast<int>(binset_->dirtyCount());
+        else update_count_ += static_cast<int>(opened);
         stats_->binned_points.fetch_add(static_cast<long long>(points_world.size()), std::memory_order_relaxed);
         stats_->binned_new_bins.fetch_add(opened, std::memory_order_relaxed);
         refit = admission::fitWanted(debiased_admitted_, update_count_, opts_->min_init_points, opts_->min_update_points, g_current_frame_idx == 0);
@@ -161,7 +143,11 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
         bo.cov_mode = opts_->binned_cov_mode == 1 ? binned::CovMode::Shrunk : binned::CovMode::Average;
         bo.weight_mode = opts_->binned_weight_mode == 1 ? binned::WeightMode::Uniform : binned::WeightMode::Count;
         plane_.refitFromBins(*binset_, bo, points_world, distinct_frames_, g_current_frame_idx, layer_, refit);
-        if (refit) stats_->binned_fits.fetch_add(1, std::memory_order_relaxed);
+        if (refit) {
+          stats_->binned_fits.fetch_add(1, std::memory_order_relaxed);
+          stats_->binned_touched_at_fit.fetch_add(binset_->dirtyCount(), std::memory_order_relaxed);
+          binset_->markFitted();
+        }
       } else {
         update_count_ += static_cast<int>(points_world.size());
         refit = admission::fitWanted(debiased_admitted_, update_count_, opts_->min_init_points, opts_->min_update_points, g_current_frame_idx == 0);
@@ -212,24 +198,49 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
         return;
       }
       now_plane = plane_.isPlane();
+    } else if (opts_->binned_enabled) {
+      // R90 (binned map, pca fit): returns go into the same bins as the debiased binned branch above; min_init / min_update count BINS OPENED; the fit is the pca fit of one weighted point per occupied bin
+      // (VoxelPlane::update() with the weights of binned::BinSet::representatives()). The admission test reads plane_.isInit() as the pca path always did; pointsSize() is the number of occupied bins at the last
+      // fit (so isFull() / points/max also count bins, and a voxel stays open until it holds points/max occupied bins).
+      if (!binset_) binset_.reset(new binned::BinSet(opts_->voxel_size / static_cast<double>(1 << layer_) * opts_->binned_bin_fraction));
+      const bool trusted = g_current_frame_idx >= 1;
+      long long opened = 0;
+      for (const auto& pt : points_world)
+        if (binset_->add(pt.point, pt.sensor_cov, trusted)) ++opened;
+      if (opts_->binned_update_count_mode == 1) update_count_ = static_cast<int>(binset_->dirtyCount());   // R91: unique bins hit since the last fit
+      else update_count_ += static_cast<int>(opened);
+      stats_->binned_points.fetch_add(static_cast<long long>(points_world.size()), std::memory_order_relaxed);
+      stats_->binned_new_bins.fetch_add(opened, std::memory_order_relaxed);
+      // History for a later subdivision, bounded exactly as the debiased path bounds it.
+      batch_stored_in_points_ = false;
+      if (static_cast<int>(points_.size()) < opts_->max_points) {
+        points_.insert(points_.end(), points_world.begin(), points_world.end());
+        batch_stored_in_points_ = true;
+      }
+      if (!admission::fitWanted(was_init, update_count_, opts_->min_init_points, opts_->min_update_points, g_current_frame_idx == 0)) return;
+      if (!was_init && g_current_frame_idx >= 1 && distinct_frames_ < opts_->min_frames_to_init) return;
+      plane_.noteFrames(distinct_frames_);
+      binned::Options bo;
+      bo.cov_mode = opts_->binned_cov_mode == 1 ? binned::CovMode::Shrunk : binned::CovMode::Average;
+      bo.weight_mode = opts_->binned_weight_mode == 1 ? binned::WeightMode::Uniform : binned::WeightMode::Count;
+      const binned::Reps reps = binset_->representatives(bo);
+      std::vector<PointXYZCov> bin_reps(reps.p.size());
+      for (std::size_t i = 0; i < reps.p.size(); ++i) {
+        bin_reps[i].point = reps.p[i];
+        bin_reps[i].sensor_cov = reps.cov[i];
+        bin_reps[i].pos_cov = M3D::Zero();   // the binned map keeps the sensor covariance only (plane_fit_pose_cov_mode = sensor_only is required)
+      }
+      plane_.update(bin_reps, static_cast<int>(binset_->numBins()), &reps.w, nullptr, &reps.w, g_current_frame_idx, layer_);
+      stats_->binned_fits.fetch_add(1, std::memory_order_relaxed);
+      stats_->binned_touched_at_fit.fetch_add(binset_->dirtyCount(), std::memory_order_relaxed);
+      binset_->markFitted();
+      update_count_ = 0;
+      now_plane = plane_.isPlane();
     } else {
-    const bool use_bins = useBins();
-
     update_count_ += points_world.size();
-    if (use_bins) {
-      for (const auto& pt : points_world) {
-        auto& bin = bins_[worldToKeyFn(pt.point, density_weight_leaf_)];
-        ++bin.count;
-        bin.sum_point += pt.point;
-        bin.sum_sensor_cov += pt.sensor_cov;
-        bin.sum_pos_cov    += pt.pos_cov;
-      }
-      total_count_ += static_cast<int>(points_world.size());
-    } else {
-      for (const auto& pt : points_world) {
-        points_.push_back(pt);
-        running_moments_.add(pt.point);
-      }
+    for (const auto& pt : points_world) {
+      points_.push_back(pt);
+      running_moments_.add(pt.point);
     }
 
     // R87: the decision is the shared admission rule; the only change to the pca path is that the bootstrap frame (global frame 0) is no longer gated by min_update.
@@ -255,14 +266,7 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     // no other channel for it.
     plane_.noteFrames(distinct_frames_);
 
-    if (use_bins) {
-      std::vector<PointXYZCov> bin_reps;
-      std::vector<double> fit_weights, var_weights;
-      buildBinReps(bin_reps, fit_weights, var_weights);
-      plane_.update(bin_reps, total_count_, &fit_weights, nullptr, &var_weights, g_current_frame_idx, layer_);
-    } else {
-      plane_.update(points_, -1, nullptr, &running_moments_, nullptr, g_current_frame_idx, layer_);
-    }
+    plane_.update(points_, -1, nullptr, &running_moments_, nullptr, g_current_frame_idx, layer_);
     update_count_ = 0;
     now_plane = plane_.isPlane();
     }
@@ -318,8 +322,8 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     status_ = VoxelStatus::PARENT;
     if (was_plane) updates.push_back({node_id_, true, {}});
     plane_retired_ = true;
-    if (debiased) {
-      // R65 (F-158): children receive the stored history (points_, bounded by max_points as in the pca
+    if (debiased || opts_->binned_enabled) {
+      // R65 (F-158): children receive the stored history (R90: the binned pca branch keeps the same history) (points_, bounded by max_points as in the pca
       // path). If this batch was not stored (points_ already at the bound) it is added so the newest
       // points are never lost. No refit from scratch: the parent's O(1) sums are simply retired.
       if (batch_stored_in_points_) {
@@ -331,18 +335,6 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       }
       points_.clear();
       running_moments_.reset(voxel_center_);
-    } else if (useBins()) {
-      // points_ stays empty whenever useBins() is true (see insertPoints()
-      // above) -- children need bins_'s current contents instead, collapsed to one
-      // representative point per bin (loses each bin's own internal
-      // weighting once handed to a child, an accepted approximation for
-      // this rare non-planar/give-up path -- see PointBin's docs).
-      std::vector<PointXYZCov> bin_reps;
-      std::vector<double> fit_weights_unused, var_weights_unused;
-      buildBinReps(bin_reps, fit_weights_unused, var_weights_unused);
-      passToChildren(bin_reps, updates);
-      bins_.clear();
-      total_count_ = 0;
     } else {
       passToChildren(points_, updates);
       points_.clear();
@@ -393,9 +385,8 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
   }
 
   points_.clear();
-  bins_.clear();
+  binset_.reset();   // R90: the binned pca branch locks in like the pca path (no more fits)
   running_moments_.reset(voxel_center_);
-  total_count_ = 0;
   VoxelStatus new_status = now_plane ? VoxelStatus::CONVERGED : VoxelStatus::DISABLED;
   stats_->transition(status_, new_status);
   status_ = new_status;

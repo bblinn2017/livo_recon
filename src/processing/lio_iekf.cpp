@@ -504,6 +504,9 @@ std::string LioProcIekf::engagementReport() const
     }
     o << "\n  voxel_map/plane/weight_floor/mode = "
       << vm->opts()->weight_floor_mode;
+    // R90: the fit and the admission settings the map ran with (written for every map, so a run's engagement file says which of the four map/fit types and which cadence it was).
+    o << "\n  voxel_map/fit_config: plane_fit_mode = " << vm->opts()->plane_fit_mode << " backend = " << (vm->opts()->binned_enabled ? "binned" : "raw")
+      << " min_init = " << vm->opts()->min_init_points << " min_update = " << vm->opts()->min_update_points << " max_points = " << vm->opts()->max_points;
     if ((vm->opts()->line_enabled && (vm->opts()->line_classify_at_fit || vm->opts()->debiased_line_form != 0)) || (vm->opts()->plane_fit_mode == "debiased" && vm->opts()->plane_gap_floor_en))   // R82 (D4, F-500): written only when a key is on
     {
       const VoxelPlaneR82Counters c82 = voxelPlaneR82Counters();
@@ -521,9 +524,10 @@ std::string LioProcIekf::engagementReport() const
     if (vm->opts()->binned_enabled)   // R88: written only for the binned map type
     {
       const auto st88 = vm->stats();
-      const long long bp = st88 ? st88->binned_points.load() : 0, bb = st88 ? st88->binned_new_bins.load() : 0, bf = st88 ? st88->binned_fits.load() : 0;
+      const long long bp = st88 ? st88->binned_points.load() : 0, bb = st88 ? st88->binned_new_bins.load() : 0, bf = st88 ? st88->binned_fits.load() : 0, bt = st88 ? st88->binned_touched_at_fit.load() : 0;
       o << "\n  voxel_map/backend = binned: bin_size_fraction = " << vm->opts()->binned_bin_fraction << " cov_mode = " << (vm->opts()->binned_cov_mode == 1 ? "shrunk" : "average")
-        << " weight_mode = " << (vm->opts()->binned_weight_mode == 1 ? "uniform" : "count") << " binned_points=" << bp << " binned_new_bins=" << bb << " binned_fits=" << bf;
+        << " weight_mode = " << (vm->opts()->binned_weight_mode == 1 ? "uniform" : "count") << " binned_points=" << bp << " binned_new_bins=" << bb << " binned_fits=" << bf
+        << " update_count_mode = " << (vm->opts()->binned_update_count_mode == 1 ? "touched" : "opened") << " binned_touched_at_fit=" << bt;
       if (bp == 0)
         o << "   <-- INERT: the binned map was selected and no return was put in a bin";
       else if (bf == 0)
@@ -580,6 +584,20 @@ std::string LioProcIekf::engagementReport() const
       << " mean_trace_ratio=" << (info_scale_iterations_ > 0 ? info_scale_trace_ratio_sum_ / info_scale_iterations_ : 0.0);
     if (info_scale_iterations_ == 0)
       o << "   <-- INERT: block information scale selected and never applied";
+  }
+  if (opts_.residual_binning.on())   // R91E
+  {
+    const double its = static_cast<double>(residual_binning_iterations_);
+    o << "\n  lio/residual_binning mode=direction axes=" << opts_.residual_binning.axes << " shift_sd_m=" << opts_.residual_binning.shift_sd_m << " min_rows=" << opts_.residual_binning.min_rows
+      << " iterations=" << residual_binning_iterations_ << " mean_corrected_rows=" << (its > 0 ? residual_binning_rows_sum_ / its : 0.0)
+      << " mean_bins_active=" << (its > 0 ? residual_binning_bins_sum_ / its : 0.0) << " skipped_rows=" << residual_binning_skipped_sum_
+      << " mean_trace_before=" << (its > 0 ? residual_binning_trace_before_sum_ / its : 0.0) << " mean_trace_after=" << (its > 0 ? residual_binning_trace_after_sum_ / its : 0.0);
+    if (residual_binning_iterations_ == 0)
+      o << "   <-- INERT: residual binning selected and never applied";
+    else if (residual_binning_rows_sum_ == 0)
+      o << "   <-- NOT ENGAGED: no bin ever reached min_rows";
+    if (residual_binning_skipped_sum_ > 0)
+      o << "   <-- NOTE: rows were skipped (distance rows or rows with a bad variance); expected 0 with rows = per_normal";
   }
 
   if (q_gain_opts_.on())

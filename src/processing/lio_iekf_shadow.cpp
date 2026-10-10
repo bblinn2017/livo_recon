@@ -83,6 +83,8 @@ void LioProcIekf::runShadowUpdate(const MeasureGroup& mg)
   const ResidualRedundancyStats real_redundancy = redundancy_stats_;
   const long is_it = info_scale_iterations_, is_disc = info_scale_discarded_modes_;
   const double is_tr = info_scale_trace_ratio_sum_;
+  const long rb_it = residual_binning_iterations_, rb_rows = residual_binning_rows_sum_, rb_skip = residual_binning_skipped_sum_, rb_bins = residual_binning_bins_sum_;   // R91E
+  const double rb_tb = residual_binning_trace_before_sum_, rb_ta = residual_binning_trace_after_sum_;
   const long rn_it = renorm_iterations_, rn_ap = renorm_applied_;
   const double rn_sum = renorm_c_sum_, rn_max = renorm_c_max_;
   const int n_mc = n_miss_coverage_, n_mm = n_miss_mismatch_, n_gc = n_statistical_gate_candidates_, n_gr = n_statistical_gate_rejections_;
@@ -138,6 +140,8 @@ void LioProcIekf::runShadowUpdate(const MeasureGroup& mg)
   ekf_ = real_ekf;
   redundancy_stats_ = real_redundancy;
   info_scale_iterations_ = is_it; info_scale_discarded_modes_ = is_disc; info_scale_trace_ratio_sum_ = is_tr;
+  residual_binning_iterations_ = rb_it; residual_binning_rows_sum_ = rb_rows; residual_binning_skipped_sum_ = rb_skip; residual_binning_bins_sum_ = rb_bins;   // R91E
+  residual_binning_trace_before_sum_ = rb_tb; residual_binning_trace_after_sum_ = rb_ta;
   renorm_iterations_ = rn_it; renorm_applied_ = rn_ap; renorm_c_sum_ = rn_sum; renorm_c_max_ = rn_max;
   n_miss_coverage_ = n_mc; n_miss_mismatch_ = n_mm; n_statistical_gate_candidates_ = n_gc; n_statistical_gate_rejections_ = n_gr;
   n_tier0_miss_coverage_ = n_t0c; n_tier0_miss_mismatch_ = n_t0m;

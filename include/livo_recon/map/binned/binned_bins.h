@@ -24,6 +24,9 @@
 // Trusted returns. The debiased fit subtracts only the covariance of returns from a trusted (post-bootstrap) frame (VoxelPlane::Scov_sensor_). A bin therefore keeps a second covariance sum over its trusted members.
 // The representative's trusted covariance is that sum divided by the same divisor as the all-member sum (k or k^2), so a bin that mixes bootstrap and live returns subtracts less, never more.
 //
+// R90 (PCA on the binned map): representatives() hands the same occupied bins to the PCA fit (VoxelPlane::update()) as one point per bin (the mean of its returns), with the same covariance (cov_mode) and the same weight
+// (weight_mode) as moments() uses. The PCA fit then takes the weighted mean and covariance of those points and propagates the covariance of each into the plane variance.
+//
 // Not kept (and so not supported): the pose covariance. The binned map requires plane_fit_pose_cov_mode = sensor_only.
 // Determinism: bins are visited in ascending key order (std::map), so the sums do not depend on hash order or thread count.
 #include <Eigen/Dense>
@@ -33,6 +36,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <vector>
 
 namespace livo_recon
 {
@@ -94,6 +98,7 @@ struct Bin
   V3 sum_p = V3::Zero();
   M3 sum_cov = M3::Zero();           // sensor covariances, all members
   M3 sum_cov_trusted = M3::Zero();   // sensor covariances, trusted members only
+  long long touch_epoch = -1;        // R91: the fit epoch in which this bin last received a return (-1: never)
 };
 
 // The additive statistics the debiased fit keeps, built from the occupied bins. sp, spp are about `ref`; scov, scov_sensor, v, w are origin-referenced (as VoxelPlane's Scov_, Scov_sensor_, V_, W_).
@@ -118,6 +123,14 @@ struct Moments
   }
 };
 
+// One point per occupied bin, in ascending key order: the mean of the bin's returns, the covariance that moments() would add for it (all members), and its weight.
+struct Reps
+{
+  std::vector<V3> p;
+  std::vector<M3> cov;
+  std::vector<double> w;
+};
+
 class BinSet
 {
 public:
@@ -128,6 +141,12 @@ public:
   long long numPoints() const { return n_points_; }
   const std::map<BinKey, Bin>& bins() const { return bins_; }
 
+  // R91: UNIQUE bins that received at least one return since the last markFitted() (or since construction). A bin hit by several scans counts once; a bin opened in this period counts (it received a return).
+  // Before the first fit this equals numBins(). Used by voxel_map/binned/update_count_mode = touched.
+  long long dirtyCount() const { return dirty_; }
+  // Called by the owner when a fit has been made: the next period starts with no bin touched.
+  void markFitted() { ++fit_epoch_; dirty_ = 0; }
+
   // Adds one return. `trusted` = the return comes from a post-bootstrap frame (its covariance may be subtracted by the debiased fit). Returns true when the return opened a new bin.
   bool add(const V3& p, const M3& sensor_cov, bool trusted)
   {
@@ -136,6 +155,7 @@ public:
     const bool is_new = (it == bins_.end());
     if (is_new) it = bins_.emplace(key, Bin()).first;
     Bin& b = it->second;
+    if (b.touch_epoch != fit_epoch_) { b.touch_epoch = fit_epoch_; ++dirty_; }
     ++b.count;
     b.sum_p += p;
     b.sum_cov += sensor_cov;
@@ -180,10 +200,29 @@ public:
     return m;
   }
 
+  // The occupied bins as weighted points (see Reps). Same weights and covariances as moments(): w = k (count) or 1 (uniform); cov = C / k (average) or C / k^2 (shrunk).
+  Reps representatives(const Options& o) const
+  {
+    Reps r;
+    r.p.reserve(bins_.size());
+    r.cov.reserve(bins_.size());
+    r.w.reserve(bins_.size());
+    for (const auto& kv : bins_) {
+      const Bin& b = kv.second;
+      const double k = static_cast<double>(b.count);
+      r.p.push_back(b.sum_p / k);
+      r.cov.push_back(b.sum_cov / ((o.cov_mode == CovMode::Shrunk) ? k * k : k));
+      r.w.push_back((o.weight_mode == WeightMode::Count) ? k : 1.0);
+    }
+    return r;
+  }
+
 private:
   double bin_size_;
   std::map<BinKey, Bin> bins_;
   long long n_points_ = 0;
+  long long fit_epoch_ = 0;   // R91: incremented by markFitted()
+  long long dirty_ = 0;       // R91: bins whose touch_epoch == fit_epoch_
 };
 
 }  // namespace binned

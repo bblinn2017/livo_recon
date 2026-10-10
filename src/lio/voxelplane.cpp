@@ -182,7 +182,7 @@ void debugLogVarianceShare(double sigma_diag_squared, double plane_var_term)
 }
 
 // T3-0d: N/J/N_eff/trace(plane_var_) per VoxelPlane::update() call that
-// commits a plane -- lets a bin_size_fraction or bin_weight_mode sweep be
+// commits a plane -- lets a binned/bin_size_fraction or binned/weight_mode sweep be
 // read against how much the effective sample size actually moved, rather
 // than inferred from ATE alone. Called from VoxelMap::insert()'s own OMP
 // parallel-for, once per plane fit -- same thread_local-buffer-plus-flush
@@ -1084,6 +1084,8 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
   res.plane_id       = this;
   res.voxel_point_count = points_size_;           // R81 (F-485 2B): write-only, read by the residual dump when lio/residual_dump_voxel_info
   res.voxel_distinct_frames = distinct_frames_;
+  res.line_axis = x_normal_;                                  // R91C: write-only (residual dump under lio/residual_dump_line_geometry)
+  res.line_axial = x_normal_.dot(pt.point - plane_.center);   // R91C: write-only
   res.plane_var_term = plane_var_term;
   res.plane_jacobian = J_nq.transpose();
   res.plane_covariance = plane_var_;
@@ -1403,8 +1405,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   trace_layer_ = layer_idx;
   if (N < 3) return;
 
-  // `weights`: supplied by the caller (VoxelNode always pre-bins whenever
-  // convergence_mode=="always_update" -- see useBins()) or left null for
+  // `weights`: supplied by the caller (the binned map passes one weight per occupied bin, see binned::BinSet::representatives()) or left null for
   // the plain unweighted path below.
   const std::vector<double>* weights = weights_in;
   double weight_sum = N;

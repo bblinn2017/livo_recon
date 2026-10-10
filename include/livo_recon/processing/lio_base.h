@@ -10,6 +10,7 @@
 #include "livo_recon/lio/deskew.h"
 #include "livo_recon/lio/residual_redundancy.h"
 #include "livo_recon/lio/info_scale.h"
+#include "livo_recon/lio/residual_binning.h"
 #include "livo_recon/lio/shadow_options.h"
 
 #include <array>
@@ -44,6 +45,11 @@ struct LioProcOptions
   bool   update_diag_en        = false;
   bool   live_point_cov_en     = false;
   int    first_frame_dump_frames = 1;
+  // R91C (write-only; empty / false = unchanged and byte-identical): lio/first_frame_dump_frame_list is a comma-separated list of further frame indices that get the solve snapshot
+  // (pose_control_first_frame_solve{.csv,_matrices.txt}) in addition to 1..first_frame_dump_frames; lio/first_frame_dump_slim (refused unless the list is non-empty) writes those frames
+  // in the slim form (prior_cov, A_exact, HtH, Htz, the prior and measurement terms, the solution: no H_full, K1, G and no per-residual lines).
+  std::vector<int> first_frame_dump_list;
+  bool   first_frame_dump_slim = false;
 
   // CQ-46: dumps raw per-accepted-residual fields (world point, normal,
   // rotation-Jacobian column, plane_id, r, and the four sigma_squared
@@ -116,6 +122,11 @@ struct LioProcOptions
   // bit-identical. iekf estimator only.
   InfoScaleOptions info_scale;
 
+  // R91E: residual binning by constraint direction (see lio/residual_binning.h): a shared shift per direction bin bounds the information a direction can gain from many rows.
+  // mode "off" (default) never enters the function and is bit-identical. iekf estimator only; refused together with residual_redundancy or info_scale, and with
+  // voxel_map/plane/line_residual/rows = distance (the direction of a distance row is set by the noise).
+  ResidualBinningOptions residual_binning;
+
   // R70 (F-340): write-only per-frame geometry of the admitted residuals (iteration 0 only): normal and lever-arm scatter
   // eigenvalues, plane concentration, distance statistics. Backend independent, so surface and octree can be compared.
   bool   residual_geometry_en  = false;
@@ -139,6 +150,10 @@ struct LioProcOptions
   // R81 (F-485 2B): append voxel_point_count and voxel_distinct_frames (of each row's voxel) to residual_dump.csv and shadow_residual_dump.csv. Sub-key of lio/residual_dump_frames (refused when that list is empty).
   // Default false leaves the header and rows byte-identical.
   bool residual_dump_voxel_info = false;
+  // R91C: append line_axis_x/y/z and line_axial to residual_dump.csv (see diagnostics/residual_dump_format.h). Sub-key of lio/residual_dump_frames (refused when that list is empty).
+  bool residual_dump_line_geometry = false;
+  // R91C: write residual_dump.csv in the 14-column slim form. Sub-key of lio/residual_dump_frames (refused when that list is empty).
+  bool residual_dump_slim = false;
 
   // R73 (F-414): shadow LIO update (see lio/shadow_options.h). mode off (default) is bit-identical. iekf estimator only.
   ShadowOptions shadow;
@@ -379,6 +394,13 @@ protected:
   mutable double renorm_c_sum_ = 0.0, renorm_c_max_ = 1.0;
   void redundancyAndRenorm(const std::vector<Residual>& residuals) const;
   void applyInfoScaleToEkf(const std::vector<Residual>& residuals) const;
+  // R91E: engagement counters of the residual binning (written by solveSystem*, which are const; saved and restored around the shadow pass like the info_scale ones).
+  mutable long residual_binning_iterations_ = 0;
+  mutable long residual_binning_rows_sum_ = 0;       // rows in corrected bins, summed over iterations
+  mutable long residual_binning_skipped_sum_ = 0;    // rows left out (distance rows, bad variance), summed over iterations
+  mutable long residual_binning_bins_sum_ = 0;       // corrected bins, summed over iterations
+  mutable double residual_binning_trace_before_sum_ = 0.0, residual_binning_trace_after_sum_ = 0.0;
+  void applyResidualBinningToEkf(const std::vector<Residual>& residuals) const;
 };
 
 }  // namespace livo_recon
