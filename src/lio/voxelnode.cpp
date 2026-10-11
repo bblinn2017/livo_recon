@@ -127,15 +127,15 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       // min_update 1 this reproduces the pre-R87 behaviour (fit at 3 points, refit on every batch).
       bool refit;
       if (opts_->binned_enabled) {
-        // R88 (binned map): returns go into bins; min_init / min_update count BINS OPENED (not raw returns); the fit is made from the occupied bins (VoxelPlane::refitFromBins).
+        // R88 (binned map): returns go into bins; min_init / min_update count unique BINS TOUCHED since the last fit (R92; not raw returns); the fit is made from the occupied bins (VoxelPlane::refitFromBins).
         if (!binset_) binset_.reset(new binned::BinSet(opts_->voxel_size / static_cast<double>(1 << layer_) * opts_->binned_bin_fraction));
         const bool trusted = g_current_frame_idx >= 1;
         long long opened = 0;
         for (const auto& pt : points_world)
           if (binset_->add(pt.point, pt.sensor_cov, trusted)) ++opened;
-        // R91: update_count_mode touched = unique bins hit since the last fit (BinSet::dirtyCount()); opened = bins newly opened (R88 to R90).
-        if (opts_->binned_update_count_mode == 1) update_count_ = static_cast<int>(binset_->dirtyCount());
-        else update_count_ += static_cast<int>(opened);
+        // R92: min_init / min_update count the UNIQUE bins that received a return since the last fit (BinSet::dirtyCount(); a bin hit in several scans counts once; before the first fit = occupied bins). This is the only count; the R88 to R90
+        // `opened` count (bins newly opened) and its key voxel_map/binned/update_count_mode were removed. `opened` is still computed for the binned_new_bins counter.
+        update_count_ = static_cast<int>(binset_->dirtyCount());
         stats_->binned_points.fetch_add(static_cast<long long>(points_world.size()), std::memory_order_relaxed);
         stats_->binned_new_bins.fetch_add(opened, std::memory_order_relaxed);
         refit = admission::fitWanted(debiased_admitted_, update_count_, opts_->min_init_points, opts_->min_update_points, g_current_frame_idx == 0);
@@ -199,7 +199,7 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       }
       now_plane = plane_.isPlane();
     } else if (opts_->binned_enabled) {
-      // R90 (binned map, pca fit): returns go into the same bins as the debiased binned branch above; min_init / min_update count BINS OPENED; the fit is the pca fit of one weighted point per occupied bin
+      // R90 (binned map, pca fit): returns go into the same bins as the debiased binned branch above; min_init / min_update count the unique bins touched since the last fit (R92); the fit is the pca fit of one weighted point per occupied bin
       // (VoxelPlane::update() with the weights of binned::BinSet::representatives()). The admission test reads plane_.isInit() as the pca path always did; pointsSize() is the number of occupied bins at the last
       // fit (so isFull() / points/max also count bins, and a voxel stays open until it holds points/max occupied bins).
       if (!binset_) binset_.reset(new binned::BinSet(opts_->voxel_size / static_cast<double>(1 << layer_) * opts_->binned_bin_fraction));
@@ -207,8 +207,7 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       long long opened = 0;
       for (const auto& pt : points_world)
         if (binset_->add(pt.point, pt.sensor_cov, trusted)) ++opened;
-      if (opts_->binned_update_count_mode == 1) update_count_ = static_cast<int>(binset_->dirtyCount());   // R91: unique bins hit since the last fit
-      else update_count_ += static_cast<int>(opened);
+      update_count_ = static_cast<int>(binset_->dirtyCount());   // R92: unique bins hit since the last fit (the only count; `opened` is kept for the binned_new_bins counter)
       stats_->binned_points.fetch_add(static_cast<long long>(points_world.size()), std::memory_order_relaxed);
       stats_->binned_new_bins.fetch_add(opened, std::memory_order_relaxed);
       // History for a later subdivision, bounded exactly as the debiased path bounds it.

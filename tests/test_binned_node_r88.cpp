@@ -4,7 +4,7 @@
 //   BP2 uniform weight gives a larger plane variance than count weight on the same bins (N is the number of bins, not of returns).
 //   BP3 refit = false keeps the previous fit and moves only pointsSize() (occupied bins).
 //   BN1 the admission rule counts BINS: 12 returns in 3 bins do not fit at min_init 5; the default (raw) node fits them. 6 bins fit.
-//   BN2 returns into bins that are already open do not trigger a refit at min_update 5; five new bins do.
+//   BN2 (R92: touched count) returns into bins that are already open count once each: 4 open bins hit twice do not refit at min_update 5, 6 distinct bins touched since the fit do; 4 new bins do not, a 5th does.
 //   BN3 the bootstrap frame (global frame 0) is exempt from min_update only: one new bin refits an admitted voxel there, and min_init still holds.
 //   BN4 30 returns of one beam are one bin; the counters say so.
 #include <cmath>
@@ -138,7 +138,7 @@ int main()
     CHECK(nr.hasConvergedPlane());
     CHECK(stats_raw->binned_points.load() == 0);
   }
-  {   // BN2: updates count bins opened
+  {   // BN2: updates count unique bins touched since the fit (R92; before R92 this block expected the opened count)
     auto stats = std::make_shared<VoxelStats>();
     setBootstrapInsertion(false);
     setCurrentFrame(1);
@@ -146,15 +146,22 @@ int main()
     n.insertPoints(patch(0, 8, 1, 1e-6, false), upd);           // 8 bins: fitted
     CHECK(stats->binned_fits.load() == 1);
     setCurrentFrame(2);
-    n.insertPoints(patch(0, 8, 2, 1e-6, false), upd);           // 16 returns into the 8 open bins: no bin opened
+    n.insertPoints(patch(0, 4, 2, 1e-6, false), upd);           // 8 returns into 4 open bins: 4 unique bins touched < min_update 5 (the returns count once per bin)
     CHECK(stats->binned_fits.load() == 1);
     CHECK(stats->binned_new_bins.load() == 8);
     setCurrentFrame(3);
-    n.insertPoints(patch(8, 4, 1, 1e-6, false), upd);           // 4 new bins < min_update 5
-    CHECK(stats->binned_fits.load() == 1);
-    setCurrentFrame(4);
-    n.insertPoints(patch(12, 1, 1, 1e-6, false), upd);          // 5th new bin since the fit
+    n.insertPoints(patch(2, 4, 1, 1e-6, false), upd);           // bins 2..5 (all open): unique since the fit {0,1,2,3,4,5} = 6 >= 5, no bin opened
     CHECK(stats->binned_fits.load() == 2);
+    CHECK(stats->binned_new_bins.load() == 8);
+    CHECK(stats->binned_touched_at_fit.load() == 8 + 6);
+    setCurrentFrame(4);
+    n.insertPoints(patch(8, 4, 1, 1e-6, false), upd);           // 4 new bins < min_update 5
+    CHECK(stats->binned_fits.load() == 2);
+    setCurrentFrame(5);
+    n.insertPoints(patch(12, 1, 1, 1e-6, false), upd);          // the 5th unique bin since the fit
+    CHECK(stats->binned_fits.load() == 3);
+    CHECK(stats->binned_touched_at_fit.load() == 8 + 6 + 5);
+    CHECK(stats->binned_new_bins.load() == 13);
   }
   {   // BN3: bootstrap frame
     auto stats = std::make_shared<VoxelStats>();

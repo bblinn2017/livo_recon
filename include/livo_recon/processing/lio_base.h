@@ -91,6 +91,12 @@ struct LioProcOptions
   // R86B: also write a "pre_imu" state_trace row (the full state and covariance BEFORE the IMU propagation of the scan) for frame indices 1..K.
   // Write-only. 0 (default) writes nothing and is bit-identical. Frame index = voxel_map_->frame_idx_ when estimateState starts, the same value the post_imu row carries.
   int state_trace_pre_imu_frames = 0;
+  // R92: also write pose_cov_trace.csv (the slim per-scan trace: post_lio rotation quaternion, position and the 6 x 6 pose covariance). Write-only; default false writes nothing and is bit-identical.
+  // Independent of eval/state_trace_en, so the sweep can switch the 18 x 18 trace off and keep this one.
+  bool pose_cov_trace_en = false;
+  // R92: with pose_cov_trace_en, rows are written only for scans whose time since the bag start is at most this many seconds (the stationary window of the bag; the run continues after it). Negative (default) = every scan.
+  // A refused sub-option without eval/pose_cov_trace_en (a dead key, rule 3.4).
+  double pose_cov_trace_end_s = -1.0;
 
   // R61: open-loop IMU propagation. "off" (default) = normal operation, bit-identical to before.
   // "propagate_only" skips the LiDAR solve entirely (state and covariance are only propagated by the IMU);
@@ -274,7 +280,7 @@ protected:
   // map, never reset per frame, and is deliberately outside the estimator.
   void ensureStationaryReference(const MeasureGroup& mg);
 
-  // R61. Writes one state_trace.csv row (no-op when eval/state_trace_en is false).
+  // R61. Writes one state_trace.csv row (no-op when eval/state_trace_en is false). R92: for phase post_lio it also writes the pose_cov_trace.csv row when eval/pose_cov_trace_en is true.
   void logStateTrace(const char* phase, const MeasureGroup& mg, int residual_count, int completed_iterations);
   // R61. True when lio/open_loop/mode == propagate_only.
   bool openLoopActive() const { return opts_.open_loop.mode == "propagate_only"; }

@@ -414,6 +414,10 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   paramWarn<int>(pnh, "eval/nees_tier1_window_scans", opts_.nees_tier1_window_scans, 489);
   paramWarn<bool>(pnh, "eval/state_trace_en", opts_.state_trace_en, true);
   paramWarn<std::string>(pnh, "eval/state_trace_run_id", opts_.state_trace_run_id, "run");
+  paramWarn<bool>(pnh, "eval/pose_cov_trace_en", opts_.pose_cov_trace_en, false);   // R92
+  paramWarn<double>(pnh, "eval/pose_cov_trace_end_s", opts_.pose_cov_trace_end_s, -1.0);   // R92
+  if (opts_.pose_cov_trace_end_s >= 0.0 && !opts_.pose_cov_trace_en)
+    throw std::invalid_argument("eval/pose_cov_trace_end_s needs eval/pose_cov_trace_en = true; the key is dead without it");
   paramWarn<int>(pnh, "eval/state_trace_pre_imu_frames", opts_.state_trace_pre_imu_frames, 0);   // R86B: pre_imu rows for frames 1..K (0 = none)
   if (opts_.state_trace_pre_imu_frames < 0) throw std::invalid_argument("eval/state_trace_pre_imu_frames must be >= 0");
   paramWarn<bool>(pnh, "cuda/enable",               cuda_enable_,          false);
@@ -650,6 +654,12 @@ void LioProcBase::logPreImuState(const MeasureGroup& mg)
 void LioProcBase::logStateTrace(const char* phase, const MeasureGroup& mg, int residual_count,
                                 int completed_iterations)
 {
+  if (opts_.pose_cov_trace_en && std::string(phase) == "post_lio")   // R92: slim posterior pose trace, independent of state_trace_en
+  {
+    const double t_abs = mg.image.t + data_queues_->start_time;
+    if (opts_.pose_cov_trace_end_s < 0.0 || !bagStartIsSet() || (t_abs - bagStart()) <= opts_.pose_cov_trace_end_s)
+      writePoseCovTraceRow(opts_.state_trace_run_id, static_cast<int>(voxel_map_->frame_idx_), t_abs, *state_, residual_count, completed_iterations);
+  }
   if (!opts_.state_trace_en) return;
   writeStateTraceRow(opts_.state_trace_run_id, static_cast<int>(voxel_map_->frame_idx_),
                      mg.image.t + data_queues_->start_time, phase, *state_, residual_count, completed_iterations,

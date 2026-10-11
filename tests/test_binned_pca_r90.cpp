@@ -3,8 +3,8 @@
 //   PC1 representatives(): one point per occupied bin (the bin mean), weight k (count) or 1 (uniform), covariance C/k (average) or C/k^2 (shrunk).
 //   PC2 VoxelPlane::update() on the representatives (average + count) equals update() on the raw returns when the returns of a bin are identical in eigenvalues, centre and normal. The plane variance is three times the raw one for bins of
 //       three returns (average = the returns of a bin are fully correlated, so a bin counts as one noise draw with the weight of three); with shrunk + count it equals the raw plane variance (a mean of three independent returns).
-//   PC3 the node counts BINS for min_init / min_update: 12 returns in 4 bins do not fit at min_init 5; 2 more bins do; the raw pca node (binned off) fits the same 12 returns at once.
-//   PC4 returns into bins that are already open do not trigger a refit at min_update 5; five new bins do.
+//   PC3 the node counts unique BINS touched for min_init / min_update (R92): 12 returns in 4 bins do not fit at min_init 5; 2 more bins do; the raw pca node (binned off) fits the same 12 returns at once.
+//   PC4 (R92: touched count) 4 open bins hit twice do not refit at min_update 5; 6 distinct bins touched since the fit do; 4 new bins do not, a 5th does.
 //   PC5 points/max counts occupied bins: with max 6 a voxel of 8 bins locks after its first fit and takes no more fits; with max 50 it keeps fitting.
 //   PC8 (step 2) the older pca-only bin path is gone: VoxelOpts has no use_bins, bin_size_fraction, bin_weight_mode_fit or bin_weight_mode_var member (compile-time check).
 //   PC7 the node passes the configured modes to the fit: the plane covariance of the fitted node differs between count and uniform weight and between average and shrunk covariance.
@@ -150,7 +150,7 @@ int main()
     CHECK(nr.hasConvergedPlane());
     CHECK(stats_raw->binned_points.load() == 0);
   }
-  {   // PC4
+  {   // PC4 (R92: touched count; before R92 this block expected the opened count)
     auto stats = std::make_shared<VoxelStats>();
     setBootstrapInsertion(false);
     setCurrentFrame(1);
@@ -158,15 +158,19 @@ int main()
     n.insertPoints(patch(0, 8, 1, 1e-6), upd);               // 8 bins: fitted
     CHECK(stats->binned_fits.load() == 1);
     setCurrentFrame(2);
-    n.insertPoints(patch(0, 8, 2, 1e-6), upd);               // 16 returns into open bins
+    n.insertPoints(patch(0, 4, 2, 1e-6), upd);               // 8 returns into 4 open bins: 4 unique < 5
     CHECK(stats->binned_fits.load() == 1);
     CHECK(stats->binned_new_bins.load() == 8);
     setCurrentFrame(3);
-    n.insertPoints(patch(8, 4, 1, 1e-6), upd);               // 4 new bins < 5
-    CHECK(stats->binned_fits.load() == 1);
-    setCurrentFrame(4);
-    n.insertPoints(patch(12, 1, 1, 1e-6), upd);              // the 5th new bin
+    n.insertPoints(patch(2, 4, 1, 1e-6), upd);               // bins 2..5 (open): unique since the fit {0..5} = 6 >= 5
     CHECK(stats->binned_fits.load() == 2);
+    CHECK(stats->binned_new_bins.load() == 8);
+    setCurrentFrame(4);
+    n.insertPoints(patch(8, 4, 1, 1e-6), upd);               // 4 new bins < 5
+    CHECK(stats->binned_fits.load() == 2);
+    setCurrentFrame(5);
+    n.insertPoints(patch(12, 1, 1, 1e-6), upd);              // the 5th unique bin since the fit
+    CHECK(stats->binned_fits.load() == 3);
   }
   {   // PC5
     auto s_lock = std::make_shared<VoxelStats>();

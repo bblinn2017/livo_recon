@@ -142,7 +142,7 @@ public:
   const std::map<BinKey, Bin>& bins() const { return bins_; }
 
   // R91: UNIQUE bins that received at least one return since the last markFitted() (or since construction). A bin hit by several scans counts once; a bin opened in this period counts (it received a return).
-  // Before the first fit this equals numBins(). Used by voxel_map/binned/update_count_mode = touched.
+  // Before the first fit this equals numBins(). R92: this is the count min_init / min_update read in a binned map (the only count).
   long long dirtyCount() const { return dirty_; }
   // Called by the owner when a fit has been made: the next period starts with no bin touched.
   void markFitted() { ++fit_epoch_; dirty_ = 0; }

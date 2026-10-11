@@ -63,17 +63,20 @@ inline const std::vector<std::string>& removedKeyTable()
       "lio/time_cov/sigma_s",
       // R85 (F-520 removal): the sample-window covariance (positional spread over sample times) was tested in R84 (216 arms), showed no consistent
       // sign against window 0 and was retired by Bryce (2026-10-08). There is no replacement key.
-      "lio/point_cov/sample_window_s"};
+      "lio/point_cov/sample_window_s",
+      // R92: voxel_map/binned/update_count_mode (R91) selected between the R88 to R90 count (bins newly opened) and the R91 count (unique bins touched since the last fit). The touched count is now the only count; the key is refused.
+      "voxel_map/binned/update_count_mode"};
   return t;
 }
 
-// The release and followup that removed `key` (R74 F-427 for the first eight keys, R82 F-476 / F-403 for the next five, R83 F-401 / F-508 for lio/zupt/*, R84 F-521 for the temporal point-covariance keys, R85 F-520 for lio/point_cov/sample_window_s).
+// The release and followup that removed `key` (R74 F-427 for the first eight keys, R82 F-476 / F-403 for the next five, R83 F-401 / F-508 for lio/zupt/*, R84 F-521 for the temporal point-covariance keys, R85 F-520 for lio/point_cov/sample_window_s, R92 for voxel_map/binned/update_count_mode).
 inline std::string removedKeyOrigin(const std::string& key)
 {
   if (key == "imu/process_noise/gain/nis_lo" || key == "imu/process_noise/gain/deflate") return "R82 (F-476)";
   if (key.rfind("lio/ekf/step_cap/", 0) == 0) return "R82 (F-403)";
   if (key.rfind("lio/zupt/", 0) == 0) return "R83 (F-401, F-508)";
   if (key == "lio/point_cov/sample_window_s") return "R85 (F-520)";
+  if (key == "voxel_map/binned/update_count_mode") return "R92";
   if (key == "lio/point_cov/mode" || key == "lio/point_cov/window_s" || key.rfind("lio/time_cov/", 0) == 0) return "R84 (F-521)";
   return "R74 (F-427)";
 }

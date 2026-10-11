@@ -554,7 +554,7 @@ std::string LioProcIekf::engagementReport() const
       const long long bp = st88 ? st88->binned_points.load() : 0, bb = st88 ? st88->binned_new_bins.load() : 0, bf = st88 ? st88->binned_fits.load() : 0, bt = st88 ? st88->binned_touched_at_fit.load() : 0;
       o << "\n  voxel_map/backend = binned: bin_size_fraction = " << vm->opts()->binned_bin_fraction << " cov_mode = " << (vm->opts()->binned_cov_mode == 1 ? "shrunk" : "average")
         << " weight_mode = " << (vm->opts()->binned_weight_mode == 1 ? "uniform" : "count") << " binned_points=" << bp << " binned_new_bins=" << bb << " binned_fits=" << bf
-        << " update_count_mode = " << (vm->opts()->binned_update_count_mode == 1 ? "touched" : "opened") << " binned_touched_at_fit=" << bt;
+        << " update_count = touched binned_touched_at_fit=" << bt;
       if (bp == 0)
         o << "   <-- INERT: the binned map was selected and no return was put in a bin";
       else if (bf == 0)

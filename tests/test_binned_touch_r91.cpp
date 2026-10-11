@@ -1,13 +1,15 @@
-// R91: min_init / min_update counted as UNIQUE BINS TOUCHED since the last fit (voxel_map/binned/update_count_mode = touched), against the R88 to R90 count of bins newly OPENED (= opened).
+// R91, rewritten in R92: min_init / min_update count UNIQUE BINS TOUCHED since the last fit. R92 removed the R88 to R90 count of bins newly OPENED and the key voxel_map/binned/update_count_mode, so this is the only count.
 // Planner sandbox on synthetic points: NOT evidence about any bag. Identities and rules only (rule 3.1). Links src/lio/voxelnode.cpp and voxelplane.cpp; no ROS.
 //   TB1 BinSet::dirtyCount(): returns into the same bin count once; markFitted() restarts the period; a bin opened in the period counts; numBins() is not touched by markFitted().
 //   TN1 debiased fit, touched: returns into bins that are already open DO count; the same bin hit in two scans counts once (3 unique bins from 5 hits do not reach min_update 4; a 4th unique bin does).
-//   TN2 debiased fit, opened (the default): the same sequence fits only when new bins open.
-//   TN3 pca fit on the binned map: the same two rules.
-//   TN4 binned_touched_at_fit is the sum over fits of the unique bins touched in that period, in both modes.
+//   TN2 (R92) VoxelOpts has no binned_update_count_mode member (compile-time check): the opened count is gone.
+//   TN3 pca fit on the binned map: the same rules as TN1.
+//   TN4 binned_touched_at_fit is the sum over fits of the unique bins touched in that period; binned_new_bins still counts bins opened.
 #include <cmath>
 #include <cstdio>
 #include <memory>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 #include "livo_recon/lio/voxelnode.h"
@@ -17,7 +19,12 @@ using namespace livo_recon;
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++g_fail; } } while (0)
 
-static VoxelOptsPtr makeOpts(const char* fit, int count_mode, int min_init, int min_update)
+// TN2: detector for the removed member (a member that exists makes the static_assert below fail to compile).
+template <class T, class = void> struct HasCountMode : std::false_type {};
+template <class T> struct HasCountMode<T, std::void_t<decltype(std::declval<T&>().binned_update_count_mode)>> : std::true_type {};
+static_assert(!HasCountMode<VoxelOpts>::value, "VoxelOpts::binned_update_count_mode was removed in R92 (touched is the only count)");
+
+static VoxelOptsPtr makeOpts(const char* fit, int min_init, int min_update)
 {
   auto o = std::make_shared<VoxelOpts>();
   o->plane_threshold = 0.01;
@@ -33,7 +40,6 @@ static VoxelOptsPtr makeOpts(const char* fit, int count_mode, int min_init, int 
   o->binned_bin_fraction = 0.2;
   o->binned_cov_mode = 0;
   o->binned_weight_mode = 0;
-  o->binned_update_count_mode = count_mode;
   return o;
 }
 
@@ -58,12 +64,12 @@ static std::vector<PointXYZCov> patch(int first, int n, int reps)
 // The sequence: frame 1: bins 0..3 (4 unique; first fit needs min_init 3).  frame 2: the same 4 bins again.  frame 3: bins 0..1.  frame 4: bins 0..2.  frame 5: bin 4 (new).
 // Fits made after each frame are returned in `fits`, the stats are read at the end.
 struct Run { long long fits[6]; long long touched_at_fit; long long new_bins; };
-static Run run(const char* fit, int count_mode, int min_update)
+static Run run(const char* fit, int min_update)
 {
   auto stats = std::make_shared<VoxelStats>();
   std::vector<PlaneUpdate> upd;
   setBootstrapInsertion(false);
-  VoxelNode n(makeOpts(fit, count_mode, 3, min_update), stats, 0, V3D(0, 0, 0));
+  VoxelNode n(makeOpts(fit, 3, min_update), stats, 0, V3D(0, 0, 0));
   Run r{};
   setCurrentFrame(1); n.insertPoints(patch(0, 4, 1), upd); r.fits[1] = stats->binned_fits.load();
   setCurrentFrame(2); n.insertPoints(patch(0, 4, 2), upd); r.fits[2] = stats->binned_fits.load();
@@ -99,9 +105,9 @@ int main()
   }
   for (int pca = 0; pca < 2; ++pca) {
     const char* fit = pca ? "pca" : "debiased";
-    // min_update 3. touched: frame 1 first fit (4 unique >= min_init 3); frame 2 re-hits 4 bins (4 >= 3) fit; frame 3 hits 2 bins (2 < 3) none; frame 4 hits bins 0..2 -> unique since the fit {0,1,2} = 3 >= 3 fit;
+    // min_update 3. Frame 1 first fit (4 unique >= min_init 3); frame 2 re-hits 4 bins (4 >= 3) fit; frame 3 hits 2 bins (2 < 3) none; frame 4 hits bins 0..2 -> unique since the fit {0,1,2} = 3 >= 3 fit;
     // frame 5 opens bin 4 (1 < 3) none.
-    const Run t = run(fit, 1, 3);
+    const Run t = run(fit, 3);
     CHECK(t.fits[1] == 1);
     CHECK(t.fits[2] == 2);
     CHECK(t.fits[3] == 2);   // 2 unique bins only, however many returns
@@ -110,13 +116,8 @@ int main()
     CHECK(t.touched_at_fit == 4 + 4 + 3);
     // frame 1..5 opened bins: 4 + 0 + 0 + 0 + 1
     CHECK(t.new_bins == 5);
-    // opened: only frame 1 (4 new >= min_init 3) fits; no later frame opens 3 new bins.
-    const Run o = run(fit, 0, 3);
-    CHECK(o.fits[1] == 1 && o.fits[2] == 1 && o.fits[3] == 1 && o.fits[4] == 1 && o.fits[5] == 1);
-    CHECK(o.touched_at_fit == 4);
-    CHECK(o.new_bins == 5);
     // touched with min_update 5 on the same sequence: frame 2 (4) no, frame 3 (still the same 4 unique since the first fit) no, frame 4 no; frame 5 adds bin 4: 5 unique >= 5 fit.
-    const Run t5 = run(fit, 1, 5);
+    const Run t5 = run(fit, 5);
     CHECK(t5.fits[1] == 1 && t5.fits[2] == 1 && t5.fits[3] == 1 && t5.fits[4] == 1);
     CHECK(t5.fits[5] == 2);
     CHECK(t5.touched_at_fit == 4 + 5);

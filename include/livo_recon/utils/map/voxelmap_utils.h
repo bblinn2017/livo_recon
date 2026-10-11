@@ -774,8 +774,7 @@ struct VoxelOpts
   double binned_bin_fraction = 0.2;
   int    binned_cov_mode = 0;
   int    binned_weight_mode = 0;
-  // R91: what min_init / min_update count in a binned map. 0 opened (R88 to R90): bins newly opened since the last fit. 1 touched: UNIQUE bins that received a return since the last fit (a bin hit in several scans counts once; before the first fit = occupied bins).
-  int    binned_update_count_mode = 0;
+  // R92: min_init / min_update in a binned map always count the UNIQUE bins that received a return since the last fit (a bin hit in several scans counts once; before the first fit = occupied bins). The R91 member binned_update_count_mode was removed.
 };
 using VoxelOptsPtr = std::shared_ptr<VoxelOpts>;
 
@@ -987,7 +986,7 @@ struct VoxelStats
   std::atomic<long long> binned_points{0};
   std::atomic<long long> binned_new_bins{0};
   std::atomic<long long> binned_fits{0};
-  std::atomic<long long> binned_touched_at_fit{0};   // R91: sum over binned fits of the unique bins touched since the previous fit (both counter modes record it)
+  std::atomic<long long> binned_touched_at_fit{0};   // R91: sum over binned fits of the unique bins touched since the previous fit (R92: touched is the only count)
 
   int total() const { return open + converged + disabled; }
 

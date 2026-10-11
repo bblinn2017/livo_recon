@@ -54,6 +54,35 @@ void writeStateTraceRow(const std::string& run_id, int scan_id, double t_abs, co
   out.flush();
 }
 
+void writePoseCovTraceRow(const std::string& run_id, int scan_id, double t_abs, const StateGroup& s, int residual_count, int completed_iterations)
+{
+  static PersistentLogStream log("pose_cov_trace.csv");
+  bool first = false;
+  std::ofstream& out = log.stream(&first);
+  if (first) {
+    out << "run_id,scan_id,t_abs,t_rel_s,qw,qx,qy,qz,px,py,pz,residual_count,completed_iterations";
+    for (int i = 0; i < 6; ++i)
+      for (int j = i; j < 6; ++j) out << ",C_" << i << '_' << j;
+    out << '\n';
+  }
+  const Eigen::MatrixXd& P = s.cov();
+  const Eigen::Quaterniond q(s.rot());
+  const int iR = StateGroup::idxR(), iP = StateGroup::idxP();
+  // Precision (size budget of the nine-bag sweep): t_abs 15 significant digits (a stamp near 1.6e9 s to 10 us), quaternion and position 12, covariance entries 9.
+  out << std::setprecision(15) << run_id << ',' << scan_id << ',' << t_abs << ',' << tRelString(t_abs) << ',' << std::setprecision(12)
+      << q.w() << ',' << q.x() << ',' << q.y() << ',' << q.z() << ','
+      << s.pos().x() << ',' << s.pos().y() << ',' << s.pos().z() << ',' << residual_count << ',' << completed_iterations << std::setprecision(9);
+  // pose index a (0..5) -> state index: 0-2 rotation, 3-5 position
+  auto st = [&](int a) { return a < 3 ? iR + a : iP + (a - 3); };
+  for (int i = 0; i < 6; ++i)
+    for (int j = i; j < 6; ++j) {
+      out << ',';
+      if (st(i) < P.rows() && st(j) < P.cols()) out << P(st(i), st(j));
+    }
+  out << '\n';
+  out.flush();
+}
+
 void writeImuCovGrowthRow(size_t scan_index, double t_abs, const Eigen::MatrixXd& P_start,
                           const Eigen::MatrixXd& P_end, const Eigen::MatrixXd& Q_acc)
 {

@@ -121,7 +121,6 @@ add_executable(livo_recon_node
   src/diagnostics/log/debug_log_dir.cpp
   src/diagnostics/log/consistency_log.cpp
   src/diagnostics/eval/nees_logger.cpp
-  src/diagnostics/gt_interp.cpp
   src/diagnostics/stationary_diagnostic_writer.cpp
   src/diagnostics/state_trace.cpp
   src/diagnostics/calibration_p0_writer.cpp
@@ -375,7 +374,7 @@ add_test(NAME residual_binning_r91f COMMAND test_residual_binning_r91f)
 
 # R72 (planning agent's patch; R82: step cap F-403 retired): Q-adaptation alternatives (F-401), failure dump round trip (F-398).
 # ROS-free header-only modules, Eigen only.
-foreach(r72_test q_adapt failure_capture symmetrize renamed_keys shadow_options bag_clock row_flush plane_test_values line_residual line_residual_r75 line_residual_r76 process_noise_switch)
+foreach(r72_test q_adapt symmetrize renamed_keys shadow_options bag_clock plane_test_values line_residual line_residual_r75 line_residual_r76 process_noise_switch)
   add_executable(test_${r72_test} tests/test_${r72_test}.cpp)
   target_include_directories(test_${r72_test} PUBLIC include ${EIGEN3_INCLUDE_DIRS})
   target_link_libraries(test_${r72_test} Eigen3::Eigen)
@@ -417,7 +416,13 @@ target_include_directories(test_binned_pca_r90 PUBLIC include ${EIGEN3_INCLUDE_D
 target_link_libraries(test_binned_pca_r90 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
 add_test(NAME binned_pca_r90 COMMAND test_binned_pca_r90)
 
-# R91: min_init / min_update counted as unique bins touched since the last fit (update_count_mode = touched) against bins newly opened (same source set as test_binned_pca_r90).
+# R92: the slim posterior pose trace writer (state_lib supplies StateGroup).
+add_executable(test_pose_cov_trace_r92 tests/test_pose_cov_trace_r92.cpp src/diagnostics/state_trace.cpp src/diagnostics/log/debug_log_dir.cpp)
+target_include_directories(test_pose_cov_trace_r92 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+target_link_libraries(test_pose_cov_trace_r92 state_lib ${catkin_LIBRARIES})
+add_test(NAME pose_cov_trace_r92 COMMAND test_pose_cov_trace_r92)
+
+# R91, rewritten in R92: min_init / min_update counted as unique bins touched since the last fit (the only count; the opened mode was removed) (same source set as test_binned_pca_r90).
 add_executable(test_binned_touch_r91 tests/test_binned_touch_r91.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
 target_include_directories(test_binned_touch_r91 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
 target_link_libraries(test_binned_touch_r91 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
