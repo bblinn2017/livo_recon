@@ -21,6 +21,8 @@ Dockerfile
 launch_container.sh
 docker/
 
-# Local datasets and experiment outputs
-data/
-results/
+# Local datasets and experiment outputs (repo-root only -- a leading slash keeps this from
+# also matching a nested directory that happens to share the name, e.g.
+# include/livo_recon/utils/data/, which is real tracked source, not a local dataset)
+/data/
+/results/
