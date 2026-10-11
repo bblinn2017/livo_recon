@@ -109,7 +109,7 @@ struct Residual
   double sigma_diag_squared = -1.0;
   double s_prior_pose       = -1.0;
   // R80 (F-449a / gate puzzle): the variance the admission test used, floor_term + sigma_gate_diag_squared + plane_var_term (the gate's diag part includes the pose covariance when
-  // the estimator passes include_state_uncertainty_in_gate, which is the default); sigma_squared above is what the WEIGHT uses (no pose covariance unless pose_cov_in_sigma). -1 = not set. Write-only.
+  // the estimator passes lio/gate_state_uncertainty, which is true by default); sigma_squared above is what the WEIGHT uses (never the pose covariance). -1 = not set. Write-only.
   double sigma_gate_squared = -1.0;
 
   // Which tier of VoxelMap::findPlaneResidual()'s fallback matched this
@@ -161,9 +161,8 @@ struct WorldPointCov
   M3D sensor_cov;
   M3D pose_cov;
 
-  // Estimator-local, gate-only override.  When true, pose_cov contributes
-  // to correspondence admission even if the legacy global
-  // voxel_map/residual/pose_cov_in_sigma switch is false.  It must never be
+  // Estimator-local, gate-only switch (lio/gate_state_uncertainty).  When true, pose_cov contributes
+  // to correspondence admission.  It must never be
   // copied into Residual::sigma_squared: the state prior already appears in
   // the information solve and adding it to the solve weight would count it
   // twice.
@@ -324,20 +323,8 @@ struct VoxelOpts
   double sigma_num_squared         = 9.0;
   double max_radius                = 3.0;
 
-  // true -- VoxelPlane::gate()'s sigma_diag_squared includes pose_cov (the
-  // point's own deskew-transform uncertainty, itself derived from the
-  // state's prior covariance) alongside sensor_cov, despite that being a
-  // double-count against solveSystem's own P_before^-1 prior term.
-  // Originally kept true because excluding it regressed badly in isolation
-  // (pre-info_gain/pre-var_acc-based-time_based_process_noise), acting as
-  // necessary damping. false (now the default) -- exclude pose_cov from
-  // sigma_diag_squared entirely (gate() still uses sensor_cov only); confirmed on
-  // eee_01 (90s, clean/fair harness, imu/undistort/time_based_process_noise
-  // ="var_acc") to further improve ATE 0.090m -> 0.078m on top of the
-  // var_acc-based noise-floor fix, which now supplies the damping this
-  // double-count was standing in for, without inheriting the collapse
-  // risk of using pose_cov to do it.
-  bool pose_cov_in_sigma           = false;
+  // R93A (Bryce 2026-10-10): voxel_map/residual/pose_cov_in_sigma is removed (it was false in every job). The residual weight sigma_squared never contains the pose covariance; the
+  // admission gate may (lio/gate_state_uncertainty, an estimator option, per-point WorldPointCov::include_pose_cov_in_gate).
 
   // R65 (F-169). Write-only: one row per map insertion in point_cov_stats.csv (frame, n_points, mean/min/max of
   // trace(pos_cov) over the inserted points). Off by default; no effect on the estimator.
@@ -484,8 +471,7 @@ struct VoxelOpts
   // mode until this is characterized by a real comparative sweep.
   std::string plane_fit_mode        = "pca";
 
-  // History (348-361): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-348
-  std::string plane_fit_pose_cov_mode = "sensor_only";
+  // R93A (Bryce 2026-10-10): plane_fit_pose_cov_mode is removed. Every fit uses the sensor covariance only (the former sensor_only); pos_cov stays on a point for plane_var_mode = information and diagnostics.
 
   // R64. How the debiased fit applies the sensor-noise correction (only read when plane_fit_mode == "debiased").
   // "full" (default, bit-identical to R63): subtract the accumulated sensor covariance from the whole 3x3
@@ -498,10 +484,7 @@ struct VoxelOpts
   // R64. Multiplier on plane_threshold applied only when a debiased voxel that WAS a plane is refit (1.0 = off,
   // bit-identical). > 1 makes an existing plane harder to revoke than a new one is to create.
   double plane_threshold_hysteresis = 1.0;
-  // R65 (F-159). Debiased path only, eigengap variance only: true (default, R64 behaviour) rejects a fit whose eigengap
-  // denominators are within max(1e-8, 0.1*plane_threshold) of zero; false disables that rejection (the finiteness and
-  // ceiling guards remain).
-  bool debias_denominator_guard = true;
+  // R93A: debias_denominator_guard is removed; the one gap floor (below) replaces it.
   // R64. Plane-fit diagnostics (write-only, default off). plane_fit_reasons_en: per-frame counts of fit outcomes by
   // reason for both fit paths -> plane_fit_reasons.csv. plane_fit_trace_frames > 0: one row per fit attempt for
   // frames 0..plane_fit_trace_frames (frame 0 = bootstrap window) -> plane_fit_trace.csv, at most
@@ -517,8 +500,8 @@ struct VoxelOpts
   //
   // "eigengap" is the incumbent: differentiate the fitted eigenVECTOR with
   // respect to each point, which introduces 1/(lambda0 - lambda_m) and is
-  // why plane_var_denom_floor_en, the debiased denom guard and the
-  // kPlaneVarCeiling reject all exist.  It blows up when the plane is
+  // why the gap floor and the
+  // kPlaneVarCeiling reject exist.  It blows up when the plane is
   // nearly isotropic -- i.e. when it is barely a plane -- rather than when
   // the plane is badly SAMPLED, which is the quantity a residual weight
   // actually wants.
@@ -548,7 +531,7 @@ struct VoxelOpts
   // TRANSITIONAL.  Both modes exist only so the incumbent is a
   // representable control (standing rule 10b, the lesson of weight_floor's
   // missing "legacy").  When INT-1/D-1 decide, the loser is deleted along
-  // with plane_var_denom_floor_en and sensor_noise_floor_eig0.
+  // with sensor_noise_floor_eig0.
   std::string plane_var_mode = "eigengap";
 
   // R90: the pca-only bin path (use_bins, bin_size_fraction, bin_weight_mode_fit/_var) is removed; binning is the binned map type (voxel_map/backend = binned) for both plane fits. The old keys are refused at start-up.
@@ -688,8 +671,7 @@ struct VoxelOpts
 
   // History (479-507, removal): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-487-removed
 
-  // History (550-554): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-550
-  bool plane_var_denom_floor_en = false;
+  // R93A: plane_var_denom_floor_en is removed (it was false in every job).
 
   // History (557-567): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-557
   int shuffle_insertion_seed = 0;
@@ -737,23 +719,18 @@ struct VoxelOpts
   std::string line_rows = "per_normal";
   bool line_rows_distance = false;   // resolved once at load from line_rows
 
-  // R82 (D4, F-500, Bryce 2026-10-06). Line model at FIT time, in both fits.
-  //   line_classify_at_fit (bool, key voxel_map/plane/line_residual/classify_at_fit, read with line_residual/enabled = true, form hard only; default false = bit-identical to R81): both fits (pca update(), debiased refitDebiased())
-  //     decide reject / plane / line ONCE, right after the eigenvalues are final, with the one function classifyVoxel (include/livo_recon/lio/voxel_class.h), and store the class (VoxelPlane::isLine()). Changes against R81 when on:
-  //     (1) a voxel with e1 < 1e-8 <= e2 is a perfect line and is kept (R81 rejected it in both fits); e2 < 1e-8 still rejects.
-  //     (2) the debiased fit no longer rejects e0 >= e1 after the sensor floor: e0 is set equal to e1 (the order the pca fit always has).
-  //     (3) the debiased eigengap-denominator guard is not applied; the gaps are floored by plane_gap_floor_en (REQUIRED with plane_var_mode = eigengap, in both fits).
+  // R82 (D4, F-500, Bryce 2026-10-06), unconditional since R93A (the key voxel_map/plane/line_residual/classify_at_fit is removed). Line model at FIT time, in both fits.
+  //   Both fits (pca update(), debiased refitDebiased()) decide reject / plane / line ONCE, right after the eigenvalues are final, with the one function classifyVoxel (include/livo_recon/lio/voxel_class.h), and store the class (VoxelPlane::isLine()):
+  //     (1) with the hard line form a voxel with e1 < 1e-8 <= e2 is a perfect line and is kept; e2 < 1e-8 rejects (with any other line setting e1 < 1e-8 also rejects, as before).
+  //     (2) after the sensor floor, e0 >= e1 is not a reject: e0 is set equal to e1 (the order the pca fit always had).
+  //     (3) the gaps are floored by the one gap floor (below), in both fits.
   //   debiased_line_equiv (off | mean_cov | moment): the plane_equivalent line variance on the debiased fit (the tilt matrices computeLineTilt builds from points on the pca path). moment = exact, from the debiased fit's own moment accumulators
   //     (include/livo_recon/lio/line_tilt_moments.h); mean_cov = the mean-covariance approximation. line_residual/variance = plane_equivalent with plane_fit_mode = debiased REQUIRES one of the two (refused with off).
-  bool line_classify_at_fit = false;
   std::string debiased_line_equiv = "off";
   int debiased_line_form = 0;   // 0 off, 1 mean_cov, 2 moment; resolved once at load
 
-  // R77 (F-433): floor the eigenvalue gaps |e0-e1| and |e0-e2| of the eigengap plane variance at the sensor noise variance (weight_sigma_r2), keeping the plane.
-  // R82 (Bryce 2026-10-06): ONE gap floor for every voxel in BOTH fits. On the debiased fit it replaces the eigengap-denominator guard (that fit rejected a plane whose gap was below max(1e-8, 0.1 plane_threshold)); the floor keeps the sign of the eigenvalue order.
-  // Default false is bit-identical to R81. Read with plane_fit_mode = pca or debiased and plane_var_mode = eigengap; refused together with plane_var_denom_floor_en
-  // (that flag rejects planes whose gap is below 2.5e-4, which a 4e-4 floor would make unreachable).
-  bool plane_gap_floor_en = false;
+  // R77 (F-433), unconditional since R93A (the key voxel_map/plane/plane_gap_floor_en and the debiased eigengap-denominator guard are removed): the eigenvalue gaps |e0-e1| and |e0-e2| of the eigengap plane variance are floored at the sensor noise
+  // variance (weight_sigma_r2, = imu/sensor/range_err^2), keeping the plane and the sign of the eigenvalue order, in BOTH fits. Needs range_err > 0 with plane_var_mode = eigengap (refused otherwise). Not applied under the information models.
 
   // R81 (F-468, F-485 Part 3): plane variance term of the weight AND the gate (VoxelPlane::gate(); res.sigma_squared adds the same value). Both default 0.0 = off: the branch is skipped, bit-identical to R80.
   //   plane_var_scan_s2 (>= 0, finite): plane_var_term += s2 / max(1, distinct frames of the voxel as of its last fit). Applied first.

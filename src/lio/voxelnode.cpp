@@ -227,7 +227,7 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       for (std::size_t i = 0; i < reps.p.size(); ++i) {
         bin_reps[i].point = reps.p[i];
         bin_reps[i].sensor_cov = reps.cov[i];
-        bin_reps[i].pos_cov = M3D::Zero();   // the binned map keeps the sensor covariance only (plane_fit_pose_cov_mode = sensor_only is required)
+        bin_reps[i].pos_cov = M3D::Zero();   // the binned map keeps the sensor covariance only (every fit uses the sensor covariance only)
       }
       plane_.update(bin_reps, static_cast<int>(binset_->numBins()), &reps.w, nullptr, &reps.w, g_current_frame_idx, layer_);
       stats_->binned_fits.fetch_add(1, std::memory_order_relaxed);

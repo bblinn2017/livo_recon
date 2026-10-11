@@ -7,7 +7,7 @@
 // Frame: whatever frame the caller feeds points in (the live backend feeds WORLD points). Every angle/offset test is
 // sign invariant (eigenvector signs are arbitrary).
 //
-// Pose covariance is NOT part of this layer (plane_fit_pose_cov_mode = sensor_only): the covariance accumulators use
+// Pose covariance is NOT part of this layer (every fit uses the sensor covariance only): the covariance accumulators use
 // the per-point SENSOR covariance only.
 //
 // Update model (dirty set): addPoint() marks the touched cell dirty; update() refits only dirty cells, recomputes the

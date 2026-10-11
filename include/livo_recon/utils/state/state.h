@@ -171,23 +171,7 @@ public:
   // own (R,P) covariance block, itself PSD).
   M3D poseCovAt(const V3D& p_body) const;
 
-  // R65 (F-169). Per-point pose covariance used for the residual gate (for_insertion = false: the state's own (R,P) block) and for
-  // map insertion (for_insertion = true: the state's block, or with pointCovInsertionPrior() the frame's PRIOR (R,P) block).
-  // With the defaults (posterior) the result is bit-identical to poseCovAt(p_body). R83B: the time-dependent terms (R65 propagated,
-  // R83 window accumulation) were removed on Bryce's instruction (2026-10-07).
-  M3D poseCovAtPoint(const V3D& p_body, bool for_insertion) const;
-  void setPointCovInsertionPrior(bool insertion_prior) { point_cov_insertion_prior_ = insertion_prior; }
-  bool pointCovInsertionPrior() const { return point_cov_insertion_prior_; }
-  // Frame's prior (R,P) 6x6 block, captured where prior_cov_ is fixed for the frame.
-  void setPriorPoseBlock(const Eigen::MatrixXd& prior_cov)
-  {
-    if (prior_cov.rows() >= idxR() + 6 && prior_cov.cols() >= idxR() + 6) {
-      prior_pose_block_ = prior_cov.block<6, 6>(idxR(), idxR());
-      prior_pose_block_valid_ = true;
-    } else {
-      prior_pose_block_valid_ = false;
-    }
-  }
+  // R93A (Bryce 2026-10-10): poseCovAtPoint, setPointCovInsertionPrior and setPriorPoseBlock (R65 F-169, the `prior` insertion source) are removed; the gate and map insertion both use poseCovAt().
 
   PointXYZCov toCamera(const PointXYZCov& pt_body) const;
   V3D lidarToImu(const V3D& p)  const { return R_li_ * p + t_li_; }
@@ -238,10 +222,6 @@ private:
   M3D rot_;
   V3D pos_, vel_, bias_gyr_, bias_acc_, gravity_;
   Eigen::MatrixXd cov_;   // dimState() × dimState()
-  // R65 (F-169) per-point pose covariance model
-  bool point_cov_insertion_prior_ = false;
-  Eigen::Matrix<double, 6, 6> prior_pose_block_ = Eigen::Matrix<double, 6, 6>::Zero();
-  bool prior_pose_block_valid_ = false;
   V3D var_acc_, var_gyr_, cov_bias_gyr_, cov_bias_acc_;
   double q_gain_acc_ = 1.0, q_gain_gyr_ = 1.0;   // R72 (F-401), see setQGain()
   V3D var_acc_floor_ = V3D::Zero(), var_gyr_floor_ = V3D::Zero();

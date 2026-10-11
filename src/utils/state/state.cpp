@@ -152,27 +152,6 @@ M3D StateGroup::poseCovAt(const V3D& p_body) const
        - JRP - JRP.transpose();
 }
 
-namespace
-{
-// J*P*J^T for a point at body offset p_body, from explicit (R,P) blocks; identical algebra to StateGroup::poseCovAt.
-M3D poseCovFromBlocks(const M3D& rot, const V3D& p_body, const M3D& P_RR, const M3D& P_PP, const M3D& P_RP)
-{
-  M3D p_skew;
-  p_skew << SKEW_SYM_MATRX(p_body);
-  const M3D Rp  = rot * p_skew;
-  const M3D JRP = Rp * P_RP;
-  return -rot * p_skew * P_RR * p_skew * rot.transpose() + P_PP - JRP - JRP.transpose();
-}
-}  // namespace
-
-M3D StateGroup::poseCovAtPoint(const V3D& p_body, bool for_insertion) const
-{
-  if (for_insertion && point_cov_insertion_prior_ && prior_pose_block_valid_)
-    return poseCovFromBlocks(rot_, p_body, prior_pose_block_.block<3,3>(0,0), prior_pose_block_.block<3,3>(3,3),
-                             prior_pose_block_.block<3,3>(0,3));
-  return poseCovAt(p_body);   // bit-identical default path
-}
-
 PointXYZCov StateGroup::toCamera(const PointXYZCov& pt_body) const
 {
   return {

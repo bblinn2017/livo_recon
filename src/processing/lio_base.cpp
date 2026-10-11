@@ -550,14 +550,10 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   cfg.nested<double>(opts_.open_loop.mode == "propagate_only", "lio/open_loop/mode=propagate_only",
                      "lio/open_loop/reset_period_s", opts_.open_loop.reset_period_s, 0.0);
 
-  // R65 (F-169): lio/point_cov/insertion_source=prior makes map insertion use the frame's prior (R,P) block, the same basis the
-  // residual gate sees; posterior (default) = R64. The time-dependent point-covariance terms (lio/point_cov/mode=propagated, R65;
-  // lio/point_cov/window_s, R83; lio/time_cov/*, R82) were removed on Bryce's instruction (2026-10-07) and are refused.
-  {
-    std::string pc_ins;
-    cfg.mode("lio/point_cov/insertion_source", pc_ins, "posterior", { "posterior", "prior" });
-    state_->setPointCovInsertionPrior(pc_ins == "prior");
-  }
+  // R93A (Bryce 2026-10-10): lio/point_cov/insertion_source is removed (the posterior block is the only insertion source; `prior` is gone) and refused if set. The time-dependent point-covariance terms
+  // (lio/point_cov/mode, lio/point_cov/window_s, lio/time_cov/*) were removed on 2026-10-07 and are refused too.
+  // lio/gate_state_uncertainty (default true): whether the admission gate adds the point's pose covariance (see LioProcOptions::gate_state_uncertainty).
+  cfg.get<bool>("lio/gate_state_uncertainty", opts_.gate_state_uncertainty, true);
 
   // R65 (F-128): measurement-noise inflation for the first N LIO scans (see LioProcOptions::bootstrap_inflate_scans).
   cfg.get<int>("lio/bootstrap_inflate/scans", opts_.bootstrap_inflate_scans, 0);
@@ -697,8 +693,8 @@ void LioProcBase::buildResiduals(
   const std::vector<PointXYZCov>& pts,
   std::vector<Residual>& residuals,
   bool allow_consistency_log,
-  bool include_state_uncertainty_in_gate,
   const std::vector<M3D>* pose_cov_overrides) const {
+  const bool include_state_uncertainty_in_gate = opts_.gate_state_uncertainty;   // R93A: was an argument (always true); now lio/gate_state_uncertainty
   // Single-threaded, before the OMP region starts below -- see
   // VoxelMap::setAllowConsistencyLog()'s doc comment.
   if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get()))
@@ -743,7 +739,7 @@ void LioProcBase::buildResiduals(
         if (pose_cov_overrides && i < static_cast<int>(pose_cov_overrides->size()))
           pose_cov = (*pose_cov_overrides)[i];
         else
-          pose_cov = state_->poseCovAtPoint(pts[i].point, false);   // R65: default path == poseCovAt
+          pose_cov = state_->poseCovAt(pts[i].point);
       }
       WorldPointCov pt_world{sensor_world.point, sensor_world.sensor_cov, pose_cov};
       pt_world.include_pose_cov_in_gate = include_state_uncertainty_in_gate;

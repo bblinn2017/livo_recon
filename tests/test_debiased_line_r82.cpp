@@ -1,13 +1,13 @@
 // R82 (D4, F-500): integration test of the fit-time line classification (both fits), the one gap floor and the debiased plane-equivalent line variance, driving VoxelPlane directly (links
 // src/lio/voxelplane.cpp only; the sandbox build stubs opencv2/opencv.hpp). Planner sandbox on synthetic points: NOT evidence about any bag. Identities and refusals only (rule 3.1).
-//   DL1 classify off: a thin line cloud is rejected by the debiased fit (denominator guard), no R82 counter moves, isLine() is false (the default path is the R81 path).
-//   DL2 classify on + gap floor, debiased: the same cloud is kept and isLine(); line_classified, line_accepted and gaps_floored each +1; a plane cloud is untouched (bit identical eigenvalues, isLine false).
+//   (R93A: fit-time classification and the gap floor are unconditional; `classify off` is now `line rule off`, and the debiased eigengap-denominator guard no longer exists.)
+//   DL1 line rule off: a thin line cloud is KEPT as a plane by the debiased fit (the guard is gone), isLine() is false, no line counter moves, gaps_floored +1.
+//   DL2 hard line rule, debiased: the same cloud is kept and isLine(); line_classified, line_accepted and gaps_floored each +1; a plane cloud is untouched (bit identical eigenvalues to the line-rule-off fit, isLine false).
 //   DL3 plane_equivalent line variance on the debiased fit, form moment, equals the pca path's computeLineTilt output for the same points: rows 0 and 1 and the distance-row form agree to 1e-3 relative.
 //   DL4 form mean_cov equals form moment when every point covariance is equal (to 1e-8), and differs from it when they are not.
 //   DL5 a plane cloud has no tilt matrices on the debiased fit.
-//   DL6 gap floor alone (classify off), debiased: the guard is not applied, the line cloud is kept as a PLANE (isLine false), gaps_floored +1.
-//   DL7 pca fit with classify on: the line cloud isLine(), line_classified +1; off: isLine false; a plane cloud is never a line.
-//   DL8 a perfectly thin line (e1 < 1e-8 <= e2): pca fit classify off rejects it, classify on keeps it as a line and e1_tiny_kept +1.
+//   DL7 pca fit with the hard line rule: the line cloud isLine(), line_classified +1; rule off: isLine false; a plane cloud is never a line.
+//   DL8 a perfectly thin line (e1 < 1e-8 <= e2): pca fit with the line rule off rejects it, with the hard rule keeps it as a line and e1_tiny_kept +1.
 #include <cmath>
 #include <cstdio>
 #include <memory>
@@ -40,19 +40,16 @@ static std::vector<PointXYZCov> cloud(std::mt19937& rng, double sx, double sy, d
   return v;
 }
 
-static VoxelOptsPtr makeOpts(bool debiased, bool classify, int form, bool plane_equiv, bool gap_floor_alone = false)
+static VoxelOptsPtr makeOpts(bool debiased, bool hard, int form, bool plane_equiv)
 {
   auto o = std::make_shared<VoxelOpts>();
   o->plane_threshold = 0.01;
   o->plane_fit_mode = debiased ? "debiased" : "pca";
   o->plane_var_mode = "eigengap";
-  o->plane_fit_pose_cov_mode = "sensor_only";
   o->weight_sigma_r2 = 4e-4;
-  o->line_enabled = true;
-  o->line_residual_enum = static_cast<int>(LineMode::HardAbsolute);
+  o->line_enabled = hard;
+  o->line_residual_enum = static_cast<int>(hard ? LineMode::HardAbsolute : LineMode::Off);
   o->line_var_plane_equivalent = plane_equiv;
-  o->line_classify_at_fit = classify;
-  o->plane_gap_floor_en = classify || gap_floor_alone;
   o->debiased_line_form = form;
   o->debiased_line_equiv = form == 2 ? "moment" : (form == 1 ? "mean_cov" : "off");
   return o;
@@ -68,16 +65,16 @@ int main()
   const auto plane = cloud(rng, 0.004, 0.5, 0.5, 1e-9, true);
   const V3D d(0.05, -0.1, 0.3);
 
-  // DL1: classify off
+  // DL1: line rule off -- the thin line cloud is kept as a plane
   {
     const VoxelPlaneR82Counters c0 = voxelPlaneR82Counters();
     VoxelPlane vp(makeOpts(true, false, 0, false));
     vp.addPoints(line, -1, 1, true, 0);
-    CHECK(!vp.isPlane() && !vp.isLine());
+    CHECK(vp.isPlane() && !vp.isLine());
     const VoxelPlaneR82Counters c1 = voxelPlaneR82Counters();
-    CHECK(c1.line_classified == c0.line_classified && c1.gaps_floored == c0.gaps_floored && c1.line_accepted == c0.line_accepted);
+    CHECK(c1.line_classified == c0.line_classified && c1.line_accepted == c0.line_accepted && c1.gaps_floored == c0.gaps_floored + 1);
   }
-  // DL2: classify on (with the gap floor, as the config requires)
+  // DL2: hard line rule
   {
     const VoxelPlaneR82Counters c0 = voxelPlaneR82Counters();
     VoxelPlane vp(makeOpts(true, true, 0, false));
@@ -89,13 +86,13 @@ int main()
     vq.addPoints(plane, -1, 1, true, 0); vr.addPoints(plane, -1, 1, true, 0);
     const VoxelPlaneR82Counters c2 = voxelPlaneR82Counters();
     CHECK(vq.isPlane() == vr.isPlane() && !vq.isLine() && c2.line_classified == c1.line_classified);
-    CHECK((vq.eigenValues() - vr.eigenValues()).norm() == 0.0);   // a plane cloud: bit identical with and without the key
+    CHECK((vq.eigenValues() - vr.eigenValues()).norm() == 0.0);   // a plane cloud: bit identical with the line rule on and off
   }
-  // DL3: moment form on the debiased fit == pca computeLineTilt (same points, same covariances)
+  // DL3: moment form
   {
     VoxelPlane deb(makeOpts(true, true, 2, true));
     deb.addPoints(line, -1, 1, true, 0);
-    VoxelPlane pca(makeOpts(false, false, 0, true));
+    VoxelPlane pca(makeOpts(false, true, 0, true));
     pca.update(line);
     CHECK(deb.isPlane() && pca.isPlane());
     for (int row = 0; row < 2; ++row)
@@ -128,14 +125,6 @@ int main()
     vp.addPoints(plane, -1, 1, true, 0);
     bool ok = true; tiltVar(vp, 0, d, ok);
     CHECK(vp.isPlane() && !ok);
-  }
-  // DL6: gap floor alone
-  {
-    const VoxelPlaneR82Counters c0 = voxelPlaneR82Counters();
-    VoxelPlane vp(makeOpts(true, false, 0, false, true));
-    vp.addPoints(line, -1, 1, true, 0);
-    const VoxelPlaneR82Counters c1 = voxelPlaneR82Counters();
-    CHECK(vp.isPlane() && !vp.isLine() && c1.gaps_floored == c0.gaps_floored + 1);
   }
   // DL7: pca fit
   {

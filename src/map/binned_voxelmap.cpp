@@ -30,8 +30,6 @@ std::string BinnedVoxelMap::loadParameters(ros::NodeHandle& pnh)
     throw std::runtime_error("[config] refused: voxel_map/binned/weight_mode=" + weight + " -- must be count or uniform");
   if (o.plane_fit_mode != "debiased" && o.plane_fit_mode != "pca")
     throw std::runtime_error("[config] refused: voxel_map/backend=binned needs voxel_map/plane/plane_fit_mode=debiased or pca (R90: with pca the occupied bins are fitted as one weighted point each)");
-  if (o.plane_fit_pose_cov_mode != "sensor_only")
-    throw std::runtime_error("[config] refused: voxel_map/backend=binned needs voxel_map/plane/plane_fit_pose_cov_mode=sensor_only (bins keep the sensor covariance only)");
 
   o.binned_enabled = true;
   o.binned_bin_fraction = fraction;

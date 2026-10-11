@@ -7,7 +7,7 @@
 //   bin_size_fraction  (default 0.2)       bin edge = fraction x the node's own edge, 0 < fraction <= 1
 //   cov_mode           average | shrunk    covariance carried by a bin's representative point (C / k, or C / k^2)
 //   weight_mode        count | uniform     weight of a bin in the fit sums (k, or 1)
-// Required of the rest of the config (refused otherwise, at start-up): plane_fit_mode = debiased or pca (R90), plane_fit_pose_cov_mode = sensor_only. (The older pca-only bin path, voxel_map/plane/use_bins, is removed in R90 and its keys are refused.)
+// Required of the rest of the config (refused otherwise, at start-up): plane_fit_mode = debiased or pca (R90). (The older pca-only bin path, voxel_map/plane/use_bins, is removed in R90 and its keys are refused.)
 // R90: with plane_fit_mode = pca the occupied bins are fitted by VoxelPlane::update() as one point per bin (the bin mean) with the weight and covariance of weight_mode / cov_mode; points/max then counts occupied bins.
 // voxel_map/points/min_init and min_update count BINS in this map type (min_init: occupied bins before the first fit; min_update: bins opened since the last fit), with the same bootstrap exemption as the default map.
 #include "livo_recon/map/voxelmap.h"

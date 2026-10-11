@@ -20,7 +20,7 @@ namespace livo_recon
 // otherwise against the cell's own plane; on a miss the single directional neighbour cell (the cell the point leans
 // toward, same rule as VoxelMap's tier 1) is tried the same way. There is no tier-2 box search.
 // The gate and the variance terms are VoxelPlane::gate()/computeResidual() for plane_gate_mode=disc,
-// weight_floor/mode=sensor_range, pose_cov_in_sigma as configured; occupancy/visibility/plane-confidence machinery is
+// weight_floor/mode=sensor_range, the pose covariance in the gate only (lio/gate_state_uncertainty); occupancy/visibility/plane-confidence machinery is
 // NOT part of this backend (vis_state stays -1).
 class SurfaceMap : public MapBackend
 {
@@ -51,7 +51,6 @@ private:
     // residual side (shared voxel_map/residual/* keys)
     double sigma_num_squared = 9.0;
     double max_radius = 3.0;
-    bool pose_cov_in_sigma = false;
     double weight_sigma_r2 = 0.0025;   // imu/sensor/range_err^2, the sensor_range weight floor
     // diagnostics
     bool frame_log_en = true;

@@ -91,7 +91,6 @@ std::shared_ptr<VoxelOpts> mkOpts()
   o->min_init_points = 5;
   o->min_update_points = 5;
   o->weight_sigma_r2 = 4e-4;
-  o->plane_fit_pose_cov_mode = "sensor_only";
   return o;   // plane_var_min = plane_var_scan_s2 = 0.0 (the defaults)
 }
 

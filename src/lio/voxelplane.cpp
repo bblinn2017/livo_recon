@@ -45,6 +45,16 @@ template <class O> LineOptions fitLineOptions(const O& o)
   return lo;
 }
 // R82 (D4, F-500): engagement of the fit-time line classification / equivalence (see VoxelPlaneR82Counters).
+// R93A: engagement of lio/gate_state_uncertainty. rows: gate-variance evaluations (plane rows and line rows); pose_rows: of those, rows whose gate variance included the pose covariance;
+// pose_var_nm2: sum over pose_rows of n^T pose_cov n, in 1e-9 m^2 units (an integer so the sum is a lock-free atomic).
+std::atomic<long> g_r93_gate_rows{0}, g_r93_gate_pose_rows{0}, g_r93_gate_pose_var_nm2{0};
+inline void noteGatePose(bool in_gate, double pose_var)
+{
+  g_r93_gate_rows.fetch_add(1, std::memory_order_relaxed);
+  if (!in_gate) return;
+  g_r93_gate_pose_rows.fetch_add(1, std::memory_order_relaxed);
+  if (std::isfinite(pose_var) && pose_var > 0.0) g_r93_gate_pose_var_nm2.fetch_add(static_cast<long>(pose_var * 1e9), std::memory_order_relaxed);
+}
 std::atomic<long> g_r82_line_classified{0}, g_r82_line_accepted{0}, g_r82_e1_tiny{0}, g_r82_e0_clamped{0}, g_r82_gaps_floored{0}, g_r82_tilt_moment{0}, g_r82_tilt_meancov{0};
 // Engagement counter for the information plane model.  A run configured with
 // plane_var_mode = "information" that never increments this built no plane
@@ -74,6 +84,7 @@ void updateMaxPlaneCovarianceTrace(double trace)
 }
 // ---- R64: plane-fit outcome accounting (diagnostics only; nothing here feeds back into a fit) -------------------
 // Fit-level reason codes (per fit attempt) and VoxelNode-level events share one counter array.
+// R93A: kRFloorReject (4) and kRDenom (7) are no longer produced (the sensor-floor reject and the eigengap-denominator guard are removed); the codes and CSV columns stay so plane_fit_reasons.csv keeps its schema.
 enum FitReason { kRAccept = 0, kRNLt3 = 1, kRSolverFail = 2, kREig12Small = 3, kRFloorReject = 4, kRNonFinite = 5,
                  kRThreshold = 6, kRDenom = 7, kRCeiling = 8, kRInfoReject = 9 };
 constexpr int kNCounters = 24;
@@ -671,6 +682,14 @@ void voxelPlaneFrameStatsRead(int& denom_rejected_count, double& max_plane_var_t
 
 PlaneVarDiagSnapshot voxelPlaneVarDiagSnapshot() { return g_r82_pvdiag.snapshot(); }   // R82 (D2)
 
+VoxelPlaneR93Counters voxelPlaneR93Counters()
+{
+  VoxelPlaneR93Counters c;
+  c.gate_rows = g_r93_gate_rows.load(std::memory_order_relaxed);
+  c.gate_pose_rows = g_r93_gate_pose_rows.load(std::memory_order_relaxed);
+  c.gate_pose_var_sum = 1e-9 * static_cast<double>(g_r93_gate_pose_var_nm2.load(std::memory_order_relaxed));
+  return c;
+}
 VoxelPlaneR82Counters voxelPlaneR82Counters()
 {
   VoxelPlaneR82Counters c;
@@ -789,26 +808,17 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
   J_nq(0, 1) = d_center.dot(x_normal_);
   J_nq(0, 2) = 1.0;
 
-  // sigma_diag_squared: sensor + (optionally) pose VARIANCE. See
-  // VoxelOpts::pose_cov_in_sigma's docs for the double-counting tradeoff
-  // this toggles.
-  // Preserve the legacy global option's historical behavior: when it is
-  // enabled, pose covariance appears in both admission and the returned
-  // sigma_diag_squared used by the residual weight.  In contrast, the
-  // coupled estimator's gating_state_uncertainty override is gate-only: it
-  // widens admission but must not enter Residual::sigma_squared and double
-  // count the fixed prior already present in the information solve.
-  sigma_diag_squared = pointPlaneGateMeasurementVariance(
-      n, sensor_cov, pose_cov, opts_->pose_cov_in_sigma);
+  // R93A: sigma_diag_squared (the residual WEIGHT's measurement variance) is the sensor variance only, always. The admission gate adds the point's pose variance when
+  // lio/gate_state_uncertainty is on (include_pose_cov_in_gate): it widens admission but never enters Residual::sigma_squared, since the state prior is already in the information solve.
+  sigma_diag_squared = pointPlaneGateMeasurementVariance(n, sensor_cov, pose_cov, false);
   if (!std::isfinite(sigma_diag_squared) || sigma_diag_squared <= 0.0) return false;
   if (sigma_diag_squared < 1e-6) sigma_diag_squared = 1e-6;
 
-  double sigma_gate_diag_squared = pointPlaneGateMeasurementVariance(
-      n, sensor_cov, pose_cov,
-      opts_->pose_cov_in_sigma || include_pose_cov_in_gate);
+  double sigma_gate_diag_squared = pointPlaneGateMeasurementVariance(n, sensor_cov, pose_cov, include_pose_cov_in_gate);
   if (!std::isfinite(sigma_gate_diag_squared) || sigma_gate_diag_squared <= 0.0)
     return false;
   if (sigma_gate_diag_squared < 1e-6) sigma_gate_diag_squared = 1e-6;
+  noteGatePose(include_pose_cov_in_gate, include_pose_cov_in_gate ? n.dot(pose_cov * n) : 0.0);
 
   plane_var_term = (J_nq * plane_var_ * J_nq.transpose()).value();
   // R81 (F-468, F-485 Part 3): scan term first, then the clamp (see lio/plane_var_r81.h). Both keys default to 0.0: this block is then skipped and plane_var_term is untouched, bit for bit.
@@ -1135,10 +1145,11 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
           if (lineDistanceTiltVar(c0, c1, s_ax, t)) fit += t;
           else g_r77_tilt_fallbacks.fetch_add(1, std::memory_order_relaxed);
         }
-        double sd = pointPlaneGateMeasurementVariance(q, pt.sensor_cov, pt.pose_cov, opts_->pose_cov_in_sigma);
-        const bool pose_in_gate = opts_->pose_cov_in_sigma || pt.include_pose_cov_in_gate;
+        double sd = pointPlaneGateMeasurementVariance(q, pt.sensor_cov, pt.pose_cov, false);
+        const bool pose_in_gate = pt.include_pose_cov_in_gate;
         double sg = pointPlaneGateMeasurementVariance(q, pt.sensor_cov, pt.pose_cov, pose_in_gate);
         if (std::isfinite(sd) && sd > 0.0 && std::isfinite(sg) && sg > 0.0) {
+          noteGatePose(pose_in_gate, pose_in_gate ? q.dot(pt.pose_cov * q) : 0.0);
           if (sd < 1e-6) sd = 1e-6;
           if (sg < 1e-6) sg = 1e-6;
           if (rd * rd <= opts_->sigma_num_squared * (floor_term + sg + fit)) {   // gated like the u1 row of the two-row form
@@ -1181,14 +1192,15 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
         res.floor_term = 0.0;
         res.sigma_squared = sigma_diag_squared;
       }
-      const bool pose_in_gate = opts_->pose_cov_in_sigma || pt.include_pose_cov_in_gate;
+      const bool pose_in_gate = pt.include_pose_cov_in_gate;
       for (int k = 1; k < nr; ++k) {
-        double sd = pointPlaneGateMeasurementVariance(rows[k].normal, pt.sensor_cov, pt.pose_cov, opts_->pose_cov_in_sigma);
+        double sd = pointPlaneGateMeasurementVariance(rows[k].normal, pt.sensor_cov, pt.pose_cov, false);
         if (!std::isfinite(sd) || sd <= 0.0) continue;
         if (sd < 1e-6) sd = 1e-6;
         if (!smooth) {   // hard line: the u1 row is gated like the plane row (sigma_num), with its own variance
           double sg = pointPlaneGateMeasurementVariance(rows[k].normal, pt.sensor_cov, pt.pose_cov, pose_in_gate);
           if (!std::isfinite(sg) || sg <= 0.0) continue;
+          noteGatePose(pose_in_gate, pose_in_gate ? rows[k].normal.dot(pt.pose_cov * rows[k].normal) : 0.0);
           if (sg < 1e-6) sg = 1e-6;
           if (!(rows[k].r * rows[k].r <= opts_->sigma_num_squared * (floor_term + sg + rows[k].fit_var))) continue;
         }
@@ -1265,7 +1277,7 @@ void VoxelPlane::computeLineTilt(const std::vector<PointXYZCov>& points, const s
   lo.shape_ratio = opts_->line_shape_ratio;
   lo.sensor_noise_var = opts_->weight_sigma_r2;
   const bool smooth = (lo.mode == LineMode::Smooth);
-  if (!smooth && !(opts_->line_classify_at_fit ? is_line_ : isLineVoxel(lo, eigen_values_(0), eigen_values_(1), points_size_, eigen_values_(2)))) return;   // R82: with classify_at_fit the class was decided at fit time
+  if (!smooth && !is_line_) return;   // R93A: the class was decided at fit time
   const int rows = smooth ? 3 : 2;
   const int N = static_cast<int>(points.size());
   if (N < 1) return;
@@ -1290,13 +1302,12 @@ void VoxelPlane::computeLineTilt(const std::vector<PointXYZCov>& points, const s
     gap_a[i] = flooredGap(i, ia[i], smooth);   // hard rows do not use axis a: not counted
     gap_b[i] = flooredGap(i, ib[i], true);
   }
-  const bool sensor_only = (opts_->plane_fit_pose_cov_mode == "sensor_only");
   for (int k = 0; k < N; ++k) {
     const auto& pt = points[k];
     const double w = use_var_weights ? ((*var_weights)[k] / var_weight_sum) : inv_N;
     const V3D z = pt.point - plane_.center;
     const double zz[3] = {u[0].dot(z), u[1].dot(z), u[2].dot(z)};
-    const M3D C = sensor_only ? pt.sensor_cov : M3D(pt.sensor_cov + pt.pos_cov);
+    const M3D C = pt.sensor_cov;   // R93A: sensor covariance only
     V3D gbv[2] = {V3D::Zero(), V3D::Zero()}, gdv[2] = {V3D::Zero(), V3D::Zero()};   // R80: the two hard rows' coefficient vectors, for their cross-covariance
     for (int i = 0; i < rows; ++i) {
       const int a = ia[i], b = ib[i];
@@ -1363,7 +1374,7 @@ void VoxelPlane::computeLineTiltDebiased(int form)
   lo.shape_ratio = opts_->line_shape_ratio;
   lo.sensor_noise_var = opts_->weight_sigma_r2;
   const bool smooth = (lo.mode == LineMode::Smooth);
-  if (!smooth && !(opts_->line_classify_at_fit ? is_line_ : isLineVoxel(lo, eigen_values_(0), eigen_values_(1), points_size_, eigen_values_(2)))) return;   // R82: with classify_at_fit the class was decided at fit time
+  if (!smooth && !is_line_) return;   // R93A: the class was decided at fit time
   const double N = N_acc_;
   if (!(N >= 1.0)) return;
   const V3D u[3] = {plane_.normal, y_normal_, x_normal_};
@@ -1471,8 +1482,9 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   eigen_values_ = solver.eigenvalues();
   const M3D evecs = solver.eigenvectors();
 
-  // R82 (D4): with classify_at_fit only a cluster with no direction (e2 < 1e-8) is degenerate; a voxel with e1 < 1e-8 <= e2 is a perfect line and is classified below. Off: the R81 test, bit for bit.
-  if (opts_->line_classify_at_fit ? (eigen_values_(2) < 1e-8) : (eigen_values_(1) < 1e-8 || eigen_values_(2) < 1e-8))
+  // R93A: reject / plane / line is decided once, below, by classifyVoxel. Here only a cluster with no direction (e2 < 1e-8) is degenerate; with the hard line form a voxel with e1 < 1e-8 <= e2 is a perfect line and is kept,
+  // with any other line setting classifyVoxel rejects it (e1 < 1e-8) as before.
+  if (eigen_values_(2) < 1e-8)
   { pcaTrace(kREig12Small, eigen_values_, eigen_values_(0)); return; }
 
   if (opts_->sensor_noise_floor_eig0) {
@@ -1503,8 +1515,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
     // than risk denom1=eigen_values_(0)-eigen_values_(1) collapsing to
     // ~zero in the plane_var_ Jacobian below.
     if (eigen_values_(0) >= eigen_values_(1)) {
-      if (!opts_->line_classify_at_fit) { pcaTrace(kRFloorReject, eigen_values_, eigen_values_(0)); return; }
-      eigen_values_(0) = eigen_values_(1);   // R82 (D4): keep the eigenvalue order (a line's e1 sits at the noise floor by definition)
+      eigen_values_(0) = eigen_values_(1);   // R82 (D4), unconditional since R93A: keep the eigenvalue order (a line's e1 sits at the noise floor by definition)
       g_r82_e0_clamped.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -1517,10 +1528,10 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   // map of usable planes and driving a 2.16m full-run ATE divergence
   // FAST-LIVO2 doesn't share; removing it (alone) cut that to 0.093m.
   is_plane_ = eigen_values_(0) < opts_->plane_threshold;
-  pcaTrace(is_plane_ ? kRAccept : kRThreshold, eigen_values_, eigen_values_(0));
-  if (!is_plane_) return;
-  if (opts_->line_classify_at_fit) {   // R82 (D4): reject / plane / line decided once, here, from the final eigenvalues
+  if (!is_plane_) { pcaTrace(kRThreshold, eigen_values_, eigen_values_(0)); return; }
+  {   // R82 (D4), unconditional since R93A: reject / plane / line decided once, here, from the final eigenvalues
     const VoxelClassResult cr = classifyVoxel(fitLineOptions(*opts_), eigen_values_(0), eigen_values_(1), eigen_values_(2), points_size_, opts_->plane_threshold);
+    if (cr.cls == VoxelClass::Reject) { is_plane_ = false; pcaTrace(kREig12Small, eigen_values_, eigen_values_(0)); return; }   // only a non-hard line setting with e1 < 1e-8 reaches this (as in R81)
     is_line_ = (cr.cls == VoxelClass::Line);
     if (is_line_) {
       g_r82_line_classified.fetch_add(1, std::memory_order_relaxed);
@@ -1528,6 +1539,7 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
       if (cr.e1_tiny_kept) g_r82_e1_tiny.fetch_add(1, std::memory_order_relaxed);
     }
   }
+  pcaTrace(kRAccept, eigen_values_, eigen_values_(0));
 
   // NOTE: no denom1/denom2 near-degenerate-eigengap guard here, unlike
   // refitDebiased() below -- tried applying the same guard to this PCA
@@ -1543,8 +1555,8 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
   double denom1 = eigen_values_(0) - eigen_values_(1);
   double denom2 = eigen_values_(0) - eigen_values_(2);
   // R77 (F-433): keep the plane, floor the eigenvalue gaps at the sensor noise variance. e0 is the smallest eigenvalue, so both gaps are <= 0 and the floored value is -floor.
-  // Default off (plane_gap_floor_en false): denom1 / denom2 are exactly what they were, bit for bit. The information path below never divides by them.
-  if (opts_->plane_gap_floor_en) {
+  // R93A: unconditional (the former plane_gap_floor_en = true). The information path below never divides by them, so the floor is not applied (nor counted) there.
+  if (opts_->plane_var_mode != "information" && opts_->plane_var_mode != "information_directional") {
     const double fl = opts_->weight_sigma_r2;
     const bool f1 = std::fabs(denom1) < fl, f2 = std::fabs(denom2) < fl;
     if (f1) denom1 = -fl;
@@ -1662,42 +1674,13 @@ void VoxelPlane::update(const std::vector<PointXYZCov>& points, int total_count,
     Jmin.row(1) = row_theta2;
     Jmin.row(2) = row_d;
 
-    // "combined" (default, unchanged behavior): full sensor+pose noise
-    // budget, same spirit as always. "sensor_only" (new ablation, see
-    // VoxelOpts::plane_fit_pose_cov_mode's docs): excludes pos_cov from
-    // this fit-uncertainty propagation entirely, testing the same
-    // exclusion idea already validated for gate()'s sigma_diag_squared
-    // (pose_cov_in_sigma=false) but applied to plane_var_ instead -- a
-    // DIFFERENT quantity, unconditionally combined here regardless of
-    // pose_cov_in_sigma. Unlike refitDebiased()'s fit-BIAS correction
-    // (which must not naively combine sensor+pose, see that function),
-    // this term is a residual-weighting VARIANCE, where combining is
-    // always at least conservative -- "sensor_only" is a genuine
-    // ablation, not a correctness fix.
-    const M3D residual_cov = (opts_->plane_fit_pose_cov_mode == "sensor_only")
-        ? pt.sensor_cov : M3D(pt.sensor_cov + pt.pos_cov);
+    // R93A: the fit uncertainty is propagated with the SENSOR covariance only (the former plane_fit_pose_cov_mode = sensor_only; `combined` is removed).
+    const M3D residual_cov = pt.sensor_cov;
     plane_var_.noalias() += Jmin * residual_cov * Jmin.transpose();
   }
 
   plane_var_ = symmetrized(plane_var_);   // R74 F-419: the sum of J C J^T terms is symmetric only up to rounding
   last_fit_j_ = use_weights ? N : 0;
-
-  // T1: refitDebiased() rejects a fit whose eigengap denominators are within
-  // eps of zero; this path had no such guard and would divide plane_var_ by
-  // an arbitrarily small denom1. Same eps, same counter, same rejection --
-  // so that the two arms are finally doing the same thing here. Off by
-  // default (see the NOTE above -- this measurably changes PCA's own output
-  // when on, which is the whole point of it being an ablatable switch now
-  // instead of a permanent behavior change).
-  if (opts_->plane_var_denom_floor_en) {
-    const double eps_denom = std::max(1e-8, 0.1 * opts_->plane_threshold);
-    if (std::fabs(denom1) < eps_denom || std::fabs(denom2) < eps_denom) {
-      is_plane_ = false;
-      plane_var_.setZero();
-      g_denom_rejected_count.fetch_add(1, std::memory_order_relaxed);
-      return;
-    }
-  }
 
   }  // end eigengap branch
 
@@ -1738,8 +1721,7 @@ void VoxelPlane::addPoints(const std::vector<PointXYZCov>& points, int total_cou
   for (const auto& pt : points) {
     const V3D& p = pt.point;
     // History (734-755): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-734
-    const M3D combined_cov = (opts_->plane_fit_pose_cov_mode == "sensor_only")
-        ? pt.sensor_cov : M3D(pt.sensor_cov + pt.pos_cov);
+    const M3D combined_cov = pt.sensor_cov;   // R93A: sensor covariance only (plane_fit_pose_cov_mode = combined is removed); Scov_ differs from Scov_sensor_ only by the frame-0 bootstrap points
     N_acc_ += 1.0;
     // CQ-56: accumulate relative to ref_ (this voxel's first-ever point)
     // instead of raw world p when centred_accumulation is on -- see
@@ -1873,24 +1855,13 @@ void VoxelPlane::refitDebiased()
   // docs/debiased_voxel_plane_fit_2026aug24.md. covariance_ is reused here
   // (same field PCA mode fills) purely for getVizInfo()/diagnostics parity.
   //
-  // Sensor noise (independent per point) is subtracted in full, every
-  // time -- Scov_sensor_/N. Pose noise (Scov_ - Scov_sensor_, SHARED
-  // across every point within one frame, not independent) is subtracted
-  // with a (F-1)/F shrinkage factor, F = distinct_frames_: a shared
-  // per-frame shift cancels out of a SINGLE frame's own scatter entirely
-  // (subtracting it in full there is a pure over-correction -- confirmed
-  // numerically, drives eig0 negative), and only becomes a genuine
-  // between-frame variance contribution as more independent frames
-  // accumulate (F=1 -> 0 correction, F->inf -> full correction). See the
-  // doc file's "single-frame over-subtraction" section for the derivation
-  // and numeric verification.
-  const M3D Scov_pose = Scov_ - Scov_sensor_;
-  const double pose_shrink = (distinct_frames_ > 1)
-      ? (distinct_frames_ - 1.0) / distinct_frames_ : 0.0;
+  // R93A (Bryce 2026-10-10): only the sensor noise (independent per point) is subtracted, Scov_sensor_/N, in full, every time. The former second term, (F-1)/F * (Scov_ - Scov_sensor_)/N, is removed:
+  // with plane_fit_pose_cov_mode = combined gone, Scov_ is also a sum of sensor covariances, so the difference was only the frame-0 bootstrap points' sensor covariance (they enter Scov_ but not
+  // Scov_sensor_, see addPoints()), not a pose covariance.
   // CQ-56: mean_rel (not mean) here -- Spp_/N - mean_rel*mean_rel^T is the
   // scatter term, and it must be computed in the SAME basis Spp_/Sp_ were
   // accumulated in (raw world when centred_accumulation is off, (p-ref_)
-  // when on) for the two to cancel correctly. Scov_sensor_/Scov_pose are
+  // when on) for the two to cancel correctly. Scov_sensor_ is
   // independent of point position entirely (pure per-point/per-frame
   // covariance sums), so they're unaffected by centring either way.
   // R64: raw (uncorrected) scatter, kept for the debias_mode variants and the fit diagnostics. In "full" mode
@@ -1899,7 +1870,7 @@ void VoxelPlane::refitDebiased()
   const M3D sens_mean_cov = Scov_sensor_ / N;
   if (opts_->debias_mode == "full") {
     covariance_ = Spp_ / N - mean_rel * mean_rel.transpose()
-                - Scov_sensor_ / N - pose_shrink * (Scov_pose / N);
+                - Scov_sensor_ / N;
   } else {
     covariance_ = raw_cov;   // "lambda0_only" and "none": normal and lambda1/lambda2 come from the raw scatter
   }
@@ -1919,9 +1890,8 @@ void VoxelPlane::refitDebiased()
   eigen_values_ = solver.eigenvalues();
   const M3D evecs = solver.eigenvectors();
 
-  // R82 (D4, F-500): with classify_at_fit only a cluster with no direction (e2 < 1e-8) is degenerate here (same rule as the pca fit); the class itself is decided below, from the final eigenvalues. Off: the R81 test, bit for bit.
-  const bool cls_fit = opts_->line_classify_at_fit;
-  if (cls_fit ? (eigen_values_(2) < 1e-8) : (eigen_values_(1) < 1e-8 || eigen_values_(2) < 1e-8)) {
+  // R93A (was R82 D4 classify_at_fit, now unconditional): only a cluster with no direction (e2 < 1e-8) is degenerate here (same rule as the pca fit); the class itself is decided below, from the final eigenvalues.
+  if (eigen_values_(2) < 1e-8) {
     dbgTrace(kREig12Small, eigen_values_, eigen_values_(0), opts_->plane_threshold);
     return;
   }
@@ -1945,8 +1915,7 @@ void VoxelPlane::refitDebiased()
     }
     eigen_values_(0) = std::max(eigen_values_(0), sensor_floor);
     if (eigen_values_(0) >= eigen_values_(1)) {
-      if (!cls_fit) { dbgTrace(kRFloorReject, eigen_values_, eigen_values_(0), opts_->plane_threshold); return; }
-      eigen_values_(0) = eigen_values_(1);   // R82 (D4): keep the eigenvalue order the pca fit always has (a line's e1 sits at the noise floor by definition)
+      eigen_values_(0) = eigen_values_(1);   // R82 (D4), unconditional since R93A: keep the eigenvalue order the pca fit always has (a line's e1 sits at the noise floor by definition)
       g_r82_e0_clamped.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -1960,8 +1929,9 @@ void VoxelPlane::refitDebiased()
   const double threshold_eff = opts_->plane_threshold * (was_plane_before ? opts_->plane_threshold_hysteresis : 1.0);
   is_plane_ = eigen_values_(0) < threshold_eff;
   if (!is_plane_) { dbgTrace(kRThreshold, eigen_values_, eigen_values_(0), threshold_eff); return; }
-  if (cls_fit) {   // R82 (D4): reject / plane / line decided once, here, from the final eigenvalues (same function as the pca fit)
+  {   // R82 (D4), unconditional since R93A: reject / plane / line decided once, here, from the final eigenvalues (same function as the pca fit)
     const VoxelClassResult cr = classifyVoxel(fitLineOptions(*opts_), eigen_values_(0), eigen_values_(1), eigen_values_(2), points_size_, threshold_eff);
+    if (cr.cls == VoxelClass::Reject) { is_plane_ = false; dbgTrace(kREig12Small, eigen_values_, eigen_values_(0), threshold_eff); return; }   // only a non-hard line setting with e1 < 1e-8 reaches this (as in R81)
     is_line_ = (cr.cls == VoxelClass::Line);
     if (is_line_) {
       g_r82_line_classified.fetch_add(1, std::memory_order_relaxed);
@@ -1971,26 +1941,12 @@ void VoxelPlane::refitDebiased()
 
   double denom1 = eigen_values_(0) - eigen_values_(1);
   double denom2 = eigen_values_(0) - eigen_values_(2);
-  // Near-degenerate-eigengap guard, debiased-mode-only (see update()'s
-  // comment on why this was NOT kept for PCA mode -- it measurably changed
-  // PCA's own output there, unlike here where it's the confirmed fix for
-  // the plane_var_ blowup (traces of 13.998/18.541 seen for a 9-point
-  // debiased fit at eig0~2.3e-7): debiasing shrinks eig0 (and often
-  // eig1/eig2 together, since the same noise floor gets subtracted from
-  // all three), making a small denom1/denom2 far more common than in
-  // plain PCA.
   const bool info_mode = (opts_->plane_var_mode == "information" ||
                           opts_->plane_var_mode == "information_directional");
-  const double eps_denom = std::max(1e-8, 0.1 * opts_->plane_threshold);
-  // Under the information model there is no eigengap denominator to guard:
-  // plane_var_ is assembled directly in the (theta1, theta2, d) chart and
-  // never divides by lambda0 - lambda_m.  This guard, plane_var_denom_floor_en
-  // and kPlaneVarCeiling below are all artefacts of the incumbent form.
-  // R82 (Bryce 2026-10-06): ONE gap floor for every voxel in both fits. With plane_gap_floor_en the guard below is not applied and the two gaps are floored at the sensor noise variance (weight_sigma_r2), keeping the sign
-  // of the eigenvalue order (the pca fit's rule, F-433), so plane_var_ never divides by a near-zero gap. Off: the R81 guard, bit for bit.
-  const bool gap_floor = !info_mode && opts_->plane_gap_floor_en;
-  bool denom_rejected = !info_mode && !gap_floor && opts_->debias_denominator_guard &&   // R65: key debias_denominator_guard (default true)
-      (std::fabs(denom1) < eps_denom || std::fabs(denom2) < eps_denom);
+  // Under the information model there is no eigengap denominator: plane_var_ is assembled directly in the (theta1, theta2, d) chart and never divides by lambda0 - lambda_m.
+  // R93A (was R82, Bryce 2026-10-06; the eigengap-denominator guard and the plane_gap_floor_en switch are removed): ONE gap floor for every voxel in both fits. The two gaps are floored at the sensor noise variance (weight_sigma_r2),
+  // keeping the sign of the eigenvalue order (the pca fit's rule, F-433), so plane_var_ never divides by a near-zero gap. kPlaneVarCeiling below stays.
+  const bool gap_floor = !info_mode;
   if (gap_floor) {
     const double fl = opts_->weight_sigma_r2;
     bool floored = false;
@@ -2003,16 +1959,9 @@ void VoxelPlane::refitDebiased()
     dbg << "[debiased_denom] N=" << N << " F=" << distinct_frames_
         << " eig0=" << eigen_values_(0) << " eig1=" << eigen_values_(1)
         << " eig2=" << eigen_values_(2) << " denom1=" << denom1 << " denom2=" << denom2
-        << " eps=" << eps_denom << " rejected=" << (denom_rejected ? 1 : 0);
+        << " gap_floor=" << (gap_floor ? 1 : 0);
     debugLogNoiseFloor(dbg.str());
   }
-  if (denom_rejected) {
-    is_plane_ = false;
-    g_denom_rejected_count.fetch_add(1, std::memory_order_relaxed);
-    dbgTrace(kRDenom, eigen_values_, eigen_values_(0), threshold_eff);
-    return;
-  }
-
   plane_.normal = evecs.col(0).normalized();
   y_normal_     = evecs.col(1);
   x_normal_     = evecs.col(2);

@@ -53,7 +53,6 @@ VoxelOptsPtr makeOpts(bool eigs_en, int trace_frames)
 {
   auto o = std::make_shared<VoxelOpts>();
   o->plane_fit_mode = "pca";
-  o->plane_fit_pose_cov_mode = "sensor_only";
   o->debias_mode = "none";
   o->plane_threshold = 0.01;
   o->plane_fit_eigs_en = eigs_en;

@@ -26,7 +26,6 @@ static VoxelOptsPtr makeOpts(bool binned, int cov_mode, int weight_mode, int min
   o->plane_threshold = 0.01;
   o->plane_fit_mode = "debiased";
   o->plane_var_mode = "eigengap";
-  o->plane_fit_pose_cov_mode = "sensor_only";
   o->weight_sigma_r2 = 4e-4;
   o->min_init_points = min_init;
   o->min_update_points = min_update;

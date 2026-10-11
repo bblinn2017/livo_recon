@@ -1,5 +1,5 @@
 // R77 unit test (F-453, F-433): the tilt term of the line / smooth row variance (VoxelOpts::line_variance = plane_equivalent) and the eigengap floor of the plane variance
-// (VoxelOpts::plane_gap_floor_en). Planning agent's test, NOT built or run by me. Same private-access pattern as test_line_residual_glue.cpp. No random numbers.
+// (always on since R93A: floor = weight_sigma_r2). Planning agent's test, NOT built or run by me. Same private-access pattern as test_line_residual_glue.cpp. No random numbers.
 //
 //   BOX fixture   : 17 x 3 grid, x in [-0.4, 0.4] step 0.05, y in {-0.03, 0, 0.03}, a tiny deterministic z wiggle (amplitude 2e-5, no symmetry): three well separated eigenvalues
 //                   e2 ~ 0.05, e1 ~ 6e-4 (< plane_threshold 2.5e-3: a LINE under hard/absolute), e0 ~ 4e-10, so every tilt gap is large and a central finite difference of the
@@ -7,7 +7,7 @@
 //   ELLIPSE       : the R74 line fixture (80 points on a thin ellipse, e1 / e0 = 1.21, e0 - e1 = -1.05e-7): a near-degenerate eigengap on purpose.
 //   GRID          : the R74 plane fixture (9 x 9 grid, e0 tiny, e1 = e2 = 0.0667): every gap far above any floor.
 //   V0  preconditions (the fixtures give the planes and eigenvalue orders the other checks rely on).
-//   V1  defaults (line_var_plane_equivalent false, plane_gap_floor_en false): no tilt matrix is made, no R77 counter moves, plane_var_ is what update() gave.
+//   V1  defaults (line_var_plane_equivalent false): no tilt matrix is made, no tilt counter moves (the gap-fit counter moves with every eigengap fit since R93A), plane_var_ is what update() gave.
 //   V2  hard rows, finite-difference check: for rows 0 and 1, lineTiltVar(row, d, hard) equals Var(delta_r_i) for l = (0, u2.d, 1), with Var(delta_r_i) computed
 //       INDEPENDENTLY by central finite differences of delta_r_i = la*theta_ia + lb*theta_ib - u_i.dc (dc = the fit centre's own shift under the same point
 //       perturbation), propagated with the same per-point covariance (relative 1e-3). R81 (F-482): updated to F-453's formula, which adds the centre-shift/offset
@@ -98,7 +98,7 @@ std::vector<PointXYZCov> gridFixture()
   return v;
 }
 
-std::shared_ptr<VoxelOpts> mkOpts(const std::string& mode, bool plane_equivalent, bool gap_floor, double sigma_r2)
+std::shared_ptr<VoxelOpts> mkOpts(const std::string& mode, bool plane_equivalent, double sigma_r2)
 {
   auto o = std::make_shared<VoxelOpts>();
   o->max_points = 1000;
@@ -115,8 +115,7 @@ std::shared_ptr<VoxelOpts> mkOpts(const std::string& mode, bool plane_equivalent
   o->line_residual_enum = static_cast<int>(lm);
   o->line_variance = plane_equivalent ? "plane_equivalent" : "fit_only";
   o->line_var_plane_equivalent = o->line_enabled && plane_equivalent;
-  o->plane_gap_floor_en = gap_floor;
-  o->plane_fit_pose_cov_mode = "sensor_only";   // the production default; the finite differences below use the SAME covariance
+  // R93A: the gap floor is always on (floor = sigma_r2; 1e-12 makes it inert for these fixtures) and every fit uses the sensor covariance only, which the finite differences below use as well
   return o;
 }
 
@@ -196,25 +195,25 @@ int main()
 
   // ---- V0 -------------------------------------------------------------------------------------------------------------------------------------
   {
-    auto p = fit(mkOpts("hard", false, false, 1e-12), box);
+    auto p = fit(mkOpts("hard", false, 1e-12), box);
     const V3D e = p->eigen_values_;
     CHECK(p->isPlane() && e(0) < e(1) && e(1) < e(2) && e(1) < p->opts_->plane_threshold, "V0 box fixture: a plane with e0 < e1 < e2 and e1 < plane_threshold (a line under hard/absolute)");
     CHECK(e(1) - e(0) > 1e-4 && e(2) - e(1) > 1e-2, "V0 box fixture: all eigenvalue gaps are large (e1 - e0 > 1e-4, e2 - e1 > 1e-2)");
-    auto q = fit(mkOpts("hard", false, false, 1e-12), ell);
+    auto q = fit(mkOpts("hard", false, 1e-12), ell);
     CHECK(q->isPlane() && std::abs(q->eigen_values_(0) - q->eigen_values_(1)) < 2e-7, "V0 ellipse fixture: a plane with |e0 - e1| < 2e-7 (near-degenerate)");
-    auto g = fit(mkOpts("hard", false, false, 1e-12), grd);
+    auto g = fit(mkOpts("hard", false, 1e-12), grd);
     CHECK(g->isPlane() && g->eigen_values_(1) - g->eigen_values_(0) > 1e-2, "V0 grid fixture: a plane with a large e1 - e0");
   }
 
   // ---- V1 defaults ----------------------------------------------------------------------------------------------------------------------------
   {
     const VoxelPlaneR77Counters c0 = voxelPlaneR77Counters();
-    auto p = fit(mkOpts("hard", false, false, 4e-4), box);
-    auto q = fit(mkOpts("off", false, false, 4e-4), ell);
+    auto p = fit(mkOpts("hard", false, 4e-4), box);
+    auto q = fit(mkOpts("off", false, 4e-4), ell);
     const VoxelPlaneR77Counters c1 = voxelPlaneR77Counters();
     CHECK(!p->line_tilt_valid_[0] && !p->line_tilt_valid_[1] && !p->line_tilt_valid_[2], "V1 defaults: no tilt matrix is made (fit_only)");
-    CHECK(c1.gap_fits == c0.gap_fits && c1.tilt_voxels == c0.tilt_voxels && c1.tilt_floored_axes == c0.tilt_floored_axes && c1.tilt_fallbacks == c0.tilt_fallbacks,
-          "V1 defaults: no R77 counter moved");
+    CHECK(c1.tilt_voxels == c0.tilt_voxels && c1.tilt_floored_axes == c0.tilt_floored_axes && c1.tilt_fallbacks == c0.tilt_fallbacks,
+          "V1 defaults: no tilt counter moved");
     double t = -1.0;
     CHECK(!p->lineTiltVar(0, V3D(0.01, 0.0, 0.0), false, t) && t == -1.0, "V1 defaults: lineTiltVar reports no matrix and leaves the output untouched");
     CHECK(std::isfinite(q->plane_var_(0, 0)), "V1 defaults: plane_var_ finite on the ellipse (not exact tie)");
@@ -222,7 +221,7 @@ int main()
 
   // ---- V2 hard rows against finite differences -----------------------------------------------------------------------------------------------
   {
-    auto p = fit(mkOpts("hard", true, false, 1e-12), box);
+    auto p = fit(mkOpts("hard", true, 1e-12), box);
     CHECK(p->line_tilt_valid_[0] && p->line_tilt_valid_[1] && !p->line_tilt_valid_[2], "V2 hard: tilt matrices for rows 0 and 1 only");
     const V3D u[3] = {p->plane_.normal, p->y_normal_, p->x_normal_};
     const V3D d = 0.17 * u[2] + 0.004 * u[1] + 0.001 * u[0];
@@ -240,7 +239,7 @@ int main()
 
   // ---- V3 smooth rows against finite differences ---------------------------------------------------------------------------------------------
   {
-    auto p = fit(mkOpts("smooth", true, false, 1e-12), box);
+    auto p = fit(mkOpts("smooth", true, 1e-12), box);
     CHECK(p->line_tilt_valid_[0] && p->line_tilt_valid_[1] && p->line_tilt_valid_[2], "V3 smooth: tilt matrices for all three rows");
     const V3D u[3] = {p->plane_.normal, p->y_normal_, p->x_normal_};
     const V3D d = 0.17 * u[2] + 0.004 * u[1] + 0.001 * u[0];
@@ -258,9 +257,9 @@ int main()
 
   // ---- V4 floor scales the floored axis exactly and is counted ---------------------------------------------------------------------------------
   {
-    auto lo = fit(mkOpts("smooth", true, false, 1e-12), box);
+    auto lo = fit(mkOpts("smooth", true, 1e-12), box);
     const VoxelPlaneR77Counters c0 = voxelPlaneR77Counters();
-    auto hi = fit(mkOpts("smooth", true, false, 1e-3), box);   // floor 1e-3 > |e0 - e1| ~ 6e-4: row 0's axis-a gap (to u1) is floored, its axis-b gap (to u2) is not
+    auto hi = fit(mkOpts("smooth", true, 1e-3), box);   // floor 1e-3 > |e0 - e1| ~ 6e-4: row 0's axis-a gap (to u1) is floored, its axis-b gap (to u2) is not
     const VoxelPlaneR77Counters c1 = voxelPlaneR77Counters();
     const double gap = std::abs(lo->eigen_values_(0) - lo->eigen_values_(1));
     CHECK(gap < 1e-3 && gap > 1e-4, "V4 precondition: the e0 - e1 gap lies between 1e-4 and the 1e-3 floor");
@@ -274,7 +273,7 @@ int main()
   // ---- V5 residual glue -----------------------------------------------------------------------------------------------------------------------
   {
     auto build = [&](bool pe) {
-      auto o = mkOpts("hard", pe, false, 4e-4);
+      auto o = mkOpts("hard", pe, 4e-4);
       std::shared_ptr<VoxelStats> st = std::make_shared<VoxelStats>();
       std::unique_ptr<VoxelNode> n(new VoxelNode(o, st, 0, V3D::Zero()));
       std::vector<PlaneUpdate> upd;
@@ -307,19 +306,20 @@ int main()
   // ---- V6 F-433 gap floor ---------------------------------------------------------------------------------------------------------------------
   {
     const VoxelPlaneR77Counters c0 = voxelPlaneR77Counters();
-    auto off = fit(mkOpts("off", false, false, 4e-4), ell);
-    auto on = fit(mkOpts("off", false, true, 4e-4), ell);
+    auto off = fit(mkOpts("off", false, 1e-12), ell);   // floor 1e-12 << |e0 - e1| = 1e-7: effectively no floor
     const VoxelPlaneR77Counters c1 = voxelPlaneR77Counters();
-    CHECK(std::isfinite(on->plane_var_.trace()) && on->plane_var_.trace() < off->plane_var_.trace(), "V6 ellipse: the floor gives a finite, smaller plane_var_ trace");
-    CHECK(c1.gap_fits == c0.gap_fits + 1 && c1.gap_d1 == c0.gap_d1 + 1, "V6 ellipse: one gap fit counted, the e0 - e1 gap floored");
-    auto goff = fit(mkOpts("off", false, false, 4e-4), grd);
+    auto on = fit(mkOpts("off", false, 4e-4), ell);
     const VoxelPlaneR77Counters c2 = voxelPlaneR77Counters();
-    auto gon = fit(mkOpts("off", false, true, 4e-4), grd);
+    CHECK(std::isfinite(on->plane_var_.trace()) && on->plane_var_.trace() < off->plane_var_.trace(), "V6 ellipse: the floor gives a finite, smaller plane_var_ trace");
+    CHECK(c1.gap_fits == c0.gap_fits + 1 && c1.gap_d1 == c0.gap_d1 && c2.gap_fits == c1.gap_fits + 1 && c2.gap_d1 == c1.gap_d1 + 1, "V6 ellipse: one gap fit counted each, the e0 - e1 gap floored only with the 4e-4 floor");
+    auto goff = fit(mkOpts("off", false, 1e-12), grd);
     const VoxelPlaneR77Counters c3 = voxelPlaneR77Counters();
+    auto gon = fit(mkOpts("off", false, 4e-4), grd);
+    const VoxelPlaneR77Counters c4 = voxelPlaneR77Counters();
     bool same = true;
     for (int a = 0; a < 3; ++a) for (int b = 0; b < 3; ++b) same = same && (goff->plane_var_(a, b) == gon->plane_var_(a, b));
-    CHECK(same, "V6 grid: plane_var_ with the floor is bit-for-bit plane_var_ without it (gaps far above the floor)");
-    CHECK(c3.gap_fits == c2.gap_fits + 1 && c3.gap_d1 == c2.gap_d1 && c3.gap_d2 == c2.gap_d2, "V6 grid: the fit is counted, no gap floored");
+    CHECK(same, "V6 grid: plane_var_ with the 4e-4 floor is bit-for-bit plane_var_ with the inert floor (gaps far above the floor)");
+    CHECK(c4.gap_fits == c3.gap_fits + 1 && c4.gap_d1 == c3.gap_d1 && c4.gap_d2 == c3.gap_d2, "V6 grid: the fit is counted, no gap floored");
   }
 
   if (g_failed) { std::fprintf(stderr, "%d check(s) FAILED\n", g_failed); return 1; }

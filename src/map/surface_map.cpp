@@ -72,11 +72,9 @@ std::string SurfaceMap::loadParameters(ros::NodeHandle& pnh)
   cfg.get<int>("voxel_map/surface/snapshot_period_frames", opts_.snapshot_period_frames, 0);
   cfg.get<int>("voxel_map/surface/viz_period_frames", opts_.viz_period_frames, 20);
   // Enumerated with ONE allowed value each: the surface backend implements only these (rule 3.4: anything else is
-  // refused, not silently replaced). The octree backend also defaults plane_fit_pose_cov_mode to sensor_only; "combined"
-  // remains available there for investigation, the surface backend supports only sensor_only.
+  // refused, not silently replaced).
   {
-    std::string pose_mode, var_mode;
-    cfg.mode("voxel_map/plane/plane_fit_pose_cov_mode", pose_mode, "sensor_only", {"sensor_only"});
+    std::string var_mode;
     cfg.mode("voxel_map/plane/plane_var_mode", var_mode, "eigengap", {"eigengap"});
   }
   // --- keys shared with the octree backend (same physical meaning) ---
@@ -84,7 +82,6 @@ std::string SurfaceMap::loadParameters(ros::NodeHandle& pnh)
   { double sigma_num = 3.0; cfg.get<double>("voxel_map/residual/sigma_num", sigma_num, 3.0);
     opts_.sigma_num_squared = sigma_num * sigma_num; }
   cfg.get<double>("voxel_map/residual/max_radius", opts_.max_radius, 3.0);
-  cfg.get<bool>("voxel_map/residual/pose_cov_in_sigma", opts_.pose_cov_in_sigma, false);
   { double range_err = 0.05; cfg.get<double>("imu/sensor/range_err", range_err, 0.05);
     opts_.weight_sigma_r2 = range_err * range_err; }
   paramWarn<std::string>(pnh, "voxel_map/map/bootstrap_mode", bootstrap_mode_, "aggregate");
@@ -123,7 +120,6 @@ std::string SurfaceMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/plane_threshold:         " << opts_.core.plane_threshold
       << "\n  residual/sigma_num_squared:    " << opts_.sigma_num_squared
       << "\n  residual/max_radius:           " << opts_.max_radius
-      << "\n  residual/pose_cov_in_sigma:    " << (opts_.pose_cov_in_sigma ? "true" : "false")
       << "\n  weight_floor sigma_r2:         " << opts_.weight_sigma_r2
       << "\n  map/bootstrap_mode:            " << bootstrap_mode_;
   return oss.str();
@@ -248,11 +244,11 @@ bool SurfaceMap::residualAgainst(const WorldPointCov& pt, const surface::Fit& fi
   J_nq(0, 2) = 1.0;
 
   double sigma_diag_squared =
-      pointPlaneGateMeasurementVariance(n, pt.sensor_cov, pt.pose_cov, opts_.pose_cov_in_sigma);
+      pointPlaneGateMeasurementVariance(n, pt.sensor_cov, pt.pose_cov, false);
   if (!std::isfinite(sigma_diag_squared) || sigma_diag_squared <= 0.0) return bail(4);
   if (sigma_diag_squared < 1e-6) sigma_diag_squared = 1e-6;
   double sigma_gate_diag_squared = pointPlaneGateMeasurementVariance(
-      n, pt.sensor_cov, pt.pose_cov, opts_.pose_cov_in_sigma || pt.include_pose_cov_in_gate);
+      n, pt.sensor_cov, pt.pose_cov, pt.include_pose_cov_in_gate);
   if (!std::isfinite(sigma_gate_diag_squared) || sigma_gate_diag_squared <= 0.0) return bail(4);
   if (sigma_gate_diag_squared < 1e-6) sigma_gate_diag_squared = 1e-6;
 

@@ -119,6 +119,11 @@ struct LioProcOptions
   int    bootstrap_inflate_scans  = 0;
   double bootstrap_inflate_factor = 1.0;
 
+  // R93A (Bryce 2026-10-10; key lio/gate_state_uncertainty, default true = the former hard-wired include_state_uncertainty_in_gate argument). true: the admission gate's variance adds the
+  // point's pose covariance n^T P_pose n (the residual WEIGHT never does). false: the gate uses the sensor + plane variance only. Experimental when false: the engagement block of the
+  // effective config prints the count of gate rows and the mean pose variance they added, and flags a run where the key is on and nothing was added.
+  bool gate_state_uncertainty = true;
+
   // The residual model has one independent control and one direct
   // per-VoxelPlane covariance marginalization. Failed collapse, count, and
   // conditioning heuristics were removed; see docs/RESIDUAL_MODE_AUDIT.md.
@@ -253,7 +258,6 @@ public:
     const std::vector<PointXYZCov>& pts,
     std::vector<Residual>& residuals,
     bool allow_consistency_log = true,
-    bool include_state_uncertainty_in_gate = true,
     const std::vector<M3D>* pose_cov_overrides = nullptr) const;
 
   void solveSystem(const std::vector<Residual>& residuals) const;

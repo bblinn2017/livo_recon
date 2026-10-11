@@ -98,7 +98,7 @@ std::shared_ptr<VoxelOpts> mkOpts(bool distance, bool plane_equivalent, const st
   o->line_var_plane_equivalent = o->line_enabled && plane_equivalent;
   o->line_rows = distance ? "distance" : "per_normal";
   o->line_rows_distance = force_flag ? true : (o->line_enabled && distance);
-  o->plane_fit_pose_cov_mode = "sensor_only";   // the production default; the references below use the sensor covariance only
+  // R93A: every fit uses the sensor covariance only, which is what the references below use
   return o;
 }
 

@@ -27,7 +27,7 @@
 // R90 (PCA on the binned map): representatives() hands the same occupied bins to the PCA fit (VoxelPlane::update()) as one point per bin (the mean of its returns), with the same covariance (cov_mode) and the same weight
 // (weight_mode) as moments() uses. The PCA fit then takes the weighted mean and covariance of those points and propagates the covariance of each into the plane variance.
 //
-// Not kept (and so not supported): the pose covariance. The binned map requires plane_fit_pose_cov_mode = sensor_only.
+// Not kept (and so not supported): the pose covariance. Every fit uses the sensor covariance only.
 // Determinism: bins are visited in ascending key order (std::map), so the sums do not depend on hash order or thread count.
 #include <Eigen/Dense>
 

@@ -1,5 +1,7 @@
 # Per-point pose covariance (F-169): what R65 implements
 
+> **R93A status (Bryce 2026-10-10).** Of the levers described below, these were removed: `voxel_map/residual/pose_cov_in_sigma`, `voxel_map/plane/plane_fit_pose_cov_mode` (every fit now uses the sensor covariance only) and `lio/point_cov/insertion_source` (posterior only). The pose covariance now enters the gate only, through `lio/gate_state_uncertainty` (default true). The debiased fit no longer subtracts a `(F-1)/F * (Scov_ - Scov_sensor_)` term: with `combined` gone that difference was only the frame-0 bootstrap points' sensor covariance. `pos_cov` is still stored on each inserted point for `plane_var_mode = information*` and diagnostics. The text below is the R65 design as written.
+
 Planning agent, 2026-09-29. Design note; nothing here has been built or run by me.
 
 ## Today (R64 code, ESTABLISHED by reading)

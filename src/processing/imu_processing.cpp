@@ -708,7 +708,6 @@ void ImuProc::propagate(MeasureGroup& mg)
   mg.imu_samples.clear();
 
   state_->setPropagatedState(rot_imu, pos_imu, vel_imu);
-  state_->setPriorPoseBlock(state_->cov());   // R65 (F-169): this scan's propagated (prior) (R,P) block; read only if insertion_source=prior
   if (!is_shadow_) writeImuCovGrowthRow(propagation_index_, mg.image.t + data_queues_->start_time, r61_P_start, state_->cov(), r61_Q_acc);
 
   // One compact row per scan; the first post-calibration scan is also logged

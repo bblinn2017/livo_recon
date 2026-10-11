@@ -210,7 +210,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
 
   { double sigma_num; paramWarn<double>(pnh, "voxel_map/residual/sigma_num", sigma_num, 3.); opts_->sigma_num_squared = sigma_num * sigma_num; }
   paramWarn<double>(pnh, "voxel_map/residual/max_radius",  opts_->max_radius,          3.);
-  paramWarn<bool>(pnh, "voxel_map/residual/pose_cov_in_sigma", opts_->pose_cov_in_sigma, false);
   paramWarn<bool>(pnh, "voxel_map/point_cov_stats_en", opts_->point_cov_stats_en, false);   // R65
   paramWarn<bool>(pnh, "voxel_map/plane/log_debug_en", opts_->log_debug_en, false);
   paramWarn<bool>(pnh, "voxel_map/plane/plane_fit_reasons_en", opts_->plane_fit_reasons_en, false);
@@ -360,20 +359,13 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
           "information (identical behaviour, honestly named) or "
           "plane_fit_mode = pca with information_directional.");
     }
-    // The T8-b plane-confidence inflations and the eigengap denominator
-    // floor are all corrections TO the eigengap model.  Under the
+    // The T8-b plane-confidence inflations are all corrections TO the eigengap model.  Under the
     // information model they are not merely unnecessary, they DOUBLE COUNT:
     // redundancy is already in the design-effect N_eff, coverage is already
     // the leverage a^T I^-1 a, and there is no denominator to floor.
     // Leaving them settable would let a cell inflate a variance twice and
     // report it as the new model's behaviour, so they are nested off.
     const bool eigengap = (opts_->plane_var_mode == "eigengap");
-    const char* kEigScope = "voxel_map/plane/plane_var_mode=eigengap";
-    cfg.nested<bool>(eigengap, kEigScope, "voxel_map/plane/plane_var_denom_floor_en",
-                     opts_->plane_var_denom_floor_en, false);
-    cfg.mode("voxel_map/plane/plane_fit_pose_cov_mode",
-             opts_->plane_fit_pose_cov_mode, "sensor_only",
-             { "combined", "sensor_only" });
     // ── R76 (F-445): line / point-to-distribution residual rows: a flag plus mutually exclusive choices ──
     // enabled=false (default) is bit-identical to R73.  enabled=true, form=hard (default), rule=absolute (default): a voxel whose second eigenvalue is also
     // below plane_threshold (the constant that tests the first) is a LINE and gets two rows (u0, u1) instead of one point-to-plane row.
@@ -409,10 +401,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     cfg.nestedMode(opts_->line_enabled, "voxel_map/plane/line_residual/enabled=true",
                    "voxel_map/plane/line_residual/variance", opts_->line_variance, "fit_only", { "fit_only", "plane_equivalent" });
     opts_->line_var_plane_equivalent = opts_->line_enabled && opts_->line_variance == "plane_equivalent";
-    // ── R82 (D4, F-500): line model at fit time (classify_at_fit, both fits) and inside the debiased fit (debiased_line_equiv). Read only with lines on; defaults inert. ──
-    cfg.nested<bool>(opts_->line_enabled, "voxel_map/plane/line_residual/enabled=true", "voxel_map/plane/line_residual/classify_at_fit", opts_->line_classify_at_fit, false);
-    if (opts_->line_classify_at_fit && opts_->line_form != "hard")
-      cfg.requireCombination("voxel_map/plane/line_residual/classify_at_fit = true needs form = hard: the smooth form has no line class (every accepted voxel is a plane with three rows), so there is nothing to classify.");
+    // ── R82 (D4, F-500): the line model inside the debiased fit (debiased_line_equiv). Read only with lines on; default inert. (R93A: classify_at_fit is unconditional and its key is removed.) ──
     {
       const bool deb_line = opts_->plane_fit_mode == "debiased" && opts_->line_enabled;
       cfg.nestedMode(deb_line, "voxel_map/plane/plane_fit_mode=debiased,line_residual/enabled=true", "voxel_map/plane/debiased_line_equiv", opts_->debiased_line_equiv, "off", { "off", "mean_cov", "moment" });
@@ -435,18 +424,9 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     opts_->line_rows_distance = opts_->line_enabled && opts_->line_rows == "distance";
     if (opts_->line_rows_distance && opts_->line_form != "hard")
       cfg.requireCombination("voxel_map/plane/line_residual/rows = distance needs form = hard: the smooth form has no line, it gives three Mahalanobis rows.");
-    // ── R77 (F-433): eigengap floor on the plane variance, plane kept ──
-    cfg.nested<bool>((opts_->plane_fit_mode == "pca" || opts_->plane_fit_mode == "debiased") && eigengap, "voxel_map/plane/plane_fit_mode=pca|debiased,plane_var_mode=eigengap",
-                     "voxel_map/plane/plane_gap_floor_en", opts_->plane_gap_floor_en, false);   // R82: one gap floor for both fits
-    if (opts_->line_classify_at_fit && eigengap && !opts_->plane_gap_floor_en)
-      cfg.requireCombination("voxel_map/plane/line_residual/classify_at_fit = true with plane_var_mode = eigengap needs plane_gap_floor_en = true: a line voxel's gap e0 - e1 is near zero by definition, and without the floor the eigengap plane variance divides by it.");
-    if (opts_->plane_gap_floor_en && opts_->plane_var_denom_floor_en)
-      cfg.requireCombination(
-          "voxel_map/plane/plane_gap_floor_en = true together with plane_var_denom_floor_en = true: the rejection flag drops planes whose gap is below "
-          "max(1e-8, 0.1 * plane_threshold) = 2.5e-4, and the floor (sensor noise variance, 4e-4 with range_err 0.02) lifts every gap above that, so the rejection could never "
-          "fire. Set one of them.");
-    if (opts_->plane_gap_floor_en && !(opts_->weight_sigma_r2 > 0.0))
-      cfg.requireCombination("voxel_map/plane/plane_gap_floor_en = true needs imu/sensor/range_err > 0 (the floor is range_err^2); it would be inert at 0.");
+    // ── R93A: the eigengap gap floor is unconditional (keys plane_gap_floor_en, plane_var_denom_floor_en and debias_denominator_guard are removed). The floor is range_err^2, so it needs range_err > 0. ──
+    if (eigengap && !(opts_->weight_sigma_r2 > 0.0))
+      cfg.requireCombination("voxel_map/plane/plane_var_mode = eigengap needs imu/sensor/range_err > 0: the gap floor (always on since R93A) is range_err^2, and at 0 the eigengap plane variance would divide by a near-zero gap.");
     // ── R81 (F-468, F-485 Part 3): scan term and clamp on the plane variance term of the weight and the gate. Both default 0.0 = off (bit-identical to R80). ──
     // Read unconditionally (every plane_var_mode, pca and debiased): the term is formed in VoxelPlane::gate(), which all of them reach. Negative, NaN and infinite are refused.
     cfg.get<double>("voxel_map/plane/plane_var_min", opts_->plane_var_min, 0.0);
@@ -460,9 +440,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       cfg.requireCombination(
           "voxel_map/plane/plane_var_min / plane_var_scan_s2 > 0 together with voxel_map/plane/line_residual/enabled = true: line, distance and smooth rows take their own fit variance "
           "(rows[i].fit_var) and never see the plane variance term these keys change, so on line voxels the keys would be silently inert. Turn the lines off (R81 arms run lines off).");
-    // R65: eigengap-denominator rejection on the debiased path (default true = R64).
-    cfg.nested<bool>(opts_->plane_fit_mode == "debiased" && eigengap, "voxel_map/plane/plane_fit_mode=debiased,plane_var_mode=eigengap",
-                     "voxel_map/plane/debias_denominator_guard", opts_->debias_denominator_guard, true);
     // R64: debiasing arithmetic variant; only meaningful on the debiased path.
     cfg.nestedMode(opts_->plane_fit_mode == "debiased", "voxel_map/plane/plane_fit_mode=debiased",
                    "voxel_map/plane/debias_mode", opts_->debias_mode, "full",
@@ -535,19 +512,16 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/plane_threshold:           " << opts_->plane_threshold
       << "\n  plane/plane_fit_mode:            " << opts_->plane_fit_mode
       << "\n  plane/line_residual:             enabled " << (opts_->line_enabled ? "true" : "false") << " / form " << opts_->line_form << " / rule " << opts_->line_rule << " / rel_sigmas " << opts_->line_rel_sigmas << " / shape_ratio " << opts_->line_shape_ratio << " / enum " << opts_->line_residual_enum << " / variance " << opts_->line_variance << " / rows " << opts_->line_rows
-      << "\n  plane/plane_gap_floor_en:        " << (opts_->plane_gap_floor_en ? "true" : "false")
-      << (opts_->line_enabled ? "\n  plane/line_residual/classify_at_fit: " + std::string(opts_->line_classify_at_fit ? "true" : "false") + (opts_->plane_fit_mode == "debiased" ? " / debiased_line_equiv " + opts_->debiased_line_equiv : std::string()) : std::string())   // R82 (D4)
+      << (opts_->line_enabled && opts_->plane_fit_mode == "debiased" ? "\n  plane/debiased_line_equiv:       " + opts_->debiased_line_equiv : std::string())   // R82 (D4)
       << "\n  plane/plane_var_min:             " << opts_->plane_var_min << (opts_->plane_var_min > 0.0 ? "   (R81 ENGAGED: plane_var_term = max(plane_var_term, plane_var_min))" : "   (off)")
       << "\n  plane/plane_var_scan_s2:         " << opts_->plane_var_scan_s2 << (opts_->plane_var_scan_s2 > 0.0 ? "   (R81 ENGAGED: plane_var_term += s2 / max(1, distinct frames), before the clamp)" : "   (off)")
       << "\n  plane/plane_var_mode:            " << opts_->plane_var_mode
-      << "\n  plane/plane_fit_pose_cov_mode:   " << opts_->plane_fit_pose_cov_mode
       << "\n  plane/log_variance_shares_en:    " << (opts_->log_variance_shares_en ? "true" : "false")
       << "\n  plane/plane_gate_mode:           " << opts_->plane_gate_mode
       << "\n  plane/weight_floor/mode:         " << opts_->weight_floor_mode
       << "\n  plane/weight_floor/sigma_r2:     " << opts_->weight_sigma_r2
       << "\n  plane/log_consistency_mode:      " << opts_->log_consistency_mode
       << "\n  plane/log_consistency_corr_stride: " << opts_->log_consistency_corr_stride
-      << "\n  plane/plane_var_denom_floor_en:  " << (opts_->plane_var_denom_floor_en ? "true" : "false")
       << "\n  map/shuffle_insertion_seed:      " << opts_->shuffle_insertion_seed
       << "\n  map/log_frame_stats_en:          " << (opts_->log_frame_stats_en ? "true" : "false")
       << "\n  map/freeze_after_calibration:    " << (opts_->freeze_after_calibration ? "true" : "false")
@@ -556,7 +530,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  points/min_update:" << opts_->min_update_points
       << "\n  residual/sigma_num_squared:  " << opts_->sigma_num_squared
       << "\n  residual/max_radius:         " << opts_->max_radius
-      << "\n  residual/pose_cov_in_sigma:  " << (opts_->pose_cov_in_sigma ? "true" : "false")
       << "\n  search/neighborhood_size:    " << opts_->neighborhood_size;
   return oss.str();
 }
@@ -685,7 +658,7 @@ void VoxelMap::updateMapInternal(MeasureGroup& mg, bool advance_live_frame) {
         // own residual-weighting propagation) adds `sensor_cov + pos_cov`
         // explicitly at the point of use. Matches gate()'s own
         // WorldPointCov, which already kept these separate.
-        pts_world_[i].pos_cov = state_->poseCovAtPoint(map_pts[i].point, true);   // R65: default path == poseCovAt
+        pts_world_[i].pos_cov = state_->poseCovAt(map_pts[i].point);
         thread_keys_[omp_get_thread_num()].emplace_back(
           worldToKey(pts_world_[i].point), i);
       }
@@ -889,7 +862,7 @@ void VoxelMap::writeSnapshotFile(const std::string& filename, int snapshot_frame
   out << "snapshot_frame,node_id,root_key_x,root_key_y,root_key_z,layer,"
          "cell_center_x,cell_center_y,cell_center_z,cell_min_x,cell_min_y,cell_min_z,"
          "cell_max_x,cell_max_y,cell_max_z,status,retired,initialized,is_plane,full,"
-         "plane_fit_mode,plane_var_mode,plane_fit_pose_cov_mode,"
+         "plane_fit_mode,plane_var_mode,"
          "center_x,center_y,center_z,normal_x,normal_y,normal_z,d,"
          "tangent_x_x,tangent_x_y,tangent_x_z,tangent_y_x,tangent_y_y,tangent_y_z,radius,"
          "eig0,eig1,eig2,scatter_00,scatter_01,scatter_02,scatter_10,scatter_11,scatter_12,"
@@ -939,7 +912,7 @@ void VoxelMap::writeSnapshotFile(const std::string& filename, int snapshot_frame
     vec(r.cell_center); out << ','; vec(r.cell_min); out << ','; vec(r.cell_max);
     out << ',' << r.status << ',' << r.retired << ',' << r.initialized << ','
         << r.is_plane << ',' << r.full << ',' << opts_->plane_fit_mode << ','
-        << opts_->plane_var_mode << ',' << opts_->plane_fit_pose_cov_mode << ',';
+        << opts_->plane_var_mode << ',';
     vec(r.center); out << ','; vec(r.normal); out << ',' << r.d << ',';
     vec(r.tangent_x); out << ','; vec(r.tangent_y); out << ',' << r.radius << ',';
     vec(r.eigenvalues); out << ','; mat(r.scatter); out << ','; mat(r.plane_covariance);

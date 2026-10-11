@@ -70,7 +70,6 @@ VoxelOptsPtr makeOpts(const std::string& mode, double hysteresis = 1.0, bool rea
 {
   auto o = std::make_shared<VoxelOpts>();
   o->plane_fit_mode = "debiased";
-  o->plane_fit_pose_cov_mode = "sensor_only";
   o->debias_mode = mode;
   o->plane_threshold_hysteresis = hysteresis;
   o->plane_fit_reasons_en = reasons;
@@ -112,7 +111,7 @@ int main()
   // ---- D1: full == R63 formula
   {
     auto o = std::make_shared<VoxelOpts>();       // default debias_mode must be "full"
-    o->plane_fit_mode = "debiased"; o->plane_fit_pose_cov_mode = "sensor_only";
+    o->plane_fit_mode = "debiased";
     check(o->debias_mode == "full", "D0 default debias_mode is full", o->debias_mode);
     VoxelPlane vp(o);
     vp.addPoints(pts_an, -1, 2, true, 5);

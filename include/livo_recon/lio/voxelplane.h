@@ -422,7 +422,7 @@ void voxelPlaneFrameStatsReset();
 void voxelPlaneFrameStatsRead(int& denom_rejected_count, double& max_plane_var_trace);
 
 // R77 (F-433, F-453): cumulative engagement counters since process start (never reset; the per-scan log writes them as they stand when a scan's first residual build runs,
-// i.e. after the previous scan's map update). gap_fits: eigengap fits made with plane_gap_floor_en; gap_d1 / gap_d2: fits whose |e0-e1| / |e0-e2| was below the floor.
+// i.e. after the previous scan's map update). gap_fits: eigengap fits made with the gap floor (always on since R93A); gap_d1 / gap_d2: fits whose |e0-e1| / |e0-e2| was below the floor.
 // tilt_voxels: voxels whose line tilt matrices were computed; tilt_floored_axes: tilt gaps lifted to the floor; tilt_fallbacks: line rows asked for a tilt matrix the voxel did not have.
 struct VoxelPlaneR77Counters
 {
@@ -448,6 +448,14 @@ struct VoxelPlaneR82Counters
   long line_classified = 0, line_accepted = 0, e1_tiny_kept = 0, e0_clamped = 0, gaps_floored = 0, tilt_voxels_moment = 0, tilt_voxels_meancov = 0;
 };
 VoxelPlaneR82Counters voxelPlaneR82Counters();
+// R93A (Bryce 2026-10-10): engagement of lio/gate_state_uncertainty, cumulative since process start. gate_rows: admission-variance evaluations (plane rows and hard line rows); gate_pose_rows: of those, rows whose
+// admission variance included the point's pose covariance; gate_pose_var_sum: sum over those rows of n^T pose_cov n (m^2; mean added variance = gate_pose_var_sum / gate_pose_rows).
+struct VoxelPlaneR93Counters
+{
+  long gate_rows = 0, gate_pose_rows = 0;
+  double gate_pose_var_sum = 0.0;
+};
+VoxelPlaneR93Counters voxelPlaneR93Counters();
 // CQ-56 item 3: this frame's largest covariance_.trace() seen across every
 // VoxelPlane refit -- reset by voxelPlaneFrameStatsReset() alongside the
 // other per-frame maxima above.
