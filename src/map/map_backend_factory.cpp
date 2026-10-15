@@ -3,7 +3,6 @@
 #include <stdexcept>
 
 #include "livo_recon/map/voxelmap.h"
-#include "livo_recon/map/akf_map.h"
 #include "livo_recon/map/surface_map.h"
 #include "livo_recon/map/binned_voxelmap.h"
 
@@ -16,9 +15,6 @@ MapBackendPtr createMapBackend(const std::string& backend_name, StateGroupPtr st
   if (backend_name == "voxel") {
     return std::make_shared<VoxelMap>(state, profiler, data_queues);
   }
-  if (backend_name == "akf") {
-    return std::make_shared<AkfMap>(state, profiler, data_queues);
-  }
   if (backend_name == "surface") {
     return std::make_shared<SurfaceMap>(state, profiler, data_queues);
   }
@@ -29,7 +25,7 @@ MapBackendPtr createMapBackend(const std::string& backend_name, StateGroupPtr st
   // this codebase's "fail loud on unexpected config" convention (see
   // run_job.sh's CACHE_FILE check for the same philosophy).
   throw std::runtime_error("createMapBackend: unknown voxel_map/backend '" + backend_name +
-                            "' (expected 'voxel', 'akf', 'surface' or 'binned')");
+                            "' (expected 'voxel', 'surface' or 'binned')");
 }
 
 }  // namespace livo_recon

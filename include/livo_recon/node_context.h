@@ -42,7 +42,7 @@ struct NodeContext
   StateGroupPtr  state;
   ProfilerPtr    profiler;
   PrinterPtr     printer;
-  MapBackendPtr  voxel_map;  // "voxel" (VoxelMap, default) or "akf" (AkfMap) -- see voxel_map/backend
+  MapBackendPtr  voxel_map;  // "voxel" (VoxelMap, default), "binned" or "surface" -- see voxel_map/backend
   TrackerPtr     tracker;
 
   NodeContext(ros::NodeHandle& nh_, ros::NodeHandle& pnh_,

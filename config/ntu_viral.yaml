@@ -181,9 +181,7 @@ lio:
   ekf:
     max_iterations: 5
 voxel_map:
-  backend: "voxel"  # "voxel" (default, persistent per-voxel plane fits, VoxelMap) or
-                    # "akf" (AKF-LIO-style raw-point Gaussian merge map, AkfMap) -- see
-                    # ~/.claude/plans/imperative-tumbling-karp.md for the design.
+  backend: "voxel"  # "voxel" (persistent per-voxel plane fits, VoxelMap), "binned" (VoxelMap whose nodes keep bins) or "surface"
   map:
     # 2026-08-14: unified to 0.425 to match HILTI (see slam_2022/
     # voxel_map.yaml's comment for the full history) instead of staying at

@@ -18,7 +18,7 @@ namespace
 // to know which concrete MapBackend to construct before that backend's
 // own loadParameters() can run. Defaults to "voxel" (today's VoxelMap) so
 // every existing config's behavior is unchanged unless a job explicitly
-// overrides voxel_map/backend to "akf".
+// overrides voxel_map/backend.
 std::string mapBackendName(ros::NodeHandle& pnh)
 {
   std::string backend_name = "voxel";

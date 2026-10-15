@@ -1,7 +1,6 @@
 #pragma once
 
 #include "livo_recon/processing/lio_base.h"
-#include "livo_recon/lio/akf_q.h"
 #include "livo_recon/lio/q_adapt.h"
 #include "livo_recon/diagnostics/eval/nees_logger.h"
 
@@ -65,8 +64,6 @@ private:
   // the full doc comment -- constructed with opts_.nees_tier1_window_scans
   // once loadParameters() has run.
   Tier1NeesBuffer iekf_tier1_nees_{0};
-
-  AkfQ       akf_q_;   // R66 opt-in AKF-style Q adaptation (akf_q/enable, default false)
 
   // R72 (F-401): innovation-driven gain on the IMU step variance (imu/process_noise/gain/*). Default off (bit-identical); engagement counters below feed engagementReport().
   // R83: the zero-velocity pseudo-update (lio/zupt/*) was removed (Bryce 2026-10-06).

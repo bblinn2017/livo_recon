@@ -148,7 +148,6 @@ add_executable(livo_recon_node
   src/lio/residual_redundancy.cpp
   src/lio/info_scale.cpp
   src/map/voxelmap.cpp
-  src/map/akf_map.cpp
   src/map/surface_map.cpp
   src/map/binned_voxelmap.cpp
   src/map/map_backend_factory.cpp

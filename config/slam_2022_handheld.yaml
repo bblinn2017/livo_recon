@@ -185,9 +185,7 @@ lio:
   ekf:
     max_iterations: 5
 voxel_map:
-  backend: "voxel"  # "voxel" (default, persistent per-voxel plane fits, VoxelMap) or
-                    # "akf" (AKF-LIO-style raw-point Gaussian merge map, AkfMap) -- see
-                    # ~/.claude/plans/imperative-tumbling-karp.md for the design.
+  backend: "voxel"  # "voxel" (persistent per-voxel plane fits, VoxelMap), "binned" (VoxelMap whose nodes keep bins) or "surface"
   map:
     # Confirmed via a single-parameter voxel_map ablation this session
     # (hilti_voxelmap_ablation, then hilti_voxelsize_fine to check finer

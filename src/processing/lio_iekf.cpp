@@ -317,27 +317,7 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
   loadSharedParameters(cfg, pnh);
   iekf_tier1_nees_ = Tier1NeesBuffer(opts_.nees_per_dof_en ? opts_.nees_tier1_window_scans : 0);
 
-  // The scan spline and AdaptiveQ were removed (Bryce, 2026-09-30). Any spline/* or adaptive_q/* key left in a config is refused by finalizeConfig() below.
-
-  // ── R66: AKF-style process-noise adaptation (opt-in) ─────────────────
-  {
-    AkfQOptions ak;
-    cfg.get<bool>("akf_q/enable", ak.enable, false);
-    cfg.nested<double>(ak.enable, "akf_q/enable", "akf_q/forgetting", ak.forgetting, 0.95);
-    cfg.nested<int>(ak.enable, "akf_q/enable", "akf_q/warmup_frames", ak.warmup_frames, 20);
-    cfg.nested<double>(ak.enable, "akf_q/enable", "akf_q/bounds/min_ratio", ak.min_ratio, 0.01);
-    cfg.nested<double>(ak.enable, "akf_q/enable", "akf_q/bounds/max_ratio", ak.max_ratio, 100.0);
-    std::string pn_model = "fixed";
-    pnh.param<std::string>("imu/process_noise/model", pn_model, std::string("fixed"));
-    if (ak.enable && pn_model != "fixed")
-      throw std::invalid_argument(
-          "akf_q/enable writes StateGroup::setNoiseParams, which only imu/process_noise/model=fixed "
-          "reads; refused under model=" + pn_model + " (the adaptation would be inert)");
-    if (ak.enable && (!(ak.forgetting >= 0.0 && ak.forgetting < 1.0) || ak.warmup_frames < 0 ||
-                      !(ak.min_ratio > 0.0) || !(ak.max_ratio >= ak.min_ratio)))
-      throw std::invalid_argument("akf_q/* values out of range (forgetting in [0,1), warmup>=0, 0<min_ratio<=max_ratio)");
-    akf_q_.configure(ak);
-  }
+  // The scan spline and AdaptiveQ were removed (Bryce, 2026-09-30). Any spline/*, adaptive_q/* or akf_q/* key (R66 AKF-style Q adaptation, removed in R97) left in a config is refused by finalizeConfig() below.
 
   // ── R72 (F-401): innovation-driven Q gain (opt-in). Sub-keys are refused unless their mode is selected; a configuration that
   // could not change anything (gain bounds both 1, forgetting 1, inflate 1) is refused as inert. ──
@@ -360,8 +340,6 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
     cfg.nested<double>(ns, "imu/process_noise/gain/mode=nis_smooth", "imu/process_noise/gain/nis_clip", q_gain_opts_.nis_clip, 0.0);   // R81 (F-478)
     if (any)
     {
-      if (akf_q_.enabled())
-        throw std::invalid_argument("imu/process_noise/gain/mode != off and akf_q/enable=true both write the IMU process noise; refused");
       if (!(q_gain_opts_.min_gain > 0.0) || !(q_gain_opts_.max_gain >= q_gain_opts_.min_gain))
         throw std::invalid_argument("imu/process_noise/gain/min_gain must be > 0 and <= max_gain");
       if (q_gain_opts_.min_gain == 1.0 && q_gain_opts_.max_gain == 1.0)
@@ -393,7 +371,7 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
     q_gain_.configure(q_gain_opts_);
   }
 
-  // Anything left over in the spline/* and adaptive_q/* namespaces (both removed) is a key nobody consumes.
+  // Anything left over in the spline/*, adaptive_q/* and akf_q/* namespaces (all removed) is a key nobody consumes.
   // Deliberately NOT extended to voxel_map/: several of its keys are still
   // read by paramWarn() in voxelmap.cpp, so they are unclaimed here and would
   // be reported as dead when they are merely read elsewhere. Widen this only
@@ -512,9 +490,8 @@ std::string LioProcIekf::engagementReport() const
   // the same report -- a run that selected "information" and never built one
   // is an inert cell for exactly the same reason any flag with a zero
   // engagement counter is, and the scorer only reads this file. voxel_map_ is a
-  // MapBackendPtr (voxel/PCA-debiased backend OR AkfMap) -- plane_var_mode/
-  // weight_floor_mode are VoxelOpts-only concepts AkfMap has no equivalent
-  // of, so this block only fires for the voxel backend.
+  // MapBackendPtr -- plane_var_mode/
+  // weight_floor_mode are VoxelOpts-only concepts, so this block only fires for the voxel backend.
   if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get()))
   {
     const long info_fits = voxelPlaneInformationFitCount();
@@ -603,11 +580,6 @@ std::string LioProcIekf::engagementReport() const
         o << "   <-- NOT ENGAGED: plane_var_min never raised a row (a valid null: every plane variance term was already above it)";
     }
   }
-
-  if (akf_q_.enabled())
-    o << "\n  akf_q frames=" << akf_q_.frames() << " applied=" << akf_q_.appliedFrames() << " clamped="
-      << akf_q_.clampedFrames() << " applied acc [" << akf_q_.minAcc() << "," << akf_q_.maxAcc() << "] gyr ["
-      << akf_q_.minGyr() << "," << akf_q_.maxGyr() << "]";
 
   if (opts_.residual_redundancy.on() && opts_.residual_redundancy.renorm != "off")
   {
@@ -1167,28 +1139,6 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
           mg, *state_, mg.image.t + data_queues_->start_time);
     }
 
-    // R66: AKF-style Q adaptation from this frame's state correction (see lio/akf_q.h for the derivation and its
-    // limits). Reads the same correction dx as the T7-a block below but does not depend on imu/log_qhat_en.
-    if (akf_q_.enabled() && !residuals_.empty() && !mg.poses.empty())
-    {
-      if (!akf_q_.primed())
-        akf_q_.setNominal(state_->varAcc().mean(), state_->varGyr().mean());
-      const Eigen::VectorXd dxa = state_->boxminusFromPropagat(state_propagat_);
-      double sum_dt2 = 0.0;
-      for (const auto& ps : mg.poses) sum_dt2 += ps.dt * ps.dt;
-      const double dtheta_sq = dxa.segment<3>(StateGroup::idxR()).squaredNorm();
-      const double dv_sq = dxa.segment<3>(StateGroup::idxV()).squaredNorm();
-      if (akf_q_.update(static_cast<long>(voxel_map_->frame_idx_), mg.image.t + data_queues_->start_time,
-                        static_cast<int>(mg.poses.size()), sum_dt2, dtheta_sq, dv_sq))
-        state_->setNoiseParams(V3D::Constant(akf_q_.varAcc()), V3D::Constant(akf_q_.varGyr()));
-      if (akf_q_.frames() == 400 && akf_q_.appliedFrames() == 0)
-        ROS_ERROR_STREAM("[akf_q] enabled but no value was applied after 400 frames (inert-when-on)");
-      if (akf_q_.frames() % 500 == 0)
-        ROS_INFO_STREAM("[akf_q] engagement: frames=" << akf_q_.frames() << " applied=" << akf_q_.appliedFrames()
-                        << " clamped=" << akf_q_.clampedFrames() << " applied acc range [" << akf_q_.minAcc() << ","
-                        << akf_q_.maxAcc() << "] gyr range [" << akf_q_.minGyr() << "," << akf_q_.maxGyr() << "]");
-    }
-
     // T7-a. dx must be read here and not inside the loop: it is the FRAME's
     // correction, and reading it mid-iteration would report one Gauss-Newton
     // step rather than the process-model error the measurement disagreed with.
@@ -1703,10 +1653,8 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
       const double mean_frac_strong_rr = sum_frac_strong_rr / n_res_d;
 
       // VoxelStats (converged/disabled/init_frames_sum/etc) describes a
-      // convergence-lock-in concept only VoxelMap has -- AkfMap (or any
-      // future backend) has no equivalent, so this diagnostic is gated on
-      // an actual VoxelMap rather than promoted to the MapBackend
-      // interface (see plan at ~/.claude/plans/imperative-tumbling-karp.md).
+      // convergence-lock-in concept only VoxelMap has, so this diagnostic is gated on
+      // an actual VoxelMap rather than promoted to the MapBackend interface.
       std::ostringstream voxel_stats_dbg;
       if (auto* vm = dynamic_cast<VoxelMap*>(voxel_map_.get())) {
         voxel_stats_dbg << "  init_frames_sum=" << vm->stats()->init_frames_sum.load()
