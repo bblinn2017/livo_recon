@@ -358,15 +358,13 @@ void logResidualGeometry(int frame_idx, const std::vector<Residual>& residuals)
 // propagated state), plus the linearisation state. Lets the information each residual claims (w_i h_i h_i^T) be compared
 // offline with what the residuals jointly deliver (leverage, per-plane groups, split-half and cross-frame solutions).
 // h_rot / h_pos are the rotation and position Jacobian rows (point_cross_normal, normal); w_i = 1 / sigma_squared.
-void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const std::vector<Residual>& residuals, bool shadow = false, bool voxel_info = false, bool line_geom = false, bool slim = false)
+void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const std::vector<Residual>& residuals, bool voxel_info = false, bool line_geom = false, bool slim = false)
 {
   static PersistentLogStream log("residual_dump.csv");
   static PersistentLogStream slog("residual_dump_state.csv");
-  static PersistentLogStream shlog("shadow_residual_dump.csv");        // R73 (F-414): same columns, the shadow pass's residuals
-  static PersistentLogStream shslog("shadow_residual_dump_state.csv");
   bool first = false, sfirst = false;
-  std::ofstream& o = shadow ? shlog.stream(&first) : log.stream(&first);
-  std::ofstream& so = shadow ? shslog.stream(&sfirst) : slog.stream(&sfirst);
+  std::ofstream& o = log.stream(&first);
+  std::ofstream& so = slog.stream(&sfirst);
   if (first) residual_dump_format::writeHeader(o, voxel_info, line_geom, slim);   // R91C: the format moved to diagnostics/residual_dump_format.h (default byte-identical, tests/test_residual_dump_format_r91c.cpp)
   if (sfirst) so << "frame,iter,n_resid,px,py,pz,rvx,rvy,rvz\n";
   const V3D rv = Log(st.rot());
@@ -380,19 +378,19 @@ void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const s
 
 void LioProcBase::logZsqIteration(int iteration) const
 {
-  if (!opts_.zsq_log_en || shadow_active_) return;
+  if (!opts_.zsq_log_en) return;
   logZsqSummary(static_cast<int>(voxel_map_->frame_idx_), iteration, residuals_);
 }
 
 long LioProcBase::zsqRowsWritten() { return g_zsq_rows.load(std::memory_order_relaxed); }
 
-void LioProcBase::dumpResidualsIfListed(int iteration, bool shadow) const
+void LioProcBase::dumpResidualsIfListed(int iteration) const
 {
   if (opts_.residual_dump_frames.empty()) return;
   if (std::find(opts_.residual_dump_frames.begin(), opts_.residual_dump_frames.end(), voxel_map_->frame_idx_) ==
       opts_.residual_dump_frames.end())
     return;
-  logResidualDump(voxel_map_->frame_idx_, iteration, *state_, residuals_, shadow, opts_.residual_dump_voxel_info, opts_.residual_dump_line_geometry, opts_.residual_dump_slim);
+  logResidualDump(voxel_map_->frame_idx_, iteration, *state_, residuals_, opts_.residual_dump_voxel_info, opts_.residual_dump_line_geometry, opts_.residual_dump_slim);
 }
 
 LioProcBase::LioProcBase(NodeContext& ctx)
@@ -512,28 +510,6 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
         cfg.requireCombination("lio/residual_binning/mode != off needs voxel_map/plane/line_residual/rows = per_normal: the Jacobian direction of a distance row is set by the noise draw, "
                                "so it cannot key a bin (distance rows would be skipped, leaving the line voxels, which carry nearly all the information, uncorrected).");
     }
-  }
-  // R73 (F-414): shadow LIO update. Sub-keys exist only under mode=on; the motion-Q keys only under process_noise_model=isotropic.
-  cfg.mode("lio/shadow/mode", opts_.shadow.mode, "off", { "off", "on" });
-  {
-    const bool son = opts_.shadow.on();
-    int ws = 0, we = 0;
-    cfg.nested<int>(son, "lio/shadow/mode=on", "lio/shadow/window_start", ws, 0);
-    cfg.nested<int>(son, "lio/shadow/mode=on", "lio/shadow/window_end", we, 0);
-    opts_.shadow.window_start = ws;
-    opts_.shadow.window_end = we;
-    cfg.nestedMode(son, "lio/shadow/mode=on", "lio/shadow/process_noise_model", opts_.shadow.process_noise_model, "same",
-                   { "same", "fixed", "isotropic" });
-    const bool iso = son && opts_.shadow.process_noise_model == "isotropic";
-    const std::string sc = "lio/shadow/process_noise_model=isotropic";
-    cfg.nested<double>(iso, sc, "lio/shadow/motion_beta", opts_.shadow.motion_beta, 0.9);
-    cfg.nested<double>(iso, sc, "lio/shadow/motion_acc_scale", opts_.shadow.motion_acc_scale, 0.3);
-    cfg.nested<double>(iso, sc, "lio/shadow/motion_gyr_scale", opts_.shadow.motion_gyr_scale, 10.0);
-    cfg.nested<double>(iso, sc, "lio/shadow/motion_acc_cap", opts_.shadow.motion_acc_cap, 1.0e6);
-    cfg.nested<double>(iso, sc, "lio/shadow/motion_gyr_cap", opts_.shadow.motion_gyr_cap, 1.0e6);
-    const std::string shadow_err = shadowOptionsError(opts_.shadow);
-    if (!shadow_err.empty()) throw std::invalid_argument(shadow_err);
-    if (son && cuda_enable_) throw std::invalid_argument("lio/shadow/mode=on is not implemented with cuda/enable=true");
   }
   cfg.get<bool>("lio/scan_log_en", opts_.scan_log_en, false);   // R73 (F-414, F-415)
   {   // R71: per-residual dump frames, a comma-separated list of frame indices in ONE string key (job overrides carry scalars only); empty = off
@@ -869,7 +845,7 @@ void LioProcBase::buildResiduals(
   // byte-for-byte free of this potentially point-level diagnostic.
   const auto* snapshot_vm = dynamic_cast<const VoxelMap*>(voxel_map_.get());
   if (snapshot_vm && snapshot_vm->opts()->snapshot_post_calibration &&
-      voxel_map_->frame_idx_ == 1 && !shadow_active_) {
+      voxel_map_->frame_idx_ == 1) {
     static PersistentLogStream log("first_post_calibration_plane_associations.csv");
     bool first_call = false;
     std::ofstream& out = log.stream(&first_call);
@@ -952,7 +928,6 @@ void LioProcBase::redundancyAndRenorm(const std::vector<Residual>& residuals) co
     renorm_c_sum_ += c;
     renorm_c_max_ = std::max(renorm_c_max_, c);
   }
-  if (shadow_active_) return;   // R73: the shadow pass writes no driver file
   static PersistentLogStream log("redundancy_renorm.csv");
   bool first = false;
   std::ofstream& o = log.stream(&first);
@@ -976,7 +951,6 @@ void LioProcBase::applyResidualBinningToEkf(const std::vector<Residual>& residua
   residual_binning_rot_rows_sum_ += st.n_rot_corrected_rows;   // R91F
   residual_binning_rot_bins_sum_ += st.n_rot_bins_active;
   residual_binning_solve_failed_sum_ += st.solve_failed;
-  if (shadow_active_) return;   // R73: the shadow pass writes no driver file
   const bool ext = opts_.residual_binning.mode != "direction";   // R91F: modes rotation and both write the extended columns; mode direction writes exactly the R91E files
   const bool use_p = opts_.residual_binning.usesPosition(), use_r = opts_.residual_binning.usesRotation();
   static PersistentLogStream log("residual_binning.csv");
@@ -1034,7 +1008,6 @@ void LioProcBase::applyInfoScaleToEkf(const std::vector<Residual>& residuals) co
   ++info_scale_iterations_;
   info_scale_discarded_modes_ += st.discarded_modes;
   if (st.trace_before > 0.0) info_scale_trace_ratio_sum_ += st.trace_after / st.trace_before;
-  if (shadow_active_) return;   // R73
   static PersistentLogStream log("info_scale.csv");
   bool first = false;
   std::ofstream& o = log.stream(&first);
@@ -1116,7 +1089,7 @@ double LioProcBase::estimateStateCorrection(
     logZsqIteration(0);
   if (!opts_.residual_dump_frames.empty() && dump_rules::residualDumpIterationWanted(opts_.residual_dump_all_iters, diagnostic_gn_iteration_) &&
       std::find(opts_.residual_dump_frames.begin(), opts_.residual_dump_frames.end(), voxel_map_->frame_idx_) != opts_.residual_dump_frames.end())
-    logResidualDump(voxel_map_->frame_idx_, diagnostic_gn_iteration_, *state_, residuals_, false, opts_.residual_dump_voxel_info, opts_.residual_dump_line_geometry, opts_.residual_dump_slim);   // R71: write-only per-residual dump
+    logResidualDump(voxel_map_->frame_idx_, diagnostic_gn_iteration_, *state_, residuals_, opts_.residual_dump_voxel_info, opts_.residual_dump_line_geometry, opts_.residual_dump_slim);   // R71: write-only per-residual dump
 
   if (opts_.log_debug_en && diagnostic_gn_iteration_ >= 0) {
     static PersistentLogStream log("iekf_factor_iteration.csv");

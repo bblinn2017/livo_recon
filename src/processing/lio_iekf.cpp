@@ -646,15 +646,6 @@ std::string LioProcIekf::engagementReport() const
       o << "   <-- NOT ENGAGED: the gain never left 1 (a valid null: the model never looked inconsistent; the IMU-side q_gain counter in "
            "engagement_imu.txt must agree)";
   }
-  if (opts_.shadow.on())   // R73 (F-414)
-  {
-    o << "\n  lio/shadow mode=on window=[" << opts_.shadow.window_start << "," << opts_.shadow.window_end << "] process_noise_model="
-      << opts_.shadow.process_noise_model << " scans_run=" << shadow_scans_ << " scans_without_residuals=" << shadow_scans_no_residuals_
-      << " scans_where_the_map_digest_changed=" << shadow_map_changed_scans_
-      << " shadow_propagations=" << (shadow_ ? shadow_->propagations() : 0L);
-    if (shadow_scans_ == 0) o << "   <-- INERT: shadow selected and no scan inside the window was processed";
-    if (shadow_map_changed_scans_ > 0) o << "   <-- INVALID: the shadow pass changed the voxel map";
-  }
   if (opts_.iekf_point_stream != "primary")   // R78
   {
     o << "\n  lio/iekf_point_stream=" << opts_.iekf_point_stream << " dry_run_point_filter_num=" << opts_.dry_run_point_filter_num
@@ -892,16 +883,12 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
   logStateTrace("post_imu", mg, 0, 0);
   if (openLoopActive() || startupHoldActive(static_cast<long>(voxel_map_->frame_idx_))) return openLoopFinishScan(mg);
 
-  // R73 (F-414, F-415): per-scan map statistics (before this scan's passes, i.e. the map as inserted through the previous scan), the
-  // shadow update for scans in its window (it runs BEFORE the driver's own update and restores everything it touched), and the
+  // R73 (F-415): per-scan map statistics (before this scan's passes, i.e. the map as inserted through the previous scan) and the
   // driver's update record. All write-only; default off is bit-identical.
-  const bool shadow_window = shadow_ && shadow_->opts().inWindow(voxel_map_->frame_idx_);
-  const bool capture_update = opts_.scan_log_en || shadow_window;
+  const bool capture_update = opts_.scan_log_en;
   drv_rec_.reset();
-  shadow_rec_.reset();
   if (opts_.scan_log_en)
     if (auto* vm_stats = dynamic_cast<VoxelMap*>(voxel_map_.get())) { scan_stats_ = vm_stats->computeScanStats(); scan_stats_valid_ = true; }
-  if (shadow_window) runShadowUpdate(mg);
 
   {
     TimedScope ts(profiler_, "lio/ekf");
@@ -913,7 +900,7 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
 
     // pose_control_lidar_information_footprint_validation Phase 2A: per-
     // iteration physical tail state before/after this scan's REAL IEKF
-    // loop (the shadow/dry-run pass above is explicitly excluded -- see
+    // loop (the dry-run pass above is explicitly excluded -- see
     // that pass's own doc comment, "this whole pass is discarded"). Reuses
     // the opts_.log_debug_en gate -- diagnostic-only, zero cost when off, no new config key.
     static PersistentLogStream gn_iter_log("iekf_gn_iteration.csv");
@@ -930,7 +917,7 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
     // this frame actually blends against.
     applyPriorScalarControls(prior_cov_, opts_.prior_scalar);
     state_propagat_ = *state_;
-    if (capture_update)   // R73: the driver's update record, same fields as the shadow's
+    if (capture_update)   // R73: the driver's update record
     {
       drv_rec_.valid = true;
       drv_rec_.start_pos = mg.pos_before_imu;
@@ -1119,7 +1106,7 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
     if (dump_rules::lastIterDumpWanted(opts_.residual_dump_last_iter, opts_.residual_dump_all_iters))   // R73 (F-417); R86B: not with every-iteration dump: the residuals of the last executed iteration
     {
       const int last_iter_dump = std::min(iter, opts_.max_iterations - 1);
-      if (last_iter_dump > 0) dumpResidualsIfListed(last_iter_dump, /*shadow=*/false);
+      if (last_iter_dump > 0) dumpResidualsIfListed(last_iter_dump);
     }
     if (opts_.zsq_log_en)   // R95: the z squared summary of the last executed iteration, the residuals_ of that iteration (as the last-iteration dump above); iteration 0 was written in estimateStateCorrection()
     {
@@ -1727,7 +1714,6 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
       debugLogLio(dbg.str());
     }
 
-    if (shadow_window) writeShadowRows(mg, shadow_digest_before_, shadow_digest_after_);   // R73
     if (opts_.scan_log_en && scan_stats_valid_) writeScanLogRow(mg, scan_stats_);          // R73
 
     logStateTrace("post_lio", mg, static_cast<int>(residuals_.size()), iter);

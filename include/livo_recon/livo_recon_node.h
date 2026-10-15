@@ -9,7 +9,6 @@
 #include "livo_recon/processing/vio_processing.h"
 #include "livo_recon/processing/combined_processing.h"
 #include "livo_recon/processing/evo_processing.h"
-#include "livo_recon/lio/shadow_lio.h"
 
 #include <memory>
 
@@ -81,8 +80,6 @@ private:
   ImuProc   imu_proc_;
   // R97: the estimator is always the IEKF (the estimator/mode key and makeLioProc() were removed); the base-class pointer type is kept.
   std::unique_ptr<LioProcBase> lio_proc_;
-  // R73 (F-414): shadow IMU propagation + shadow state (null unless lio/shadow/mode=on). Constructed after parameter loading.
-  std::shared_ptr<ShadowLio> shadow_;
   VioProc      vio_proc_;
   CombinedProc combined_proc_;
   EvoProc      evo_proc_;

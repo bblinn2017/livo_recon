@@ -154,7 +154,7 @@ ImuProc::~ImuProc()
 {
   // R73 (F-407): always written, including when no alternative engaged (R72 returned no engagement_imu.txt for the arms where the
   // counters were all zero, and the gate could not tell "inert" from "never written"). A zero-engagement run states its zeros.
-  std::ofstream out(debugLogPath(is_shadow_ ? "engagement_imu_" + shadow_tag_ + ".txt" : std::string("engagement_imu.txt")), std::ios::trunc);
+  std::ofstream out(debugLogPath("engagement_imu.txt"), std::ios::trunc);
   if (out) out << engagementReport() << '\n';
 }
 
@@ -296,7 +296,6 @@ void ImuProc::propagate(MeasureGroup& mg)
   {
     last_imu_sample_.acc  = -state_->rot().transpose() * state_->gravity();
     last_imu_sample_.gyro = V3D::Zero();
-    last_scan_q_ = ScanQ{};   // R73: no samples, no process variance applied this call
     return;
   }
 
@@ -518,12 +517,11 @@ void ImuProc::propagate(MeasureGroup& mg)
     debiased_gyr_energy_sum += debiased_gyr_energy;
     acc_motion_sum += dynamic_acc.norm();
     gyr_motion_sum += dynamic_gyr.norm();
-    if (!is_shadow_)   // R73: a shadow instance never writes the driver's files
-      writeMotionQSampleDiagnostic(
+    writeMotionQSampleDiagnostic(
           propagation_index_, q_samples - 1, tail.t + data_queues_->start_time,
           opts_.process_noise_model, dynamic_acc, dynamic_gyr,
           debiased_acc_energy, debiased_gyr_energy, var_acc_step, var_gyr_step);
-    if (!is_shadow_ && opts_.motion_q_step_log_en)   // R83B (A6/B5)
+    if (opts_.motion_q_step_log_en)   // R83B (A6/B5)
       writeMotionQStepDiagnostic(
           propagation_index_, q_samples - 1, tail.t + data_queues_->start_time,
           var_acc_step, var_gyr_step,
@@ -708,18 +706,13 @@ void ImuProc::propagate(MeasureGroup& mg)
   mg.imu_samples.clear();
 
   state_->setPropagatedState(rot_imu, pos_imu, vel_imu);
-  if (!is_shadow_) writeImuCovGrowthRow(propagation_index_, mg.image.t + data_queues_->start_time, r61_P_start, state_->cov(), r61_Q_acc);
+  writeImuCovGrowthRow(propagation_index_, mg.image.t + data_queues_->start_time, r61_P_start, state_->cov(), r61_Q_acc);
 
   // One compact row per scan; the first post-calibration scan is also logged
   // sample-by-sample above. Both are intentionally small enough for campaign
   // returns.
   const double inv_n = q_samples ? 1.0 / static_cast<double>(q_samples) : 0.0;
-  last_scan_q_.q_acc = q_acc_sum * inv_n;   // R73: the per-scan mean process variance actually applied (both driver and shadow instances)
-  last_scan_q_.q_gyr = q_gyr_sum * inv_n;
-  last_scan_q_.samples = q_samples;
-  last_scan_q_.acc_clamped_axes = acc_clamped;
-  last_scan_q_.gyr_clamped_axes = gyr_clamped;
-  if (!is_shadow_) writeMotionQScanDiagnostic(
+  writeMotionQScanDiagnostic(
       propagation_index_, mg.image.t + data_queues_->start_time,
       opts_.process_noise_model, opts_.motion_beta,
       opts_.motion_acc_scale, opts_.motion_gyr_scale, q_samples,

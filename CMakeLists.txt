@@ -137,8 +137,7 @@ add_executable(livo_recon_node
   src/processing/vio_processing.cpp
   src/processing/lio_base.cpp
   src/processing/lio_iekf.cpp
-  src/processing/lio_iekf_shadow.cpp
-  src/lio/shadow_lio.cpp
+  src/processing/lio_iekf_scan_log.cpp
   src/processing/combined_processing.cpp
   src/processing/evo_processing.cpp
   src/lio/voxelplane.cpp
@@ -360,7 +359,7 @@ add_test(NAME residual_binning_r91f COMMAND test_residual_binning_r91f)
 
 # R72 (planning agent's patch; R82: step cap F-403 retired): Q-adaptation alternatives (F-401), failure dump round trip (F-398).
 # ROS-free header-only modules, Eigen only.
-foreach(r72_test q_adapt symmetrize renamed_keys shadow_options bag_clock plane_test_values line_residual line_residual_r75 line_residual_r76 process_noise_switch)
+foreach(r72_test q_adapt symmetrize renamed_keys bag_clock plane_test_values line_residual line_residual_r75 line_residual_r76 process_noise_switch)
   add_executable(test_${r72_test} tests/test_${r72_test}.cpp)
   target_include_directories(test_${r72_test} PUBLIC include ${EIGEN3_INCLUDE_DIRS})
   target_link_libraries(test_${r72_test} Eigen3::Eigen)

@@ -7,7 +7,6 @@
 #include <array>
 #include <string>
 #include <vector>
-#include "livo_recon/lio/shadow_lio.h"
 
 namespace livo_recon
 {
@@ -32,7 +31,7 @@ private:
   // See LioProcOptions::dry_run_point_filter_num's doc comment.
   void runDryRunShadowPass(const MeasureGroup& mg);
 
-  // R73 (F-414, F-415): everything one update (driver or shadow) of one scan produced, for the per-scan logs. Write-only.
+  // R73 (F-414, F-415): everything one update of one scan produced, for the per-scan logs. Write-only.
   struct UpdateRecord
   {
     bool valid = false;
@@ -50,13 +49,9 @@ private:
     std::string stop;
     void reset() { *this = UpdateRecord(); }
   };
-  UpdateRecord drv_rec_, shadow_rec_;
+  UpdateRecord drv_rec_;
   void recordIteration(UpdateRecord& rec, int iter, const V3D& dtheta, const V3D& dt) const;
-  void runShadowUpdate(const MeasureGroup& mg);                       // fills shadow_rec_ (see shadow_options.h)
-  void writeShadowRows(const MeasureGroup& mg, unsigned long long digest_before, unsigned long long digest_after);
   void writeScanLogRow(const MeasureGroup& mg, const VoxelMapScanStats& st) const;
-  long shadow_scans_ = 0, shadow_scans_no_residuals_ = 0, shadow_map_changed_scans_ = 0;
-  unsigned long long shadow_digest_before_ = 0, shadow_digest_after_ = 0;
   VoxelMapScanStats scan_stats_;
   bool scan_stats_valid_ = false;
 

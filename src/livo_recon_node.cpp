@@ -101,14 +101,6 @@ void LivoReconNode::loadParameters()
   ctx_.printer->print(PrintCategory::PARAMS, calib_proc_.loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, imu_proc_.loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, lio_proc_->loadParameters(pnh_));
-  if (lio_proc_->shadowOptions().on())   // R73 (F-414)
-  {
-    shadow_ = std::make_shared<ShadowLio>(ctx_, imu_proc_, lio_proc_->shadowOptions());
-    lio_proc_->setShadow(shadow_);
-    ctx_.printer->print(PrintCategory::PARAMS, std::string("[params/shadow]  lio/shadow/mode=on window=[") +
-        std::to_string(lio_proc_->shadowOptions().window_start) + "," + std::to_string(lio_proc_->shadowOptions().window_end) +
-        "] process_noise_model=" + lio_proc_->shadowOptions().process_noise_model);
-  }
   ctx_.printer->print(PrintCategory::PARAMS, evo_proc_.loadParameters(pnh_));
 
   paramWarn<bool>(pnh_, "outputs/auto_terminate_on_idle", auto_terminate_on_idle_, false);
@@ -163,8 +155,6 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
   mg.cov_before_imu = ctx_.state->cov();
   lio_proc_->logPreImuState(mg);   // R86B: write-only pre_imu state_trace row (no-op unless eval/state_trace_pre_imu_frames > 0)
 
-  // R73 (F-414): the shadow starts from the driver's posterior of the previous scan (its state right now), BEFORE the driver propagates.
-  if (shadow_) shadow_->propagateFromDriver(mg, *ctx_.state);
   imu_proc_.maybeSwitchProcessNoise(static_cast<long>(ctx_.voxel_map->frame_idx_) + 1);   // R74 (F-426): no-op unless imu/process_noise/switch/scan > 0
   { TimedScope ts(ctx_.profiler, "imu"); imu_proc_.processIMU(mg); }
   mg.pos_after_imu = ctx_.state->pos();
