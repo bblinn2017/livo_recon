@@ -57,7 +57,7 @@ int main()
 
   // average + count on bins of identical points reproduces the raw sums exactly (the representative IS every member, covariance sums are the raw sums)
   {
-    Options o; o.cov_mode = CovMode::Average; o.weight_mode = WeightMode::Count;
+    Options o; o.cov_mode = CovMode::Average;
     const Moments m = b2.moments(o, ref);
     const Raw r = rawSums(pts, cov, tr, ref);
     CK(std::fabs(m.n - r.n) < 1e-12);
@@ -70,37 +70,14 @@ int main()
     for (int a = 0; a < 3; ++a) { vw = vw && maxAbs(m.w[a], r.w[a]) < 1e-14; for (int b = 0; b < 3; ++b) vw = vw && maxAbs(m.v[a][b], r.v[a][b]) < 1e-14; }
     CK(vw);
   }
-  // uniform weight: n is the number of bins; the position sums are those of the three bin means
+  // shrunk + count (R95: the uniform weight was removed): each bin's covariance is divided by k^2 and the bin is weighted by k, so the covariance sums are C / k per bin; n is the number of returns
   {
-    Options o; o.cov_mode = CovMode::Average; o.weight_mode = WeightMode::Uniform;
+    Options o; o.cov_mode = CovMode::Shrunk;
     const Moments m = b2.moments(o, ref);
-    CK(std::fabs(m.n - 3.0) < 1e-12);
-    CK((m.sp - ((pa - ref) + (pb - ref) + (pc - ref))).cwiseAbs().maxCoeff() < 1e-12);
-    // average covariance of bin A (3 members C1,C2,C1) is (2 C1 + C2)/3; weight 1
     const M3 expect_all = (2.0 * C1 + C2) / 3.0 + (C2 + C1) / 2.0 + C2;
     CK(maxAbs(m.scov, expect_all) < 1e-15);
-    // trusted: bin A has none, bin B has both (C2 + C1)/2, bin C has C2
-    CK(maxAbs(m.scov_sensor, (C2 + C1) / 2.0 + C2) < 1e-15);
-  }
-  // shrunk + uniform: each bin's covariance is divided by k^2
-  {
-    Options o; o.cov_mode = CovMode::Shrunk; o.weight_mode = WeightMode::Uniform;
-    const Moments m = b2.moments(o, ref);
-    const M3 expect_all = (2.0 * C1 + C2) / 9.0 + (C2 + C1) / 4.0 + C2;
-    CK(maxAbs(m.scov, expect_all) < 1e-15);
-    CK(maxAbs(m.scov_sensor, (C2 + C1) / 4.0 + C2) < 1e-15);
-    CK(std::fabs(m.n - 3.0) < 1e-12);
-  }
-  // shrunk + count carries the same covariance sums as average + uniform (k x C/k^2 = 1 x C/k) but the weight of count
-  {
-    Options sc; sc.cov_mode = CovMode::Shrunk; sc.weight_mode = WeightMode::Count;
-    Options au; au.cov_mode = CovMode::Average; au.weight_mode = WeightMode::Uniform;
-    const Moments a = b2.moments(sc, ref), b = b2.moments(au, ref);
-    CK(maxAbs(a.scov, b.scov) < 1e-15);
-    CK(maxAbs(a.scov_sensor, b.scov_sensor) < 1e-15);
-    CK(std::fabs(a.n - 6.0) < 1e-12);
-    CK(std::fabs(b.n - 3.0) < 1e-12);
-    CK((a.sp - b.sp).norm() > 1e-6);   // the position sums differ: that is the weight
+    CK(maxAbs(m.scov_sensor, (C2 + C1) / 2.0 + C2) < 1e-15);   // trusted: bin A has none, bin B has both, bin C has C2
+    CK(std::fabs(m.n - 6.0) < 1e-12);
   }
   // untrusted returns are in scov and not in scov_sensor
   {
@@ -136,13 +113,10 @@ int main()
   }
   // config names
   {
-    CovMode c; WeightMode w;
+    CovMode c;
     CK(parseCovMode("average", c) && c == CovMode::Average);
     CK(parseCovMode("shrunk", c) && c == CovMode::Shrunk);
     CK(!parseCovMode("mean", c));
-    CK(parseWeightMode("count", w) && w == WeightMode::Count);
-    CK(parseWeightMode("uniform", w) && w == WeightMode::Uniform);
-    CK(!parseWeightMode("sqrt", w));
   }
   std::printf("test_binned_bins_r88 %s\n", fails ? "FAIL" : "PASS");
   return fails ? 1 : 0;

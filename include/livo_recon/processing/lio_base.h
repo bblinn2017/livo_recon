@@ -146,6 +146,9 @@ struct LioProcOptions
   // the points that got line or smooth rows, the sums of fit variance, tilt variance and total variance, and the cumulative R77 engagement counters
   // (voxelPlaneR77Counters()). Default false writes nothing and is bit-identical.
   bool   line_rows_log_en      = false;
+  // R95 (Bryce 2026-10-11; key lio/zsq_log_en, default false = nothing is written, bit-identical): zsq_per_scan.csv, one row per scan for iteration 0 and one for the last executed iteration, holding
+  // the sums and counts of z squared = r^2 / sigma_squared of the residuals (diagnostics/zsq_summary.h defines every column). Write-only; experimental: the engagement block of the effective config prints the row count and flags a run where the key is on and no row was written.
+  bool   zsq_log_en            = false;
 
   // R71 (F-363): write-only per-residual dump (residual_dump.csv, residual_dump_state.csv) for the listed frame indices at
   // iteration 0. Empty (default) writes nothing and is bit-identical.
@@ -322,6 +325,10 @@ protected:
   std::shared_ptr<class ShadowLio> shadow_;
   // R73: per-residual dump of the CURRENT residuals_ (and state_) when the current map frame is in lio/residual_dump_frames.
   void dumpResidualsIfListed(int iteration, bool shadow) const;
+  // R95: one zsq_per_scan.csv row for the CURRENT residuals_ and map frame (no-op when lio/zsq_log_en is false). Iteration 0 is written inside estimateStateCorrection(); the IEKF loop calls this once more after the loop for the last executed iteration.
+  void logZsqIteration(int iteration) const;
+  // R95: rows written to zsq_per_scan.csv since process start (engagement counter).
+  static long zsqRowsWritten();
 
   StateGroupPtr state_;
   MapBackendPtr voxel_map_;

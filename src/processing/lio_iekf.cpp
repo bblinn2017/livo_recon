@@ -554,12 +554,20 @@ std::string LioProcIekf::engagementReport() const
       else if (!opts_.gate_state_uncertainty && c93.gate_pose_rows != 0)
         o << "   <-- ERROR: the gate was set to exclude the pose covariance and " << c93.gate_pose_rows << " rows received it";
     }
+    {   // R95 (Bryce 2026-10-11): lio/zsq_log_en -- the per-scan z squared summary (engagement counter)
+      const long zr = zsqRowsWritten();
+      o << "\n  lio/zsq_log_en = " << (opts_.zsq_log_en ? "true" : "false") << " zsq_rows_written=" << zr;
+      if (opts_.zsq_log_en && zr == 0)
+        o << "   <-- INERT: the key is on and no row was written";
+      else if (!opts_.zsq_log_en && zr != 0)
+        o << "   <-- ERROR: the key is off and " << zr << " rows were written";
+    }
     if (vm->opts()->binned_enabled)   // R88: written only for the binned map type
     {
       const auto st88 = vm->stats();
       const long long bp = st88 ? st88->binned_points.load() : 0, bb = st88 ? st88->binned_new_bins.load() : 0, bf = st88 ? st88->binned_fits.load() : 0, bt = st88 ? st88->binned_touched_at_fit.load() : 0;
       o << "\n  voxel_map/backend = binned: bin_size_fraction = " << vm->opts()->binned_bin_fraction << " cov_mode = " << (vm->opts()->binned_cov_mode == 1 ? "shrunk" : "average")
-        << " weight_mode = " << (vm->opts()->binned_weight_mode == 1 ? "uniform" : "count") << " binned_points=" << bp << " binned_new_bins=" << bb << " binned_fits=" << bf
+        << " weight = count binned_points=" << bp << " binned_new_bins=" << bb << " binned_fits=" << bf
         << " update_count = touched binned_touched_at_fit=" << bt;
       if (bp == 0)
         o << "   <-- INERT: the binned map was selected and no return was put in a bin";
@@ -1141,6 +1149,11 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
     {
       const int last_iter_dump = std::min(iter, opts_.max_iterations - 1);
       if (last_iter_dump > 0) dumpResidualsIfListed(last_iter_dump, /*shadow=*/false);
+    }
+    if (opts_.zsq_log_en)   // R95: the z squared summary of the last executed iteration, the residuals_ of that iteration (as the last-iteration dump above); iteration 0 was written in estimateStateCorrection()
+    {
+      const int last_iter_zsq = std::min(iter, opts_.max_iterations - 1);
+      if (last_iter_zsq > 0) logZsqIteration(last_iter_zsq);
     }
 
     // The covariance is intentionally updated once, after all fixed-prior

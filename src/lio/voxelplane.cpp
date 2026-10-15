@@ -193,7 +193,7 @@ void debugLogVarianceShare(double sigma_diag_squared, double plane_var_term)
 }
 
 // T3-0d: N/J/N_eff/trace(plane_var_) per VoxelPlane::update() call that
-// commits a plane -- lets a binned/bin_size_fraction or binned/weight_mode sweep be
+// commits a plane -- lets a binned/bin_size_fraction or binned/cov_mode sweep be
 // read against how much the effective sample size actually moved, rather
 // than inferred from ATE alone. Called from VoxelMap::insert()'s own OMP
 // parallel-for, once per plane fit -- same thread_local-buffer-plus-flush
