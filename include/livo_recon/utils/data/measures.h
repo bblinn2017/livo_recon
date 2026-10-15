@@ -87,7 +87,6 @@ struct MeasureGroup
   V3D prior_vel = V3D::Zero();
 
   // Visualization Outputs
-  cv::Mat grid_vis_image;
   std::string evo_stats;  // latest "n=.. ATE=.. RTE=.. ROE=.." line, set by EvoProc::processEvo() -- empty until enough poses have been matched to align
 
   // VIO tracking result for this group's image (task #145) -- populated by

@@ -66,8 +66,6 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<std::string>(pnh, "topics/image",      opts_.image_topic,  "/camera/image_raw");
   paramWarn<std::string>(pnh, "topics/lidar",      opts_.lidar_topic,  "/points_raw");
   paramWarn<std::string>(pnh, "topics/imu",        opts_.imu_topic,    "/imu/data");
-  paramWarn<std::string>(pnh, "frames/camera",     opts_.camera_frame, "camera_link");
-  paramWarn<std::string>(pnh, "frames/lidar",      opts_.lidar_frame,  "lidar_link");
   paramWarn<int>(pnh, "topics/queue_size", opts_.queue_size,   10);
   paramWarn<double>(pnh, "topics/lookahead_margin_s", data_queues_->lookahead_margin_s, 0.1);
   paramWarn<double>(pnh, "topics/quiet_margin_s",     data_queues_->quiet_margin_s,     0.05);
@@ -180,8 +178,6 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  topics/queue_size:" << opts_.queue_size
       << "\n  topics/lookahead_margin_s: " << data_queues_->lookahead_margin_s
       << "\n  topics/quiet_margin_s:     " << data_queues_->quiet_margin_s
-      << "\n  frames/camera:    " << opts_.camera_frame
-      << "\n  frames/lidar:     " << opts_.lidar_frame
       << "\n  cbk/lidar/blind:  " << blind
       << "\n  cbk/lidar/point_filter_num: " << opts_.point_filter_num
       << "\n  cbk/lidar/time_offset: " << opts_.lidar_time_offset

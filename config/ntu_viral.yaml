@@ -13,7 +13,6 @@ cuda:
   enable: false  # set true to dispatch H^T*W*H accumulation (LIO) and affine warp (VIO) to GPU
 viz:
   enable: true  # normally overridden by the launch file's viz/enable param, set directly from the rviz:= launch arg (see livo_recon_*.launch) -- this default only applies if that param load is bypassed, e.g. loading this file's params directly outside a launch file
-  grid_map: false
   plane_map: false
   uv_tracking: true  # publish rgb_img with arrows showing vio's tracked uv displacements
   ds:
@@ -103,8 +102,6 @@ state:
     bg: true
     ba: true
     gravity: true
-    cov_acc: false
-    cov_gyr: false
   cov:
     # Initial state covariance only; runtime process noise is under imu/.
     rot_tilt: 1.0e-2
@@ -296,9 +293,6 @@ topics:
   lidar: "/os1_cloud_node1/points"
   imu: "/imu/imu"
   queue_size: 20000
-frames:
-  camera: camera_link
-  lidar: lidar_link
 extrinsics:
   R_l2i: [1, 0, 0, 0, 1, 0, 0, 0, 1]
   t_l2i: [-0.050, 0.000, 0.055]
@@ -311,7 +305,6 @@ camera:
   fy: 426.7976260903337
   cx: 386.0151866550880
   cy: 241.9130336743440
-  distortion_model: plumb_bob
   distortion_coeffs: [-0.288105327549552, 0.074578284234601, 7.784489598138802e-04, -2.277853975035461e-04, 0.0]
 preprocess:
   # NTU VIRAL's camera/lidar rates don't have the mismatch HILTI's does

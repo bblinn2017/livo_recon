@@ -155,7 +155,6 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
   mg.cov_before_imu = ctx_.state->cov();
   lio_proc_->logPreImuState(mg);   // R86B: write-only pre_imu state_trace row (no-op unless eval/state_trace_pre_imu_frames > 0)
 
-  imu_proc_.maybeSwitchProcessNoise(static_cast<long>(ctx_.voxel_map->frame_idx_) + 1);   // R74 (F-426): no-op unless imu/process_noise/switch/scan > 0
   { TimedScope ts(ctx_.profiler, "imu"); imu_proc_.processIMU(mg); }
   mg.pos_after_imu = ctx_.state->pos();
   mg.rot_after_imu = ctx_.state->rot();

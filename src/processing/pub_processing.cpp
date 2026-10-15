@@ -19,7 +19,6 @@ std::string PubProc::loadParameters(ros::NodeHandle& pnh)
 {
   paramWarn<bool>(pnh, "viz/enable",          opts_.viz_enable,      true);
   paramWarn<double>(pnh, "viz/ds/ds_leaf_size", opts_.vis_ds_leaf_size, 0.0);
-  paramWarn<bool>(pnh, "viz/grid_map",        opts_.viz_grid_map,    false);
   paramWarn<bool>(pnh, "viz/plane_map",       opts_.viz_plane_map,   false);
 
   paramWarn<std::string>(pnh, "outputs/path",               opts_.output_path,           "");
@@ -154,7 +153,6 @@ std::string PubProc::loadParameters(ros::NodeHandle& pnh)
   oss << "[params/pub]"
       << "\n  viz/enable:          " << (opts_.viz_enable       ? "true" : "false")
       << "\n  viz/ds/ds_leaf_size: " << opts_.vis_ds_leaf_size
-      << "\n  viz/grid_map:        " << (opts_.viz_grid_map    ? "true" : "false")
       << "\n  viz/plane_map:       " << (opts_.viz_plane_map   ? "true" : "false")
       << "\n  outputs/path:        " << opts_.output_path
       << "\n  outputs/pcd/export:  " << (opts_.export_pcd    ? "true" : "false")
@@ -380,8 +378,6 @@ void PubProc::publishImage(const MeasureGroup& mg)
   const cv::Mat uv_vis = tracker_->maybeDrawUvTracking(mg.image.image);
   if (!uv_vis.empty())
     cv_img.image = uv_vis;
-  else if (opts_.viz_grid_map && !mg.grid_vis_image.empty())
-    cv_img.image = mg.grid_vis_image;
   else
     cv_img.image = mg.image.image;
   pub_image_.publish(*cv_img.toImageMsg());

@@ -134,20 +134,9 @@ std::string ImuProc::engagementReport() const
 {
   std::ostringstream o;
   o << "[engagement/imu] propagations=" << propagation_index_;
-  o << "\n  process_noise_switch scan=" << switch_.scan << " model=" << (switch_.on() ? switch_.model : std::string("off"))
-    << " applied=" << (switch_applied_ ? 1 : 0) << " applied_at_frame=" << switch_applied_frame_ << " applied_at_propagation=" << switch_applied_propagation_;
   o << "\n  q_gain steps=" << gain_steps_ << " steps_with_gain_ne_1=" << gain_steps_applied_
     << " max_gain_acc=" << gain_acc_max_ << " max_gain_gyr=" << gain_gyr_max_;
   return o.str();
-}
-
-void ImuProc::maybeSwitchProcessNoise(long next_frame)
-{
-  if (!processNoiseSwitchDue(switch_, next_frame, switch_applied_)) return;
-  applyProcessNoiseSwitch(opts_, switch_);
-  switch_applied_ = true;
-  switch_applied_frame_ = next_frame;
-  switch_applied_propagation_ = propagation_index_ + 1;   // the propagation that is about to run is the next one
 }
 
 ImuProc::~ImuProc()
@@ -247,22 +236,6 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
       throw std::invalid_argument("IMU motion-noise scales/caps must be finite and nonnegative");
   // R74 (F-427): the local-polynomial energy source and the additive WNOA disturbance were removed; their keys are refused by
   // refuseRenamedKeys() (removedKeyTable) before this point.
-  // R74 (F-426 part 2): process-noise switch at one scan (lio/process_noise_switch.h). The sub-keys are read only when scan > 0, so a sub-key set
-  // with scan 0 is left unconsumed and refused by the all-keys-consumed check, like the other dependent keys.
-  { int sw_scan = 0; paramWarn<int>(pnh, "imu/process_noise/switch/scan", sw_scan, 0); switch_.scan = sw_scan; }
-  if (switch_.on()) {
-    paramWarn<std::string>(pnh, "imu/process_noise/switch/model", switch_.model, std::string("fixed"));
-    if (switch_.model == "isotropic") {
-      paramWarn<double>(pnh, "imu/process_noise/switch/motion_beta", switch_.motion_beta, 0.9);
-      paramWarn<double>(pnh, "imu/process_noise/switch/motion_acc_scale", switch_.motion_acc_scale, 0.3);
-      paramWarn<double>(pnh, "imu/process_noise/switch/motion_gyro_scale", switch_.motion_gyr_scale, 10.0);
-      paramWarn<double>(pnh, "imu/process_noise/switch/motion_acc_cap", switch_.motion_acc_cap, 1.0e6);
-      paramWarn<double>(pnh, "imu/process_noise/switch/motion_gyro_cap", switch_.motion_gyr_cap, 1.0e6);
-    }
-  }
-  { const std::string err = processNoiseSwitchError(switch_); if (!err.empty()) throw std::invalid_argument(err); }
-  if (switch_.on() && switch_.model == opts_.process_noise_model && switch_.model == "fixed")
-    throw std::invalid_argument("imu/process_noise/switch/model=fixed with imu/process_noise/model=fixed switches nothing (inert)");
   // Read directly rather than being wired from LioProcOptions: the two
   // classes are constructed independently and this keeps the single source
   // of truth in the parameter server, where the sweep harness writes it.

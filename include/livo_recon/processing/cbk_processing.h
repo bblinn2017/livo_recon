@@ -14,8 +14,6 @@ struct CbkProcOptions
   std::string image_topic  = "/camera/image_raw";
   std::string lidar_topic  = "/points_raw";
   std::string imu_topic    = "/imu/data";
-  std::string camera_frame = "camera_link";
-  std::string lidar_frame  = "lidar_link";
 
   // Different IMU devices/drivers publish sensor_msgs/Imu's linear_acceleration
   // in different units despite the message's own convention being m/s^2 --

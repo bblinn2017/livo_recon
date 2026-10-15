@@ -27,7 +27,6 @@ struct PubProcOptions
   // visualization. Prints periodic progress instead (see publishResults()).
   bool        viz_enable            = true;
   double      vis_ds_leaf_size      = 0.0;
-  bool        viz_grid_map          = false;
   bool        viz_plane_map         = false;
   std::string output_path           = "";
   bool        export_pcd            = false;
@@ -85,7 +84,7 @@ private:
   ros::Publisher pub_geom_;      // PointCloud2 or MarkerArray depending on viz/plane_map
   ros::Publisher pub_odom_;
   ros::Publisher pub_path_;
-  ros::Publisher pub_image_;     // raw RGB or grid map depending on viz/grid_map
+  ros::Publisher pub_image_;     // raw RGB or the UV tracking overlay
   ros::Publisher pub_timestamp_; // TEXT_VIEW_FACING marker with relative image.t
   ros::Publisher pub_evo_stats_; // jsk_rviz_plugins/OverlayText table of mg.evo_stats (n/ATE/RTE/ROE), when non-empty -- screen-space overlay, not a 3D marker, so it stays fixed/readable regardless of camera view
 

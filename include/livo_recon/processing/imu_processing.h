@@ -1,7 +1,6 @@
 #pragma once
 
 #include "livo_recon/node_context.h"
-#include "livo_recon/lio/process_noise_switch.h"
 #include "livo_recon/utils/data/measures.h"
 #include "livo_recon/utils/log/profiler.h"
 
@@ -98,10 +97,6 @@ public:
 
   std::string loadParameters(ros::NodeHandle& pnh);
 
-  // R74 (F-426 part 2): call BEFORE processIMU(mg) with the map frame index the scan about to be propagated will have (frame_idx + 1). Applies the
-  // configured process-noise switch once; a no-op (and bit-identical) when imu/process_noise/switch/scan is 0.
-  void maybeSwitchProcessNoise(long next_frame);
-
   void propagate(MeasureGroup& mg);
   // History (78-82): see docs/livo_recon_changelog.md#include-livo_recon-processing-imu_processing.h-78
   void processIMU(MeasureGroup& mg);
@@ -126,10 +121,6 @@ private:
   V3D filtered_gyr_excitation_energy_ = V3D::Zero();
   bool motion_noise_primed_ = false;
   size_t propagation_index_ = 0;
-  ProcessNoiseSwitch switch_;           // R74 (F-426)
-  bool switch_applied_ = false;
-  long switch_applied_frame_ = -1;
-  size_t switch_applied_propagation_ = 0;
   // R66 Gauss-Markov bias engagement counters / magnitude.
   bool gm_ref_set_ = false;
   V3D gm_ref_gyr_ = V3D::Zero(), gm_ref_acc_ = V3D::Zero();

@@ -80,11 +80,25 @@ inline const std::vector<std::string>& removedKeyTable()
       "voxel_map/binned/weight_mode",
       // R97 (Bryce 2026-10-15): the estimator has one mode (the IEKF), so the selector is gone. Both spellings are refused, whatever the value.
       "estimator/mode",
-      "lio/estimator/mode"};
+      "lio/estimator/mode",
+      // R97 (Bryce 2026-10-15): the lidar time offset and the overlap policy (with its four retime parameters) are replaced by rewritten bags (scripts/r97_rewrite_bags.py); the debiased plane-fit path was removed with its five keys;
+      // the inert keys of the R97 sweep (read and printed only, or dead) were removed. Keys of the removed akf and surface backends, shadow, akf_q and process_noise/switch/* sub-keys are refused as unknown keys.
+      "voxel_map/plane/plane_fit_mode",
+      "voxel_map/plane/debias_mode",
+      "voxel_map/plane/plane_threshold_hysteresis",
+      "voxel_map/plane/centred_accumulation",
+      "voxel_map/plane/debiased_line_equiv",
+      "state/est/cov_acc",
+      "state/est/cov_gyr",
+      "frames/camera",
+      "frames/lidar",
+      "camera/distortion_model",
+      "viz/grid_map",
+      "imu/process_noise/switch/scan"};
   return t;
 }
 
-// The release and followup that removed `key` (R74 F-427 for the first eight keys, R82 F-476 / F-403 for the next five, R83 F-401 / F-508 for lio/zupt/*, R84 F-521 for the temporal point-covariance keys, R85 F-520 for lio/point_cov/sample_window_s, R92 for voxel_map/binned/update_count_mode, R93A for the next seven keys, R95 for voxel_map/binned/weight_mode, R97 for estimator/mode and lio/estimator/mode).
+// The release and followup that removed `key` (R74 F-427 for the first eight keys, R82 F-476 / F-403 for the next five, R83 F-401 / F-508 for lio/zupt/*, R84 F-521 for the temporal point-covariance keys, R85 F-520 for lio/point_cov/sample_window_s, R92 for voxel_map/binned/update_count_mode, R93A for the next seven keys, R95 for voxel_map/binned/weight_mode, R97 for estimator/mode, lio/estimator/mode and the 18 keys listed after them).
 inline std::string removedKeyOrigin(const std::string& key)
 {
   if (key == "imu/process_noise/gain/nis_lo" || key == "imu/process_noise/gain/deflate") return "R82 (F-476)";
@@ -96,6 +110,9 @@ inline std::string removedKeyOrigin(const std::string& key)
       key == "voxel_map/plane/line_residual/classify_at_fit" || key == "voxel_map/plane/debias_denominator_guard" || key == "voxel_map/plane/plane_var_denom_floor_en") return "R93A";
   if (key == "voxel_map/binned/weight_mode") return "R95";
   if (key == "estimator/mode" || key == "lio/estimator/mode") return "R97";
+  for (const char* k : {"voxel_map/plane/plane_fit_mode", "voxel_map/plane/debias_mode", "voxel_map/plane/plane_threshold_hysteresis", "voxel_map/plane/centred_accumulation", "voxel_map/plane/debiased_line_equiv",
+                        "state/est/cov_acc", "state/est/cov_gyr", "frames/camera", "frames/lidar", "camera/distortion_model", "viz/grid_map", "imu/process_noise/switch/scan"})
+    if (key == k) return "R97";
   if (key == "lio/point_cov/mode" || key == "lio/point_cov/window_s" || key.rfind("lio/time_cov/", 0) == 0) return "R84 (F-521)";
   return "R74 (F-427)";
 }
