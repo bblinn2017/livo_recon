@@ -11,39 +11,6 @@
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
 
-namespace
-{
-// CQ-49 item 3c/3f: estimator/mode selects WHICH LioProcBase subclass is
-// constructed -- read here, once, with a bare paramWarn (marks the key
-// consumed so checkAllParamsConsumed() stays happy), BEFORE lio_proc_ is
-// built. lio/estimator/mode (the pre-split key) is refused explicitly
-// rather than silently ignored, per rule 4f.
-std::unique_ptr<livo_recon::LioProcBase> makeLioProc(ros::NodeHandle& pnh, livo_recon::NodeContext& ctx)
-{
-  if (pnh.hasParam("lio/estimator/mode"))
-    throw std::runtime_error(
-        "[config] refused: lio/estimator/mode was RENAMED to estimator/mode "
-        "-- it selects which LioProc is constructed and is read at the "
-        "node, not inside LioProc.");
-  std::string mode;
-  livo_recon::paramWarn<std::string>(pnh, "estimator/mode", mode, "iekf");
-  if (mode == "coupled")
-    throw std::runtime_error(
-        "[config] refused: estimator/mode='coupled' -- the coupled joint-knot "
-        "estimator was removed (R89); must be 'iekf'");
-  if (mode == "decoupled")
-    throw std::runtime_error(
-        "[config] refused: estimator/mode='decoupled' was RENAMED to 'iekf' "
-        "(the plain IEKF on IMU-deskewed points; the spline is gone) -- "
-        "must be 'iekf'");
-  if (mode != "iekf")
-    throw std::runtime_error(
-        "[config] refused: estimator/mode='" + mode + "' -- must be "
-        "'iekf'");
-  return std::make_unique<livo_recon::LioProcIekf>(ctx);
-}
-}  // namespace
-
 namespace livo_recon
 {
 
@@ -51,7 +18,7 @@ LivoReconNode::LivoReconNode(ros::NodeHandle& nh, ros::NodeHandle& pnh)
   : nh_(nh), pnh_(pnh), it_(nh_),
     ctx_(nh_, pnh_, it_),
     cbk_proc_(ctx_), pub_proc_(ctx_), calib_proc_(ctx_),
-    imu_proc_(ctx_), lio_proc_(makeLioProc(pnh_, ctx_)),
+    imu_proc_(ctx_), lio_proc_(std::make_unique<LioProcIekf>(ctx_)),
     vio_proc_(ctx_), combined_proc_(ctx_), evo_proc_(ctx_)
 {
   loadParameters();

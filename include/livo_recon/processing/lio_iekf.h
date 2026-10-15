@@ -13,11 +13,8 @@
 namespace livo_recon
 {
 
-// The shipped, DEFAULT estimator (estimator/mode: iekf; renamed from
-// `decoupled` 2026-09-30 when the scan spline and AdaptiveQ were removed).
-// Points are deskewed once from the IMU poses; estimateStateCorrection() (LioProcBase)
-// runs the LiDAR pose-block IEKF update. NO estimator_mode branch survives in
-// this class (the node never instantiates it under estimator/mode: coupled).
+// The estimator (R97: the only one; the estimator/mode key was removed). Points are deskewed once from the IMU poses;
+// estimateStateCorrection() (LioProcBase) runs the LiDAR pose-block IEKF update.
 class LioProcIekf : public LioProcBase
 {
 public:

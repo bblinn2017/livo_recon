@@ -77,11 +77,14 @@ inline const std::vector<std::string>& removedKeyTable()
       "voxel_map/plane/debias_denominator_guard",
       "voxel_map/plane/plane_var_denom_floor_en",
       // R95 (Bryce 2026-10-11): the uniform bin weight (w = 1 per occupied bin) was removed; the weight of a bin is its return count (the former `count`). The key is refused, whatever its value.
-      "voxel_map/binned/weight_mode"};
+      "voxel_map/binned/weight_mode",
+      // R97 (Bryce 2026-10-15): the estimator has one mode (the IEKF), so the selector is gone. Both spellings are refused, whatever the value.
+      "estimator/mode",
+      "lio/estimator/mode"};
   return t;
 }
 
-// The release and followup that removed `key` (R74 F-427 for the first eight keys, R82 F-476 / F-403 for the next five, R83 F-401 / F-508 for lio/zupt/*, R84 F-521 for the temporal point-covariance keys, R85 F-520 for lio/point_cov/sample_window_s, R92 for voxel_map/binned/update_count_mode, R93A for the next seven keys, R95 for voxel_map/binned/weight_mode).
+// The release and followup that removed `key` (R74 F-427 for the first eight keys, R82 F-476 / F-403 for the next five, R83 F-401 / F-508 for lio/zupt/*, R84 F-521 for the temporal point-covariance keys, R85 F-520 for lio/point_cov/sample_window_s, R92 for voxel_map/binned/update_count_mode, R93A for the next seven keys, R95 for voxel_map/binned/weight_mode, R97 for estimator/mode and lio/estimator/mode).
 inline std::string removedKeyOrigin(const std::string& key)
 {
   if (key == "imu/process_noise/gain/nis_lo" || key == "imu/process_noise/gain/deflate") return "R82 (F-476)";
@@ -92,6 +95,7 @@ inline std::string removedKeyOrigin(const std::string& key)
   if (key == "voxel_map/residual/pose_cov_in_sigma" || key == "voxel_map/plane/plane_fit_pose_cov_mode" || key == "lio/point_cov/insertion_source" || key == "voxel_map/plane/plane_gap_floor_en" ||
       key == "voxel_map/plane/line_residual/classify_at_fit" || key == "voxel_map/plane/debias_denominator_guard" || key == "voxel_map/plane/plane_var_denom_floor_en") return "R93A";
   if (key == "voxel_map/binned/weight_mode") return "R95";
+  if (key == "estimator/mode" || key == "lio/estimator/mode") return "R97";
   if (key == "lio/point_cov/mode" || key == "lio/point_cov/window_s" || key.rfind("lio/time_cov/", 0) == 0) return "R84 (F-521)";
   return "R74 (F-427)";
 }

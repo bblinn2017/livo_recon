@@ -317,8 +317,7 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
   loadSharedParameters(cfg, pnh);
   iekf_tier1_nees_ = Tier1NeesBuffer(opts_.nees_per_dof_en ? opts_.nees_tier1_window_scans : 0);
 
-  // The scan spline and AdaptiveQ were removed (Bryce, 2026-09-30), and with them the spline/mode key: estimator/mode is the only
-  // switch. Any spline/* or adaptive_q/* key left in a config is refused by finalizeConfig() below.
+  // The scan spline and AdaptiveQ were removed (Bryce, 2026-09-30). Any spline/* or adaptive_q/* key left in a config is refused by finalizeConfig() below.
 
   // ── R66: AKF-style process-noise adaptation (opt-in) ─────────────────
   {

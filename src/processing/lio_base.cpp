@@ -627,8 +627,7 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
 }
 
 // CQ-49: the shared finish -- refuse anything left unclaimed in the given
-// namespaces (each derived class passes its OWN set: {"spline","adaptive_q",...}
-// (removed namespaces, refused) for iekf, {"estimator"} for coupled), record the accumulation
+// namespaces (the iekf passes its own set: removed namespaces, refused), record the accumulation
 // precision, and either refuse (throw) or return the effective config.
 std::string LioProcBase::finalizeConfig(ConfigResolver& cfg, std::initializer_list<const char*> allowed_unclaimed_namespaces)
 {
