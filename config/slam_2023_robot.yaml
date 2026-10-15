@@ -131,7 +131,7 @@ lio:
   ekf:
     max_iterations: 5
 voxel_map:
-  backend: "voxel"  # "voxel" (persistent per-voxel plane fits, VoxelMap), "binned" (VoxelMap whose nodes keep bins) or "surface"
+  backend: "voxel"  # "voxel" (persistent per-voxel plane fits, VoxelMap), "binned" (VoxelMap whose nodes keep bins) 
   map:
     # Confirmed via a single-parameter voxel_map ablation this session
     # (hilti_voxelmap_ablation, then hilti_voxelsize_fine to check finer

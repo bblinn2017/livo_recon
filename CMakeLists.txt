@@ -148,7 +148,6 @@ add_executable(livo_recon_node
   src/lio/residual_redundancy.cpp
   src/lio/info_scale.cpp
   src/map/voxelmap.cpp
-  src/map/surface_map.cpp
   src/map/binned_voxelmap.cpp
   src/map/map_backend_factory.cpp
   src/vio/crop_utils.cpp
@@ -167,7 +166,6 @@ target_compile_options(livo_recon_node PRIVATE
 
 target_link_libraries(livo_recon_node
   livo_cuda
-  surface_core
   ${CUDA_LIBRARIES}
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
@@ -221,17 +219,6 @@ add_subdirectory(tests/active)
 add_subdirectory(tests/reference_math)
 
 # R66: the R52 stationary-map research library, its CLI and its test were removed (harness parked and retired by Bryce).
-
-# Surface map core (Eigen + std only): additive cell statistics and the dirty-set merge/split layer used by the
-# "surface" MapBackend (src/map/surface_map.cpp). Kept ROS-free so it can be unit-tested on its own.
-add_library(surface_core
-  src/map/surface/surface_core.cpp
-)
-target_include_directories(surface_core PUBLIC include ${EIGEN3_INCLUDE_DIRS})
-target_link_libraries(surface_core Eigen3::Eigen)
-add_executable(test_surface_core tests/test_surface_core.cpp)
-target_link_libraries(test_surface_core surface_core)
-add_test(NAME surface_core COMMAND test_surface_core)
 
 # R63 (coding agent addition, not part of the planning agent's patch): StateGroup's s2 gravity
 # model, exercised ROS-free via #define private public (no ros::NodeHandle/loadParameters() path
