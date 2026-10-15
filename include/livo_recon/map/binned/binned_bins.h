@@ -5,27 +5,24 @@
 // sensor covariances. When the voxel is fitted, every OCCUPIED bin is turned into one representative point (the mean of its returns) with a covariance and a weight, and those representatives are summed into the same additive
 // statistics that the debiased plane fit keeps for raw points (VoxelPlane::N_acc_, Sp_, Spp_, Scov_, Scov_sensor_, V_, W_, sum_sensor_var_). The debiased fit itself is not changed.
 //
-// Two independent choices (both are config keys, voxel_map/binned/cov_mode and voxel_map/binned/weight_mode):
+// One choice (the config key voxel_map/binned/cov_mode). R95: the weight of a bin is always the number of returns it holds; the R88 `uniform` weight (w = 1) and its key voxel_map/binned/weight_mode were removed.
 //
 //   cov_mode (what covariance the representative carries; k = returns in the bin, C = the sum of their sensor covariances)
 //     average : C / k.      The noise of the representative is the average member noise. This is the assumption that the members' errors are FULLY CORRELATED (a stationary sensor repeating the same beam),
 //                           so averaging does not reduce the error of the mean.
 //     shrunk  : C / k^2.    The noise of the representative is the noise of a mean of k INDEPENDENT returns, so it falls as 1/k.
-//   weight_mode (how much one bin contributes to the sums)
-//     count   : w = k.      A bin counts as the k returns it holds.
-//     uniform : w = 1.      A bin counts as one observation however many returns fell in it.
+//   weight (how much one bin contributes to the sums; not a choice since R95)
+//     w = k.      A bin counts as the k returns it holds.
 //
-// Every statistic that a raw point would add with weight 1 is added with weight w by the representative; the covariance sums are w x (the representative's covariance). So the four combinations are:
-//   average + count   : sum of covariances = C (the raw sum), N = total returns.   (the raw statistics, with each bin's own scatter replaced by its mean)
-//   average + uniform : sum of covariances = C / k, N = number of bins.
-//   shrunk  + count   : sum of covariances = C / k, N = total returns.
-//   shrunk  + uniform : sum of covariances = C / k^2, N = number of bins.
+// Every statistic that a raw point would add with weight 1 is added with weight w = k by the representative; the covariance sums are w x (the representative's covariance). So the two combinations are:
+//   average : sum of covariances = C (the raw sum), N = total returns.   (the raw statistics, with each bin's own scatter replaced by its mean)
+//   shrunk  : sum of covariances = C / k, N = total returns.
 //
 // Trusted returns. The debiased fit subtracts only the covariance of returns from a trusted (post-bootstrap) frame (VoxelPlane::Scov_sensor_). A bin therefore keeps a second covariance sum over its trusted members.
 // The representative's trusted covariance is that sum divided by the same divisor as the all-member sum (k or k^2), so a bin that mixes bootstrap and live returns subtracts less, never more.
 //
 // R90 (PCA on the binned map): representatives() hands the same occupied bins to the PCA fit (VoxelPlane::update()) as one point per bin (the mean of its returns), with the same covariance (cov_mode) and the same weight
-// (weight_mode) as moments() uses. The PCA fit then takes the weighted mean and covariance of those points and propagates the covariance of each into the plane variance.
+// (w = k) as moments() uses. The PCA fit then takes the weighted mean and covariance of those points and propagates the covariance of each into the plane variance.
 //
 // Not kept (and so not supported): the pose covariance. Every fit uses the sensor covariance only.
 // Determinism: bins are visited in ascending key order (std::map), so the sums do not depend on hash order or thread count.
@@ -47,27 +44,18 @@ using V3 = Eigen::Vector3d;
 using M3 = Eigen::Matrix3d;
 
 enum class CovMode { Average = 0, Shrunk = 1 };
-enum class WeightMode { Count = 0, Uniform = 1 };
 
 inline const char* covModeName(CovMode m) { return m == CovMode::Shrunk ? "shrunk" : "average"; }
-inline const char* weightModeName(WeightMode m) { return m == WeightMode::Uniform ? "uniform" : "count"; }
 inline bool parseCovMode(const std::string& s, CovMode& out)
 {
   if (s == "average") { out = CovMode::Average; return true; }
   if (s == "shrunk") { out = CovMode::Shrunk; return true; }
   return false;
 }
-inline bool parseWeightMode(const std::string& s, WeightMode& out)
-{
-  if (s == "count") { out = WeightMode::Count; return true; }
-  if (s == "uniform") { out = WeightMode::Uniform; return true; }
-  return false;
-}
 
 struct Options
 {
   CovMode cov_mode = CovMode::Average;
-  WeightMode weight_mode = WeightMode::Count;
 };
 
 struct BinKey
@@ -177,7 +165,7 @@ public:
       const Bin& b = kv.second;
       const double k = static_cast<double>(b.count);
       const V3 pbar = b.sum_p / k;
-      const double w = (o.weight_mode == WeightMode::Count) ? k : 1.0;
+      const double w = k;   // R95: the only weight (the uniform weight was removed); bit-identical to the former count weight
       const double div = (o.cov_mode == CovMode::Shrunk) ? k * k : k;
       const M3 cov_all = b.sum_cov / div;
       const M3 cov_tr = b.sum_cov_trusted / div;
@@ -200,7 +188,7 @@ public:
     return m;
   }
 
-  // The occupied bins as weighted points (see Reps). Same weights and covariances as moments(): w = k (count) or 1 (uniform); cov = C / k (average) or C / k^2 (shrunk).
+  // The occupied bins as weighted points (see Reps). Same weights and covariances as moments(): w = k; cov = C / k (average) or C / k^2 (shrunk).
   Reps representatives(const Options& o) const
   {
     Reps r;
@@ -212,7 +200,7 @@ public:
       const double k = static_cast<double>(b.count);
       r.p.push_back(b.sum_p / k);
       r.cov.push_back(b.sum_cov / ((o.cov_mode == CovMode::Shrunk) ? k * k : k));
-      r.w.push_back((o.weight_mode == WeightMode::Count) ? k : 1.0);
+      r.w.push_back(k);
     }
     return r;
   }

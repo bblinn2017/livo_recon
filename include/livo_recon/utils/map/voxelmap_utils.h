@@ -746,11 +746,10 @@ struct VoxelOpts
   //   binned_enabled        : the debiased branch of VoxelNode::insertPoints() keeps returns in bins and fits from the occupied bins.
   //   binned_bin_fraction   : bin edge = this x the node's own edge (0 < f <= 1).
   //   binned_cov_mode       : 0 average (C / k), 1 shrunk (C / k^2).
-  //   binned_weight_mode    : 0 count (w = k), 1 uniform (w = 1).
+  //   (R95: binned_weight_mode was removed; the weight of a bin is always its return count k.)
   bool   binned_enabled = false;
   double binned_bin_fraction = 0.2;
   int    binned_cov_mode = 0;
-  int    binned_weight_mode = 0;
   // R92: min_init / min_update in a binned map always count the UNIQUE bins that received a return since the last fit (a bin hit in several scans counts once; before the first fit = occupied bins). The R91 member binned_update_count_mode was removed.
 };
 using VoxelOptsPtr = std::shared_ptr<VoxelOpts>;

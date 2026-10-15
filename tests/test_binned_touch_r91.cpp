@@ -38,7 +38,6 @@ static VoxelOptsPtr makeOpts(const char* fit, int min_init, int min_update)
   o->binned_enabled = true;
   o->binned_bin_fraction = 0.2;
   o->binned_cov_mode = 0;
-  o->binned_weight_mode = 0;
   return o;
 }
 

@@ -2,6 +2,7 @@
 #include "livo_recon/processing/lio_base.h"
 #include "livo_recon/diagnostics/dump_rules.h"
 #include "livo_recon/diagnostics/residual_dump_format.h"
+#include "livo_recon/diagnostics/zsq_summary.h"
 #include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/config_resolve.h"
@@ -13,6 +14,7 @@
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/diagnostics/state_trace.h"
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -258,6 +260,20 @@ void logLineRows(int frame_idx, int iteration, const std::vector<Residual>& resi
   o.flush();
 }
 
+// R95: write-only per-scan summary of z squared = r^2 / sigma_squared (diagnostics/zsq_summary.h defines the columns). g_zsq_rows counts the rows written (engagement counter).
+std::atomic<long> g_zsq_rows{0};
+void logZsqSummary(int frame_idx, int iteration, const std::vector<Residual>& residuals)
+{
+  static PersistentLogStream log("zsq_per_scan.csv");
+  bool first = false;
+  std::ofstream& o = log.stream(&first);
+  if (first) o << zsq_summary::header();
+  o << std::setprecision(10);
+  zsq_summary::writeRow(o, frame_idx, iteration, residuals);
+  o.flush();
+  g_zsq_rows.fetch_add(1, std::memory_order_relaxed);
+}
+
 // R69 (F-300): write-only statistics of the live scan's per-point sensor covariance (body frame, as passed to the
 // residual builder), first iteration of every frame. sigma_trace3 = trace/3 per point.
 void logLivePointCov(int frame_idx, const std::vector<PointXYZCov>& pts)
@@ -361,6 +377,14 @@ void logResidualDump(int frame_idx, int iteration, const StateGroup& st, const s
   o.flush(); so.flush();
 }
 }  // namespace
+
+void LioProcBase::logZsqIteration(int iteration) const
+{
+  if (!opts_.zsq_log_en || shadow_active_) return;
+  logZsqSummary(static_cast<int>(voxel_map_->frame_idx_), iteration, residuals_);
+}
+
+long LioProcBase::zsqRowsWritten() { return g_zsq_rows.load(std::memory_order_relaxed); }
 
 void LioProcBase::dumpResidualsIfListed(int iteration, bool shadow) const
 {
@@ -543,6 +567,7 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   }
   paramWarn<bool>(pnh, "lio/residual_geometry_en", opts_.residual_geometry_en, false);   // R70: residual_geometry.csv (write-only)
   paramWarn<bool>(pnh, "lio/line_rows_log_en", opts_.line_rows_log_en, false);   // R77 (F-451): line_rows_per_scan.csv (write-only)
+  paramWarn<bool>(pnh, "lio/zsq_log_en", opts_.zsq_log_en, false);   // R95: zsq_per_scan.csv (write-only)
 
   // R61: open-loop IMU propagation (see OpenLoopOptions). reset_period_s is only meaningful, and only accepted,
   // under propagate_only.
@@ -1088,6 +1113,8 @@ double LioProcBase::estimateStateCorrection(
     logResidualGeometry(voxel_map_->frame_idx_, residuals_);
   if (opts_.line_rows_log_en && diagnostic_gn_iteration_ == 0)   // R77 (F-451): write-only per-scan row counts by kind
     logLineRows(voxel_map_->frame_idx_, diagnostic_gn_iteration_, residuals_);
+  if (opts_.zsq_log_en && diagnostic_gn_iteration_ == 0)   // R95: write-only z squared summary, iteration 0 (the last iteration is written by the IEKF loop through logZsqIteration)
+    logZsqIteration(0);
   if (!opts_.residual_dump_frames.empty() && dump_rules::residualDumpIterationWanted(opts_.residual_dump_all_iters, diagnostic_gn_iteration_) &&
       std::find(opts_.residual_dump_frames.begin(), opts_.residual_dump_frames.end(), voxel_map_->frame_idx_) != opts_.residual_dump_frames.end())
     logResidualDump(voxel_map_->frame_idx_, diagnostic_gn_iteration_, *state_, residuals_, false, opts_.residual_dump_voxel_info, opts_.residual_dump_line_geometry, opts_.residual_dump_slim);   // R71: write-only per-residual dump

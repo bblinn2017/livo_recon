@@ -141,7 +141,6 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
         refit = admission::fitWanted(debiased_admitted_, update_count_, opts_->min_init_points, opts_->min_update_points, g_current_frame_idx == 0);
         binned::Options bo;
         bo.cov_mode = opts_->binned_cov_mode == 1 ? binned::CovMode::Shrunk : binned::CovMode::Average;
-        bo.weight_mode = opts_->binned_weight_mode == 1 ? binned::WeightMode::Uniform : binned::WeightMode::Count;
         plane_.refitFromBins(*binset_, bo, points_world, distinct_frames_, g_current_frame_idx, layer_, refit);
         if (refit) {
           stats_->binned_fits.fetch_add(1, std::memory_order_relaxed);
@@ -221,7 +220,6 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
       plane_.noteFrames(distinct_frames_);
       binned::Options bo;
       bo.cov_mode = opts_->binned_cov_mode == 1 ? binned::CovMode::Shrunk : binned::CovMode::Average;
-      bo.weight_mode = opts_->binned_weight_mode == 1 ? binned::WeightMode::Uniform : binned::WeightMode::Count;
       const binned::Reps reps = binset_->representatives(bo);
       std::vector<PointXYZCov> bin_reps(reps.p.size());
       for (std::size_t i = 0; i < reps.p.size(); ++i) {

@@ -1,7 +1,7 @@
 // R88: the binned map type below the map level: VoxelPlane::refitFromBins() and VoxelNode's binned debiased branch, driven directly (links src/lio/voxelnode.cpp and voxelplane.cpp; no ROS).
 // Planner sandbox on synthetic points: NOT evidence about any bag. Identities and rules only (rule 3.1).
 //   BP1 average + count on bins of identical points gives the same fit as VoxelPlane::addPoints() on the raw points (eigenvalues, plane variance, centre, normal, d).
-//   BP2 uniform weight gives a larger plane variance than count weight on the same bins (N is the number of bins, not of returns).
+//   BP2 (R95: the uniform weight was removed) the shrunk covariance gives a finite plane variance on the same bins.
 //   BP3 refit = false keeps the previous fit and moves only pointsSize() (occupied bins).
 //   BN1 the admission rule counts BINS: 12 returns in 3 bins do not fit at min_init 5; the default (raw) node fits them. 6 bins fit.
 //   BN2 (R92: touched count) returns into bins that are already open count once each: 4 open bins hit twice do not refit at min_update 5, 6 distinct bins touched since the fit do; 4 new bins do not, a 5th does.
@@ -20,7 +20,7 @@ using namespace livo_recon;
 static int g_fail = 0;
 #define CHECK(c) do { if (!(c)) { std::printf("FAIL line %d: %s\n", __LINE__, #c); ++g_fail; } } while (0)
 
-static VoxelOptsPtr makeOpts(bool binned, int cov_mode, int weight_mode, int min_init, int min_update)
+static VoxelOptsPtr makeOpts(bool binned, int cov_mode, int min_init, int min_update)
 {
   auto o = std::make_shared<VoxelOpts>();
   o->plane_threshold = 0.01;
@@ -34,7 +34,6 @@ static VoxelOptsPtr makeOpts(bool binned, int cov_mode, int weight_mode, int min
   o->binned_enabled = binned;
   o->binned_bin_fraction = 0.2;
   o->binned_cov_mode = cov_mode;
-  o->binned_weight_mode = weight_mode;
   return o;
 }
 
@@ -61,7 +60,7 @@ int main()
   // ---------------------------------------------------------------- plane level
   {
     const auto pts = patch(0, 25, 3, 1e-6, true);
-    auto o = makeOpts(false, 0, 0, 3, 1);
+    auto o = makeOpts(false, 0, 3, 1);
     VoxelPlane raw(o);
     raw.addPoints(pts, -1, 1, true, 1, 0);
     CHECK(raw.isPlane());
@@ -83,11 +82,6 @@ int main()
     CHECK(std::fabs(sr.d - sb.d) < 1e-9);
 
     // BP2
-    binned::Options bu; bu.weight_mode = binned::WeightMode::Uniform;
-    VoxelPlane vu(o);
-    vu.refitFromBins(bins, bu, pts, 1, 1, 0, true);
-    CHECK(vu.isPlane());
-    CHECK(vu.planeVar().trace() > vb.planeVar().trace());
     binned::Options bs; bs.cov_mode = binned::CovMode::Shrunk;
     VoxelPlane vs(o);
     vs.refitFromBins(bins, bs, pts, 1, 1, 0, true);
@@ -118,7 +112,7 @@ int main()
     auto stats = std::make_shared<VoxelStats>();
     setBootstrapInsertion(false);
     setCurrentFrame(1);
-    VoxelNode nb(makeOpts(true, 0, 0, 5, 5), stats, 0, V3D(0, 0, 0));
+    VoxelNode nb(makeOpts(true, 0, 5, 5), stats, 0, V3D(0, 0, 0));
     nb.insertPoints(patch(0, 4, 3, 1e-6, false), upd);          // 12 returns, 4 bins
     CHECK(!nb.hasConvergedPlane());
     CHECK(stats->binned_points.load() == 12);
@@ -132,7 +126,7 @@ int main()
 
     auto stats_raw = std::make_shared<VoxelStats>();
     setCurrentFrame(1);
-    VoxelNode nr(makeOpts(false, 0, 0, 5, 5), stats_raw, 0, V3D(0, 0, 0));
+    VoxelNode nr(makeOpts(false, 0, 5, 5), stats_raw, 0, V3D(0, 0, 0));
     nr.insertPoints(patch(0, 4, 3, 1e-6, false), upd);          // the same 12 returns, raw: 12 >= 5 raw points, so the default node fits at once
     CHECK(nr.hasConvergedPlane());
     CHECK(stats_raw->binned_points.load() == 0);
@@ -141,7 +135,7 @@ int main()
     auto stats = std::make_shared<VoxelStats>();
     setBootstrapInsertion(false);
     setCurrentFrame(1);
-    VoxelNode n(makeOpts(true, 0, 0, 5, 5), stats, 0, V3D(0, 0, 0));
+    VoxelNode n(makeOpts(true, 0, 5, 5), stats, 0, V3D(0, 0, 0));
     n.insertPoints(patch(0, 8, 1, 1e-6, false), upd);           // 8 bins: fitted
     CHECK(stats->binned_fits.load() == 1);
     setCurrentFrame(2);
@@ -166,7 +160,7 @@ int main()
     auto stats = std::make_shared<VoxelStats>();
     setBootstrapInsertion(true);
     setCurrentFrame(0);
-    VoxelNode n(makeOpts(true, 0, 0, 5, 5), stats, 0, V3D(0, 0, 0));
+    VoxelNode n(makeOpts(true, 0, 5, 5), stats, 0, V3D(0, 0, 0));
     n.insertPoints(patch(0, 4, 1, 1e-6, false), upd);           // 4 bins at min_init 5: not even in the bootstrap frame
     CHECK(stats->binned_fits.load() == 0);
     n.insertPoints(patch(4, 2, 1, 1e-6, false), upd);           // 6 bins: first fit
@@ -179,7 +173,7 @@ int main()
     auto stats = std::make_shared<VoxelStats>();
     setBootstrapInsertion(true);
     setCurrentFrame(0);
-    VoxelNode n(makeOpts(true, 0, 0, 5, 5), stats, 0, V3D(0, 0, 0));
+    VoxelNode n(makeOpts(true, 0, 5, 5), stats, 0, V3D(0, 0, 0));
     n.insertPoints(patch(0, 1, 30, 1e-6, false), upd);
     CHECK(stats->binned_points.load() == 30);
     CHECK(stats->binned_new_bins.load() == 1);

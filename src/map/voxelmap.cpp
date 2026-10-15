@@ -456,7 +456,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
                                  "voxel_map/plane/bin_weight_mode_fit", "voxel_map/plane/bin_weight_mode_var" })
       if (pnh.hasParam(removed))
         throw std::runtime_error(std::string("[config] refused: ") + removed + " was removed in R90 (the pca-only bin path); set voxel_map/backend=binned and "
-                                 "voxel_map/binned/{bin_size_fraction,cov_mode,weight_mode} instead");
+                                 "voxel_map/binned/{bin_size_fraction,cov_mode} instead (R95: the weight is always the return count)");
 
     // ── consistency logging tier ─────────────────────────────────────────
     // See VoxelOpts::log_consistency_mode. The two booleans this replaces
