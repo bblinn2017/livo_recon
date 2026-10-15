@@ -96,14 +96,12 @@ private:
 
   int32_t   node_id_;
   VoxelNode *leaves_[8];
-  int update_count_ = 0;   // raw points received since the last fit (both paths; R87: also the debiased path)
-  // R87: true once the debiased path has had its first admitted fit (the pca path uses plane_.isInit()). Read by admission::fitWanted().
-  bool debiased_admitted_ = false;
+  int update_count_ = 0;   // raw points received since the last fit (both paths)
   // R88 (binned map): this node's bins, created on the first insertion when opts_->binned_enabled. In that mode update_count_ is the number of UNIQUE bins that received a return since the last fit (BinSet::dirtyCount(); before the first fit
   // that is the number of occupied bins; R92: the only count, the R88 to R90 `opened` count was removed), and the admission rule reads it exactly as it reads raw points elsewhere.
   std::unique_ptr<binned::BinSet> binset_;
   std::vector<PointXYZCov> points_;
-  // R65 (F-158): true when the most recent debiased insertion appended its batch to points_.
+  // R65 (F-158): true when the most recent binned insertion appended its batch to points_.
   bool batch_stored_in_points_ = false;
 
   // Running sufficient statistics paralleling points_ (see RunningMoments' docs) -- added to whenever a point is appended to points_, reset (with ref rebased to voxel_center_) whenever points_ is cleared

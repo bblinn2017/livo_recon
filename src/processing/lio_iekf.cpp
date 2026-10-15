@@ -508,18 +508,15 @@ std::string LioProcIekf::engagementReport() const
     o << "\n  voxel_map/plane/weight_floor/mode = "
       << vm->opts()->weight_floor_mode;
     // R90: the fit and the admission settings the map ran with (written for every map, so a run's engagement file says which of the four map/fit types and which cadence it was).
-    o << "\n  voxel_map/fit_config: plane_fit_mode = " << vm->opts()->plane_fit_mode << " backend = " << (vm->opts()->binned_enabled ? "binned" : "raw")
+    o << "\n  voxel_map/fit_config: backend = " << (vm->opts()->binned_enabled ? "binned" : "raw")
       << " min_init = " << vm->opts()->min_init_points << " min_update = " << vm->opts()->min_update_points << " max_points = " << vm->opts()->max_points;
     {   // R82 (D4, F-500), unconditional since R93A: the fit-time classification and the one gap floor are always on; their counters are always written
       const VoxelPlaneR82Counters c82 = voxelPlaneR82Counters();
       const VoxelPlaneR77Counters c77 = voxelPlaneR77Counters();
       o << "\n  voxel_map/plane fit-time model (always on): line_classified=" << c82.line_classified << " line_accepted=" << c82.line_accepted << " e1_tiny_kept=" << c82.e1_tiny_kept << " e0_clamped=" << c82.e0_clamped
-        << " gap_fits=" << c77.gap_fits << " gap_d1=" << c77.gap_d1 << " gap_d2=" << c77.gap_d2 << " gaps_floored=" << c82.gaps_floored
-        << " tilt_voxels_moment=" << c82.tilt_voxels_moment << " tilt_voxels_meancov=" << c82.tilt_voxels_meancov;
+        << " gap_fits=" << c77.gap_fits << " gap_d1=" << c77.gap_d1 << " gap_d2=" << c77.gap_d2;
       if (vm->opts()->line_enabled && vm->opts()->line_form == "hard" && c82.line_classified == 0)
         o << "   <-- INERT: hard lines are enabled and no fit was classified a line";
-      else if (vm->opts()->debiased_line_form != 0 && c82.tilt_voxels_moment + c82.tilt_voxels_meancov == 0)
-        o << "   <-- INERT: debiased_line_equiv was set and no line tilt matrix was built";
     }
     {   // R93A (Bryce 2026-10-10): lio/gate_state_uncertainty -- pose covariance in the admission gate (engagement counter and magnitude; a map backend that does not count gate rows is not reported)
       const VoxelPlaneR93Counters c93 = voxelPlaneR93Counters();

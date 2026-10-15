@@ -14,7 +14,7 @@ MapBackendPtr createMapBackend(const std::string& backend_name, StateGroupPtr st
   if (backend_name == "voxel") {
     return std::make_shared<VoxelMap>(state, profiler, data_queues);
   }
-  if (backend_name == "binned") {   // R88: VoxelMap whose debiased nodes keep bins (map/binned_voxelmap.h)
+  if (backend_name == "binned") {   // R88: VoxelMap whose nodes keep bins (map/binned_voxelmap.h)
     return std::make_shared<BinnedVoxelMap>(state, profiler, data_queues);
   }
   // Fail loudly rather than silently falling back to "voxel", matching

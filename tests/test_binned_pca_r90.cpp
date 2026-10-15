@@ -45,7 +45,6 @@ static VoxelOptsPtr makeOpts(bool binned, int cov_mode, int min_init, int min_up
 {
   auto o = std::make_shared<VoxelOpts>();
   o->plane_threshold = 0.01;
-  o->plane_fit_mode = "pca";
   o->plane_var_mode = "eigengap";
   o->weight_sigma_r2 = 4e-4;
   o->min_init_points = min_init;
@@ -89,7 +88,7 @@ int main()
   {   // PC1
     binned::BinSet bins(0.05);
     const auto pts = patch(0, 4, 3, 2e-6);
-    for (const auto& p : pts) bins.add(p.point, p.sensor_cov, true);
+    for (const auto& p : pts) bins.add(p.point, p.sensor_cov);
     binned::Options avg_count;                                       // average + count
     const binned::Reps a = bins.representatives(avg_count);
     CHECK(a.p.size() == 4 && a.cov.size() == 4 && a.w.size() == 4);
@@ -106,7 +105,7 @@ int main()
     raw.update(pts, -1, nullptr, nullptr, nullptr, 1, 0);
     CHECK(raw.isPlane());
     binned::BinSet bins(0.05);
-    for (const auto& p : pts) bins.add(p.point, p.sensor_cov, true);
+    for (const auto& p : pts) bins.add(p.point, p.sensor_cov);
     CHECK(bins.numBins() == 25);
     const binned::Reps r = bins.representatives(binned::Options());
     const auto reps = toPoints(r);

@@ -105,111 +105,21 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
 
   const bool was_init   = plane_.isInit();
   bool       was_plane  = plane_.isPlane();
-  const bool debiased   = opts_->plane_fit_mode == "debiased";
 
   bool now_plane;
   {
-    if (debiased) {
-      // O(1) forever -- no min_update_points batching threshold needed
-      // (see plane_fit_mode's docs), but the FIRST fit still needs real
-      // view diversity, same risk/reasoning as the pca path below (a fit
-      // off one frame's correlated-noise points, see
-      // sensor_noise_floor_eig0's docs). Accumulate unconditionally
-      // either way (cheap) so the eventual first fit already reflects
-      // every point seen so far, not just the frame that finally
-      // satisfies min_frames_to_init.
-      // g_current_frame_idx == 0 is the calibration/bootstrap window (many
-      // scans from a STATIONARY sensor, same vantage point repeated -- see
-      // VoxelPlane::addPoints()'s trust_sensor_noise docs); don't trust
-      // those points' sensor_cov for the debiasing correction.
-      // R87: the same admission rule as the pca path (lio/admission_rule.h): min_init raw points before the first fit, min_update raw points since the last
-      // fit before a refit, the bootstrap frame (global frame 0) exempt from min_update only. Points are accumulated either way. With min_init 3 and
-      // min_update 1 this reproduces the pre-R87 behaviour (fit at 3 points, refit on every batch).
-      bool refit;
-      if (opts_->binned_enabled) {
-        // R88 (binned map): returns go into bins; min_init / min_update count unique BINS TOUCHED since the last fit (R92; not raw returns); the fit is made from the occupied bins (VoxelPlane::refitFromBins).
-        if (!binset_) binset_.reset(new binned::BinSet(opts_->voxel_size / static_cast<double>(1 << layer_) * opts_->binned_bin_fraction));
-        const bool trusted = g_current_frame_idx >= 1;
-        long long opened = 0;
-        for (const auto& pt : points_world)
-          if (binset_->add(pt.point, pt.sensor_cov, trusted)) ++opened;
-        // R92: min_init / min_update count the UNIQUE bins that received a return since the last fit (BinSet::dirtyCount(); a bin hit in several scans counts once; before the first fit = occupied bins). This is the only count; the R88 to R90
-        // `opened` count (bins newly opened) and its key voxel_map/binned/update_count_mode were removed. `opened` is still computed for the binned_new_bins counter.
-        update_count_ = static_cast<int>(binset_->dirtyCount());
-        stats_->binned_points.fetch_add(static_cast<long long>(points_world.size()), std::memory_order_relaxed);
-        stats_->binned_new_bins.fetch_add(opened, std::memory_order_relaxed);
-        refit = admission::fitWanted(debiased_admitted_, update_count_, opts_->min_init_points, opts_->min_update_points, g_current_frame_idx == 0);
-        binned::Options bo;
-        bo.cov_mode = opts_->binned_cov_mode == 1 ? binned::CovMode::Shrunk : binned::CovMode::Average;
-        plane_.refitFromBins(*binset_, bo, points_world, distinct_frames_, g_current_frame_idx, layer_, refit);
-        if (refit) {
-          stats_->binned_fits.fetch_add(1, std::memory_order_relaxed);
-          stats_->binned_touched_at_fit.fetch_add(binset_->dirtyCount(), std::memory_order_relaxed);
-          binset_->markFitted();
-        }
-      } else {
-        update_count_ += static_cast<int>(points_world.size());
-        refit = admission::fitWanted(debiased_admitted_, update_count_, opts_->min_init_points, opts_->min_update_points, g_current_frame_idx == 0);
-        plane_.addPoints(points_world, -1, distinct_frames_, g_current_frame_idx >= 1, g_current_frame_idx, layer_, refit);
-      }
-      if (refit) { update_count_ = 0; debiased_admitted_ = true; }
-      // R65 (F-158): keep the raw history exactly as the pca path does, so a later subdivision hands
-      // the children every point this voxel has seen. Same bound as pca: a batch is appended whole
-      // while points_ holds fewer than max_points; once at or above max_points no further batch is
-      // stored (the O(1) sums above still take every point). The fit itself never reads points_.
-      batch_stored_in_points_ = false;
-      if (static_cast<int>(points_.size()) < opts_->max_points) {
-        points_.insert(points_.end(), points_world.begin(), points_world.end());
-        batch_stored_in_points_ = true;
-      }
-      // History (135-153): see docs/livo_recon_changelog.md#src-lio-voxelnode.cpp-135
-      //
-      // n_planes accounting fix.  addPoints() (via refitDebiased()) can
-      // flip is_plane_ right above, but the two early returns just below
-      // can exit before the shared was_plane/now_plane bookkeeping at the
-      // bottom of this function ever runs -- so a voxel that becomes a
-      // plane during the bootstrap window (before isInit()/
-      // min_frames_to_init are satisfied) never got its stats_->planes
-      // increment counted, while its eventual LOSS of plane status still
-      // fired the decrement later, with no matching increment behind it.
-      // Confirmed this was the entire cause of stats_->planes (frame_
-      // stats.txt's n_planes) reading deeply negative on every debiased-
-      // arm DX-1R cell (down to -49204) -- residual generation itself
-      // gates on is_plane_ directly, not this counter, so this was a
-      // diagnostic-only bug, not a correctness one. Fixed by recording
-      // the transition immediately, using was_plane's value AT THIS
-      // POINT (updated in place) so the shared bookkeeping below sees no
-      // further transition to double-count.
-      {
-        const bool now_plane_immediate = plane_.isPlane();
-        if (!was_plane && now_plane_immediate)  stats_->planes.fetch_add(1, std::memory_order_relaxed);
-        if (was_plane  && !now_plane_immediate) {
-          stats_->planes.fetch_sub(1, std::memory_order_relaxed);
-          voxelPlaneFitEvent(*opts_, g_current_frame_idx, true, kEvRetire);   // R64 diagnostics
-        }
-        was_plane = now_plane_immediate;
-      }
-      if (!refit) return;   // R87: no fit this call, nothing to book (the pca path returns at the same point)
-      if (!plane_.isInit()) return;
-      if (!was_init && g_current_frame_idx >= 1 &&
-          distinct_frames_ < opts_->min_frames_to_init)
-      {
-        return;
-      }
-      now_plane = plane_.isPlane();
-    } else if (opts_->binned_enabled) {
-      // R90 (binned map, pca fit): returns go into the same bins as the debiased binned branch above; min_init / min_update count the unique bins touched since the last fit (R92); the fit is the pca fit of one weighted point per occupied bin
+    if (opts_->binned_enabled) {
+      // R90 (binned map, pca fit): returns go into bins; min_init / min_update count the unique bins touched since the last fit (R92); the fit is the pca fit of one weighted point per occupied bin
       // (VoxelPlane::update() with the weights of binned::BinSet::representatives()). The admission test reads plane_.isInit() as the pca path always did; pointsSize() is the number of occupied bins at the last
       // fit (so isFull() / points/max also count bins, and a voxel stays open until it holds points/max occupied bins).
       if (!binset_) binset_.reset(new binned::BinSet(opts_->voxel_size / static_cast<double>(1 << layer_) * opts_->binned_bin_fraction));
-      const bool trusted = g_current_frame_idx >= 1;
       long long opened = 0;
       for (const auto& pt : points_world)
-        if (binset_->add(pt.point, pt.sensor_cov, trusted)) ++opened;
+        if (binset_->add(pt.point, pt.sensor_cov)) ++opened;
       update_count_ = static_cast<int>(binset_->dirtyCount());   // R92: unique bins hit since the last fit (the only count; `opened` is kept for the binned_new_bins counter)
       stats_->binned_points.fetch_add(static_cast<long long>(points_world.size()), std::memory_order_relaxed);
       stats_->binned_new_bins.fetch_add(opened, std::memory_order_relaxed);
-      // History for a later subdivision, bounded exactly as the debiased path bounds it.
+      // History for a later subdivision, bounded by max_points.
       batch_stored_in_points_ = false;
       if (static_cast<int>(points_.size()) < opts_->max_points) {
         points_.insert(points_.end(), points_world.begin(), points_world.end());
@@ -259,8 +169,6 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     // The information model's design-effect correction needs to know how
     // many DISTINCT frames these points came from -- returns from one sweep
     // share that instant's pose error and are not independent observations.
-    // The debiased path receives this through addPoints(); the pca path has
-    // no other channel for it.
     plane_.noteFrames(distinct_frames_);
 
     plane_.update(points_, -1, nullptr, &running_moments_, nullptr, g_current_frame_idx, layer_);
@@ -275,15 +183,10 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
         // voxel_center_ is the SAME quantized key across separate runs on
         // the same bag/config as long as trajectories haven't yet diverged
         // (voxel keys are derived purely from world-frame point position at
-        // insertion time) -- logging it lets a pca-mode run and a
-        // debiased-mode run be joined on voxel_center_ post-hoc to compare
-        // the SAME voxel's first fit directly, isolating fit differences
-        // from any already-accumulated trajectory drift. See the
-        // plane_fit_mode divergence investigation
-        // (docs/debiased_voxel_plane_fit_2026aug24.md).
+        // insertion time), so runs can be joined on it post-hoc.
         PlaneVizInfo viz{};
         const bool have_viz = plane_.getVizInfo(viz);
-        dbg << "mode=" << opts_->plane_fit_mode
+        dbg << "mode=pca"
             << " voxel=[" << voxel_center_.transpose() << "]"
             << " frame=" << g_current_frame_idx
             << " distinct_frames=" << distinct_frames_
@@ -310,16 +213,16 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
   if (!was_plane && now_plane)  stats_->planes.fetch_add(1, std::memory_order_relaxed);
   if (was_plane  && !now_plane) {
     stats_->planes.fetch_sub(1, std::memory_order_relaxed);
-    voxelPlaneFitEvent(*opts_, g_current_frame_idx, debiased, kEvRetire);   // R64 diagnostics
+    voxelPlaneFitEvent(*opts_, g_current_frame_idx, kEvRetire);   // R64 diagnostics
   }
 
   if (!now_plane && layer_ < opts_->max_layer) {
-    voxelPlaneFitEvent(*opts_, g_current_frame_idx, debiased, kEvSubdivide);   // R64 diagnostics
+    voxelPlaneFitEvent(*opts_, g_current_frame_idx, kEvSubdivide);   // R64 diagnostics
     stats_->transition(status_, VoxelStatus::PARENT);
     status_ = VoxelStatus::PARENT;
     if (was_plane) updates.push_back({node_id_, true, {}});
     plane_retired_ = true;
-    if (debiased || opts_->binned_enabled) {
+    if (opts_->binned_enabled) {
       // R65 (F-158): children receive the stored history (R90: the binned pca branch keeps the same history) (points_, bounded by max_points as in the pca
       // path). If this batch was not stored (points_ already at the bound) it is added so the newest
       // points are never lost. No refit from scratch: the parent's O(1) sums are simply retired.
@@ -348,26 +251,11 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
   // dead-end path above (subdivide, or fall through here to DISABLED at
   // max_layer) is unaffected either way.
   bool should_lock;
-  if (debiased) {
-    // Never freeze a GOOD (now_plane) converged plane -- no O(N) cost to
-    // keep refitting, so no reason to ever stop incorporating new points
-    // (see plane_fit_mode's docs). max_points/convergence_mode/
-    // min_frames_to_converge are pca-mode-only under this setting.
-    // STILL allow locking a genuinely non-planar voxel to DISABLED once
-    // it's exhausted subdivision (layer_ >= max_layer, so the earlier
-    // PARENT/subdivide branch above no longer applies) -- otherwise such a
-    // voxel refits from scratch forever with no way out. Residual
-    // generation gates on is_plane_, not VoxelStatus, so this was a
-    // wasted-CPU/stats-accounting gap, not a correctness bug, but fix it
-    // anyway for parity with pca mode's give-up behavior.
-    should_lock = !now_plane && (layer_ >= opts_->max_layer);
-  } else {
-    should_lock = plane_.isFull();
-    if (opts_->convergence_mode == "frame_gated")
-      should_lock = should_lock && (distinct_frames_ >= opts_->min_frames_to_converge);
-    else if (opts_->convergence_mode == "always_update" && now_plane)
-      should_lock = false;
-  }
+  should_lock = plane_.isFull();
+  if (opts_->convergence_mode == "frame_gated")
+    should_lock = should_lock && (distinct_frames_ >= opts_->min_frames_to_converge);
+  else if (opts_->convergence_mode == "always_update" && now_plane)
+    should_lock = false;
 
   if (g_bootstrap_insertion) should_lock = false;
 
@@ -394,7 +282,7 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     if (plane_.getVizInfo(info))
       updates.push_back({node_id_, false, info});
   } else {
-    voxelPlaneFitEvent(*opts_, g_current_frame_idx, debiased, kEvDisabled);   // R64 diagnostics
+    voxelPlaneFitEvent(*opts_, g_current_frame_idx, kEvDisabled);   // R64 diagnostics
     if (was_plane) updates.push_back({node_id_, true, {}});
     plane_retired_ = true;
   }

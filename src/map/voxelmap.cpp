@@ -52,7 +52,7 @@ void debugLogFrameStats(double t_abs, int frame_idx, int denom_rejected_count,
            // P-C (BASE, 2026-09-03): a direct per-frame CENSUS of
            // VoxelStats' live atomic counters -- n_planes above is a
            // TRANSITION counter (increments/decrements on state change,
-           // known negative on the debiased path, see the bug ledger)
+           // known to go negative, see the bug ledger)
            // while these are the counters' own current values, always
            // non-negative by construction. n_voxels = stats_->total()
            // (open+converged+disabled); n_voxels_is_plane = stats_->planes
@@ -183,7 +183,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
                              " -- voxel sizes <= 0.10 m are retired (R70, F-340)");
   paramWarn<int>(pnh, "voxel_map/map/max_layer",       opts_->max_layer,    2);
   paramWarn<bool>(pnh, "voxel_map/plane/sensor_noise_floor_eig0", opts_->sensor_noise_floor_eig0, false);
-  paramWarn<bool>(pnh, "voxel_map/plane/centred_accumulation", opts_->centred_accumulation, false);
   paramWarn<bool>(pnh, "voxel_map/map/snapshot_post_calibration",
                   opts_->snapshot_post_calibration, false);
   {   // R79: snapshot frames N >= 2, one comma-separated string key (job overrides carry scalars only); empty = off. Refused when contradictory (map/snapshot_frames.h).
@@ -284,8 +283,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
                        "voxel_map/plane/weight_floor/incidence_k",
                        opts_->weight_incidence_k, 1.0);
 
-    cfg.mode("voxel_map/plane/plane_fit_mode", opts_->plane_fit_mode, "pca",
-             { "pca", "debiased" });
     // ── the plane covariance model ───────────────────────────────────────
     // See VoxelOpts::plane_var_mode.  "information" replaces the eigenvector
     // -perturbation form with the directional Fisher information in the
@@ -298,7 +295,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     // "roughness" returns VoxelPlane::roughness_, which only the information
     // model computes.  Pairing it with the eigengap model would floor every
     // residual at zero and read as a silent "none" -- refuse instead.  This
-    // is the same class of defect as use_bins-on-debiased. Checked here,
+    // is a defect of the same class. Checked here,
     // not where weight_floor/mode is loaded above, because plane_var_mode
     // is not yet read at that point in this function.
     if (opts_->weight_floor_mode == "roughness" &&
@@ -335,29 +332,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
           "floor on top of a variance the information model already "
           "accounts for in full, double-counting exactly the way "
           "roughness-under-eigengap would silently zero every residual");
-    }
-    // P7 (2026-09-03).  debiased+information_directional cannot engage:
-    // refitDebiased() runs from persistent unweighted accumulators, after
-    // the points are gone, so the per-point weighted-H path (built in
-    // update(), which only the pca fit path calls with a point vector in
-    // hand) is structurally unreachable on the debiased arm. DX-1 found
-    // this the hard way -- L5d equalled L4d exactly, info_path was 100%
-    // fallback -- and rule 4b forbids a flag set true that increments
-    // nothing. Refuse rather than run it as a silent alias for
-    // debiased+information. The alternative (teaching refitDebiased() to
-    // retain enough state for the exact path) was considered and rejected:
-    // the per-point weights depend on the fitted normal, which isn't known
-    // until the fit runs, so they cannot be accumulated before it.
-    if (opts_->plane_fit_mode == "debiased" &&
-        opts_->plane_var_mode == "information_directional")
-    {
-      cfg.requireCombination(
-          "voxel_map/plane/plane_fit_mode = debiased with "
-          "voxel_map/plane/plane_var_mode = information_directional is "
-          "UNREACHABLE: the directional weighting needs update()'s point "
-          "vector and refitDebiased() never has it. Use plane_var_mode = "
-          "information (identical behaviour, honestly named) or "
-          "plane_fit_mode = pca with information_directional.");
     }
     // The T8-b plane-confidence inflations are all corrections TO the eigengap model.  Under the
     // information model they are not merely unnecessary, they DOUBLE COUNT:
@@ -401,23 +375,10 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     cfg.nestedMode(opts_->line_enabled, "voxel_map/plane/line_residual/enabled=true",
                    "voxel_map/plane/line_residual/variance", opts_->line_variance, "fit_only", { "fit_only", "plane_equivalent" });
     opts_->line_var_plane_equivalent = opts_->line_enabled && opts_->line_variance == "plane_equivalent";
-    // ── R82 (D4, F-500): the line model inside the debiased fit (debiased_line_equiv). Read only with lines on; default inert. (R93A: classify_at_fit is unconditional and its key is removed.) ──
-    {
-      const bool deb_line = opts_->plane_fit_mode == "debiased" && opts_->line_enabled;
-      cfg.nestedMode(deb_line, "voxel_map/plane/plane_fit_mode=debiased,line_residual/enabled=true", "voxel_map/plane/debiased_line_equiv", opts_->debiased_line_equiv, "off", { "off", "mean_cov", "moment" });
-      opts_->debiased_line_form = opts_->debiased_line_equiv == "moment" ? 2 : (opts_->debiased_line_equiv == "mean_cov" ? 1 : 0);
-      if (deb_line && opts_->debiased_line_equiv != "off" && !opts_->line_var_plane_equivalent)
-        cfg.requireCombination("voxel_map/plane/debiased_line_equiv = " + opts_->debiased_line_equiv + " needs voxel_map/plane/line_residual/variance = plane_equivalent (it is the plane-equivalent variance on the debiased fit).");
-      if (deb_line && opts_->line_var_plane_equivalent && opts_->debiased_line_form == 0)
-        cfg.requireCombination("voxel_map/plane/line_residual/variance = plane_equivalent with plane_fit_mode = debiased needs voxel_map/plane/debiased_line_equiv = mean_cov or moment (off = no tilt matrices on the debiased fit).");
-      if (deb_line && opts_->debiased_line_form != 0 && !eigengap)
-        cfg.requireCombination("voxel_map/plane/debiased_line_equiv needs plane_var_mode = eigengap: the information variance has no eigengap tilt term (the pca path refuses the same combination).");
-    }
-    if (opts_->line_var_plane_equivalent && !(opts_->plane_fit_mode == "pca" && eigengap) && !(opts_->plane_fit_mode == "debiased" && eigengap && opts_->debiased_line_form != 0))
+    if (opts_->line_var_plane_equivalent && !eigengap)
       cfg.requireCombination(
-          "voxel_map/plane/line_residual/variance = plane_equivalent needs voxel_map/plane/plane_fit_mode = pca and plane_var_mode = eigengap, or (R82) plane_fit_mode = debiased with plane_var_mode = eigengap and "
-          "debiased_line_equiv = mean_cov | moment: the tilt term is propagated from the voxel's own points inside VoxelPlane::update()'s eigengap branch (pca) or from the debiased fit's moment accumulators "
-          "(debiased); the information variance (no eigengap) never forms one. Use variance = fit_only with those modes.");
+          "voxel_map/plane/line_residual/variance = plane_equivalent needs voxel_map/plane/plane_var_mode = eigengap: the tilt term is propagated from the voxel's own points inside "
+          "VoxelPlane::update()'s eigengap branch; the information variance (no eigengap) never forms one. Use variance = fit_only with those modes.");
     // ── R80 (F-453, Bryce 2026-10-05): one distance row per hard line voxel instead of the two normal rows ──
     cfg.nestedMode(opts_->line_enabled, "voxel_map/plane/line_residual/enabled=true",
                    "voxel_map/plane/line_residual/rows", opts_->line_rows, "per_normal", { "per_normal", "distance" });
@@ -428,7 +389,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     if (eigengap && !(opts_->weight_sigma_r2 > 0.0))
       cfg.requireCombination("voxel_map/plane/plane_var_mode = eigengap needs imu/sensor/range_err > 0: the gap floor (always on since R93A) is range_err^2, and at 0 the eigengap plane variance would divide by a near-zero gap.");
     // ── R81 (F-468, F-485 Part 3): scan term and clamp on the plane variance term of the weight and the gate. Both default 0.0 = off (bit-identical to R80). ──
-    // Read unconditionally (every plane_var_mode, pca and debiased): the term is formed in VoxelPlane::gate(), which all of them reach. Negative, NaN and infinite are refused.
+    // Read unconditionally (every plane_var_mode): the term is formed in VoxelPlane::gate(), which all of them reach. Negative, NaN and infinite are refused.
     cfg.get<double>("voxel_map/plane/plane_var_min", opts_->plane_var_min, 0.0);
     cfg.get<double>("voxel_map/plane/plane_var_scan_s2", opts_->plane_var_scan_s2, 0.0);
     cfg.get<bool>("voxel_map/plane/plane_var_diag_en", opts_->plane_var_diag_en, false);   // R82 (D2): write-only diagnostic, default off
@@ -440,15 +401,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       cfg.requireCombination(
           "voxel_map/plane/plane_var_min / plane_var_scan_s2 > 0 together with voxel_map/plane/line_residual/enabled = true: line, distance and smooth rows take their own fit variance "
           "(rows[i].fit_var) and never see the plane variance term these keys change, so on line voxels the keys would be silently inert. Turn the lines off (R81 arms run lines off).");
-    // R64: debiasing arithmetic variant; only meaningful on the debiased path.
-    cfg.nestedMode(opts_->plane_fit_mode == "debiased", "voxel_map/plane/plane_fit_mode=debiased",
-                   "voxel_map/plane/debias_mode", opts_->debias_mode, "full",
-                   { "full", "lambda0_only", "none" });
-    cfg.nested<double>(opts_->plane_fit_mode == "debiased", "voxel_map/plane/plane_fit_mode=debiased",
-                       "voxel_map/plane/plane_threshold_hysteresis",
-                       opts_->plane_threshold_hysteresis, 1.0);
-    if (!(opts_->plane_threshold_hysteresis > 0.0) || !std::isfinite(opts_->plane_threshold_hysteresis))
-      throw std::runtime_error("voxel_map/plane/plane_threshold_hysteresis must be finite and > 0");
     // ── binning ──────────────────────────────────────────────────────────
     // R90: the pca-only bin path (voxel_map/plane/use_bins and its three nested keys) is removed. Binning is the binned map type, voxel_map/backend = binned (src/map/binned_voxelmap.cpp), for
     // both plane fits. A removed key that is still set is REFUSED rather than ignored: an ignored flag would make a run that asks for binning silently run without it.
@@ -499,20 +451,15 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   oss << "[params/voxel_map]"
       << "\n  map/voxel_size:                  " << opts_->voxel_size
       << "\n  map/max_layer:                   " << opts_->max_layer
-      << "\n  plane/debias_mode:               " << opts_->debias_mode
-      << "\n  plane/plane_threshold_hysteresis:" << opts_->plane_threshold_hysteresis
       << "\n  plane/plane_fit_reasons_en:      " << (opts_->plane_fit_reasons_en ? "true" : "false")
       << "\n  plane/plane_fit_trace_frames:    " << opts_->plane_fit_trace_frames
       << "\n  plane/plane_fit_eigs_en:         " << (opts_->plane_fit_eigs_en ? "true" : "false")
       << "\n  plane/sensor_noise_floor_eig0:   " << (opts_->sensor_noise_floor_eig0 ? "true" : "false")
-      << "\n  plane/centred_accumulation:      " << (opts_->centred_accumulation ? "true" : "false")
       << "\n  plane/convergence_mode:          " << opts_->convergence_mode
       << "\n  plane/min_frames_to_converge:    " << opts_->min_frames_to_converge
       << "\n  plane/min_frames_to_init:        " << opts_->min_frames_to_init
       << "\n  plane/plane_threshold:           " << opts_->plane_threshold
-      << "\n  plane/plane_fit_mode:            " << opts_->plane_fit_mode
       << "\n  plane/line_residual:             enabled " << (opts_->line_enabled ? "true" : "false") << " / form " << opts_->line_form << " / rule " << opts_->line_rule << " / rel_sigmas " << opts_->line_rel_sigmas << " / shape_ratio " << opts_->line_shape_ratio << " / enum " << opts_->line_residual_enum << " / variance " << opts_->line_variance << " / rows " << opts_->line_rows
-      << (opts_->line_enabled && opts_->plane_fit_mode == "debiased" ? "\n  plane/debiased_line_equiv:       " + opts_->debiased_line_equiv : std::string())   // R82 (D4)
       << "\n  plane/plane_var_min:             " << opts_->plane_var_min << (opts_->plane_var_min > 0.0 ? "   (R81 ENGAGED: plane_var_term = max(plane_var_term, plane_var_min))" : "   (off)")
       << "\n  plane/plane_var_scan_s2:         " << opts_->plane_var_scan_s2 << (opts_->plane_var_scan_s2 > 0.0 ? "   (R81 ENGAGED: plane_var_term += s2 / max(1, distinct frames), before the clamp)" : "   (off)")
       << "\n  plane/plane_var_mode:            " << opts_->plane_var_mode
@@ -911,7 +858,7 @@ void VoxelMap::writeSnapshotFile(const std::string& filename, int snapshot_frame
         << r.root_key.z << ',' << r.layer << ',';
     vec(r.cell_center); out << ','; vec(r.cell_min); out << ','; vec(r.cell_max);
     out << ',' << r.status << ',' << r.retired << ',' << r.initialized << ','
-        << r.is_plane << ',' << r.full << ',' << opts_->plane_fit_mode << ','
+        << r.is_plane << ',' << r.full << ',' << std::string("pca") << ','
         << opts_->plane_var_mode << ',';
     vec(r.center); out << ','; vec(r.normal); out << ',' << r.d << ',';
     vec(r.tangent_x); out << ','; vec(r.tangent_y); out << ',' << r.radius << ',';

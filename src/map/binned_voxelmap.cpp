@@ -24,8 +24,6 @@ std::string BinnedVoxelMap::loadParameters(ros::NodeHandle& pnh)
   binned::CovMode cm;
   if (!binned::parseCovMode(cov, cm))
     throw std::runtime_error("[config] refused: voxel_map/binned/cov_mode=" + cov + " -- must be average or shrunk");
-  if (o.plane_fit_mode != "debiased" && o.plane_fit_mode != "pca")
-    throw std::runtime_error("[config] refused: voxel_map/backend=binned needs voxel_map/plane/plane_fit_mode=debiased or pca (R90: with pca the occupied bins are fitted as one weighted point each)");
 
   o.binned_enabled = true;
   o.binned_bin_fraction = fraction;
@@ -36,7 +34,7 @@ std::string BinnedVoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  binned/bin_size_fraction:        " << fraction << "   (bin edge " << fraction * o.voxel_size << " m at the root voxel)"
       << "\n  binned/cov_mode:                 " << binned::covModeName(cm)
       << "\n  binned/weight:                   count (w = k; the only weight since R95)"
-      << "\n  binned/plane_fit_mode:           " << o.plane_fit_mode << (o.plane_fit_mode == "pca" ? "   (R90: one weighted point per occupied bin)" : "   (the bins feed the debiased accumulators)")
+      << "\n  binned/fit:                      pca, one weighted point per occupied bin"
       << "\n  binned/min_init, min_update:     " << o.min_init_points << ", " << o.min_update_points << "   (counted in unique bins touched since the last fit)";
   return oss.str();
 }

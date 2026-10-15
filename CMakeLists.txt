@@ -232,12 +232,6 @@ add_executable(test_gravity_s2 tests/test_gravity_s2.cpp)
 target_link_libraries(test_gravity_s2 state_lib)
 add_test(NAME gravity_s2 COMMAND test_gravity_s2)
 
-# R64 (planning agent's patch, section 4 of R64_INSTRUCTIONS.md): debiased plane-fit variants
-# unit test.
-add_executable(test_debias_modes tests/test_debias_modes.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
-target_include_directories(test_debias_modes PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
-target_link_libraries(test_debias_modes ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
-add_test(NAME debias_modes COMMAND test_debias_modes)
 
 # R65 (planning agent's patch, section 4 of R65_INSTRUCTIONS.md): per-point pose covariance and
 # voxel-history unit tests.
@@ -322,15 +316,7 @@ add_test(NAME first_pose_align_r82 COMMAND test_first_pose_align_r82)
 add_executable(test_plane_var_diag_r82 tests/test_plane_var_diag_r82.cpp)
 target_include_directories(test_plane_var_diag_r82 PUBLIC include)
 add_test(NAME plane_var_diag_r82 COMMAND test_plane_var_diag_r82)
-add_executable(test_line_tilt_r82 tests/test_line_tilt_r82.cpp)
-target_include_directories(test_line_tilt_r82 PUBLIC include ${EIGEN3_INCLUDE_DIRS})
-target_link_libraries(test_line_tilt_r82 Eigen3::Eigen)
-add_test(NAME line_tilt_r82 COMMAND test_line_tilt_r82)
 # R82 (D4): drives VoxelPlane directly (same source set as test_line_variance_r77).
-add_executable(test_debiased_line_r82 tests/test_debiased_line_r82.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
-target_include_directories(test_debiased_line_r82 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(test_debiased_line_r82 Eigen3::Eigen ${OpenCV_LIBS})
-add_test(NAME debiased_line_r82 COMMAND test_debiased_line_r82)
 add_executable(test_voxel_class_r82 tests/test_voxel_class_r82.cpp)
 target_include_directories(test_voxel_class_r82 PUBLIC include ${EIGEN3_INCLUDE_DIRS})
 target_link_libraries(test_voxel_class_r82 Eigen3::Eigen)
@@ -393,13 +379,7 @@ add_executable(test_p0_pin_r89 tests/test_p0_pin_r89.cpp)
 target_include_directories(test_p0_pin_r89 PUBLIC include ${EIGEN3_INCLUDE_DIRS})
 target_link_libraries(test_p0_pin_r89 Eigen3::Eigen)
 add_test(NAME p0_pin_r89 COMMAND test_p0_pin_r89)
-# R88: VoxelPlane::refitFromBins() and VoxelNode's binned debiased branch (same source set as test_plane_var_r81).
-add_executable(test_binned_node_r88 tests/test_binned_node_r88.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
-target_include_directories(test_binned_node_r88 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
-target_link_libraries(test_binned_node_r88 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
-add_test(NAME binned_node_r88 COMMAND test_binned_node_r88)
-
-# R90: the pca fit on the binned map type: BinSet::representatives() and VoxelNode's binned pca branch (same source set as test_binned_node_r88).
+# R90: the pca fit on the binned map type: BinSet::representatives() and VoxelNode's binned pca branch (links voxelnode.cpp and voxelplane.cpp; no ROS).
 add_executable(test_binned_pca_r90 tests/test_binned_pca_r90.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
 target_include_directories(test_binned_pca_r90 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
 target_link_libraries(test_binned_pca_r90 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)

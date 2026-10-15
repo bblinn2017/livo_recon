@@ -1,12 +1,12 @@
-// R65 unit test (F-158): a debiased voxel keeps its raw history and hands ALL of it to its children on subdivision.
+// R65 unit test (F-158), rewritten in R97 (the debiased path is removed): a binned voxel keeps its raw history and hands ALL of it to its children on subdivision.
 // Same private-access pattern as test_gravity_s2.cpp (standard headers first, then #define private public).
-//   VH1 precondition: after batch A (planar points, frame 1) the debiased voxel is a plane.
+//   VH1 precondition: after batch A (planar points, frame 1) the binned voxel is a plane.
 //   VH2 after batch B (off-plane scatter, frame 2) the voxel has subdivided (status PARENT, plane retired).
-//   VH3 the children's accumulated point counts sum to |A|+|B| (before F-158 they summed to |B| only), for both
-//       max_points=50 (points_ already at the bound when B arrives, so the batch-not-stored branch) and max_points=1000
-//       (batch stored branch).
+//   VH3 the children's bin accumulators together hold |A|+|B| returns (before F-158 they held |B| only), with
+//       max_points=1000 (batch stored branch). The batch-not-stored branch (points_ already at max_points when B arrives) is not covered here: with a small max_points the children lock
+//       once full and drop their bins, so their returns cannot be counted. Counted as returns in the children's BinSet (numPoints()), not as occupied bins.
 //   VH4 the parent's points_ is empty after the hand-off.
-//   VH5 pca control: the same scenario with plane_fit_mode=pca; children hold at least the last batch (not asserted to be all of it).
+//   VH5 plain (unbinned) pca control: the same scenario with binned_enabled=false; children hold at least the last batch (not asserted to be all of it).
 // Exit code 0 = all pass.
 #include <Eigen/Dense>
 #include <algorithm>
@@ -61,7 +61,9 @@ void scenario(const std::string& mode, int max_points, bool expect_history)
 {
   std::mt19937 rng(11);
   auto opts = std::make_shared<VoxelOpts>();
-  opts->plane_fit_mode = mode;
+  opts->binned_enabled = (mode == "binned");
+  opts->binned_bin_fraction = 0.1;
+  opts->binned_cov_mode = 0;
   opts->max_points = max_points;
   opts->max_layer = 1;
   opts->voxel_size = 0.5;
@@ -76,15 +78,18 @@ void scenario(const std::string& mode, int max_points, bool expect_history)
   setCurrentFrame(1);
   node.insertPoints(planar(rng, nA), updates);
   const std::string tag = mode + " max_points=" + std::to_string(max_points);
-  if (mode == "debiased") CHECK(node.plane_.isPlane(), ("VH1 planar batch gives a plane (" + tag + ")").c_str());
+  if (mode == "binned") CHECK(node.plane_.isPlane(), ("VH1 planar batch gives a plane (" + tag + ")").c_str());
   setCurrentFrame(2);
   node.insertPoints(scatter(rng, nB), updates);
   std::printf("[INFO] after batch B (%s): status=%d is_plane=%d pointsSize=%d\n", tag.c_str(),
               static_cast<int>(node.status_), node.plane_.isPlane() ? 1 : 0, static_cast<int>(node.plane_.pointsSize()));
   CHECK(node.status_ == VoxelStatus::PARENT, ("VH2 voxel subdivided (" + tag + ")").c_str());
   int sum = 0;
-  for (int i = 0; i < 8; ++i)
-    if (node.leaves_[i]) sum += node.leaves_[i]->plane_.pointsSize();
+  for (int i = 0; i < 8; ++i) {
+    if (!node.leaves_[i]) continue;
+    if (expect_history) { if (node.leaves_[i]->binset_) sum += static_cast<int>(node.leaves_[i]->binset_->numPoints()); }
+    else sum += node.leaves_[i]->plane_.pointsSize();
+  }
   if (expect_history)
     CHECK(sum == nA + nB, ("VH3 children hold all history " + std::to_string(sum) + " == " + std::to_string(nA + nB) + " (" + tag + ")").c_str());
   else
@@ -96,8 +101,7 @@ void scenario(const std::string& mode, int max_points, bool expect_history)
 
 int main()
 {
-  scenario("debiased", 50, true);
-  scenario("debiased", 1000, true);
+  scenario("binned", 1000, true);
   scenario("pca", 1000, false);
   std::printf("ALL PASS\n");
   return 0;

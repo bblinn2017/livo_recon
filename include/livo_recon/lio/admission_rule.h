@@ -1,6 +1,6 @@
 #pragma once
 
-// R87. The point-count admission rule of a voxel fit, in one ROS-free header so both fit paths (pca and debiased, src/lio/voxelnode.cpp) use the same decision and a
+// R87. The point-count admission rule of a voxel fit, in one ROS-free header so both fit paths (plain and binned pca, src/lio/voxelnode.cpp) use the same decision and a
 // unit test can show it fires (tests/test_admission_rule_r87.cpp).
 //
 //   fitWanted(admitted, since_fit, min_init, min_update, bootstrap):
@@ -11,8 +11,7 @@
 //   min_init is NOT relaxed in the bootstrap frame: a voxel with fewer than min_init raw points gets no fit there either.
 //   Points are counted raw (one per return). Counting distinct beams is a different rule (the binned voxel class) and is not done here.
 //
-// Before R87 only the pca path applied min_init / min_update, and it applied min_update in the bootstrap frame as well; the debiased path applied neither (it fitted at 3 points
-// and refitted on every batch).
+// Before R87 only the pca path applied min_init / min_update, and it applied min_update in the bootstrap frame as well.
 
 namespace livo_recon
 {
