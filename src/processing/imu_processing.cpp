@@ -421,29 +421,24 @@ void ImuProc::propagate(MeasureGroup& mg)
     // R63: d(g)/d(gravity error coordinates); I3 for vector3 (bit-identical
     // to the pre-R63 blocks), -[g]x B for s2. g and B do not change during
     // propagation, so this is constant over the whole call.
-    const Eigen::MatrixXd J_g = state_->estGravity() ? Eigen::MatrixXd(state_->gravityJacobian())
-                                                     : Eigen::MatrixXd(Eigen::MatrixXd::Zero(3, 0));
+    const Eigen::MatrixXd J_g = state_->gravityJacobian();
 
     // Rotation
     F_x.block<3,3>(StateGroup::idxR(), StateGroup::idxR()) = Exp_f.transpose();
-    if (state_->estBG())
-      F_x.block(StateGroup::idxR(), state_->idxBG(), 3, 3) = -Eye3d * dt;
+    F_x.block(StateGroup::idxR(), StateGroup::idxBG(), 3, 3) = -Eye3d * dt;
 
     // Position
     F_x.block<3,3>(StateGroup::idxP(), StateGroup::idxV()) = Eye3d * dt;
     if (opts_.second_order)
     {
       F_x.block<3,3>(StateGroup::idxP(), StateGroup::idxR()) += -0.5 * rot_imu * acc_avr_skew * dt2;
-      if (state_->estGravity())
-        F_x.block(StateGroup::idxP(), state_->idxG(), 3, state_->gravDim()) = 0.5 * J_g * dt2;
+      F_x.block(StateGroup::idxP(), StateGroup::idxG(), 3, state_->gravDim()) = 0.5 * J_g * dt2;
     }
 
     // Velocity
     F_x.block<3,3>(StateGroup::idxV(), StateGroup::idxR()) = -rot_imu * acc_avr_skew * dt;
-    if (state_->estBA())
-      F_x.block(StateGroup::idxV(), state_->idxBA(), 3, 3) = -rot_imu * dt;
-    if (state_->estGravity())
-      F_x.block(StateGroup::idxV(), state_->idxG(), 3, state_->gravDim()) = J_g * dt;
+    F_x.block(StateGroup::idxV(), StateGroup::idxBA(), 3, 3) = -rot_imu * dt;
+    F_x.block(StateGroup::idxV(), StateGroup::idxG(), 3, state_->gravDim()) = J_g * dt;
 
     // Rotation noise
     cov_w.block<3,3>(StateGroup::idxR(), StateGroup::idxR()).diagonal() =
@@ -454,14 +449,12 @@ void ImuProc::propagate(MeasureGroup& mg)
         acc_noise_world * dt2;
 
     // Bias Gyro noise (random walk)
-    if (state_->estBG())
-      cov_w.block(state_->idxBG(), state_->idxBG(), 3, 3).diagonal() =
-          (state_->covBiasGyr() * dt).eval();
+    cov_w.block(StateGroup::idxBG(), StateGroup::idxBG(), 3, 3).diagonal() =
+        (state_->covBiasGyr() * dt).eval();
 
     // Bias Acc noise (random walk)
-    if (state_->estBA())
-      cov_w.block(state_->idxBA(), state_->idxBA(), 3, 3).diagonal() =
-          (state_->covBiasAcc() * dt).eval();
+    cov_w.block(StateGroup::idxBA(), StateGroup::idxBA(), 3, 3).diagonal() =
+        (state_->covBiasAcc() * dt).eval();
 
     if (opts_.second_order)
     {
@@ -569,10 +562,8 @@ void ImuProc::propagate(MeasureGroup& mg)
         << "  trace(P_PP)=" << P_PP.trace()
         << "  trace(P_VV)=" << P_VV.trace()
         << "  norm(P_PV)=" << P_PV.norm();
-    if (state_->estBG())
-      dbg << "  trace(P_BGBG)=" << P.block<3, 3>(state_->idxBG(), state_->idxBG()).trace();
-    if (state_->estBA())
-      dbg << "  trace(P_BABA)=" << P.block<3, 3>(state_->idxBA(), state_->idxBA()).trace();
+    dbg << "  trace(P_BGBG)=" << P.block<3, 3>(StateGroup::idxBG(), StateGroup::idxBG()).trace()
+        << "  trace(P_BABA)=" << P.block<3, 3>(StateGroup::idxBA(), StateGroup::idxBA()).trace();
 
     // Full post-IMU-propagation (pre-LIO-correction) state + covariance --
     // see lio_processing.cpp's matching post-LIO dump for why (raw-value

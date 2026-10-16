@@ -67,25 +67,10 @@ calib:
   # as a sensor floor; it never silently replaces runtime process noise.
   stationary:
     num_samples: 100
-    stall_calls_max: 300
-    apply_to_state:
-      gyro_bias: true
-      accel_bias: true
   p0:
-    # R97 default (Bryce 2026-10-15): exact-zero P0. The position, velocity and attitude blocks are exactly zero (a known state); the IMU
-    # propagation makes the covariance positive before anything is inverted. These are the values of the R96E factor P0 = 1 (cell f10001111).
-    # Calibration is required to begin stationary.
-    mode: calibration_derived
+    # R97A Q4: calib/p0/mode (and known_{pos,vel,theta}_variance) are removed -- P0's position, velocity and attitude blocks
+    # are always exactly zero now (the values this yaml's own calibration_derived/0.0/0.0/0.0 already selected).
     autocov_lags: 20
-    # The world/map origin is defined to be exactly zero and the platform is
-    # required to start stationary. Positive epsilons keep information-form
-    # solves nonsingular while representing those known constraints.
-    known_pos_variance: 0.0
-    known_vel_variance: 0.0
-    # R89: attitude block of P0 in calibration_derived mode. Negative = the calibration-derived block (unchanged); 0 or more = that
-    # constant on the diagonal with no cross terms (0 = exactly zero). known_pos_variance / known_vel_variance may also be exactly 0
-    # (a known state; the IMU propagation makes the covariance positive before anything is inverted).
-    known_theta_variance: 0.0
     # Balanced roll/pitch-vs-b_a ambiguity in acceleration units. 0.0856
     # m/s^2 = g * 0.5 degrees, using the VN-100's published static pitch/roll
     # accuracy as the initial conservative ambiguity scale. Each side gets
@@ -99,24 +84,14 @@ calib:
     # physical uncertainty and is reported before/after in calibration_p0.txt.
     numerical_eigenvalue_floor: 1.0e-12
 state:
-  est:
-    bg: true
-    ba: true
-    gravity: true
+  # R97A Q4: state/est/{bg,ba,gravity} and state/cov/{rot_tilt,rot_yaw,pos,vel,bg,ba} and state/init_state/{vel,ba,bg} are
+  # removed -- no consumer survives P0's pos/vel/attitude always being pinned to zero and the bias blocks always being
+  # calibration-derived (see calib/p0 above), and vel/bias_gyr/bias_acc are always overwritten by the mandatory stationary
+  # calibration before first use. state/cov/gravity and state/init_state/gravity are kept.
   cov:
-    # Initial state covariance only; runtime process noise is under imu/.
-    rot_tilt: 1.0e-2
-    rot_yaw: 1.0e-2
-    pos: 1.0e-2
-    vel: 1.0e-2
-    bg: 1.0e-5
-    ba: 1.0e-5
     gravity: 1.0e-5
   init_state:
     gravity: [0., 0., -9.81]
-    vel: [0., 0., 0.]
-    ba: [0., 0., 0.]
-    bg: [0., 0., 0.]
 imu:
   process_noise:
     # "fixed" is the earlier production behavior. "isotropic" and "axis_aware"

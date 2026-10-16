@@ -65,28 +65,13 @@ outputs:
 calib:
   stationary:
     num_samples: 100
-    stall_calls_max: 300
-    apply_to_state:
-      gyro_bias: true
-      accel_bias: true
+# R97A Q4: calib/stationary/stall_calls_max, apply_to_state/*, state/est/{bg,ba,gravity}, state/cov/{rot_tilt,rot_yaw,pos,vel,bg,ba},
+# and state/init_state/{vel,ba,bg} are removed. state/cov/gravity and state/init_state/gravity are kept.
 state:
-  est:
-    bg: true
-    ba: true
-    gravity: true
   cov:
-    rot_tilt: 1.0e-2
-    rot_yaw: 1.0e-2
-    pos: 1.0e-2
-    vel: 1.0e-2
-    bg: 1.0e-5
-    ba: 1.0e-5
     gravity: 1.0e-5
   init_state:
     gravity: [0., 0., -9.81]
-    vel: [0., 0., 0.]
-    ba: [0., 0., 0.]
-    bg: [0., 0., 0.]
 imu:
   process_noise:
     fixed:

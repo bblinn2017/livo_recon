@@ -26,18 +26,8 @@ struct CalibProcOptions
   double sensor_sigma_r2 = 0.05 * 0.05;
   double sensor_sigma_a2 = 0.0;
 
-  // Calibration used to have no way to fail. collectSamples() returns false
-  // whenever the buffer is short, estimateFromBuffer() reports "Calibrating
-  // IMU... N samples collected." and the node calls it again next frame --
-  // forever, if the condition that starves it never clears. That is the
-  // "hang" on exp01_construction_ground_level and once on site1_handheld_4's
-  // pca arm: not an infinite inner loop but a precondition that is never met,
-  // with no timeout and no diagnosis. After this many consecutive calls with
-  // ZERO growth in the sample count, abort loudly with the counts that
-  // explain why. 0 disables the bound and restores the old behaviour.
-  int  stall_calls_max   = 300;
-  bool apply_gyro_bias = true;
-  bool apply_accel_bias = true;
+  // R97A Q4: stall_calls_max (the abort on consecutive zero-growth calls) is removed.
+  // apply_to_state/gyro_bias and accel_bias are always on (the yaml sets both true).
   // R63: how the stationary accelerometer-magnitude excess (|mean acc| - G)
   // is explained. "bias" (default, historical): absorbed by the z accel
   // bias state. "scale": a fixed scale factor G/|mean acc| is applied to
@@ -45,25 +35,17 @@ struct CalibProcOptions
   // configured initial value.
   std::string accel_excess_model = "bias";
 
-  // Initial-covariance policy. "configured" is the legacy path and leaves
-  // state/cov/* byte-for-byte in control. "calibration_derived" replaces
-  // the observable attitude/bias blocks after the stationary calibration;
-  // yaw, gravity and explicit model floors remain configured because a
-  // single stationary specific-force vector cannot identify them.
-  std::string p0_mode = "configured";
+  // R97A Q4: calib/p0/mode (and its "configured" branch) is removed. P0's
+  // position, velocity and attitude blocks are always exactly zero -- the
+  // pinned, excluded-from-the-floor path "calibration_derived" always
+  // selected with known_pos/vel/theta_variance == 0.
   int p0_autocov_lags = 20;
-  double p0_known_pos_variance = 1e-12;
-  double p0_known_vel_variance = 1e-12;
-  // R89: attitude block of P0 in calibration_derived mode. Negative: the calibration-derived block (unchanged). 0 or more: that constant on
-  // the diagonal with no cross terms (0 = exactly zero).
-  double p0_known_theta_variance = -1.0;
   // Standard deviation of the ONE transverse specific-force ambiguity
   // shared equally (in acceleration-equivalent units) by gravity tilt and
-  // accelerometer bias. Negative conservatively derives it from the larger
-  // of the configured tilt and b_a uncertainties.
-  double p0_tilt_ba_ambiguity_accel_std = -1.0;
-  double p0_bg_model_floor = -1.0;
-  double p0_ba_radial_model_floor = -1.0;
+  // accelerometer bias.
+  double p0_tilt_ba_ambiguity_accel_std = 0.03;
+  double p0_bg_model_floor = 1.0e-5;
+  double p0_ba_radial_model_floor = 1.0e-5;
   // Purely numerical covariance floor. This is not a physical uncertainty
   // model: it only makes the symmetric P0 strictly positive definite for
   // information-form solves when a physically valid construction is PSD.
@@ -122,8 +104,6 @@ private:
   long   calib_groups_seen_      = 0;
   long   calib_groups_short_imu_ = 0;
   long   calib_images_consumed_  = 0;
-  int    calib_stall_calls_      = 0;
-  size_t calib_last_count_       = 0;
 
   std::vector<std::vector<PointXYZT>> calib_observations_raw_;
   std::vector<std::vector<PointXYZCov>> bootstrap_observations_;

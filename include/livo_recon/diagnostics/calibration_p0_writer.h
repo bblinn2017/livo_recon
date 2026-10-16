@@ -13,7 +13,7 @@ namespace livo_recon
 // calibration and before the first propagation. This is the actual P0 used by
 // the estimator, not a reconstruction from configuration values.
 void writeCalibrationP0Diagnostic(
-    const StateGroup& state, const std::string& mode, int sample_count,
+    const StateGroup& state, int sample_count,
     int autocov_lags, const M3D& acc_mean_cov, const M3D& gyro_mean_cov);
 
 // R62: the raw quantities behind gravity alignment, so tilt P0 can be tested
@@ -26,7 +26,6 @@ void writeCalibrationP0Diagnostic(
 void writeGravityAlignmentDiagnostic(
     const std::deque<ImuSample>& samples, const M3D& acc_mean_cov,
     const M3D& gyro_mean_cov, const M3D& R_before, const M3D& R_init,
-    const StateGroup& state_after, const V3D& true_acc_bias,
-    bool apply_accel_bias, bool apply_gyro_bias);
+    const StateGroup& state_after, const V3D& true_acc_bias);
 
 }  // namespace livo_recon

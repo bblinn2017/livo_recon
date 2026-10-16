@@ -20,19 +20,21 @@ public:
   StateGroup& operator=(const StateGroup& o);
 
   // History (22-29): see docs/livo_recon_changelog.md#include-livo_recon-utils-state-state.h-22
-  static constexpr int idxR() { return 0; }
-  static constexpr int idxP() { return 3; }
-  static constexpr int idxV() { return 6; }
-  static M3D gravityAlignedAttitudeCovariance(
-      const M3D& aligned_rot, double tilt_variance, double yaw_variance);
-  int idxBG() const { return est_bg_      ? 9                                     : -1; }
-  int idxBA() const { return est_ba_      ? 9 + (est_bg_ ? 3 : 0)                 : -1; }
-  int idxG()  const { return est_gravity_ ? 9 + (est_bg_ ? 3 : 0) + (est_ba_ ? 3 : 0) : -1; }
+  // R97A Q4 item 5: rotation, position, velocity, gyro bias, accelerometer bias, then gravity LAST -- all five fixed-width
+  // blocks are always estimated (state/est/bg|ba|gravity were always true), so every index but gravity's own width is a
+  // compile-time constant. gravity is the only runtime-dependent part (3 free Euclidean components, or 2 tangent coordinates
+  // under state/gravity_model=s2).
+  static constexpr int idxR()  { return 0; }
+  static constexpr int idxP()  { return 3; }
+  static constexpr int idxV()  { return 6; }
+  static constexpr int idxBG() { return 9; }
+  static constexpr int idxBA() { return 12; }
+  static constexpr int idxG()  { return 15; }
   // R63: gravity block width. vector3 (historical): 3 free Euclidean
   // components. s2: 2 tangent coordinates on the sphere |g| = const.
-  int gravDim() const { return est_gravity_ ? (gravity_model_s2_ ? 2 : 3) : 0; }
-  int dimState() const { return 9 + (est_bg_ ? 3 : 0) + (est_ba_ ? 3 : 0) + gravDim(); }
-  bool gravityS2() const { return est_gravity_ && gravity_model_s2_; }
+  int gravDim() const { return gravity_model_s2_ ? 2 : 3; }
+  int dimState() const { return idxG() + gravDim(); }
+  bool gravityS2() const { return gravity_model_s2_; }
   const char* gravityModelName() const { return gravity_model_s2_ ? "s2" : "vector3"; }
   // d(gravity vector)/d(gravity error coordinates), 3 x gravDim():
   // I3 for vector3; -[g]x B for s2 (B = current 3x2 tangent basis).
@@ -43,9 +45,7 @@ public:
   double accScale() const { return acc_scale_; }
   void setAccScale(double s) { acc_scale_ = s; }
 
-  bool estBG()      const { return est_bg_; }
-  bool estBA()      const { return est_ba_; }
-  bool estGravity() const { return est_gravity_; }
+  // R97A Q4 item 5: estBG()/estBA()/estGravity() are removed -- all three are always true.
 
   // ── Setters ───────────────────────────────────────────────────────────────
 
@@ -110,20 +110,9 @@ public:
   const V3D& covBiasGyr() const { return cov_bias_gyr_; }
   const V3D& covBiasAcc() const { return cov_bias_acc_; }
 
-  // Resolved initial-covariance scalars (the exact seven `state/cov/*`
-  // values this run was configured with), retained for diagnostics that
-  // need to report the configuration a scan's numbers were produced under
-  // without threading the config through every call site. rot_tilt/rot_yaw
-  // are the values gravityAlignedAttitudeCovariance() was built from (see
-  // setCalibResult()); pos/vel/bg/ba/gravity are the plain isotropic
-  // diagonal values initCov() used.
-  double initCovRotTilt() const { return init_cov_rot_tilt_; }
-  double initCovRotYaw()  const { return init_cov_rot_yaw_; }
-  double initCovPos()     const { return init_cov_pos_; }
-  double initCovVel()     const { return init_cov_vel_; }
+  // R97A Q4 item 6: initCovRotTilt/RotYaw/Pos/Vel/Bg/Ba() are removed with their `state/cov/*` keys (section above). Only
+  // gravity survives (an arm of this round changes how the gravity covariance is built).
   double initCovGravity() const { return init_cov_gravity_; }
-  double initCovBg()      const { return init_cov_bg_; }
-  double initCovBa()      const { return init_cov_ba_; }
   const Eigen::MatrixXd& initialCovarianceActual() const
   {
     return initial_covariance_actual_;
@@ -198,10 +187,6 @@ private:
     std::vector<double> distortion_coeffs;
   };
 
-  // Estimation flags (set before cov_ is sized)
-  bool est_bg_      = true;
-  bool est_ba_      = true;
-  bool est_gravity_ = true;
   // R63: gravity_ is always the 3-vector; under s2 its norm is held fixed
   // and gravity_basis_ (3x2, orthonormal, orthogonal to gravity_) defines
   // the tangent coordinates of the error state. The basis is parallel-
@@ -217,15 +202,7 @@ private:
   Eigen::MatrixXd cov_;   // dimState() × dimState()
   V3D var_acc_, var_gyr_, cov_bias_gyr_, cov_bias_acc_;
   V3D var_acc_floor_ = V3D::Zero(), var_gyr_floor_ = V3D::Zero();
-  // Right-perturbation attitude covariance after gravity alignment. Equal
-  // values reproduce the former isotropic initialization exactly.
-  double init_cov_rot_tilt_ = 1e-4;
-  double init_cov_rot_yaw_ = 1e-4;
-  double init_cov_pos_ = 1e-4;
-  double init_cov_vel_ = 1e-4;
   double init_cov_gravity_ = 1e-5;
-  double init_cov_bg_ = 1e-6;
-  double init_cov_ba_ = 1e-6;
   Eigen::MatrixXd initial_covariance_actual_;
   std::string initial_covariance_mode_ = "uncaptured";
   double p0_min_eigenvalue_before_ = 0.0;
@@ -242,8 +219,7 @@ private:
   V3D tcw_;  // t_ic_ - Rcw_ * pos_
 
   void updateDerivedTransforms();
-  void initCov(double cov_rot, double cov_pos, double cov_vel,
-               double cov_bg, double cov_ba, double cov_gravity);
+  void initCov(double cov_gravity);
 };
 
 using StateGroupPtr = std::shared_ptr<StateGroup>;

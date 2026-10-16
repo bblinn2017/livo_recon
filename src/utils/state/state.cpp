@@ -1,5 +1,6 @@
 #include "livo_recon/utils/state/state.h"
 #include "livo_recon/utils/log/param_warn.h"
+#include "livo_recon/utils/log/renamed_keys.h"
 
 #include <algorithm>
 #include <cmath>
@@ -8,29 +9,19 @@
 namespace livo_recon
 {
 
-M3D StateGroup::gravityAlignedAttitudeCovariance(
-    const M3D& aligned_rot, double tilt_variance, double yaw_variance)
-{
-  const V3D yaw_axis_body =
-      (aligned_rot.transpose() * V3D(0.0, 0.0, -1.0)).normalized();
-  return tilt_variance * M3D::Identity() +
-      (yaw_variance - tilt_variance) *
-          yaw_axis_body * yaw_axis_body.transpose();
-}
+// R97A Q4 item 5/6: gravityAlignedAttitudeCovariance() is removed -- its only call site (setCalibResult() below) wrote a
+// value that CalibProc::applyCalibrationDerivedP0() always immediately overwrites to exactly zero (the attitude block is
+// always pinned; see p0::applyKnownBlocks()), so it was dead.
 
-void StateGroup::initCov(double cov_rot, double cov_pos, double cov_vel,
-                          double cov_bg, double cov_ba, double cov_gravity)
+void StateGroup::initCov(double cov_gravity)
 {
+  // R97A Q4 item 6: rotation, position, velocity, gyro-bias and accelerometer-bias blocks are always overwritten before
+  // first use (calibration is mandatory and its P0 construction always pins rot/pos/vel to exactly zero and always
+  // replaces the bias blocks), so this pre-calibration placeholder covariance only needs to size cov_ and seed gravity's.
   const int dim = dimState();
   cov_ = Eigen::MatrixXd::Zero(dim, dim);
-  cov_.block<3,3>(idxR(), idxR()) = cov_rot     * M3D::Identity();
-  cov_.block<3,3>(idxP(), idxP()) = cov_pos     * M3D::Identity();
-  cov_.block<3,3>(idxV(), idxV()) = cov_vel     * M3D::Identity();
-  if (est_bg_)      cov_.block(idxBG(), idxBG(), 3, 3) = cov_bg      * M3D::Identity();
-  if (est_ba_)      cov_.block(idxBA(), idxBA(), 3, 3) = cov_ba      * M3D::Identity();
-  if (est_gravity_)
-    cov_.block(idxG(), idxG(), gravDim(), gravDim()) =
-        cov_gravity * Eigen::MatrixXd::Identity(gravDim(), gravDim());
+  cov_.block(idxG(), idxG(), gravDim(), gravDim()) =
+      cov_gravity * Eigen::MatrixXd::Identity(gravDim(), gravDim());
 }
 
 void StateGroup::resetGravityBasis()
@@ -66,7 +57,7 @@ StateGroup::StateGroup()
   bias_acc_ = V3D::Zero();
   gravity_  = V3D::Zero();
 
-  initCov(1e-4, 1e-4, 1e-4, 1e-6, 1e-6, 1e-5);
+  initCov(1e-5);
 
   var_acc_ = V3D::Zero();
   var_gyr_ = V3D::Zero();
@@ -84,9 +75,6 @@ StateGroup::StateGroup()
 StateGroup& StateGroup::operator=(const StateGroup& o)
 {
   if (this != &o) {
-    est_bg_      = o.est_bg_;
-    est_ba_      = o.est_ba_;
-    est_gravity_ = o.est_gravity_;
     gravity_model_s2_ = o.gravity_model_s2_;
     gravity_basis_ = o.gravity_basis_;
     acc_scale_ = o.acc_scale_;
@@ -98,13 +86,7 @@ StateGroup& StateGroup::operator=(const StateGroup& o)
     // an isotropic motion-Q shadow threw "motion-dependent Q requires positive stationary calibration floors"). Copying them is inert for the driver.
     var_acc_floor_ = o.var_acc_floor_; var_gyr_floor_ = o.var_gyr_floor_;
     cov_bias_gyr_ = o.cov_bias_gyr_; cov_bias_acc_ = o.cov_bias_acc_;
-    init_cov_rot_tilt_ = o.init_cov_rot_tilt_;
-    init_cov_rot_yaw_ = o.init_cov_rot_yaw_;
-    init_cov_pos_ = o.init_cov_pos_;
-    init_cov_vel_ = o.init_cov_vel_;
     init_cov_gravity_ = o.init_cov_gravity_;
-    init_cov_bg_ = o.init_cov_bg_;
-    init_cov_ba_ = o.init_cov_ba_;
     initial_covariance_actual_ = o.initial_covariance_actual_;
     initial_covariance_mode_ = o.initial_covariance_mode_;
     p0_min_eigenvalue_before_ = o.p0_min_eigenvalue_before_;
@@ -172,11 +154,8 @@ void StateGroup::setCalibResult(const M3D& rot, const V3D& bias_gyr, const V3D& 
   vel_      = V3D::Zero();
   bias_gyr_ = bias_gyr;
   bias_acc_ = bias_acc;
-  // Gravity alignment observes tilt but cannot observe yaw. Since applyDelta
-  // uses a right/body-frame perturbation, the tangent-space yaw axis is the
-  // world-gravity direction expressed in the aligned body frame.
-  cov_.block<3,3>(idxR(), idxR()) = gravityAlignedAttitudeCovariance(
-      rot_, init_cov_rot_tilt_, init_cov_rot_yaw_);
+  // R97A Q4 item 6: the attitude block used to be seeded here (gravityAlignedAttitudeCovariance()); it is now left alone --
+  // CalibProc::applyCalibrationDerivedP0() always pins it to exactly zero immediately afterward.
   updateDerivedTransforms();
 }
 
@@ -203,22 +182,19 @@ void StateGroup::applyDelta(const Eigen::VectorXd& dx)
   rot_      = rot_ * Exp(dx.segment<3>(idxR()));
   pos_      += dx.segment<3>(idxP());
   vel_      += dx.segment<3>(idxV());
-  if (est_bg_)      bias_gyr_ += dx.segment<3>(idxBG());
-  if (est_ba_)      bias_acc_ += dx.segment<3>(idxBA());
-  if (est_gravity_)
+  bias_gyr_ += dx.segment<3>(idxBG());
+  bias_acc_ += dx.segment<3>(idxBA());
+  if (!gravity_model_s2_)
+    gravity_ += dx.segment<3>(idxG());
+  else
   {
-    if (!gravity_model_s2_)
-      gravity_ += dx.segment<3>(idxG());
-    else
-    {
-      // Retraction on the sphere: rotate g about an axis orthogonal to g,
-      // and rotate the tangent basis by the same rotation (parallel
-      // transport along the geodesic).
-      const V3D w = gravity_basis_ * dx.segment<2>(idxG());
-      const M3D Rg = Exp(w);
-      gravity_ = Rg * gravity_;
-      gravity_basis_ = Rg * gravity_basis_;
-    }
+    // Retraction on the sphere: rotate g about an axis orthogonal to g,
+    // and rotate the tangent basis by the same rotation (parallel
+    // transport along the geodesic).
+    const V3D w = gravity_basis_ * dx.segment<2>(idxG());
+    const M3D Rg = Exp(w);
+    gravity_ = Rg * gravity_;
+    gravity_basis_ = Rg * gravity_basis_;
   }
   updateDerivedTransforms();
 }
@@ -230,24 +206,21 @@ Eigen::VectorXd StateGroup::boxminusFromPropagat(const StateGroup& propagat) con
   vec.segment<3>(idxR()) = Log(rotd);
   vec.segment<3>(idxP()) = propagat.pos_ - pos_;
   vec.segment<3>(idxV()) = propagat.vel_ - vel_;
-  if (est_bg_)      vec.segment<3>(idxBG()) = propagat.bias_gyr_ - bias_gyr_;
-  if (est_ba_)      vec.segment<3>(idxBA()) = propagat.bias_acc_ - bias_acc_;
-  if (est_gravity_)
+  vec.segment<3>(idxBG()) = propagat.bias_gyr_ - bias_gyr_;
+  vec.segment<3>(idxBA()) = propagat.bias_acc_ - bias_acc_;
+  if (!gravity_model_s2_)
+    vec.segment<3>(idxG()) = propagat.gravity_ - gravity_;
+  else
   {
-    if (!gravity_model_s2_)
-      vec.segment<3>(idxG()) = propagat.gravity_ - gravity_;
-    else
-    {
-      // Geodesic deviation of the prior gravity direction from the current
-      // one, in the current tangent basis: delta = B_c^T w, where w has
-      // magnitude equal to the angle between the two vectors and direction
-      // g_c x g_p (normalised).
-      const V3D c = gravity_.cross(propagat.gravity_);
-      const double cn = c.norm();
-      const double ang = std::atan2(cn, gravity_.dot(propagat.gravity_));
-      const V3D w = (cn > 1e-15) ? V3D(c * (ang / cn)) : V3D(V3D::Zero());
-      vec.segment<2>(idxG()) = gravity_basis_.transpose() * w;
-    }
+    // Geodesic deviation of the prior gravity direction from the current
+    // one, in the current tangent basis: delta = B_c^T w, where w has
+    // magnitude equal to the angle between the two vectors and direction
+    // g_c x g_p (normalised).
+    const V3D c = gravity_.cross(propagat.gravity_);
+    const double cn = c.norm();
+    const double ang = std::atan2(cn, gravity_.dot(propagat.gravity_));
+    const V3D w = (cn > 1e-15) ? V3D(c * (ang / cn)) : V3D(V3D::Zero());
+    vec.segment<2>(idxG()) = gravity_basis_.transpose() * w;
   }
   return vec;
 }
@@ -263,9 +236,8 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
       throw std::invalid_argument(std::string("removed mixed-responsibility IMU key: ") +
           legacy + "; use imu/process_noise/fixed or bias_random_walk");
   }
-  paramWarn<bool>(pnh, "state/est/bg",      est_bg_,      true);
-  paramWarn<bool>(pnh, "state/est/ba",      est_ba_,      true);
-  paramWarn<bool>(pnh, "state/est/gravity", est_gravity_, true);
+  refuseRenamedKeys(pnh);   // R97A Q4: catches state/est/{bg,ba,gravity}, state/cov/*, state/init_state/{vel,ba,bg}, etc.
+  // R97A Q4 item 5: state/est/{bg,ba,gravity} are removed -- all three are always true.
   {
     std::string gm;
     paramWarn<std::string>(pnh, "state/gravity_model", gm, std::string("vector3"));
@@ -332,31 +304,20 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
 
   updateDerivedTransforms();
 
-  // Initial state covariance
-  paramWarn<double>(pnh, "state/cov/rot_tilt", init_cov_rot_tilt_, 1e-4);
-  paramWarn<double>(pnh, "state/cov/rot_yaw", init_cov_rot_yaw_, 1e-4);
-  paramWarn<double>(pnh, "state/cov/pos",     init_cov_pos_,     1e-4);
-  paramWarn<double>(pnh, "state/cov/vel",     init_cov_vel_,     1e-4);
-  paramWarn<double>(pnh, "state/cov/bg",      init_cov_bg_,      1e-6);
-  paramWarn<double>(pnh, "state/cov/ba",      init_cov_ba_,      1e-6);
+  // R97A Q4 item 6: state/cov/{rot_tilt,rot_yaw,pos,vel,bg,ba} are removed -- CalibProc::applyCalibrationDerivedP0() always
+  // pins position/velocity/attitude to exactly zero and always replaces the bias blocks, so none of these six keys had a
+  // consumer left after Q4 items 3-5. state/cov/gravity is kept (an arm of this round changes how the gravity covariance
+  // is built) -- it still seeds initCov() below, unchanged.
   paramWarn<double>(pnh, "state/cov/gravity", init_cov_gravity_, 1e-5);
-  // Before gravity alignment there is not yet a meaningful yaw axis. Seed
-  // the temporary isotropic block with the tilt value; setCalibResult()
-  // replaces it with the exact aligned tilt/yaw covariance before LIO.
-  initCov(init_cov_rot_tilt_, init_cov_pos_, init_cov_vel_, init_cov_bg_,
-          init_cov_ba_, init_cov_gravity_);
+  initCov(init_cov_gravity_);
 
-  // Initial dynamic state
-  std::vector<double> g_vec, v_vec, ba_vec, bg_vec;
+  // R97A Q4 item 6: state/init_state/{vel,ba,bg} are removed -- CalibProc::estimateFromBuffer() always overwrites vel_
+  // (to zero) and bias_gyr_/bias_acc_ (from the mandatory stationary calibration) before first use. state/init_state/gravity
+  // is kept (the only one with a live consumer: the uncalibrated starting gravity vector calibration aligns against).
+  std::vector<double> g_vec;
   paramWarn<std::vector<double>>(pnh, "state/init_state/gravity", g_vec,  {0., 0., -G_m_s2});
-  paramWarn<std::vector<double>>(pnh, "state/init_state/vel",     v_vec,  {0., 0., 0.});
-  paramWarn<std::vector<double>>(pnh, "state/init_state/ba",      ba_vec, {0., 0., 0.});
-  paramWarn<std::vector<double>>(pnh, "state/init_state/bg",      bg_vec, {0., 0., 0.});
   gravity_  = V3D(g_vec[0],  g_vec[1],  g_vec[2]);
   resetGravityBasis();
-  vel_      = V3D(v_vec[0],  v_vec[1],  v_vec[2]);
-  bias_acc_ = V3D(ba_vec[0], ba_vec[1], ba_vec[2]);
-  bias_gyr_ = V3D(bg_vec[0], bg_vec[1], bg_vec[2]);
 
   // Fixed IMU propagation noise. Stationary calibration records a separate
   // sensor floor and never silently replaces these operating values.
@@ -403,13 +364,8 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
       << "\n  camera: " << camera_.width << "x" << camera_.height
       << "  fx=" << camera_.fx << "  fy=" << camera_.fy
       << "  cx=" << camera_.cx << "  cy=" << camera_.cy
-      << "\n  est/bg=" << (est_bg_ ? "true" : "false")
-      << "  est/ba=" << (est_ba_ ? "true" : "false")
-      << "  est/gravity=" << (est_gravity_ ? "true" : "false")
       << "  gravity_model=" << gravityModelName()
-      << "  dimState=" << dimState()
-      << "\n  initial_attitude_cov/tilt=" << init_cov_rot_tilt_
-      << "  initial_attitude_cov/yaw=" << init_cov_rot_yaw_;
+      << "  dimState=" << dimState();
   return oss.str();
 }
 

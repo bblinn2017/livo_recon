@@ -13,7 +13,7 @@ namespace livo_recon
 {
 
 void writeCalibrationP0Diagnostic(
-    const StateGroup& state, const std::string& mode, int sample_count,
+    const StateGroup& state, int sample_count,
     int autocov_lags, const M3D& acc_mean_cov, const M3D& gyro_mean_cov)
 {
   static PersistentLogStream log("calibration_p0.txt");
@@ -25,25 +25,21 @@ void writeCalibrationP0Diagnostic(
 
   out << "schema calibration_p0_v1\n"
       << "phase post_stationary_calibration_pre_first_imu\n"
-      << "mode " << mode << '\n'
+      << "mode calibration_derived\n"
       << "sample_count " << sample_count << '\n'
       << "autocov_lags " << autocov_lags << '\n'
       << "state_dim " << state.dimState() << '\n'
       << "numerical_stabilization min_before " << state.p0MinEigenvalueBefore()
       << " floor " << state.p0EigenvalueFloor()
       << " min_after " << state.p0MinEigenvalueAfter() << '\n'
-      << "ordering theta[0:3] p[3:6] v[6:9]";
-  if (state.estBG()) out << " bg[" << state.idxBG() << ':' << state.idxBG()+3 << ']';
-  if (state.estBA()) out << " ba[" << state.idxBA() << ':' << state.idxBA()+3 << ']';
-  if (state.estGravity()) out << " g[" << state.idxG() << ':' << state.idxG()+state.gravDim() << ']'
-                              << " gravity_model " << state.gravityModelName();
-  out << "\nconfigured_init_variances tilt " << state.initCovRotTilt()
-      << " yaw " << state.initCovRotYaw()
-      << " p " << state.initCovPos()
-      << " v " << state.initCovVel()
-      << " bg " << state.initCovBg()
-      << " ba " << state.initCovBa()
-      << " g " << state.initCovGravity() << '\n'
+      << "ordering theta[0:3] p[3:6] v[6:9]"
+      << " bg[" << state.idxBG() << ':' << state.idxBG()+3 << ']'
+      << " ba[" << state.idxBA() << ':' << state.idxBA()+3 << ']'
+      << " g[" << state.idxG() << ':' << state.idxG()+state.gravDim() << ']'
+      << " gravity_model " << state.gravityModelName();
+  // R97A Q4 item 6: configured_init_variances' tilt/yaw/p/v/bg/ba fields are removed with their state/cov/* keys -- only
+  // gravity's survives.
+  out << "\nconfigured_init_variances g " << state.initCovGravity() << '\n'
       << "state_rotation\n" << state.rot() << '\n'
       << "state_position " << state.pos().transpose() << '\n'
       << "state_velocity " << state.vel().transpose() << '\n'
@@ -54,16 +50,11 @@ void writeCalibrationP0Diagnostic(
       << "gyro_mean_covariance\n" << gyro_mean_cov << '\n'
       << "P0_theta_theta\n" << P.block<3,3>(state.idxR(), state.idxR()) << '\n'
       << "P0_p_p\n" << P.block<3,3>(state.idxP(), state.idxP()) << '\n'
-      << "P0_v_v\n" << P.block<3,3>(state.idxV(), state.idxV()) << '\n';
-  if (state.estBG())
-    out << "P0_bg_bg\n" << P.block(state.idxBG(), state.idxBG(), 3, 3) << '\n';
-  if (state.estBA())
-  {
-    out << "P0_ba_ba\n" << P.block(state.idxBA(), state.idxBA(), 3, 3) << '\n'
-        << "P0_theta_ba\n" << P.block(state.idxR(), state.idxBA(), 3, 3) << '\n';
-  }
-  if (state.estGravity())
-    out << "P0_g_g\n" << P.block(state.idxG(), state.idxG(), state.gravDim(), state.gravDim()) << '\n';
+      << "P0_v_v\n" << P.block<3,3>(state.idxV(), state.idxV()) << '\n'
+      << "P0_bg_bg\n" << P.block(state.idxBG(), state.idxBG(), 3, 3) << '\n'
+      << "P0_ba_ba\n" << P.block(state.idxBA(), state.idxBA(), 3, 3) << '\n'
+      << "P0_theta_ba\n" << P.block(state.idxR(), state.idxBA(), 3, 3) << '\n'
+      << "P0_g_g\n" << P.block(state.idxG(), state.idxG(), state.gravDim(), state.gravDim()) << '\n';
   out << "P0_full\n" << P << '\n';
   if (eig.info() == Eigen::Success)
     out << "P0_eigenvalues " << eig.eigenvalues().transpose() << '\n';
@@ -97,8 +88,7 @@ void meanAndSampleCov(const std::deque<ImuSample>& s, bool accel, size_t lo, siz
 void writeGravityAlignmentDiagnostic(
     const std::deque<ImuSample>& samples, const M3D& acc_mean_cov,
     const M3D& gyro_mean_cov, const M3D& R_before, const M3D& R_init,
-    const StateGroup& state_after, const V3D& true_acc_bias,
-    bool apply_accel_bias, bool apply_gyro_bias)
+    const StateGroup& state_after, const V3D& true_acc_bias)
 {
   static PersistentLogStream log("gravity_alignment.txt");
   std::ofstream& out = log.stream();
@@ -132,8 +122,7 @@ void writeGravityAlignmentDiagnostic(
       << "sample_count " << n << '\n'
       << "t_first_rel " << (n ? samples.front().t : 0.0)
       << " t_last_rel " << (n ? samples.back().t : 0.0) << '\n'
-      << "apply_to_state accel_bias " << (apply_accel_bias ? 1 : 0)
-      << " gyro_bias " << (apply_gyro_bias ? 1 : 0) << '\n'
+      << "apply_to_state accel_bias 1 gyro_bias 1\n"
       << "acc_mean_body " << a_all.transpose() << '\n'
       << "acc_mean_norm " << a_norm << '\n'
       << "state_gravity_norm " << g_mag << '\n'

@@ -51,70 +51,37 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
   }
   if (opts_.ds_mode != "off" && !(opts_.ds_leaf_size > 0.0))
     throw std::runtime_error("imu/ds/ds_leaf_size must be > 0 when downsampling is enabled");
-  paramWarn<int>(pnh, "calib/stationary/stall_calls_max", opts_.stall_calls_max, 300);
-  paramWarn<bool>(pnh, "calib/stationary/apply_to_state/gyro_bias",
-                  opts_.apply_gyro_bias, true);
-  paramWarn<bool>(pnh, "calib/stationary/apply_to_state/accel_bias",
-                  opts_.apply_accel_bias, true);
   paramWarn<std::string>(pnh, "calib/stationary/accel_excess_model",
                          opts_.accel_excess_model, std::string("bias"));
   if (opts_.accel_excess_model != "bias" && opts_.accel_excess_model != "scale")
     throw std::invalid_argument(
         "calib/stationary/accel_excess_model must be bias or scale");
-  paramWarn<std::string>(pnh, "calib/p0/mode", opts_.p0_mode, "configured");
   paramWarn<int>(pnh, "calib/p0/autocov_lags", opts_.p0_autocov_lags, 20);
-  paramWarn<double>(pnh, "calib/p0/known_pos_variance",
-                    opts_.p0_known_pos_variance, 1e-12);
-  paramWarn<double>(pnh, "calib/p0/known_vel_variance",
-                    opts_.p0_known_vel_variance, 1e-12);
-  // R89: the attitude block of P0. Negative (default) keeps the calibration-derived block; 0 or more sets it to that constant
-  // (0 = exactly zero, cross terms included).
-  paramWarn<double>(pnh, "calib/p0/known_theta_variance",
-                    opts_.p0_known_theta_variance, -1.0);
   paramWarn<double>(pnh, "calib/p0/tilt_ba_ambiguity_accel_std",
-                    opts_.p0_tilt_ba_ambiguity_accel_std, -1.0);
+                    opts_.p0_tilt_ba_ambiguity_accel_std, 0.03);
   paramWarn<double>(pnh, "calib/p0/bg_model_floor",
-                    opts_.p0_bg_model_floor, -1.0);
+                    opts_.p0_bg_model_floor, 1.0e-5);
   paramWarn<double>(pnh, "calib/p0/ba_radial_model_floor",
-                    opts_.p0_ba_radial_model_floor, -1.0);
+                    opts_.p0_ba_radial_model_floor, 1.0e-5);
   paramWarn<double>(pnh, "calib/p0/numerical_eigenvalue_floor",
                     opts_.p0_numerical_eigenvalue_floor, 1e-12);
 
   if (opts_.num_samples < 1)
     opts_.num_samples = 1;
   opts_.p0_autocov_lags = std::max(0, opts_.p0_autocov_lags);
-  if (opts_.p0_mode != "configured" && opts_.p0_mode != "calibration_derived")
-    throw std::invalid_argument("calib/p0/mode must be configured or calibration_derived");
-  // R89: zero is allowed (a known state: P0 is positive semi-definite and the IMU propagation makes the covariance positive before
-  // anything is inverted); only negative or non-finite values are refused.
-  if (!std::isfinite(opts_.p0_known_pos_variance) ||
-      !std::isfinite(opts_.p0_known_vel_variance) ||
-      !std::isfinite(opts_.p0_known_theta_variance) ||
-      opts_.p0_known_pos_variance < 0.0 || opts_.p0_known_vel_variance < 0.0)
-    throw std::invalid_argument("calib/p0 known-state variances must be finite and not negative");
-  if (!std::isfinite(opts_.p0_tilt_ba_ambiguity_accel_std) ||
-      !std::isfinite(opts_.p0_bg_model_floor) ||
-      !std::isfinite(opts_.p0_ba_radial_model_floor) ||
+  if (!std::isfinite(opts_.p0_tilt_ba_ambiguity_accel_std) || opts_.p0_tilt_ba_ambiguity_accel_std < 0.0 ||
+      !std::isfinite(opts_.p0_bg_model_floor) || opts_.p0_bg_model_floor < 0.0 ||
+      !std::isfinite(opts_.p0_ba_radial_model_floor) || opts_.p0_ba_radial_model_floor < 0.0 ||
       !std::isfinite(opts_.p0_numerical_eigenvalue_floor) ||
       opts_.p0_numerical_eigenvalue_floor <= 0.0)
-    throw std::invalid_argument("calib/p0 ambiguity and floor parameters must be finite");
+    throw std::invalid_argument("calib/p0 ambiguity and floor parameters must be finite and not negative");
   std::ostringstream oss;
   oss << "[params/calib/stationary]"
       << "\n  required: true"
-      << "\n  num_samples: " << opts_.num_samples
-      << "\n  stall_calls_max: " << opts_.stall_calls_max
-      << "\n  apply_to_state/gyro_bias: "
-      << (opts_.apply_gyro_bias ? "true" : "false")
-      << "\n  apply_to_state/accel_bias: "
-      << (opts_.apply_accel_bias ? "true" : "false");
+      << "\n  num_samples: " << opts_.num_samples;
   oss << "\n  bootstrap point covariance: sensor model"
       << "\n  sensor sigma_r2, sigma_a2: " << opts_.sensor_sigma_r2 << ", " << opts_.sensor_sigma_a2;
-  oss << "\n  p0/mode:       " << opts_.p0_mode
-      << "\n  p0/autocov_lags: " << opts_.p0_autocov_lags
-      << "\n  p0/known_pos_variance: " << opts_.p0_known_pos_variance
-      << "\n  p0/known_vel_variance: " << opts_.p0_known_vel_variance
-      << "\n  p0/known_theta_variance: " << opts_.p0_known_theta_variance
-      << (opts_.p0_known_theta_variance < 0.0 ? " (negative: calibration-derived attitude block)" : "")
+  oss << "\n  p0/autocov_lags: " << opts_.p0_autocov_lags
       << "\n  p0/tilt_ba_ambiguity_accel_std: "
       << opts_.p0_tilt_ba_ambiguity_accel_std
       << "\n  p0/model_floors(bg,ba_radial): " << opts_.p0_bg_model_floor << ", "
@@ -124,16 +91,11 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
   return oss.str();
 }
 
-// R89: the known blocks of P0 (calibration_derived mode only). Position and velocity are listed only when their variance is exactly 0
-// (pinned); attitude whenever known_theta_variance >= 0. A run that sets none of these builds P0 exactly as before.
+// R97A Q4 item 3: calib/p0/mode (and known_{pos,vel,theta}_variance) are removed -- attitude, position and velocity are
+// always pinned exactly zero (the yaml's own "calibration_derived" values, unconditionally now).
 std::vector<p0::KnownBlock> CalibProc::knownP0Blocks() const
 {
-  std::vector<p0::KnownBlock> b;
-  if (opts_.p0_mode != "calibration_derived") return b;
-  if (opts_.p0_known_theta_variance >= 0.0) b.push_back({StateGroup::idxR(), opts_.p0_known_theta_variance});
-  if (opts_.p0_known_pos_variance == 0.0) b.push_back({StateGroup::idxP(), 0.0});
-  if (opts_.p0_known_vel_variance == 0.0) b.push_back({StateGroup::idxV(), 0.0});
-  return b;
+  return { {StateGroup::idxR(), 0.0}, {StateGroup::idxP(), 0.0}, {StateGroup::idxV(), 0.0} };
 }
 
 void CalibProc::stabilizeP0()
@@ -291,44 +253,29 @@ void CalibProc::applyCalibrationDerivedP0(
     const V3D& acc_mean, const M3D& R_init, const M3D& acc_mean_cov,
     const M3D& gyro_mean_cov)
 {
-  auto rotationAndBias = [&](const V3D& mean, M3D& R, V3D& ba) {
-    R = computeInitialRotation(mean);
-    ba = mean + R.transpose() * state_->gravity();
-  };
-
-  // Numerical Jacobian is intentional: it differentiates the exact
-  // production gravity-alignment convention, including the right/body
-  // attitude perturbation consumed by StateGroup::applyDelta().
-  Eigen::Matrix<double, 6, 3> J = Eigen::Matrix<double, 6, 3>::Zero();
+  // R97A Q4 item 3: position, velocity and attitude are always pinned exactly zero (knownP0Blocks() below, applied last --
+  // clears every cross term of those rows/columns too), so the attitude row of the numeric Jacobian and the tilt/accelerometer-bias
+  // cross terms that used to feed P.block(idxR(), idxR()) and its BA cross terms are dead: nothing below ever reaches a pinned
+  // row or column. Only the accelerometer-bias row of the Jacobian is needed.
+  Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
   for (int axis = 0; axis < 3; ++axis)
   {
     const double eps = std::max(1e-7, std::abs(acc_mean(axis)) * 1e-7);
     V3D plus = acc_mean, minus = acc_mean;
     plus(axis) += eps;
     minus(axis) -= eps;
-    M3D Rp, Rm;
-    V3D bap, bam;
-    rotationAndBias(plus, Rp, bap);
-    rotationAndBias(minus, Rm, bam);
-    J.block<3,1>(0, axis) =
-        (Log(R_init.transpose() * Rp) - Log(R_init.transpose() * Rm)) /
-        (2.0 * eps);
-    J.block<3,1>(3, axis) = (bap - bam) / (2.0 * eps);
+    const V3D bap = plus + computeInitialRotation(plus).transpose() * state_->gravity();
+    const V3D bam = minus + computeInitialRotation(minus).transpose() * state_->gravity();
+    J.col(axis) = (bap - bam) / (2.0 * eps);
   }
 
-  Eigen::Matrix<double, 6, 6> P_acc = J * acc_mean_cov * J.transpose();
-  P_acc = symmetrized(P_acc);
-  const double bg_floor = opts_.p0_bg_model_floor >= 0.0
-      ? opts_.p0_bg_model_floor : state_->initCovBg();
-  const double ba_radial_floor = opts_.p0_ba_radial_model_floor >= 0.0
-      ? opts_.p0_ba_radial_model_floor : state_->initCovBa();
+  M3D P_ba = symmetrized(M3D(J * acc_mean_cov * J.transpose()));
+  const double bg_floor = opts_.p0_bg_model_floor;
+  const double ba_radial_floor = opts_.p0_ba_radial_model_floor;
 
-  // Stationary specific force constrains only the SUM
-  //     delta_a = A * delta_theta + delta_ba,  A = [a_gravity]_x.
-  // Model its transverse null-space ambiguity with one latent acceleration
-  // vector e: A*dtheta=-e, dba=+e. Thus both alternatives
-  // have identical acceleration-equivalent variance and their negative
-  // cross-covariance preserves the fact that one compensates the other.
+  // Stationary specific force constrains only the SUM delta_a = A*delta_theta + delta_ba; the transverse null-space ambiguity
+  // (shared equally, in acceleration-equivalent units, by gravity tilt and accelerometer bias) still contributes to the
+  // accelerometer-bias block even though the tilt side is pinned away.
   const double gravity_mag = state_->gravity().norm();
   if (!std::isfinite(gravity_mag) || gravity_mag < 1e-6)
     throw std::runtime_error("calibration-derived P0 requires nonzero finite gravity");
@@ -336,53 +283,19 @@ void CalibProc::applyCalibrationDerivedP0(
       (R_init.transpose() * (-state_->gravity())).normalized();
   const M3D tangent = M3D::Identity() -
       gravity_axis_body * gravity_axis_body.transpose();
-  const double inherited_accel_var = std::max(
-      gravity_mag * gravity_mag * state_->initCovRotTilt(), state_->initCovBa());
-  const double ambiguity_std = opts_.p0_tilt_ba_ambiguity_accel_std >= 0.0
-      ? opts_.p0_tilt_ba_ambiguity_accel_std : std::sqrt(inherited_accel_var);
+  const double ambiguity_std = opts_.p0_tilt_ba_ambiguity_accel_std;
   const M3D ambiguity_accel_cov =
       ambiguity_std * ambiguity_std * tangent;
-  M3D A;
-  A << SKEW_SYM_MATRX(gravity_mag * gravity_axis_body);
-  // On the tangent plane pinv([g*u]_x) = -[g*u]_x/g^2.
-  const M3D A_pinv = -A / (gravity_mag * gravity_mag);
-  const M3D P_theta_amb = symmetrized(M3D(
-      A_pinv * ambiguity_accel_cov * A_pinv.transpose()));   // R74 F-419
-  const M3D P_ba_amb = ambiguity_accel_cov;
-  const M3D P_theta_ba_amb =
-      -A_pinv * ambiguity_accel_cov;
-  P_acc.block<3,3>(0,0) += P_theta_amb;
-  P_acc.block<3,3>(3,3) += P_ba_amb + ba_radial_floor *
+  P_ba += ambiguity_accel_cov + ba_radial_floor *
       gravity_axis_body * gravity_axis_body.transpose();
-  P_acc.block<3,3>(0,3) += P_theta_ba_amb;
-  P_acc.block<3,3>(3,0) += P_theta_ba_amb.transpose();
 
   Eigen::MatrixXd& P = state_->covMut();
-  P.block<3,3>(StateGroup::idxP(), StateGroup::idxP()) =
-      opts_.p0_known_pos_variance * M3D::Identity();
-  P.block<3,3>(StateGroup::idxV(), StateGroup::idxV()) =
-      opts_.p0_known_vel_variance * M3D::Identity();
+  P.block(state_->idxBA(), state_->idxBA(), 3, 3) = P_ba;
+  P.block(state_->idxBG(), state_->idxBG(), 3, 3) =
+      gyro_mean_cov + bg_floor * M3D::Identity();
 
-  // Accelerometer mean observes tilt, not yaw. Add the configured yaw
-  // variance along the right-perturbation gravity axis.
-  const V3D yaw_axis_body =
-      (R_init.transpose() * V3D(0.0, 0.0, -1.0)).normalized();
-  P.block<3,3>(StateGroup::idxR(), StateGroup::idxR()) =
-      P_acc.block<3,3>(0,0) + state_->initCovRotYaw() *
-          yaw_axis_body * yaw_axis_body.transpose();
-
-  if (state_->estBA())
-  {
-    P.block(state_->idxBA(), state_->idxBA(), 3, 3) = P_acc.block<3,3>(3,3);
-    P.block(StateGroup::idxR(), state_->idxBA(), 3, 3) = P_acc.block<3,3>(0,3);
-    P.block(state_->idxBA(), StateGroup::idxR(), 3, 3) = P_acc.block<3,3>(3,0);
-  }
-  if (state_->estBG())
-    P.block(state_->idxBG(), state_->idxBG(), 3, 3) =
-        gyro_mean_cov + bg_floor * M3D::Identity();
-
-  // R89: known blocks (exact zero position/velocity; a constant or zero attitude block). Cross terms of those rows and columns are
-  // cleared: removing states from a positive semi-definite matrix leaves it positive semi-definite.
+  // R89: known blocks (exact zero position, velocity and attitude). Cross terms of those rows and columns are cleared:
+  // removing states from a positive semi-definite matrix leaves it positive semi-definite.
   p0::applyKnownBlocks(P, knownP0Blocks());
 
   // Gravity magnitude/direction is deliberately left at state/cov/gravity:
@@ -415,35 +328,14 @@ std::string CalibProc::estimateFromBuffer()
   oss << "Calibrating IMU... " << calib_imu_samples.size() << " samples collected.";
   if (!collectSamples())
   {
-    // No progress since the last call means the buffer is not filling, and
-    // repeating the same line forever is what made this look like a hang.
-    // Bound it and fail with the breakdown that says WHY -- see
-    // CalibProcOptions::stall_calls_max.
-    if (calib_imu_samples.size() == calib_last_count_)
-      ++calib_stall_calls_;
-    else
-      { calib_stall_calls_ = 0; calib_last_count_ = calib_imu_samples.size(); }
-
-    if (opts_.stall_calls_max > 0 && calib_stall_calls_ >= opts_.stall_calls_max)
-    {
-      std::ostringstream err;
-      err << "[calib] STALLED: " << calib_imu_samples.size() << "/"
-          << opts_.num_samples << " IMU samples after " << calib_stall_calls_
-          << " consecutive calls with zero growth. images_consumed="
-          << calib_images_consumed_
-          << "  groups_seen=" << calib_groups_seen_
-          << "  groups_dropped_for_fewer_than_2_imu=" << calib_groups_short_imu_
-          << ". If groups_dropped is close to groups_seen the IMU stream is "
-             "arriving slower than one sample per image window and no amount "
-             "of waiting will fix it; if groups_seen stopped growing the "
-             "queues went dry. Either way this is a failure, not a wait.";
-      ROS_FATAL_STREAM(err.str());
-      throw std::runtime_error(err.str());
-    }
-
-    oss << "  [stalled " << calib_stall_calls_ << "/" << opts_.stall_calls_max
-        << ", dropped " << calib_groups_short_imu_ << " of "
-        << calib_groups_seen_ << " groups for <2 IMU samples]";
+    // R97A Q4 item 1: the stall-abort (calib/stationary/stall_calls_max) is removed. The calibration loop's own caller
+    // (LivoReconNode::run()/runOffline()) is what ends it: runOffline() breaks out the moment feedNextMessage() reports the
+    // bag has no more data, so an offline run with too few stationary samples ends there, not here, with calibration simply
+    // never completing. A live/online run (ros::ok() && !calib_done, fed by rosbag play rather than feedNextMessage()) has no
+    // such bag-exhaustion signal of its own and WILL spin here forever on a bag with too few samples -- it depends on the
+    // outer process being killed once playback ends.
+    oss << "  [progress: " << calib_groups_short_imu_ << " of "
+        << calib_groups_seen_ << " groups dropped for <2 IMU samples]";
     return oss.str();
   }
 
@@ -472,22 +364,19 @@ std::string CalibProc::estimateFromBuffer()
   // acc_bias = true_bias + R_init^T * [0,0,9.81]; strip gravity to get true sensor bias
   const V3D true_acc_bias = acc_bias + R_init.transpose() * state_->gravity();
   const M3D r62_R_before_alignment = state_->rot();
-  state_->setCalibResult(R_init,
-                         opts_.apply_gyro_bias ? gyro_bias : state_->biasGyr(),
-                         opts_.apply_accel_bias ? true_acc_bias : state_->biasAcc());
+  state_->setCalibResult(R_init, gyro_bias, true_acc_bias);
   // Stationary variance is a measured sensor-noise floor, not a complete
   // dynamic process-noise model. Keep it separate from imu/process_noise.
   state_->setNoiseFloor(var_acc, var_gyr);
   state_->setAccScale(r63_acc_scale);
-  if (opts_.p0_mode == "calibration_derived")
-    applyCalibrationDerivedP0(acc_bias, R_init, acc_mean_cov, gyro_mean_cov);
+  applyCalibrationDerivedP0(acc_bias, R_init, acc_mean_cov, gyro_mean_cov);
   stabilizeP0();
-  state_->captureInitialCovariance(opts_.p0_mode);
+  state_->captureInitialCovariance("calibration_derived");
   writeGravityAlignmentDiagnostic(
       calib_imu_samples, acc_mean_cov, gyro_mean_cov, r62_R_before_alignment,
-      R_init, *state_, true_acc_bias, opts_.apply_accel_bias, opts_.apply_gyro_bias);
+      R_init, *state_, true_acc_bias);
   writeCalibrationP0Diagnostic(
-      *state_, opts_.p0_mode, static_cast<int>(calib_imu_samples.size()),
+      *state_, static_cast<int>(calib_imu_samples.size()),
       opts_.p0_autocov_lags, acc_mean_cov, gyro_mean_cov);
 
   // TQ-34, Bryce 2026-09-18: groups_seen/groups_dropped/stall_calls were
@@ -507,13 +396,12 @@ std::string CalibProc::estimateFromBuffer()
       << "\n  acc floor:  " << state_->varAccFloor().transpose()
       << "\n  gyro floor: " << state_->varGyrFloor().transpose()
       << "\n  gravity:    " << state_->gravity().transpose()
-      << "\n  P0 mode:    " << opts_.p0_mode
+      << "\n  P0 mode:    calibration_derived"
       << "\n  acc mean covariance:\n" << acc_mean_cov
       << "\n  gyro mean covariance:\n" << gyro_mean_cov
       << "\n  initialized P0:\n" << state_->cov()
       << "\n  groups_seen=" << calib_groups_seen_
       << " groups_dropped_for_fewer_than_2_imu=" << calib_groups_short_imu_
-      << " stall_calls=" << calib_stall_calls_
       << "\n  R_init_roll_deg=" << r_init_rpy(0) << " R_init_pitch_deg=" << r_init_rpy(1);
   const std::string done_msg = oss.str();
 
