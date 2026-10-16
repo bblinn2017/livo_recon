@@ -15,7 +15,6 @@
 #include "livo_recon/lio/voxelplane.h"   // voxelPlaneInformationFitCount()
 #include "livo_recon/lio/lio_accumulator.h"
 #include "livo_recon/utils/algo/covariance_math.h"
-#include "livo_recon/lio/iekf_stream.h"   // R78
 #include <cuda_runtime.h>
 #include <algorithm>
 #include <array>
@@ -258,14 +257,7 @@ void debugLogIterError(const std::string& msg)
   ofs.flush();
 }
 
-// History (51-54): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-51
-void debugLogLioDryRun(const std::string& msg)
-{
-  static PersistentLogStream log("lio_dryrun.txt");
-  std::ofstream& ofs = log.stream();
-  ofs << msg << "\n";
-  ofs.flush();
-}
+// R97A Q2: debugLogLioDryRun() / lio_dryrun.txt are removed with runDryRunShadowPass().
 
 // History (63-70): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-63
 
@@ -454,21 +446,7 @@ void LioProcIekf::deskewAndDownsample(MeasureGroup& mg)
     mg.points = std::move(deskewed);
   }
 
-  // See LioProcOptions::dry_run_point_filter_num's doc comment. Identical
-  // deskew/downsample treatment as the primary points above, just against
-  // mg.dry_run_lidar_points -- left empty (no-op) unless the feature is on
-  // and this frame actually got a second-decimation scan.
-  if (opts_.dry_run_point_filter_num > 0 && !mg.dry_run_lidar_points.empty())
-  {
-    std::vector<PointXYZCov> dry_run_deskewed;
-    deskewPoints(state_, mg.poses, mg.image.t, mg.dry_run_lidar_points, deskew_opts, dry_run_deskewed);   // R91H: same options as the primary stream (counters are primary only)
-    if (opts_.dsOn()) {
-      DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
-      voxelDownsample(dry_run_deskewed, mg.dry_run_points, PointXYZCovKeyFn{opts_.ds_leaf_size}, mode);
-    } else {
-      mg.dry_run_points = std::move(dry_run_deskewed);
-    }
-  }
+  // R97A Q2: the dry-run second decimation stream (lio/dry_run_point_filter_num) is removed.
 }
 
 
@@ -568,14 +546,7 @@ std::string LioProcIekf::engagementReport() const
     // R97A: voxel_map/plane/plane_var_min and plane_var_scan_s2 are removed; this report block (VoxelPlaneR81Counters) is dead with them.
   }
 
-  if (opts_.residual_redundancy.on() && opts_.residual_redundancy.renorm != "off")
-  {
-    o << "\n  lio/residual_redundancy/renorm=" << opts_.residual_redundancy.renorm << " iterations=" << renorm_iterations_
-      << " applied=" << renorm_applied_ << " mean_c(applied)=" << (renorm_applied_ > 0 ? renorm_c_sum_ / renorm_applied_ : 1.0)
-      << " max_c=" << renorm_c_max_;
-    if (renorm_applied_ == 0)
-      o << "   <-- INERT: renormalisation selected and c > 1 never occurred";
-  }
+  // R97A Q2: lio/residual_redundancy/* (and its renorm report block) is removed.
   if (opts_.info_scale.on())
   {
     o << "\n  lio/info_scale mode=block F_rot=" << opts_.info_scale.rotation << " F_pos=" << opts_.info_scale.position
@@ -633,203 +604,13 @@ std::string LioProcIekf::engagementReport() const
       o << "   <-- NOT ENGAGED: the gain never left 1 (a valid null: the model never looked inconsistent; the IMU-side q_gain counter in "
            "engagement_imu.txt must agree)";
   }
-  if (opts_.iekf_point_stream != "primary")   // R78
-  {
-    o << "\n  lio/iekf_point_stream=" << opts_.iekf_point_stream << " dry_run_point_filter_num=" << opts_.dry_run_point_filter_num
-      << " frames=" << stream_frames_ << " frames_second=" << stream_second_ << " frames_fallback=" << stream_fallback_
-      << " mean_points_map=" << (stream_frames_ > 0 ? static_cast<double>(stream_sum_primary_) / stream_frames_ : 0.0)
-      << " mean_points_iekf=" << (stream_frames_ > 0 ? static_cast<double>(stream_sum_iekf_) / stream_frames_ : 0.0);
-    if (stream_frames_ == 0) o << "   <-- INERT: iekf_point_stream selected and no frame reached the update";
-    else if (stream_second_ == 0) o << "   <-- INERT: the second stream was never used (every frame fell back to the primary set)";
-    else if (stream_fallback_ > 0) o << "   <-- PARTLY ENGAGED: " << stream_fallback_ << " frames fell back to the primary set (their second-stream set was empty)";
-  }
   if (opts_.scan_log_en) o << "\n  lio/scan_log_en=true  (scan_log.csv written)";
   o << "\n[engagement] a flag marked INERT above did not test anything; the "
        "cell is invalid, not null.";
   return o.str();
 }
 
-// See LioProcOptions::dry_run_point_filter_num's doc comment and this
-// method's declaration in lio_processing.h.
-void LioProcIekf::runDryRunShadowPass(const MeasureGroup& mg)
-{
-  if (mg.dry_run_points.empty()) return;
-
-  // Swap state_ to a throwaway copy for the duration of this shadow pass --
-  // every member function below (buildResiduals/solveSystem/
-  // estimateStateCorrection) reads/writes state_ by following this pointer,
-  // so reassigning it here means none of them ever touch the real shared
-  // StateGroup other components (ImuProc/PubProc) hold a reference to.
-  StateGroupPtr real_state = state_;
-  state_ = std::make_shared<StateGroup>(*real_state);
-
-  // prior_cov_/state_propagat_ are class members read directly by
-  // solveSystem() -- save/restore around the shadow pass's own use of them,
-  // same reasoning as the state_ swap above. residuals_/ekf_ are also class
-  // members clobbered by estimateStateCorrection() below, but don't need
-  // save/restore: the real loop right after this call unconditionally
-  // overwrites both via its own first buildResiduals()/solveSystem() call
-  // before ever reading them.
-  Eigen::MatrixXd real_prior_cov = prior_cov_;
-  StateGroup real_state_propagat = state_propagat_;
-
-  prior_cov_ = state_->cov();
-  state_propagat_ = *state_;
-
-  V3D dtheta, dt;
-  V3D total_dtheta = V3D::Zero(), total_dt = V3D::Zero();
-  double prev_error = std::numeric_limits<double>::infinity();
-  std::string stop = "max_iter";
-  int iter = 0;
-  bool any_solved = false;
-
-  for (; iter < opts_.max_iterations; iter++) {
-    // allow_consistency_log=false unconditionally -- this whole pass is
-    // discarded (see this method's own doc comment), so none of its
-    // residuals, first-iteration or not, belong in corr.csv.
-    double error = estimateStateCorrection(mg.dry_run_points, dtheta, dt, /*allow_consistency_log=*/false);
-    if (!residuals_.empty()) any_solved = true;
-    total_dtheta += dtheta;
-    total_dt     += dt;
-
-    const double prev = prev_error;
-    prev_error = error;
-
-    if (dtheta.norm() < opts_.min_norm_dtheta && dt.norm() < opts_.min_norm_dt)
-      { stop = "norm"; break; }
-    if ((prev - error) / std::max(prev, 1e-6) < opts_.min_diff_error)
-      { stop = "rel_diff"; break; }
-  }
-
-  // Applying the shadow covariance update (against the shadow's own
-  // prior_cov_) is harmless -- state_ still points at the throwaway copy,
-  // not the real shared StateGroup -- and lets trace(P_PP)/trace(P_RR)/
-  // trace(P_VV) below reflect what a REAL update at this point_filter_num
-  // would have produced, for direct comparison against the real frame's
-  // own posterior trace further down in processLIO().
-  if (any_solved)
-    ekf_.applyCovarianceUpdate(state_, prior_cov_);
-
-  // Same eigen-structure / frac_weak / frac_strong diagnostics as
-  // processLIO()'s own [lio] block (see that block's doc comments for the
-  // full rationale) -- computed here against residuals_ from this shadow
-  // pass's LAST estimateStateCorrection() call, i.e. the shadow's own final
-  // iteration, exactly mirroring how the real block's residuals_ reflects
-  // its own final iteration.
-  V3D mean_normal = V3D::Zero();
-  double mean_abs_r = 0.0, max_abs_r = 0.0;
-  double sum_sigma_squared = 0.0, min_sigma_squared = std::numeric_limits<double>::infinity(), max_sigma_squared = 0.0;
-  double sum_weight = 0.0;
-  int n_tier0 = 0, n_tier1 = 0, n_tier2 = 0;
-  double sum_chi2 = 0.0;
-  for (const auto& r : residuals_)
-  {
-    mean_normal += r.normal;
-    const double abs_r = std::abs(r.r);
-    mean_abs_r += abs_r;
-    max_abs_r = std::max(max_abs_r, abs_r);
-
-    sum_sigma_squared += r.sigma_squared;
-    min_sigma_squared = std::min(min_sigma_squared, r.sigma_squared);
-    max_sigma_squared = std::max(max_sigma_squared, r.sigma_squared);
-    sum_weight += 1.0 / r.sigma_squared;
-    sum_chi2 += (r.r * r.r) / r.sigma_squared;
-
-    if (r.match_tier == 0) ++n_tier0;
-    else if (r.match_tier == 1) ++n_tier1;
-    else ++n_tier2;
-  }
-  if (!residuals_.empty())
-  {
-    mean_normal /= static_cast<double>(residuals_.size());
-    mean_abs_r  /= static_cast<double>(residuals_.size());
-  }
-  const double mean_sigma_squared = residuals_.empty() ? 0.0 : sum_sigma_squared / residuals_.size();
-  const double reduced_chi2 = residuals_.empty() ? 0.0 : sum_chi2 / residuals_.size();
-
-  const M3D H_pp = ekf_.HtH.block<3, 3>(3, 3);
-  Eigen::SelfAdjointEigenSolver<M3D> h_es(H_pp);
-  const V3D h_pp_eig = h_es.eigenvalues();
-  const M3D H_rr = ekf_.HtH.block<3, 3>(0, 0);
-  Eigen::SelfAdjointEigenSolver<M3D> h_rr_es(H_rr);
-  const V3D h_rr_eig = h_rr_es.eigenvalues();
-
-  const V3D v_pp_weak   = h_es.eigenvectors().col(0);
-  const V3D v_pp_strong = h_es.eigenvectors().col(2);
-  const V3D v_rr_weak   = h_rr_es.eigenvectors().col(0);
-  const V3D v_rr_strong = h_rr_es.eigenvectors().col(2);
-  double sum_frac_weak_pp = 0.0, sum_frac_strong_pp = 0.0;
-  double sum_frac_weak_rr = 0.0, sum_frac_strong_rr = 0.0;
-  for (const auto& res : residuals_)
-  {
-    const double hp_sqnorm = res.normal.squaredNorm();
-    if (hp_sqnorm > 1e-12) {
-      sum_frac_weak_pp   += std::pow(res.normal.dot(v_pp_weak),   2) / hp_sqnorm;
-      sum_frac_strong_pp += std::pow(res.normal.dot(v_pp_strong), 2) / hp_sqnorm;
-    }
-    const double hr_sqnorm = res.point_cross_normal.squaredNorm();
-    if (hr_sqnorm > 1e-12) {
-      sum_frac_weak_rr   += std::pow(res.point_cross_normal.dot(v_rr_weak),   2) / hr_sqnorm;
-      sum_frac_strong_rr += std::pow(res.point_cross_normal.dot(v_rr_strong), 2) / hr_sqnorm;
-    }
-  }
-  const double n_res_d = std::max<double>(1.0, static_cast<double>(residuals_.size()));
-  const double mean_frac_weak_pp   = sum_frac_weak_pp   / n_res_d;
-  const double mean_frac_strong_pp = sum_frac_strong_pp / n_res_d;
-  const double mean_frac_weak_rr   = sum_frac_weak_rr   / n_res_d;
-  const double mean_frac_strong_rr = sum_frac_strong_rr / n_res_d;
-
-  const auto& P = state_->cov();
-  const M3D P_RR = P.block<3, 3>(StateGroup::idxR(), StateGroup::idxR());
-  const M3D P_PP = P.block<3, 3>(StateGroup::idxP(), StateGroup::idxP());
-  const M3D P_VV = P.block<3, 3>(StateGroup::idxV(), StateGroup::idxV());
-
-  const double t_abs = mg.image.t + data_queues_->start_time;
-  const Eigen::Quaterniond q(state_->rot());
-
-  std::ostringstream dbg;
-  dbg << std::fixed << std::setprecision(6)
-      << "[lio_dryrun]  t_abs=" << t_abs
-      << "  dry_run_point_filter_num=" << opts_.dry_run_point_filter_num
-      << "  iters=" << iter + 1
-      << "  stop=" << stop
-      << "  n_residuals=" << residuals_.size()
-      << "  tier0=" << n_tier0 << "  tier1=" << n_tier1 << "  tier2=" << n_tier2
-      << "  n_map_pts=" << voxel_map_->last_n_map_pts_ << "  n_active_voxels=" << voxel_map_->last_n_active_voxels_
-      << "  pos=[" << state_->pos().transpose() << "]"
-      << "  vel=[" << state_->vel().transpose() << "]"
-      << "  quat(wxyz)=[" << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << "]"
-      << "  total_dtheta=[" << total_dtheta.transpose() << "]"
-      << "  total_dt=[" << total_dt.transpose() << "]"
-      << "  mean_normal=[" << mean_normal.transpose() << "]"
-      << "  mean_normal_norm=" << mean_normal.norm()
-      << "  mean_abs_r=" << mean_abs_r
-      << "  max_abs_r=" << max_abs_r
-      << std::scientific
-      << "  reduced_chi2=" << reduced_chi2
-      << "  mean_sigma_squared=" << mean_sigma_squared
-      << "  min_sigma_squared=" << (residuals_.empty() ? 0.0 : min_sigma_squared)
-      << "  max_sigma_squared=" << max_sigma_squared
-      << "  sum_weight=" << sum_weight
-      << "  H_pp_eig=[" << h_pp_eig.transpose() << "]"
-      << "  H_rr_eig=[" << h_rr_eig.transpose() << "]"
-      << "  mean_frac_weak_pp=" << mean_frac_weak_pp
-      << "  mean_frac_strong_pp=" << mean_frac_strong_pp
-      << "  mean_frac_weak_rr=" << mean_frac_weak_rr
-      << "  mean_frac_strong_rr=" << mean_frac_strong_rr
-      << "  trace(P_RR)=" << P_RR.trace()
-      << "  trace(P_PP)=" << P_PP.trace()
-      << "  trace(P_VV)=" << P_VV.trace();
-
-  debugLogLioDryRun(dbg.str());
-
-  // Restore everything the shadow pass touched -- the real loop right after
-  // this call must see exactly the same state_/prior_cov_/state_propagat_
-  // it would have if this method had never run.
-  state_ = real_state;
-  prior_cov_ = real_prior_cov;
-  state_propagat_ = real_state_propagat;
-}
+// R97A Q2: runDryRunShadowPass() is removed (lio/dry_run_point_filter_num).
 
 std::string LioProcIekf::processLIO(MeasureGroup& mg)
 {
@@ -863,13 +644,7 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
   if (voxel_map_->isEmpty()) return {};
   ensureStationaryReference(mg);
 
-  // R78: with lio/iekf_point_stream = second the second stream is the IEKF input, not a diagnostic; the shadow pass would only repeat it.
-  if (opts_.dry_run_point_filter_num > 0 && opts_.log_debug_en && opts_.iekf_point_stream == "primary")
-    runDryRunShadowPass(mg);
-
   logStateTrace("post_imu", mg, 0, 0);
-  if (openLoopActive() || startupHoldActive(static_cast<long>(voxel_map_->frame_idx_))) return openLoopFinishScan(mg);
-
   // R73 (F-415): per-scan map statistics (before this scan's passes, i.e. the map as inserted through the previous scan) and the
   // driver's update record. All write-only; default off is bit-identical.
   const bool capture_update = opts_.scan_log_en;
@@ -897,12 +672,7 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
     // by every solveSystem()/solveSystem_cuda() call below until the loop
     // finishes and applyCovarianceUpdate() is called exactly once.
     prior_cov_ = state_->cov();
-    // CQ-31 item 5: the scalar P controls, applied once here to this frame's
-    // fixed prior snapshot (identity at every default -- see
-    // PriorScalarOptions::on()). trP_pos_pre_ below intentionally reads the
-    // POST-control value, since that is the prior every solveSystem() call
-    // this frame actually blends against.
-    applyPriorScalarControls(prior_cov_, opts_.prior_scalar);
+    // R97A Q2: the scalar P controls (lio/p_inflate/alpha, lio/p_floor/min_eig, lio/p_fading/lambda) are removed.
     state_propagat_ = *state_;
     if (capture_update)   // R73: the driver's update record
     {
@@ -925,15 +695,8 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
     mg.prior_pos = state_propagat_.pos();
     mg.prior_rot = state_propagat_.rot();
     mg.prior_vel = state_propagat_.vel();
-    // R78: which point set this frame's residuals are built from. The map update (after this block) always reads mg.points.
-    IekfStreamPick stream_pick;
-    const std::vector<PointXYZCov>& iekf_points =
-        pickIekfPoints(opts_.iekf_point_stream == "second", mg.points, mg.dry_run_points, stream_pick);
-    ++stream_frames_;
-    if (stream_pick.second_used) ++stream_second_;
-    if (stream_pick.fell_back) ++stream_fallback_;
-    stream_sum_primary_ += static_cast<long>(mg.points.size());
-    stream_sum_iekf_ += static_cast<long>(iekf_points.size());
+    // R97A Q2: lio/iekf_point_stream is removed; the IEKF always reads mg.points (the same set the map update uses).
+    const std::vector<PointXYZCov>& iekf_points = mg.points;
     bool any_solved = false;
     for (; iter < opts_.max_iterations; iter++) {
       const StateGroup iteration_before = *state_;
@@ -952,7 +715,7 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
       // already-partially-corrected state, which is not the quantity NIS
       // is defined over.
       setDiagnosticGnIteration(iter);
-      double error = estimateStateCorrection(iekf_points, dtheta, dt, /*allow_consistency_log=*/iter == 0);   // R78: iekf_points is mg.points unless lio/iekf_point_stream = second
+      double error = estimateStateCorrection(iekf_points, dtheta, dt, /*allow_consistency_log=*/iter == 0);
       if (capture_update) recordIteration(drv_rec_, iter, dtheta, dt);   // R73
       if (iter == 0 && q_gain_opts_.on() && !residuals_.empty()) updateQGainFromResiduals();   // R72 (F-401)
       writeStationaryIterationDiagnostics(
@@ -1062,15 +825,8 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
         debugLogIterError(iss.str());
       }
 
-      if (dtheta.norm() < opts_.min_norm_dtheta && dt.norm() < opts_.min_norm_dt) {
-        std::ostringstream ss;
-        ss << std::scientific << std::setprecision(1)
-           << "norm(dth=" << dtheta.norm() * (180.0 / M_PI) << "deg"
-           << ",dt="      << dt.norm() * 1000.0               << "mm)";
-        stop = ss.str(); break;
-      }
-      if ((prev - error) / std::max(prev, 1e-6) < opts_.min_diff_error)
-        { stop = "rel_diff"; break; }
+      // R97A Q2: the min_norm_dtheta/min_norm_dt/min_diff_error early stops are removed; every scan
+      // now runs all max_iterations iterations (stop stays "max_iter").
     }
 
     // Posterior covariance write happens exactly ONCE here, using the SAME
@@ -1451,34 +1207,9 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
           diag.p_rot_eig_max_post = es_r_post.eigenvalues()(2);
         }
       }
-      // CQ-34: redundancy_stats_ is written by solveSystem()/
-      // solveSystem_cuda() earlier this same processLIO() call by an
-      // UNCONDITIONAL call to applyResidualRedundancyCorrection() -- no
-      // extra guard needed here, unlike the earlier guarded block, which only
-      // runs when the block ran at all. (Before CQ-34 this comment was
-      // already true in spirit but false in fact: the two call sites above
-      // still gated the call itself on opts_.residual_redundancy.on(), so a
-      // "0" here at mode=="off" was a default-constructed struct, not a
-      // measurement -- see CQ-34.)
-      diag.redund_groups     = redundancy_stats_.redund_groups;
-      diag.redund_groups_seen             = redundancy_stats_.redund_groups_seen;
-      diag.redund_groups_degenerate_pv    = redundancy_stats_.redund_groups_degenerate_pv;
-      diag.redund_groups_degenerate_var   = redundancy_stats_.redund_groups_degenerate_var;
-      diag.redund_n_raw      = redundancy_stats_.redund_n_raw;
-      diag.redund_info_ratio = redundancy_stats_.redund_info_ratio;
-      diag.information_increase_groups = redundancy_stats_.information_increase_groups;
-      // CQ-31 item 7: log beside, do not drive -- always populated,
-      // including mode=="off", from the stats applyResidualRedundancyCorrection()
-      // now always computes (see residual_redundancy.cpp).
-      diag.naive_info_gain    = redundancy_stats_.naive_info_gain;
-      diag.woodbury_info_gain = redundancy_stats_.woodbury_info_gain;
-      diag.gamma_correction_trace = redundancy_stats_.gamma_correction_trace;
-      diag.gamma_correction_frobenius = redundancy_stats_.gamma_correction_frobenius;
-      diag.gamma_correction_min_eigenvalue =
-          redundancy_stats_.gamma_correction_min_eigenvalue;
-      diag.gamma_correction_max_eigenvalue =
-          redundancy_stats_.gamma_correction_max_eigenvalue;
-      diag.b_correction_norm = redundancy_stats_.b_correction_norm;
+      // R97A Q2: lio/residual_redundancy/* is removed; diag.redund_*/naive_info_gain/
+      // woodbury_info_gain/gamma_correction_*/b_correction_norm stay at their LioFrameDiag
+      // struct defaults (0 / 1.0, matching mode=="off" exactly).
       // CQ-31 item 8: reduced_chi2 was computed twice already in this file
       // (lines ~1048, ~1648) but only ever streamed to a log line -- TQ-23
       // could not report it per-cell for exactly that reason. Same formula,

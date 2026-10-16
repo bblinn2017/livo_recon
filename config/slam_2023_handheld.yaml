@@ -187,7 +187,6 @@ vio:
     log_point_residuals: false
     log_residual_counts: false
     log_raw_tracker_output: false
-    dry_run: false
     log_norm_l_low_frac: 0.3
     # log_path deliberately NOT set here -- letting VioProc::loadParameters()'s
     # own C++ default (debugLogPath("livo_recon_myvio_log.txt"), see

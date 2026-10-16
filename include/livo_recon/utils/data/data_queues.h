@@ -57,8 +57,7 @@ struct DataQueues
 {
   std::deque<ImageData> image_queue;
   std::deque<std::vector<PointXYZT>> lidar_queue;
-  // History (60-69): see docs/livo_recon_changelog.md#include-livo_recon-utils-data-data_queues.h-60
-  std::deque<std::vector<PointXYZT>> dry_run_lidar_queue;
+  // R97A Q2: dry_run_lidar_queue is removed.
   std::deque<ImuSample> imu_queue;
   // Raw ground-truth pose samples (evo/gt_source=="topic") -- ingestion
   // lives in CbkProc::gtCallback() alongside image/lidar/imu, same as
@@ -71,13 +70,11 @@ struct DataQueues
 
   std::mutex image_mutex;
   std::mutex lidar_mutex;
-  std::mutex dry_run_lidar_mutex;
   std::mutex imu_mutex;
   std::mutex gt_mutex;
 
   double latest_image_time = 0.0;
   double latest_lidar_time = 0.0;
-  double latest_dry_run_lidar_time = 0.0;
   double latest_imu_time   = 0.0;
 
   double start_time = 0.;
@@ -170,18 +167,14 @@ struct DataQueues
   // accepted message (the rule is unchanged; callers that ignore the result behave exactly as before). latestLidarTime() is that last point time (0.0 before the first message).
   bool pushLidar(std::vector<PointXYZT>&& msg);
   double latestLidarTime();
-  // See dry_run_lidar_queue's doc comment above.
-  // R86A (F-532): returns true when the message was queued, false when it was empty or rejected because its first point is earlier than the last point of the previously queued dry-run
-  // message (the rule is unchanged). latestDryRunLidarTime() is that last point time (0.0 before the first message). Callers that ignore the result behave as before.
-  bool pushDryRunLidar(std::vector<PointXYZT>&& msg);
-  double latestDryRunLidarTime();
+  // R97A Q2: pushDryRunLidar()/latestDryRunLidarTime() are removed.
   void pushImage(const ImageData& msg);
   void pushGt(const GtPoseSample& msg);
 
   bool ready();
   ImageData popImage();
   bool popLidar(std::vector<PointXYZT>& out, double max_time);
-  bool popDryRunLidar(std::vector<PointXYZT>& out, double max_time);
+  // R97A Q2: popDryRunLidar() is removed.
   bool popImu(std::deque<ImuSample>& out, double max_time);
   // Drains gt_queue entirely (not time-bounded like the pop* above -- GT
   // samples arrive independently of any measure-group cadence, so there's

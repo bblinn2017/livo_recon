@@ -52,9 +52,7 @@ struct MeasureGroup
 
   // History (42-44): see docs/livo_recon_changelog.md#include-livo_recon-utils-data-measures.h-42
 
-  // History (46-53): see docs/livo_recon_changelog.md#include-livo_recon-utils-data-measures.h-46
-  std::vector<PointXYZT> dry_run_lidar_points;
-  std::vector<PointXYZCov> dry_run_points;
+  // R97A Q2: dry_run_lidar_points/dry_run_points are removed.
 
   // State snapshots used by EvoProc and first-frame solve diagnostics.
   V3D pos_before_imu = V3D::Zero();

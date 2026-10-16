@@ -93,10 +93,7 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
     if (opts_.point_time_field.empty())
       throw std::invalid_argument("cbk/lidar/point_time_field must not be empty");
   }
-  // See CbkProcOptions::dry_run_point_filter_num's doc comment -- SAME
-  // rosparam key LioProcOptions::dry_run_point_filter_num reads
-  // ("lio/dry_run_point_filter_num"), loaded into both Options structs.
-  paramWarn<int>(pnh, "lio/dry_run_point_filter_num", opts_.dry_run_point_filter_num, 0);
+  // R97A Q2: lio/dry_run_point_filter_num is removed.
 
   std::string lidar_type_str;
   paramWarn<std::string>(pnh, "cbk/lidar/type", lidar_type_str, "mid360");
@@ -297,19 +294,7 @@ void CbkProc::lidarCallbackMsg(const livox_ros_driver::CustomMsg::ConstPtr& msg)
   if (opts_.log_sensor_stamps) logSensorStamp('L', scan_time, static_cast<std::size_t>(msg->point_num), points.size());   // R65
   perturbPoints(points, scan_time, opts_.perturb_std_m, opts_.perturb_seed);                                               // R65
 
-  // See CbkProcOptions::dry_run_point_filter_num's doc comment -- reuses
-  // the SAME raw msg, decimated a second time at a different rate.
-  // pointsFromLivoxMsg has no shared/global side effects (its per-call
-  // cumulative-offset state is local to this invocation), so calling it
-  // twice on the same msg is safe.
-  if (opts_.dry_run_point_filter_num > 0)
-  {
-    std::vector<PointXYZT> dry_run_points = pointsFromLivoxMsg(
-        *msg, scan_time, opts_.tag_mask, opts_.tag_max_keep, opts_.blind_sqr, measures_,
-        opts_.dry_run_point_filter_num);
-    if (!dry_run_points.empty())
-      data_queues_->pushDryRunLidar(std::move(dry_run_points));
-  }
+  // R97A Q2: the dry-run second decimation stream (lio/dry_run_point_filter_num) is removed.
 
   if (points.empty()) return;
   data_queues_->pushLidar(std::move(points));
@@ -371,19 +356,7 @@ void CbkProc::lidarCallbackPcl(const sensor_msgs::PointCloud2::ConstPtr& msg)
     logSensorStamp('L', scan_time, static_cast<std::size_t>(msg->width) * static_cast<std::size_t>(msg->height), points.size());   // R65
   perturbPoints(points, scan_time, opts_.perturb_std_m, opts_.perturb_seed);                                                     // R65
 
-  // See lidarCallbackMsg()'s matching comment.
-  if (opts_.dry_run_point_filter_num > 0)
-  {
-    std::vector<PointXYZT> dry_run_points = pointsFromPointCloud2(
-        *msg, scan_time, opts_.blind_sqr, measures_, opts_.dry_run_point_filter_num, pt_spec);
-    const bool dry_nonempty = !dry_run_points.empty();
-    const bool dry_pushed = dry_nonempty && data_queues_->pushDryRunLidar(std::move(dry_run_points));
-    static long long dr_seen = 0, dr_pushed = 0, dr_rejected = 0;
-    ++dr_seen;
-    if (dry_pushed) ++dr_pushed; else if (dry_nonempty) ++dr_rejected;
-    if (dr_seen == 1 || dr_seen % 100 == 0)
-      ROS_INFO_STREAM("[dry_run_stream] msgs=" << dr_seen << " pushed_msgs=" << dr_pushed << " rejected_msgs=" << dr_rejected);
-  }
+  // R97A Q2: the dry-run second decimation stream (lio/dry_run_point_filter_num) is removed.
 
   if (points.empty())
   {
@@ -488,14 +461,7 @@ bool CbkProc::syncMeasures()
   std::vector<PointXYZT> points;
   success &= data_queues_->popLidar(points, img.t);
 
-  // See CbkProcOptions::dry_run_point_filter_num's doc comment --
-  // deliberately NOT folded into `success`: a missing/short dry-run scan
-  // must never cause a real frame to be skipped, it only means this one
-  // frame's shadow diagnostic pass has nothing to run on (LioProc checks
-  // mg.dry_run_points.empty() itself before attempting it).
-  std::vector<PointXYZT> dry_run_points;
-  if (opts_.dry_run_point_filter_num > 0)
-    data_queues_->popDryRunLidar(dry_run_points, img.t);
+  // R97A Q2: the dry-run second decimation stream (lio/dry_run_point_filter_num) is removed.
 
   std::deque<ImuSample> imu_samples;
   success &= data_queues_->popImu(imu_samples, img.t);
@@ -530,7 +496,6 @@ bool CbkProc::syncMeasures()
   }
 
   MeasureGroup mg{std::move(img), std::move(points), std::move(imu_samples)};
-  mg.dry_run_lidar_points = std::move(dry_run_points);
   // Guaranteed ready (see the waitReadyFor(0ms) gate above) -- stored
   // directly on the MeasureGroup (task #145) so VioProc::processVIO()
   // just reads mg.tracked_frame later, no wait/consume call of its own.

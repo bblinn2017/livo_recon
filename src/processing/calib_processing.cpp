@@ -168,18 +168,7 @@ bool CalibProc::collectSamples()
     imu_samples.clear();
     data_queues_->popImu(imu_samples, calib_last_img_.t);
 
-    // See DataQueues::dry_run_lidar_queue's doc comment. Must be drained in
-    // lockstep with the primary lidar_queue above, even though calibration
-    // has no use for the dry-run points themselves (discarded immediately)
-    // -- otherwise it silently accumulates every dry-run scan that arrives
-    // during the whole calibration window (nothing else pops it), and the
-    // first real frame after calibration then dumps that entire backlog
-    // into one MeasureGroup via popDryRunLidar(), spanning far more time
-    // than that frame's own IMU-propagated pose coverage. Confirmed this
-    // session: deskewPoints() FATAL-aborted ("24868 point(s) unmatched by
-    // poses coverage") on exactly this backlog on the very first frame.
-    std::vector<PointXYZT> dry_run_points;
-    data_queues_->popDryRunLidar(dry_run_points, calib_last_img_.t);
+    // R97A Q2: the dry-run second decimation stream (and its queue) is removed.
 
     // Preserve the scan boundary for the explicit post-calibration map
     // bootstrap path. Keep the incumbent aggregate cloud too: aggregate

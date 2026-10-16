@@ -409,9 +409,6 @@ LioProcBase::LioProcBase(NodeContext& ctx)
 void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh)
 {
   paramWarn<int>(pnh, "lio/ekf/max_iterations",     opts_.max_iterations,  5);
-  paramWarn<double>(pnh, "lio/ekf/min_norm_dtheta", opts_.min_norm_dtheta, 0.0);
-  paramWarn<double>(pnh, "lio/ekf/min_norm_dt",     opts_.min_norm_dt,     0.0);
-  paramWarn<double>(pnh, "lio/ekf/min_diff_error",  opts_.min_diff_error,  -1.0);
   paramWarn<bool>(pnh, "lio/log_debug_en",          opts_.log_debug_en,   false);
   paramWarn<bool>(pnh, "lio/log_pair_corr_en",      opts_.log_pair_corr_en, false);
   paramWarn<bool>(pnh, "lio/log_eigenspectrum_en",  opts_.log_eigenspectrum_en, false);
@@ -427,11 +424,7 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
     cfg.nested<bool>(!opts_.first_frame_dump_list.empty(), "lio/first_frame_dump_frame_list is non-empty", "lio/first_frame_dump_slim",
                      opts_.first_frame_dump_slim, false);
   }
-  paramWarn<int>(pnh, "lio/dry_run_point_filter_num", opts_.dry_run_point_filter_num, 0);
-  // R78: which point set the IEKF residuals use (the map always uses the primary set). Refused as dead without the second stream.
-  cfg.mode("lio/iekf_point_stream", opts_.iekf_point_stream, "primary", { "primary", "second" });
-  if (opts_.iekf_point_stream == "second" && !(opts_.dry_run_point_filter_num >= 1))
-    throw std::invalid_argument("lio/iekf_point_stream = second needs lio/dry_run_point_filter_num >= 1 (the second decimation stream it reads); the key is dead without it");
+  // R97A Q2: lio/dry_run_point_filter_num and lio/iekf_point_stream are removed.
   paramWarn<bool>(pnh, "eval/nees_per_dof_en", opts_.nees_per_dof_en, false);
   paramWarn<int>(pnh, "eval/nees_tier1_window_scans", opts_.nees_tier1_window_scans, 489);
   paramWarn<bool>(pnh, "eval/state_trace_en", opts_.state_trace_en, true);
@@ -453,14 +446,7 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   const double sin_angle_err = std::sin(std::max(1e-6, angle_err_deg * M_PI / 180.0));
   opts_.deskew.sigma_a2 = sin_angle_err * sin_angle_err;
 
-  // Independent control or exact per-VoxelPlane covariance marginalization.
-  cfg.mode("lio/residual_redundancy/mode", opts_.residual_redundancy.mode, "off",
-           { "off", "woodbury" });
-  const bool rr = opts_.residual_redundancy.mode != "off";
-  cfg.nested<double>(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/rho",
-                     opts_.residual_redundancy.rho, 1.0);
-  cfg.nestedMode(rr, "lio/residual_redundancy/mode!=off", "lio/residual_redundancy/renorm",
-                 opts_.residual_redundancy.renorm, "off", { "off", "hold_pos_min_eig" });
+  // R97A Q2: lio/residual_redundancy/* (mode, rho, renorm) is removed.
 
   // R70 (F-320): block information scale (rotation vs position). Sub-options are refused unless mode=block; block mode with
   // both scales 1 would be inert and is refused (rule 2.4 / R4c).
@@ -494,19 +480,18 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
         throw std::invalid_argument("lio/residual_binning/rot_shift_sd_rad must be a finite number > 0 (a shift of 0 is the identity: use mode=off)");
       if (opts_.residual_binning.min_rows < 1)
         throw std::invalid_argument("lio/residual_binning/min_rows must be >= 1");
-      if (opts_.residual_redundancy.mode != "off" || opts_.info_scale.mode != "off")
-        cfg.requireCombination("lio/residual_binning/mode != off cannot be combined with lio/residual_redundancy/mode != off or lio/info_scale/mode != off: all three correct the same HtH and Htz "
+      if (opts_.info_scale.mode != "off")
+        cfg.requireCombination("lio/residual_binning/mode != off cannot be combined with lio/info_scale/mode != off: both correct the same HtH and Htz "
                                "and the order of the corrections is not specified.");
       std::string lr_rows = "per_normal";
-      bool lr_enabled = false;
       pnh.getParam("voxel_map/plane/line_residual/rows", lr_rows);
-      pnh.getParam("voxel_map/plane/line_residual/enabled", lr_enabled);
       bool combined_en = false;
       pnh.getParam("combined/enable", combined_en);
       if (combined_en)
         cfg.requireCombination("lio/residual_binning/mode != off cannot be combined with combined/enable = true: the joint LIO+VIO step builds its own HtH and Htz through "
                                "accumulateForCombined() and does not call the binning correction (the binning covers the LIO-only solve).");
-      if (lr_enabled && lr_rows == "distance")
+      // R97A Q2: line residuals are always on now (voxel_map/plane/line_residual/enabled is removed).
+      if (lr_rows == "distance")
         cfg.requireCombination("lio/residual_binning/mode != off needs voxel_map/plane/line_residual/rows = per_normal: the Jacobian direction of a distance row is set by the noise draw, "
                                "so it cannot key a bin (distance rows would be skipped, leaving the line voxels, which carry nearly all the information, uncorrected).");
     }
@@ -545,36 +530,16 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   paramWarn<bool>(pnh, "lio/line_rows_log_en", opts_.line_rows_log_en, false);   // R77 (F-451): line_rows_per_scan.csv (write-only)
   paramWarn<bool>(pnh, "lio/zsq_log_en", opts_.zsq_log_en, false);   // R95: zsq_per_scan.csv (write-only)
 
-  // R61: open-loop IMU propagation (see OpenLoopOptions). reset_period_s is only meaningful, and only accepted,
-  // under propagate_only.
-  cfg.mode("lio/open_loop/mode", opts_.open_loop.mode, "off", { "off", "propagate_only" });
-  cfg.nested<double>(opts_.open_loop.mode == "propagate_only", "lio/open_loop/mode=propagate_only",
-                     "lio/open_loop/reset_period_s", opts_.open_loop.reset_period_s, 0.0);
+  // R97A Q2: lio/open_loop/mode and reset_period_s are removed.
 
   // R93A (Bryce 2026-10-10): lio/point_cov/insertion_source is removed (the posterior block is the only insertion source; `prior` is gone) and refused if set. The time-dependent point-covariance terms
   // (lio/point_cov/mode, lio/point_cov/window_s, lio/time_cov/*) were removed on 2026-10-07 and are refused too.
   // lio/gate_state_uncertainty (default true): whether the admission gate adds the point's pose covariance (see LioProcOptions::gate_state_uncertainty).
   cfg.get<bool>("lio/gate_state_uncertainty", opts_.gate_state_uncertainty, true);
 
-  // R65 (F-128): measurement-noise inflation for the first N LIO scans (see LioProcOptions::bootstrap_inflate_scans).
-  cfg.get<int>("lio/bootstrap_inflate/scans", opts_.bootstrap_inflate_scans, 0);
-  if (opts_.bootstrap_inflate_scans < 0)
-    throw std::invalid_argument("lio/bootstrap_inflate/scans must be >= 0");
-  cfg.nested<double>(opts_.bootstrap_inflate_scans > 0, "lio/bootstrap_inflate/scans>0", "lio/bootstrap_inflate/factor",
-                     opts_.bootstrap_inflate_factor, 1.0);
-  if (!(opts_.bootstrap_inflate_factor >= 1.0))
-    throw std::invalid_argument("lio/bootstrap_inflate/factor must be >= 1");
+  // R97A Q2: lio/bootstrap_inflate/scans, lio/bootstrap_inflate/factor and lio/startup_hold/scans are removed.
 
-  // R64: startup hold (see LioProcOptions::startup_hold_scans). 0 = off.
-  cfg.get<int>("lio/startup_hold/scans", opts_.startup_hold_scans, 0);
-  if (opts_.startup_hold_scans < 0)
-    throw std::invalid_argument("lio/startup_hold/scans must be >= 0");
-
-  // CQ-31 item 5: three independently-switchable scalar P controls, all
-  // default-identity.
-  cfg.get<double>("lio/p_inflate/alpha", opts_.prior_scalar.p_inflate_alpha, 1.0);
-  cfg.get<double>("lio/p_floor/min_eig", opts_.prior_scalar.p_floor_min_eig, 0.0);
-  cfg.get<double>("lio/p_fading/lambda", opts_.prior_scalar.p_fading_lambda, 1.0);
+  // R97A Q2: lio/p_inflate/alpha, lio/p_floor/min_eig and lio/p_fading/lambda are removed.
 
   // Downsampling is one axis with three states, not a mode plus a magic
   // zero.
@@ -662,32 +627,8 @@ void LioProcBase::logStateTrace(const char* phase, const MeasureGroup& mg, int r
                      ol_window_, ol_reset_now_);
 }
 
-std::string LioProcBase::openLoopFinishScan(MeasureGroup& mg)
-{
-  const double t_abs = mg.image.t + data_queues_->start_time;
-  if (!ol_captured_) {
-    // First scan that reached ensureStationaryReference(): its head covariance is the first-frame pre-IMU P0.
-    ol_P0_ = mg.pose_covariances.empty() ? state_->cov() : mg.pose_covariances.front();
-    ol_window_ = 0;
-    ol_window_t0_ = t_abs;
-    ol_captured_ = true;
-  }
-  ol_reset_now_ = 0;
-  // The post_imu row was already written by the caller for the CURRENT window. Reset (if due) starts the next one.
-  if (opts_.open_loop.reset_period_s > 0.0 && (t_abs - ol_window_t0_) >= opts_.open_loop.reset_period_s) {
-    state_->setPropagatedState(stationary_reference_R_, stationary_reference_p_, stationary_reference_v_);
-    state_->covMut() = symmetrized(ol_P0_);   // R73 F-419
-    ++ol_window_;
-    ol_window_t0_ = t_abs;
-    ol_reset_now_ = 1;
-  }
-  logStateTrace("post_lio", mg, 0, 0);
-  mg.pos_after_lio = state_->pos();
-  mg.rot_after_lio = state_->rot();
-  mg.vel_after_lio = state_->vel();
-  mg.cov_after_lio = state_->cov();
-  return "[open_loop] propagate_only window=" + std::to_string(ol_window_) + " reset=" + std::to_string(ol_reset_now_);
-}
+// R97A Q2: openLoopFinishScan() is removed with lio/open_loop/*; ol_window_/ol_reset_now_
+// (state_trace.csv's columns) stay at 0 always, matching every job's actual behavior.
 
 void LioProcBase::buildResiduals(
   const std::vector<PointXYZCov>& pts,
@@ -766,13 +707,9 @@ void LioProcBase::buildResiduals(
         res.point_cross_normal = pts[i].point.cross(state_->rot().transpose() * res.normal);
         res.world_point = pt_world.point;
         res.sigma_squared += res.plane_var_term;
-        if (opts_.bootstrap_inflate_scans > 0 && voxel_map_->frame_idx_ >= 1 &&
-            voxel_map_->frame_idx_ <= static_cast<decltype(voxel_map_->frame_idx_)>(opts_.bootstrap_inflate_scans))
-          res.sigma_squared *= opts_.bootstrap_inflate_factor;   // R65 (F-128)
+        // R97A Q2: lio/bootstrap_inflate/scans and factor are removed.
         res.t = pts[i].t;   // diagnostic only (spline refinement removed)
         res.raw_body_point = pts[i].raw_body_point;  // CQ-50
-        const bool inflate_now = opts_.bootstrap_inflate_scans > 0 && voxel_map_->frame_idx_ >= 1 &&
-            voxel_map_->frame_idx_ <= static_cast<decltype(voxel_map_->frame_idx_)>(opts_.bootstrap_inflate_scans);
         build_thread_residuals_[omp_get_thread_num()].push_back(res);
         // R74 (F-430, F-431): the further rows of this point (line u1 row, smooth u1/u2 rows), each its own Residual, right after the u0 row.
         // Same point, same plane id, same world point; own direction, residual, variance (fit part in plane_var_term, as for the u0 row).
@@ -789,7 +726,6 @@ void LioProcBase::buildResiduals(
           x.point_cross_normal = pts[i].point.cross(state_->rot().transpose() * x.normal);
           x.plane_jacobian = V3D::Zero();
           x.plane_covariance = M3D::Zero();
-          if (inflate_now) x.sigma_squared *= opts_.bootstrap_inflate_factor;
           build_thread_residuals_[omp_get_thread_num()].push_back(x);
         }
         if (allow_consistency_log && opts_.log_pair_corr_en)
@@ -895,45 +831,10 @@ void LioProcBase::buildResiduals(
 // History (242-246): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-242
 void LioProcBase::solveSystem_cuda(const std::vector<Residual>& residuals) const {
   accumulateLioResidualsCuda(residuals, ekf_, cuda_buf_);
-  // CQ-34: called UNCONDITIONALLY -- residual_redundancy.h's own header
-  // already promises this is safe at mode=="off" (the module's internal
-  // gate on ekf.HtH/Htz mutation is what keeps "off" byte-identical, not
-  // this call site).
-  redundancyAndRenorm(residuals);
+  // R97A Q2: lio/residual_redundancy/* (and the renorm it gated) is removed.
   applyResidualBinningToEkf(residuals);   // R91E/R91F: no-op unless lio/residual_binning/mode != off
   applyInfoScaleToEkf(residuals);
   ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
-}
-
-void LioProcBase::redundancyAndRenorm(const std::vector<Residual>& residuals) const
-{
-  // R70 (F-317): the redundancy correction as before, plus the optional renormalisation that holds the weakest position
-  // eigenvalue of HtH at its independent-accumulator value. renorm == "off" (default) takes exactly the previous path.
-  const bool renorm = opts_.residual_redundancy.renorm != "off" && opts_.residual_redundancy.on();
-  Eigen::Matrix<double, 3, 3> Hpp_naive;
-  if (renorm) Hpp_naive = ekf_.HtH.block<3, 3>(3, 3);
-  { TimedScope ts(profiler_, "lio/ekf/redundancy");
-    redundancy_stats_ = applyResidualRedundancyCorrection(residuals, opts_.residual_redundancy, ekf_); }
-  if (!renorm) return;
-  ++renorm_iterations_;
-  const double ln = Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3, 3>>(Hpp_naive).eigenvalues()(0);
-  const double lc = Eigen::SelfAdjointEigenSolver<Eigen::Matrix<double, 3, 3>>(
-                        Eigen::Matrix<double, 3, 3>(ekf_.HtH.block<3, 3>(3, 3))).eigenvalues()(0);
-  double c = 1.0;
-  if (lc > 0.0 && ln > lc) {
-    c = ln / lc;
-    ekf_.HtH *= c;
-    ekf_.Htz *= c;
-    ++renorm_applied_;
-    renorm_c_sum_ += c;
-    renorm_c_max_ = std::max(renorm_c_max_, c);
-  }
-  static PersistentLogStream log("redundancy_renorm.csv");
-  bool first = false;
-  std::ofstream& o = log.stream(&first);
-  if (first) o << "frame,iter,n_resid,hpp_min_eig_naive,hpp_min_eig_corrected,c\n";
-  o << std::setprecision(10) << voxel_map_->frame_idx_ << ',' << diagnostic_gn_iteration_ << ',' << residuals.size() << ','
-    << ln << ',' << lc << ',' << c << '\n';
 }
 
 void LioProcBase::applyResidualBinningToEkf(const std::vector<Residual>& residuals) const
@@ -1020,8 +921,6 @@ void LioProcBase::applyInfoScaleToEkf(const std::vector<Residual>& residuals) co
 void LioProcBase::solveSystem(const std::vector<Residual>& residuals) const {
   accumulateLioResiduals(residuals, ekf_);
 
-  // CQ-34: see solveSystem_cuda()'s comment above -- same fix, same reason.
-  redundancyAndRenorm(residuals);
   applyResidualBinningToEkf(residuals);   // R91E/R91F: no-op unless lio/residual_binning/mode != off
   applyInfoScaleToEkf(residuals);   // R70 (F-320): no-op unless lio/info_scale/mode=block
 

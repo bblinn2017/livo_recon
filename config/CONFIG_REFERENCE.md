@@ -262,34 +262,26 @@ The keys `lio/q_adapt/*` (renamed to `imu/process_noise/gain/*`), `lio/ekf/step_
 
 ### lio/ekf
 
-The iterated update loop runs at most `lio/ekf/max_iterations` Gauss-Newton iterations per scan. After each iteration the loop stops early if the step is below both thresholds, or if the relative drop of the mean absolute residual is below `lio/ekf/min_diff_error`. At the code defaults neither early stop can fire (a threshold of 0 is never undercut by a norm, and a drop of less than minus one does not occur), so every scan runs all iterations.
+The iterated update loop runs exactly `lio/ekf/max_iterations` Gauss-Newton iterations per scan (R97A Q2: the early-stop thresholds min_norm_dtheta/min_norm_dt/min_diff_error are removed; see Removed keys).
 
 
 | key | type | code default | value in config/ntu_viral.yaml | meaning | read at |
 |---|---|---|---|---|---|
 | `lio/ekf/max_iterations` | int | 5 | `5` | Maximum number of iterations of the IEKF update per scan. | `src/processing/lio_base.cpp:411`; used at src/processing/lio_iekf.cpp:948 |
-| `lio/ekf/min_norm_dtheta` | double | 0.0 | not set (other yamls: hk.yaml = `1.0e-3`; mid360.yaml = `1.0e-4`) | Rotation-step threshold in radians: the loop stops when the norm of the iteration's rotation increment is below this and the norm of the position increment is below lio/ekf/min_norm_dt. Both must hold. 0 never triggers. | `src/processing/lio_base.cpp:412`; used at src/processing/lio_iekf.cpp:1075 |
-| `lio/ekf/min_norm_dt` | double | 0.0 | not set (other yamls: hk.yaml = `1.0e-2`; mid360.yaml = `1.0e-3`) | Position-step threshold in metres, the second condition of the stop described above. | `src/processing/lio_base.cpp:413`; used at src/processing/lio_iekf.cpp:1075 |
-| `lio/ekf/min_diff_error` | double | -1.0 | not set (other yamls: hk.yaml = `1.0e-2`; mid360.yaml = `1.0e-3`) | The loop stops when (previous mean absolute residual minus current) divided by max(previous, 1e-6) is below this value. The comparison is not true on the first iteration (the previous value starts at infinity). A negative default effectively disables it. | `src/processing/lio_base.cpp:414`; used at src/processing/lio_iekf.cpp:1082 |
 
 ### lio point streams
 
 
 | key | type | code default | value in config/ntu_viral.yaml | meaning | read at |
 |---|---|---|---|---|---|
-| `lio/dry_run_point_filter_num` | int | 0 | not set | Second decimation stream of the raw LiDAR scan. A value of 1 or more keeps every N-th raw point of each scan in a separate queue, which the LIO processor deskews and downsamples exactly like the primary points (mg.dry_run_points). 0 disables the stream. It is read by both the callbacks processor and the LIO processor. The stream is used as the IEKF input when lio/iekf_point_stream is "second"; otherwise it feeds only the shadow pass written to lio_dryrun.txt when lio/log_debug_en is true. | `src/processing/cbk_processing.cpp:99`, `src/processing/lio_base.cpp:430`; used at src/processing/cbk_processing.cpp:305, :375, :497, src/processing/lio_iekf.cpp:461, :877 |
-| `lio/iekf_point_stream` | string enum | "primary" | not set | Which deskewed point set builds the IEKF residuals. "primary": the same points that update the map (mg.points). "second": the dry-run stream above; a scan whose second set is empty falls back to the primary set and is counted. The map update always uses the primary points. Any other value is a config-resolver error. "second" with lio/dry_run_point_filter_num below 1 throws std::invalid_argument at start. | `src/processing/lio_base.cpp:432`; used at src/processing/lio_iekf.cpp:940 |
 
 ### lio residual weighting corrections
 
-These three corrections each modify HtH and Htz, so lio/residual_redundancy/mode or lio/info_scale/mode not "off" cannot be combined with lio/residual_binning/mode not "off" (the resolver refuses the combination).
+R97A Q2: lio/residual_redundancy/* is removed. info_scale and residual_binning each modify HtH and Htz, so lio/info_scale/mode not "off" cannot be combined with lio/residual_binning/mode not "off" (the resolver refuses the combination).
 
 
 | key | type | code default | value in config/ntu_viral.yaml | meaning | read at |
 |---|---|---|---|---|---|
-| `lio/residual_redundancy/mode` | string enum | "off" | not set | Correction for residuals that share one fitted plane. "off": the accumulator is unchanged (comparison statistics are still computed). "woodbury": the exact marginalisation of the shared plane covariance of each plane group of at least two residuals is added to HtH and Htz. Any other value is a config-resolver error at start (and the correction code itself throws a runtime error on an unrecognised value). | `src/processing/lio_base.cpp:457`; used at src/lio/residual_redundancy.cpp:127, :210, :216, src/processing/lio_base.cpp:911 |
-| `lio/residual_redundancy/rho` | double | 1.0 | not set | Weight given to the shared plane covariance inside a group: 0 gives no correction, 1 is the full Woodbury correction. Read only when mode is not "off"; refused if set while the mode is "off". A value outside [0, 1] throws a runtime error the first time the correction runs (not at load). | `src/processing/lio_base.cpp:460`; used at src/lio/residual_redundancy.cpp:130, :159 |
-| `lio/residual_redundancy/renorm` | string enum | "off" | not set | "off" or "hold_pos_min_eig". With "hold_pos_min_eig" HtH and Htz are multiplied after the correction by the factor that restores the smallest eigenvalue of the position block of HtH to its value before the correction, when that factor is above 1. Read only when mode is not "off"; refused if set while the mode is "off"; other values are a config-resolver error. | `src/processing/lio_base.cpp:462`; used at src/processing/lio_base.cpp:912-927 (redundancyAndRenorm) |
 | `lio/info_scale/mode` | string enum | "off" | not set | "off": HtH and Htz untouched. "block": separate scales on the rotation and position information, HtH' = S HtH S with S = diag(1/sqrt(rotation), 1/sqrt(position)) and Htz' = HtH' pinv(HtH) Htz. Mode "block" with both scales equal to 1 is refused as inert. Other values are a config-resolver error. | `src/processing/lio_base.cpp:467`; used at src/processing/lio_base.cpp:904 (applyInfoScaleToEkf), include/livo_recon/lio/info_scale.h |
 | `lio/info_scale/rotation` | double | 1.0 | not set | Divisor F_rot on the rotation information; must be at least 1. Read only when mode is "block" (refused if set otherwise). | `src/processing/lio_base.cpp:470`; used at src/processing/lio_base.cpp:470, :473-476 |
 | `lio/info_scale/position` | double | 1.0 | not set | Divisor F_pos on the position information; must be at least 1. Read only when mode is "block". | `src/processing/lio_base.cpp:471`; used at src/processing/lio_base.cpp:471, :473 |
@@ -312,15 +304,7 @@ Residual binning limits the information that rows sharing one constraint directi
 
 | key | type | code default | value in config/ntu_viral.yaml | meaning | read at |
 |---|---|---|---|---|---|
-| `lio/p_inflate/alpha` | double | 1.0 | not set | Scalar applied once per scan to the frame's fixed prior covariance snapshot used by the IEKF: the code multiplies the covariance by alpha (the options-struct comment describes it as multiplying the inverse, which is a division of the covariance; the code does the multiplication). 1 is the identity. | `src/processing/lio_base.cpp:575`; used at src/lio/residual_redundancy.cpp:223, src/processing/lio_iekf.cpp:915 |
-| `lio/p_floor/min_eig` | double | 0.0 | not set | When greater than 0, every eigenvalue of the prior covariance snapshot below this value is raised to it (the code floors the eigenvalues of the covariance; the struct comment says it floors those of the inverse and caps the covariance). 0 disables. | `src/processing/lio_base.cpp:576`; used at src/lio/residual_redundancy.cpp:225-231 |
-| `lio/p_fading/lambda` | double | 1.0 | not set | The prior covariance snapshot is divided by lambda (a value below 1 enlarges it). 1 is the identity; no range check in the code, and a value of 0 would divide by zero. | `src/processing/lio_base.cpp:577`; used at src/lio/residual_redundancy.cpp:233 |
 | `lio/gate_state_uncertainty` | bool | true | not set | true: the admission gate of each point-to-plane match adds the point's pose covariance projected on the plane normal to the gate variance (it widens admission, and never enters the residual weight). false: the gate uses the sensor and plane variance only (experimental; the engagement report flags a run where the key is on and nothing was added). | `src/processing/lio_base.cpp:557`; used at src/processing/lio_base.cpp:697, :738, src/lio/voxelplane.cpp:803-808 |
-| `lio/bootstrap_inflate/scans` | int | 0 | not set | Number of initial map frames (frame index 1 to this value) whose admitted residual variances are multiplied by lio/bootstrap_inflate/factor. 0 disables. A negative value throws std::invalid_argument. | `src/processing/lio_base.cpp:560`; used at src/processing/lio_base.cpp:769, :774 |
-| `lio/bootstrap_inflate/factor` | double | 1.0 | not set | Multiplier on the residual variance for those frames; must be at least 1. Read only when scans is greater than 0 (refused if set otherwise). | `src/processing/lio_base.cpp:563`; used at src/processing/lio_base.cpp:792 |
-| `lio/startup_hold/scans` | int | 0 | not set | The first N LiDAR scans (frame index 1 to N) are handled like open-loop propagate-only scans (IMU propagation only, no LiDAR solve, no reset) while the map is still built from them. 0 disables; negative throws std::invalid_argument. | `src/processing/lio_base.cpp:569`; used at src/processing/lio_iekf.cpp:881 (startupHoldActive) |
-| `lio/open_loop/mode` | string enum | "off" | not set | "off": normal operation. "propagate_only": the LiDAR solve is skipped for every scan; state and covariance are only propagated by the IMU. Other values are a config-resolver error. | `src/processing/lio_base.cpp:550`; used at src/processing/lio_iekf.cpp:881 (openLoopActive), src/processing/lio_base.cpp:665 |
-| `lio/open_loop/reset_period_s` | double | 0.0 | not set | Read only under mode "propagate_only" (refused if set otherwise). When greater than 0, every this many seconds the state is reset to the stationary reference pose and velocity and the covariance to the first-frame P0, giving several independent windows. 0 never resets. | `src/processing/lio_base.cpp:551`; used at src/processing/lio_base.cpp:677 |
 
 ### lio write-only diagnostics
 
@@ -329,7 +313,7 @@ All of these only write files; none is read back by the estimator.
 
 | key | type | code default | value in config/ntu_viral.yaml | meaning | read at |
 |---|---|---|---|---|---|
-| `lio/log_debug_en` | bool | false | not set | Per-iteration and per-scan debug output of the IEKF: iekf_factor_iteration.csv (with the 6 by 6 information matrix), iekf_gn_iteration.csv, iter_error.txt, a per-scan lio.txt line; with lio/dry_run_point_filter_num above 0 and the primary stream it also runs the dry-run shadow pass (lio_dryrun.txt). | `src/processing/lio_base.cpp:415`; used at src/processing/lio_base.cpp:1094, src/processing/lio_iekf.cpp:877, :956, :1064, :1508 |
+| `lio/log_debug_en` | bool | false | not set | Per-iteration and per-scan debug output of the IEKF: iekf_factor_iteration.csv (with the 6 by 6 information matrix), iekf_gn_iteration.csv, iter_error.txt, a per-scan lio.txt line. | `src/processing/lio_base.cpp:415`; used at src/processing/lio_base.cpp:1094, src/processing/lio_iekf.cpp:956, :1064, :1508 |
 | `lio/log_pair_corr_en` | bool | false | not set | Writes cq46_residuals.txt (raw per-accepted-residual fields) and cq46_prior.txt (the 6 by 6 prior pose covariance block) on the first iteration of every scan. | `src/processing/lio_base.cpp:416`; used at src/processing/lio_base.cpp:795, :823, :827 |
 | `lio/log_eigenspectrum_en` | bool | false | not set | Writes cq74_eigenspectrum.txt, the eigenspectrum of the leading 18 by 18 block of the post-update covariance; nothing is written unless gyroscope bias, accelerometer bias and gravity are all estimated states. | `src/processing/lio_base.cpp:417`; used at src/processing/lio_base.cpp:1165 |
 | `lio/log_consistency_scan_en` | bool | false | not set | Writes one scan.csv row per scan with covariance traces, mean angular rate and acceleration magnitude, and the biases. | `src/processing/lio_base.cpp:418`; used at src/processing/lio_iekf.cpp:1203 |
@@ -485,7 +469,6 @@ All vio keys are read at start-up whether or not VIO runs. The tracker is loaded
 | `vio/log/log_residual_counts` | bool | false | `false` | Counts rejected residuals and residuals whose epipolar norm is below log_norm_l_low_frac times baseline_cc (a camera-to-camera baseline length computed per frame, printed in the same log), and writes the counts. | `src/processing/vio_processing.cpp:76`; src/vio/vio_accumulator.cpp:404, :469, :548 |
 | `vio/log/log_consistency_corr_en` | bool | false | not set | Writes one consistency row per candidate residual (residual, S = 1/weight, residual mode) before any further rejection. | `src/processing/vio_processing.cpp:77`; src/vio/vio_accumulator.cpp:479 |
 | `vio/log/log_raw_tracker_output` | bool | false | `false` | Writes one [vio/raw_tracker] line per frame (tracker ok flag, tracked count, anchor count, reseed flag) before the EKF touches it. | `src/processing/vio_processing.cpp:78`; src/processing/vio_processing.cpp:359 |
-| `vio/log/dry_run` | bool | false | `false` | When true the VIO iterations compute and log everything but never apply the mean update to the state, and the final covariance update is skipped. | `src/processing/vio_processing.cpp:79`; src/processing/vio_processing.cpp:157, :267 |
 | `vio/log/log_norm_l_low_frac` | double | 0.3 | `0.3` | Multiplier on baseline_cc in the low epipolar-norm count of log_residual_counts. | `src/processing/vio_processing.cpp:80`; src/vio/vio_accumulator.cpp:404, :469 |
 | `vio/log/log_path` | string | debugLogPath("livo_recon_myvio_log.txt") | not set | File that the VIO log lines are written to. The code default is that file name inside outputs/debug_log_dir (or /tmp when unset). | `src/processing/vio_processing.cpp:81`; src/processing/vio_processing.cpp:81, :174 |
 
@@ -744,6 +727,23 @@ A key in this section is refused at start-up when it is set, whatever its value.
 - `voxel_map/plane/plane_var_scan_s2`: removed; R97A Q1.
 - `voxel_map/map/freeze_after_calibration`: removed; R97A Q1.
 - `voxel_map/map/shuffle_insertion_seed`: removed; R97A Q1.
+- `lio/ekf/min_norm_dtheta`: removed; R97A Q2 (unset at the yaml, 0 = never fires; hk.yaml and mid360.yaml previously set a non-zero value -- a real behavior change for those configs).
+- `lio/ekf/min_norm_dt`: removed; R97A Q2 (same as min_norm_dtheta).
+- `lio/ekf/min_diff_error`: removed; R97A Q2 (same as min_norm_dtheta).
+- `lio/dry_run_point_filter_num`: removed; R97A Q2 (0 at the yaml, the stream was always off).
+- `lio/iekf_point_stream`: removed; R97A Q2 ("primary" at the yaml, the only value left).
+- `vio/log/dry_run`: removed; R97A Q2 (false at the yaml).
+- `lio/residual_redundancy/mode`: removed; R97A Q2 ("off" at the yaml).
+- `lio/residual_redundancy/rho`: removed; R97A Q2.
+- `lio/residual_redundancy/renorm`: removed; R97A Q2.
+- `lio/p_inflate/alpha`: removed; R97A Q2 (1.0 at the yaml, the identity).
+- `lio/p_floor/min_eig`: removed; R97A Q2 (0.0 at the yaml, off).
+- `lio/p_fading/lambda`: removed; R97A Q2 (1.0 at the yaml, the identity).
+- `lio/bootstrap_inflate/scans`: removed; R97A Q2 (0 at the yaml, off).
+- `lio/bootstrap_inflate/factor`: removed; R97A Q2.
+- `lio/startup_hold/scans`: removed; R97A Q2 (0 at the yaml, off).
+- `lio/open_loop/mode`: removed; R97A Q2 ("off" at the yaml).
+- `lio/open_loop/reset_period_s`: removed; R97A Q2.
 
 ### Refused by the loaders
 

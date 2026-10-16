@@ -76,7 +76,6 @@ std::string VioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "vio/log/log_residual_counts",  opts_.log_residual_counts,  false);
   paramWarn<bool>(pnh, "vio/log/log_consistency_corr_en", opts_.log_consistency_corr_en, false);
   paramWarn<bool>(pnh, "vio/log/log_raw_tracker_output", opts_.log_raw_tracker_output, false);
-  paramWarn<bool>(pnh, "vio/log/dry_run",              opts_.dry_run,              false);
   paramWarn<double>(pnh, "vio/log/log_norm_l_low_frac", opts_.log_norm_l_low_frac, 0.3);
   paramWarn<std::string>(pnh, "vio/log/log_path",       opts_.log_path,             debugLogPath("livo_recon_myvio_log.txt"));
 
@@ -103,7 +102,6 @@ std::string VioProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  log_residual_counts:   " << (opts_.log_residual_counts ? "true" : "false")
       << "\n  log_consistency_corr_en: " << (opts_.log_consistency_corr_en ? "true" : "false")
       << "\n  log_raw_tracker_output:" << (opts_.log_raw_tracker_output ? "true" : "false")
-      << "\n  dry_run:               " << (opts_.dry_run ? "true" : "false")
       << "\n  log_norm_l_low_frac:   " << opts_.log_norm_l_low_frac
       << "\n  log_path:              " << opts_.log_path;
 
@@ -151,11 +149,7 @@ bool VioProc::solveSystem(const TrackedFrame& frame, float& last_error, double t
 
   last_error = avg_error;
 
-  // See dry_run's doc comment -- HtH/Htz above are still the real
-  // accumulated residuals/Jacobians (fully logged inside accumulate()),
-  // but the actual state mutation is skipped when set.
-  if (!opts_.dry_run)
-    ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
+  ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
 
   if (opts_.log_iterations)
   {
@@ -260,11 +254,11 @@ std::string VioProc::estimateStateCorrection(const TrackedFrame& frame, double t
   // Posterior covariance write happens exactly ONCE here, using the SAME
   // fixed prior_cov_ every iteration above blended against (see ekf.h) --
   // not per-iteration like the old applyUpdate() did. No-op (skipped) when
-  // n_successful == 0 OR dry_run (see that option's doc comment): no real
-  // measurement info was ever accumulated this frame (ekf_'s H_full would
-  // be stale from a previous frame), so there's nothing to blend and
-  // state_->cov() should stay exactly as it was going into this frame.
-  if (n_successful > 0 && !opts_.dry_run)
+  // n_successful == 0: no real measurement info was ever accumulated this
+  // frame (ekf_'s H_full would be stale from a previous frame), so
+  // there's nothing to blend and state_->cov() should stay exactly as it
+  // was going into this frame. R97A Q2: vio/log/dry_run is removed.
+  if (n_successful > 0)
     ekf_.applyCovarianceUpdate(state_, prior_cov_);
 
   // Absolute sanity check: reject the whole frame's correction if the best

@@ -22,12 +22,6 @@ void DataQueues::setStartTime(const double timestamp)
       for (auto& pt : scan) pt.t -= start_time;
   }
   {
-    // History (21-32): see docs/livo_recon_changelog.md#src-utils-data-data_queues.cpp-21
-    std::lock_guard<std::mutex> lock(dry_run_lidar_mutex);
-    for (auto& scan : dry_run_lidar_queue)
-      for (auto& pt : scan) pt.t -= start_time;
-  }
-  {
     std::lock_guard<std::mutex> lock(image_mutex);
     for (auto& img : image_queue) img.t -= start_time;
   }
@@ -87,26 +81,7 @@ double DataQueues::latestLidarTime()
   return latest_lidar_time;
 }
 
-// See dry_run_lidar_queue's doc comment (data_queues.h) -- deliberately
-// independent bookkeeping from pushLidar()/lidar_mutex above; does NOT
-// touch last_lidar_arrival_ns (ready()'s margin logic is keyed on the
-// PRIMARY stream only, this is a diagnostic-only side channel).
-bool DataQueues::pushDryRunLidar(std::vector<PointXYZT>&& msg)
-{
-  if (msg.empty()) return false;
-  std::lock_guard<std::mutex> lock(dry_run_lidar_mutex);
-  if (msg.front().t < latest_dry_run_lidar_time) return false;
-  latest_dry_run_lidar_time = msg.back().t;
-  for (auto& pt : msg) pt.t -= start_time;
-  dry_run_lidar_queue.push_back(std::move(msg));
-  return true;
-}
-
-double DataQueues::latestDryRunLidarTime()
-{
-  std::lock_guard<std::mutex> lock(dry_run_lidar_mutex);
-  return latest_dry_run_lidar_time;
-}
+// R97A Q2: pushDryRunLidar()/latestDryRunLidarTime() are removed.
 
 void DataQueues::pushImage(const ImageData& msg)
 {
@@ -201,34 +176,7 @@ bool DataQueues::popLidar(std::vector<PointXYZT>& out, double max_time)
   return !out.empty();
 }
 
-// Mirrors popLidar() exactly, against dry_run_lidar_queue/dry_run_lidar_
-// mutex instead -- see that queue's doc comment (data_queues.h).
-bool DataQueues::popDryRunLidar(std::vector<PointXYZT>& out, double max_time)
-{
-  std::lock_guard<std::mutex> lock(dry_run_lidar_mutex);
-  while (!dry_run_lidar_queue.empty())
-  {
-    auto& scan = dry_run_lidar_queue.front();
-    if (scan.front().t > max_time) break;
-    if (scan.back().t <= max_time)
-    {
-      out.insert(out.end(),
-                 std::make_move_iterator(scan.begin()),
-                 std::make_move_iterator(scan.end()));
-      dry_run_lidar_queue.pop_front();
-      continue;
-    }
-    auto it = std::upper_bound(
-      scan.begin(), scan.end(), max_time,
-      [](double t, const PointXYZT& p) { return t < p.t; });
-    out.insert(out.end(),
-               std::make_move_iterator(scan.begin()),
-               std::make_move_iterator(it));
-    scan.erase(scan.begin(), it);
-    break;
-  }
-  return !out.empty();
-}
+// R97A Q2: popDryRunLidar() is removed.
 
 bool DataQueues::popImu(std::deque<ImuSample>& out, double max_time)
 {

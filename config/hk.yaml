@@ -103,10 +103,9 @@ imu:
     ds_leaf_size: 2.5e-2
 lio:
   ekf:
+    # R97A Q2: min_norm_dtheta/min_norm_dt/min_diff_error are removed (this yaml previously set
+    # non-zero values, a real behavior change -- flagged in REPORT.md).
     max_iterations: 5
-    min_norm_dtheta: 1.0e-3
-    min_norm_dt: 1.0e-2
-    min_diff_error: 1.0e-2
 voxel_map:
   map:
     voxel_size: 0.5
@@ -143,7 +142,6 @@ vio:
     log_point_residuals: false
     log_residual_counts: false
     log_raw_tracker_output: false
-    dry_run: false
     log_norm_l_low_frac: 0.3
     # log_path deliberately NOT set here -- letting VioProc::loadParameters()'s
     # own C++ default (debugLogPath("livo_recon_myvio_log.txt"), see

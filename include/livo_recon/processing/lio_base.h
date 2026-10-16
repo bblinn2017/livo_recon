@@ -8,7 +8,6 @@
 #include "livo_recon/utils/data/measures.h"
 #include "livo_recon/utils/log/profiler.h"
 #include "livo_recon/lio/deskew.h"
-#include "livo_recon/lio/residual_redundancy.h"
 #include "livo_recon/lio/info_scale.h"
 #include "livo_recon/lio/residual_binning.h"
 
@@ -30,9 +29,8 @@ class ConfigResolver;
 struct LioProcOptions
 {
   int    max_iterations        = 5;
-  double min_norm_dtheta       = 0.0;
-  double min_norm_dt           = 0.0;
-  double min_diff_error        = -1.0;
+  // R97A Q2: min_norm_dtheta/min_norm_dt/min_diff_error (the early-stop thresholds) are removed;
+  // every scan now runs all max_iterations iterations.
 
   // History (24-27): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-24
   bool   log_debug_en          = false;
@@ -66,12 +64,9 @@ struct LioProcOptions
   // never read back by any estimator path.
   bool   log_eigenspectrum_en  = false;
 
-  // History (30-50): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-30
-  int    dry_run_point_filter_num = 0;
-
-  // R78 (split: all points to the map, every k-th point to the IEKF): which point set the IEKF residuals use. "primary" (default, bit-identical to R77): the set the
-  // map is built from. "second": the second decimation stream (dry_run_point_filter_num, include/livo_recon/lio/iekf_stream.h). iekf estimator only.
-  std::string iekf_point_stream = "primary";
+  // R97A Q2: dry_run_point_filter_num and iekf_point_stream (the second decimation stream, the dry-run
+  // shadow pass and vio/log/dry_run) are removed. The map and the IEKF both use the one primary point
+  // set (what "iekf_point_stream = primary" / "dry_run_point_filter_num = 0" always did).
 
   // CQ-60 item 5: the shared per-dof NEES logger (utils/eval/nees_logger.h)
   // -- report-only, default false, shared by both estimator paths (unlike
@@ -97,36 +92,15 @@ struct LioProcOptions
   // A refused sub-option without eval/pose_cov_trace_en (a dead key, rule 3.4).
   double pose_cov_trace_end_s = -1.0;
 
-  // R61: open-loop IMU propagation. "off" (default) = normal operation, bit-identical to before.
-  // "propagate_only" skips the LiDAR solve entirely (state and covariance are only propagated by the IMU);
-  // reset_period_s > 0 resets the state to the stationary reference and the covariance to its first-frame P0
-  // every that many seconds, giving several independent drift windows in one run. 0 = never reset.
-  struct OpenLoopOptions
-  {
-    std::string mode = "off";
-    double reset_period_s = 0.0;
-  } open_loop;
-
-  // R64: startup hold. The first startup_hold_scans LiDAR scans (frame index 1..N) are handled exactly like open-loop
-  // propagate_only scans (IMU propagation only, no LiDAR solve, no reset); the map is still built from them. 0 (default)
-  // = off, bit-identical. Tests whether the first LiDAR updates cause the scan 1-10 excursion.
-  int startup_hold_scans = 0;
-
-  // R65 (F-128/F-135). For LIO scans with frame index 1..bootstrap_inflate_scans every admitted residual's sigma_squared is
-  // multiplied by bootstrap_inflate_factor (measurement noise inflated while the map is only a few scans old). 0 scans (default)
-  // = off, bit-identical. factor must be >= 1.
-  int    bootstrap_inflate_scans  = 0;
-  double bootstrap_inflate_factor = 1.0;
+  // R97A Q2: open_loop (lio/open_loop/mode, reset_period_s), startup_hold_scans and
+  // bootstrap_inflate_scans/factor are removed (all off at the yaml).
 
   // R93A (Bryce 2026-10-10; key lio/gate_state_uncertainty, default true = the former hard-wired include_state_uncertainty_in_gate argument). true: the admission gate's variance adds the
   // point's pose covariance n^T P_pose n (the residual WEIGHT never does). false: the gate uses the sensor + plane variance only. Experimental when false: the engagement block of the
   // effective config prints the count of gate rows and the mean pose variance they added, and flags a run where the key is on and nothing was added.
   bool gate_state_uncertainty = true;
 
-  // The residual model has one independent control and one direct
-  // per-VoxelPlane covariance marginalization. Failed collapse, count, and
-  // conditioning heuristics were removed; see docs/RESIDUAL_MODE_AUDIT.md.
-  ResidualRedundancyOptions residual_redundancy;
+  // R97A Q2: ResidualRedundancyOptions (lio/residual_redundancy/*) is removed.
 
   // R70 (F-320): separate rotation / position scales on the LiDAR information (see info_scale.h). mode "off" (default) is
   // bit-identical. iekf estimator only.
@@ -134,7 +108,7 @@ struct LioProcOptions
 
   // R91E / R91F: residual binning by constraint direction (see lio/residual_binning.h): a shared shift per direction bin bounds the information a direction can gain from many rows.
   // mode "off" (default) never enters the function and is bit-identical; "direction" = position bins (R91E), "rotation" = rotation bins, "both" = joint (R91F). iekf estimator only; refused
-  // together with residual_redundancy or info_scale, with combined/enable, and with voxel_map/plane/line_residual/rows = distance (the direction of a distance row is set by the noise).
+  // together with info_scale, with combined/enable, and with voxel_map/plane/line_residual/rows = distance (the direction of a distance row is set by the noise).
   ResidualBinningOptions residual_binning;
 
   // R70 (F-340): write-only per-frame geometry of the admitted residuals (iteration 0 only): normal and lever-arm scatter
@@ -174,11 +148,7 @@ struct LioProcOptions
   // iteration, posterior covariance traces. Write-only; default off is bit-identical. iekf estimator only.
   bool scan_log_en = false;
 
-  // CQ-31 item 5: the scalar P controls, independent of residual_redundancy
-  // above (these act on the prior directly, not the measurement update) --
-  // see residual_redundancy.h's PriorScalarOptions. Identity at every
-  // default.
-  PriorScalarOptions prior_scalar;
+  // R97A Q2: PriorScalarOptions (lio/p_inflate/alpha, lio/p_floor/min_eig, lio/p_fading/lambda) is removed.
 
   // History (151-159): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-151
 
@@ -283,14 +253,8 @@ protected:
 
   // R61. Writes one state_trace.csv row (no-op when eval/state_trace_en is false). R92: for phase post_lio it also writes the pose_cov_trace.csv row when eval/pose_cov_trace_en is true.
   void logStateTrace(const char* phase, const MeasureGroup& mg, int residual_count, int completed_iterations);
-  // R61. True when lio/open_loop/mode == propagate_only.
-  bool openLoopActive() const { return opts_.open_loop.mode == "propagate_only"; }
-  // R64. True while the startup hold is engaged for this frame index.
-  bool startupHoldActive(long frame_idx) const { return frame_idx >= 1 && frame_idx <= opts_.startup_hold_scans; }
-  // R61. Call right after ensureStationaryReference() and the post_imu trace, only when openLoopActive(): captures
-  // P0 on first use, applies the optional reset window, writes the post_lio row (= post_imu state, or the reset state),
-  // fills mg.*_after_lio and returns a short report string. The caller must then return WITHOUT solving.
-  std::string openLoopFinishScan(MeasureGroup& mg);
+  // R97A Q2: openLoopActive()/startupHoldActive()/openLoopFinishScan() are removed with
+  // lio/open_loop/* and lio/startup_hold/scans.
 
 public:
 
@@ -353,11 +317,9 @@ protected:
   mutable int n_statistical_gate_candidates_ = 0;
   mutable int n_statistical_gate_rejections_ = 0;
 
-  // R61 open-loop bookkeeping
-  bool ol_captured_ = false;
-  Eigen::MatrixXd ol_P0_;
+  // R97A Q2: open-loop (lio/open_loop/*) is removed; ol_window_/ol_reset_now_ (state_trace.csv's
+  // columns) stay at their default 0 always, matching every job's actual behavior.
   int ol_window_ = 0;
-  double ol_window_t0_ = 0.0;
   int ol_reset_now_ = 0;
 
   bool stationary_reference_valid_ = false;
@@ -389,20 +351,14 @@ protected:
   int diagnostic_gn_iteration_ = -1;
   mutable LioCudaBuffers cuda_buf_;
 
-  // CQ-28: this frame's residual-redundancy-correction engagement/magnitude
-  // counters, written by solveSystem()/solveSystem_cuda() (both const) right
-  // after accumulate[Cuda]() when opts_.residual_redundancy.on().
-  mutable ResidualRedundancyStats redundancy_stats_;
+  // R97A Q2: redundancy_stats_ (ResidualRedundancyStats) is removed.
 
   // R70 (F-320): engagement counters of the block information scale (written by solveSystem*, which are const).
   // R72 (F-403): step-cap engagement (iterations seen, iterations where the cap bound, sum of applied/raw scale when bound).
   mutable long info_scale_iterations_ = 0;
   mutable long info_scale_discarded_modes_ = 0;
   mutable double info_scale_trace_ratio_sum_ = 0.0;
-  // R70 (F-317): redundancy renormalisation engagement (iterations where c > 1 was applied, sum and max of c).
-  mutable long renorm_iterations_ = 0, renorm_applied_ = 0;
-  mutable double renorm_c_sum_ = 0.0, renorm_c_max_ = 1.0;
-  void redundancyAndRenorm(const std::vector<Residual>& residuals) const;
+  // R97A Q2: redundancyAndRenorm()/renorm_* (lio/residual_redundancy/*) are removed.
   void applyInfoScaleToEkf(const std::vector<Residual>& residuals) const;
   // R91E: engagement counters of the residual binning (written by solveSystem*, which are const).
   mutable long residual_binning_iterations_ = 0;

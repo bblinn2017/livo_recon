@@ -91,15 +91,7 @@ struct VioProcOptions
   // applies here too).
   bool log_point_residuals = false;
 
-  // When true, estimateStateCorrection() still runs the full per-iteration
-  // residual/Jacobian/HtH computation and writes every normal log line,
-  // but skips the two calls that actually mutate state_ (ekf_.
-  // applyMeanUpdate/applyCovarianceUpdate). Net effect: VIO is computed
-  // and logged as usual, but the odometry output ends up recording pure
-  // LIO-propagated poses -- for an apples-to-apples ATE comparison ("what
-  // if this residual's corrections were never applied at all, at these
-  // exact timestamps") against a real run with the same config.
-  bool dry_run = false;
+  // R97A Q2: vio/log/dry_run is removed.
 
   // Lightweight alternative to log_point_residuals -- only accumulates
   // accepted/rejected COUNTS (no per-point string formatting/file writes)

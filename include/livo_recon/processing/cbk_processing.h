@@ -46,8 +46,7 @@ struct CbkProcOptions
   // `i % point_filter_num != 0` skip). 1 = keep everything (no decimation).
   int point_filter_num = 1;
 
-  // History (54-65): see docs/livo_recon_changelog.md#include-livo_recon-processing-cbk_processing.h-54
-  int dry_run_point_filter_num = 0;
+  // R97A Q2: dry_run_point_filter_num is removed.
 
   LidarType lidar_type = LidarType::MID360;
   // tag filter: reject point when (tag & tag_mask) >= tag_max_keep

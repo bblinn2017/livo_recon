@@ -28,9 +28,6 @@ public:
   }
 
 private:
-  // See LioProcOptions::dry_run_point_filter_num's doc comment.
-  void runDryRunShadowPass(const MeasureGroup& mg);
-
   // R73 (F-414, F-415): everything one update of one scan produced, for the per-scan logs. Write-only.
   struct UpdateRecord
   {
@@ -67,9 +64,6 @@ private:
   long   qa_scans_ = 0, qa_scans_gain_ne_1_ = 0;
   double qa_nis_sum_ = 0.0, qa_rho_sum_ = 0.0, qa_lag1_abs_sum_ = 0.0;
   void updateQGainFromResiduals();
-
-  // R78: iekf_point_stream engagement (frames that reached the update; frames that used the second stream; frames that fell back; summed set sizes).
-  long   stream_frames_ = 0, stream_second_ = 0, stream_fallback_ = 0, stream_sum_primary_ = 0, stream_sum_iekf_ = 0;
 
   // R91H: rotation-warp scale engagement (written only when imu/undistort/rot_warp_scale != 1). Scans warped, scans on which the scale was applied (frame <= rot_warp_last_frame), and
   // the summed counters of the primary stream over those scans.

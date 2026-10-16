@@ -113,7 +113,27 @@ inline const std::vector<std::string>& removedKeyTable()
       "voxel_map/plane/plane_var_min",
       "voxel_map/plane/plane_var_scan_s2",
       "voxel_map/map/freeze_after_calibration",
-      "voxel_map/map/shuffle_insertion_seed"};
+      "voxel_map/map/shuffle_insertion_seed",
+      // R97A Q2: the LIO EKF early-stop thresholds were unset at the yaml (0/0/-1, never firing); the dry-run second
+      // decimation stream and the VIO dry-run mode; the residual-redundancy correction and the three scalar P
+      // controls (all identity at the yaml); the startup/open-loop/bootstrap-inflate controls (all off at the yaml).
+      "lio/ekf/min_norm_dtheta",
+      "lio/ekf/min_norm_dt",
+      "lio/ekf/min_diff_error",
+      "lio/dry_run_point_filter_num",
+      "lio/iekf_point_stream",
+      "vio/log/dry_run",
+      "lio/residual_redundancy/mode",
+      "lio/residual_redundancy/rho",
+      "lio/residual_redundancy/renorm",
+      "lio/p_inflate/alpha",
+      "lio/p_floor/min_eig",
+      "lio/p_fading/lambda",
+      "lio/bootstrap_inflate/scans",
+      "lio/bootstrap_inflate/factor",
+      "lio/startup_hold/scans",
+      "lio/open_loop/mode",
+      "lio/open_loop/reset_period_s"};
   return t;
 }
 
@@ -134,10 +154,16 @@ inline std::string removedKeyOrigin(const std::string& key)
                         "state/est/cov_acc", "state/est/cov_gyr", "frames/camera", "frames/lidar", "camera/distortion_model", "viz/grid_map", "imu/process_noise/switch/scan"})
     if (key == k) return "R97";
   if (key == "lio/point_cov/mode" || key == "lio/point_cov/window_s" || key.rfind("lio/time_cov/", 0) == 0) return "R84 (F-521)";
-  if (key == "voxel_map/backend" || key == "voxel_map/plane/min_frames_to_init" || key == "voxel_map/plane/min_frames_to_converge" ||
-      key == "voxel_map/plane/plane_gate_mode" || key == "voxel_map/plane/line_residual/enabled" || key == "voxel_map/plane/plane_var_min" ||
-      key == "voxel_map/plane/plane_var_scan_s2" || key == "voxel_map/map/freeze_after_calibration" || key == "voxel_map/map/shuffle_insertion_seed")
-    return "R97A";
+  for (const char* k : {"voxel_map/backend", "voxel_map/plane/min_frames_to_init", "voxel_map/plane/min_frames_to_converge",
+                        "voxel_map/plane/plane_gate_mode", "voxel_map/plane/line_residual/enabled", "voxel_map/plane/plane_var_min",
+                        "voxel_map/plane/plane_var_scan_s2", "voxel_map/map/freeze_after_calibration", "voxel_map/map/shuffle_insertion_seed",
+                        "lio/ekf/min_norm_dtheta", "lio/ekf/min_norm_dt", "lio/ekf/min_diff_error",
+                        "lio/dry_run_point_filter_num", "lio/iekf_point_stream", "vio/log/dry_run",
+                        "lio/residual_redundancy/mode", "lio/residual_redundancy/rho", "lio/residual_redundancy/renorm",
+                        "lio/p_inflate/alpha", "lio/p_floor/min_eig", "lio/p_fading/lambda",
+                        "lio/bootstrap_inflate/scans", "lio/bootstrap_inflate/factor", "lio/startup_hold/scans",
+                        "lio/open_loop/mode", "lio/open_loop/reset_period_s"})
+    if (key == k) return "R97A";
   return "R74 (F-427)";
 }
 

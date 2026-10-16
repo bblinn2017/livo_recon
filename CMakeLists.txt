@@ -144,7 +144,6 @@ add_executable(livo_recon_node
   src/lio/voxelnode.cpp
   src/lio/lio_accumulator.cpp
   src/lio/deskew.cpp
-  src/lio/residual_redundancy.cpp
   src/lio/info_scale.cpp
   src/map/voxelmap.cpp
   src/map/map_backend_factory.cpp
@@ -278,9 +277,6 @@ add_test(NAME line_distance_r80 COMMAND test_line_distance_r80)
 # R81 (F-468, F-485 Part 3): plane_var_scan_s2 / plane_var_min (pure arithmetic + VoxelPlane::gate() / computeResidual(); the source check reads src/map/voxelmap.cpp).
 
 # R78 (planning agent's patch): which point set the IEKF uses (lio/iekf_point_stream); header only, ROS-free.
-add_executable(test_iekf_stream_r78 tests/test_iekf_stream_r78.cpp)
-target_include_directories(test_iekf_stream_r78 PUBLIC include)
-add_test(NAME iekf_stream_r78 COMMAND test_iekf_stream_r78)
 
 # R79 (planning agent's patch): which frames write a voxel-map snapshot (voxel_map/map/snapshot_frames); header only, ROS-free.
 add_executable(test_snapshot_frames_r79 tests/test_snapshot_frames_r79.cpp)
