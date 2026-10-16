@@ -72,28 +72,29 @@ calib:
       gyro_bias: true
       accel_bias: true
   p0:
-    # Baseline-preserving default. Set to calibration_derived for the Stage-1
-    # experiment; calibration is required to begin stationary.
-    mode: configured
+    # R97 default (Bryce 2026-10-15): exact-zero P0. The position, velocity and attitude blocks are exactly zero (a known state); the IMU
+    # propagation makes the covariance positive before anything is inverted. These are the values of the R96E factor P0 = 1 (cell f10001111).
+    # Calibration is required to begin stationary.
+    mode: calibration_derived
     autocov_lags: 20
     # The world/map origin is defined to be exactly zero and the platform is
     # required to start stationary. Positive epsilons keep information-form
     # solves nonsingular while representing those known constraints.
-    known_pos_variance: 1.0e-12
-    known_vel_variance: 1.0e-12
+    known_pos_variance: 0.0
+    known_vel_variance: 0.0
     # R89: attitude block of P0 in calibration_derived mode. Negative = the calibration-derived block (unchanged); 0 or more = that
     # constant on the diagonal with no cross terms (0 = exactly zero). known_pos_variance / known_vel_variance may also be exactly 0
     # (a known state; the IMU propagation makes the covariance positive before anything is inverted).
-    known_theta_variance: -1.0
+    known_theta_variance: 0.0
     # Balanced roll/pitch-vs-b_a ambiguity in acceleration units. 0.0856
     # m/s^2 = g * 0.5 degrees, using the VN-100's published static pitch/roll
     # accuracy as the initial conservative ambiguity scale. Each side gets
     # that same acceleration-equivalent uncertainty and the compensating
     # cross-covariance. This is NOT
     # the later motion-dependent Q scale.
-    tilt_ba_ambiguity_accel_std: 0.0856
-    bg_model_floor: -1.0
-    ba_radial_model_floor: -1.0
+    tilt_ba_ambiguity_accel_std: 0.03
+    bg_model_floor: 1.0e-5
+    ba_radial_model_floor: 1.0e-5
     # Numerical SPD floor for information-form solves. This does not express
     # physical uncertainty and is reported before/after in calibration_p0.txt.
     numerical_eigenvalue_floor: 1.0e-12
@@ -118,10 +119,11 @@ state:
     bg: [0., 0., 0.]
 imu:
   process_noise:
-    # "fixed" preserves production behavior. "isotropic" and "axis_aware"
+    # "fixed" is the earlier production behavior. "isotropic" and "axis_aware"
     # use stationary-calibration variance as the floor and add bounded motion
     # variance from gravity-removed acceleration and bias-corrected gyro rate.
-    model: fixed
+    # R97 default: isotropic (R96E factor NOISE = 1: acc_scale 0.15 and the dynamic caps 1e6).
+    model: isotropic
     fixed:
       # FAST-LIVO2's tuned NTU_VIRAL acc_cov/gyr_cov. These operating
       # variances are intentionally separate from the stationary floor.
@@ -131,13 +133,12 @@ imu:
       # beta=0 uses each IMU sample directly; beta in [0,1) low-pass filters
       # the dynamic variance. Scales are dimensionless because the motion
       # signal is squared to produce a variance contribution.
-      # R80 (F-477, Bryce): motion defaults beta 0.9, acc_scale 0.3, gyro_scale 10 (were 0.0 / 1.0 / 1.0);
-      # read only when model != fixed, so model: fixed is unchanged.
+      # Read only when model != fixed.
       beta: 0.9
-      acc_scale: 0.3
+      acc_scale: 0.15
       gyro_scale: 10.0
-      acc_max_dynamic_variance: 0.5
-      gyro_max_dynamic_variance: 0.3
+      acc_max_dynamic_variance: 1.0e6
+      gyro_max_dynamic_variance: 1.0e6
     bias_random_walk:
       gyro_variance_rate: 1.0e-5
       accel_variance_rate: 1.0e-5
@@ -178,7 +179,10 @@ lio:
   ekf:
     max_iterations: 5
 voxel_map:
-  backend: "voxel"  # "voxel" (persistent per-voxel plane fits, VoxelMap), "binned" (VoxelMap whose nodes keep bins) 
+  backend: "binned"  # "voxel" (persistent per-voxel plane fits, VoxelMap), "binned" (VoxelMap whose nodes keep bins). R97 default: binned (R96E factor MAP = 1).
+  binned:
+    bin_size_fraction: 0.25   # bin edge = this x the node's own edge
+    cov_mode: average         # average (C / k) | shrunk (C / k^2)
   map:
     # 2026-08-14: unified to 0.425 to match HILTI (see slam_2022/
     # voxel_map.yaml's comment for the full history) instead of staying at
@@ -192,6 +196,13 @@ voxel_map:
     max_layer: 2
   plane:
     plane_threshold: 2.5e-3
+    # R97 default: hard lines with the plane-equivalent variance (R96E factor LINES = 1).
+    line_residual:
+      enabled: true
+      form: hard
+      rule: absolute
+      rows: per_normal
+      variance: plane_equivalent
   points:
     min_init: 5
     min_update: 5
@@ -202,7 +213,7 @@ voxel_map:
   search:
     neighborhood_size: 1
 vio:
-  enable: true  # set by test_*.sh
+  enable: false  # R97 default: off (every R96E run had it off). Set true to run the visual-inertial odometry.
   ekf:
     # max_iterations/min_diff_error matched to FAST-LIVO2 myvio's own
     # production values (10 / 0.0001, both HILTI/NTU_VIRAL configs) on
