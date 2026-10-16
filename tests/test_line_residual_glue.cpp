@@ -99,8 +99,12 @@ Fixture build(const std::vector<PointXYZCov>& pts, const std::string& mode, cons
   f.opts->voxel_size = 1.0;
   f.opts->min_init_points = 5;
   f.opts->min_update_points = 5;
+  // R97A: VoxelNode::insertPoints() always bins now (the plain node fit path is removed). This fixture's exact,
+  // by-construction eigenstructure needs the raw per-point fit, so the bin edge is set far smaller than the
+  // fixtures' own point spacing -- every point lands in its own bin, whose representative (mean of 1 point, weight 1)
+  // is that point exactly, reproducing the pre-R97A raw-point fit bit for bit.
+  f.opts->binned_bin_fraction = 1e-9;
   // R76: the test still speaks the R74 (mode, threshold) pairs; map them onto the R76 flag/form/rule fields.
-  f.opts->line_enabled = (mode != "off");
   f.opts->line_form = (mode == "smooth") ? "smooth" : "hard";
   f.opts->line_rule = threshold;
   LineMode lm = LineMode::Off;
@@ -133,8 +137,8 @@ bool near(double a, double b, double tol) { return std::abs(a - b) <= tol; }
 
 int main()
 {
-  Fixture line_off = build(lineFixture(), "off", "absolute");
-  Fixture plane_off = build(planeFixture(), "off", "absolute");
+  Fixture line_off = build(lineFixture(), "hard", "absolute");
+  Fixture plane_off = build(planeFixture(), "hard", "absolute");
   const double thr = line_off.opts->plane_threshold;
   CHECK(line_off.node->plane_.isPlane(), "LG0 line fixture gives is_plane_ (e0 < plane_threshold)");
   CHECK(plane_off.node->plane_.isPlane(), "LG0 plane fixture gives is_plane_");
@@ -147,22 +151,15 @@ int main()
           "LG0 line fixture: e0 != e1 and plane_var_ is finite (no exact-tie NaN, F-433)");
   }
 
-  // ---- LG1: off --------------------------------------------------------------------------------------------------------------
+  // ---- LG1: planar-voxel reference row (R97A: the "mode off" half of this check is removed -- line residuals are always on,
+  // there is no longer a path that gives a line-shaped voxel an ordinary row) --------------------------------------------------
   const V3D q_plane_off = plane_off.node->plane_.plane_.center + 0.02 * plane_off.node->plane_.x_normal_ + 0.01 * plane_off.node->plane_.y_normal_ +
                           0.001 * plane_off.node->plane_.plane_.normal;
   Residual ref_plane;
   {
     WorldPointCov w = query(q_plane_off);
-    CHECK(plane_off.node->plane_.computeResidual(w, ref_plane, -1), "LG1 off: planar voxel admits the point");
-    CHECK(ref_plane.row_kind == 0 && ref_plane.n_extra == 0, "LG1 off: planar voxel gives the ordinary single row");
-  }
-  {
-    const auto& pl = line_off.node->plane_;
-    const V3D q = pl.plane_.center + 0.02 * pl.x_normal_ + 0.002 * pl.y_normal_;
-    WorldPointCov w = query(q);
-    Residual r;
-    CHECK(line_off.node->plane_.computeResidual(w, r, -1), "LG1 off: line voxel admits the point");
-    CHECK(r.row_kind == 0 && r.n_extra == 0, "LG1 off: line voxel still gives the ordinary single row");
+    CHECK(plane_off.node->plane_.computeResidual(w, ref_plane, -1), "LG1 planar voxel admits the point");
+    CHECK(ref_plane.row_kind == 0 && ref_plane.n_extra == 0, "LG1 planar voxel gives the ordinary single row");
   }
 
   // ---- LG2: planar voxel unchanged under the hard modes ---------------------------------------------------------------------
@@ -175,10 +172,10 @@ int main()
     CHECK(r.row_kind == 0 && r.n_extra == 0, ("LG2 " + tag + ": planar voxel keeps the single row").c_str());
     CHECK(r.r == ref_plane.r && r.sigma_squared == ref_plane.sigma_squared && r.plane_var_term == ref_plane.plane_var_term &&
           r.floor_term == ref_plane.floor_term && r.sigma_diag_squared == ref_plane.sigma_diag_squared,
-          ("LG2 " + tag + ": r, sigma_squared, plane_var_term, floor_term, sigma_diag_squared equal mode off exactly").c_str());
+          ("LG2 " + tag + ": r, sigma_squared, plane_var_term, floor_term, sigma_diag_squared equal mode hard/absolute exactly").c_str());
     CHECK((r.plane_jacobian - ref_plane.plane_jacobian).norm() == 0.0 && (r.plane_covariance - ref_plane.plane_covariance).norm() == 0.0 &&
           (r.normal - ref_plane.normal).norm() == 0.0,
-          ("LG2 " + tag + ": normal, plane_jacobian, plane_covariance equal mode off exactly").c_str());
+          ("LG2 " + tag + ": normal, plane_jacobian, plane_covariance equal mode hard/absolute exactly").c_str());
   }
 
   // ---- LG3 / LG4 / LG6: line voxel, hard ----------------------------------------------------------------------------------------

@@ -507,15 +507,16 @@ std::string LioProcIekf::engagementReport() const
     }
     o << "\n  voxel_map/plane/weight_floor/mode = "
       << vm->opts()->weight_floor_mode;
-    // R90: the fit and the admission settings the map ran with (written for every map, so a run's engagement file says which of the four map/fit types and which cadence it was).
-    o << "\n  voxel_map/fit_config: backend = " << (vm->opts()->binned_enabled ? "binned" : "raw")
+    // R90: the fit and the admission settings the map ran with. R97A: the binned map is the only map, so backend is always "binned"
+    // (harness tools parse this exact line -- see 00_COMMON.md rule 5).
+    o << "\n  voxel_map/fit_config: backend = binned"
       << " min_init = " << vm->opts()->min_init_points << " min_update = " << vm->opts()->min_update_points << " max_points = " << vm->opts()->max_points;
     {   // R82 (D4, F-500), unconditional since R93A: the fit-time classification and the one gap floor are always on; their counters are always written
       const VoxelPlaneR82Counters c82 = voxelPlaneR82Counters();
       const VoxelPlaneR77Counters c77 = voxelPlaneR77Counters();
       o << "\n  voxel_map/plane fit-time model (always on): line_classified=" << c82.line_classified << " line_accepted=" << c82.line_accepted << " e1_tiny_kept=" << c82.e1_tiny_kept << " e0_clamped=" << c82.e0_clamped
         << " gap_fits=" << c77.gap_fits << " gap_d1=" << c77.gap_d1 << " gap_d2=" << c77.gap_d2;
-      if (vm->opts()->line_enabled && vm->opts()->line_form == "hard" && c82.line_classified == 0)
+      if (vm->opts()->line_form == "hard" && c82.line_classified == 0)
         o << "   <-- INERT: hard lines are enabled and no fit was classified a line";
     }
     {   // R93A (Bryce 2026-10-10): lio/gate_state_uncertainty -- pose covariance in the admission gate (engagement counter and magnitude; a map backend that does not count gate rows is not reported)
@@ -535,8 +536,7 @@ std::string LioProcIekf::engagementReport() const
       else if (!opts_.zsq_log_en && zr != 0)
         o << "   <-- ERROR: the key is off and " << zr << " rows were written";
     }
-    if (vm->opts()->binned_enabled)   // R88: written only for the binned map type
-    {
+    {   // R88: written for the (only, since R97A) binned map type
       const auto st88 = vm->stats();
       const long long bp = st88 ? st88->binned_points.load() : 0, bb = st88 ? st88->binned_new_bins.load() : 0, bf = st88 ? st88->binned_fits.load() : 0, bt = st88 ? st88->binned_touched_at_fit.load() : 0;
       o << "\n  voxel_map/backend = binned: bin_size_fraction = " << vm->opts()->binned_bin_fraction << " cov_mode = " << (vm->opts()->binned_cov_mode == 1 ? "shrunk" : "average")
@@ -565,17 +565,7 @@ std::string LioProcIekf::engagementReport() const
       else
         o << "   <-- INERT: plane_var_diag_en was set and no row reached the variance term";
     }
-    if (vm->opts()->plane_var_min > 0.0 || vm->opts()->plane_var_scan_s2 > 0.0)   // R81 (F-468, F-485): written only when a key is on, so the default report is unchanged
-    {
-      const VoxelPlaneR81Counters c81 = voxelPlaneR81Counters();
-      o << "\n  voxel_map/plane/plane_var_min = " << vm->opts()->plane_var_min << " plane_var_scan_s2 = " << vm->opts()->plane_var_scan_s2
-        << " rows=" << c81.rows << " scan_rows=" << c81.scan_rows << " mean_n_scans=" << (c81.scan_rows > 0 ? static_cast<double>(c81.sum_n_scans) / c81.scan_rows : 0.0)
-        << " clamped=" << c81.clamped << " clamped_fraction=" << (c81.rows > 0 ? static_cast<double>(c81.clamped) / c81.rows : 0.0);
-      if (c81.rows == 0)
-        o << "   <-- INERT: a plane variance key was set and no row reached the variance term";
-      else if (vm->opts()->plane_var_min > 0.0 && c81.clamped == 0 && !(vm->opts()->plane_var_scan_s2 > 0.0))
-        o << "   <-- NOT ENGAGED: plane_var_min never raised a row (a valid null: every plane variance term was already above it)";
-    }
+    // R97A: voxel_map/plane/plane_var_min and plane_var_scan_s2 are removed; this report block (VoxelPlaneR81Counters) is dead with them.
   }
 
   if (opts_.residual_redundancy.on() && opts_.residual_redundancy.renorm != "off")

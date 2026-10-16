@@ -107,14 +107,13 @@ std::shared_ptr<VoxelOpts> mkOpts(const std::string& mode, bool plane_equivalent
   o->min_init_points = 5;
   o->min_update_points = 5;
   o->weight_sigma_r2 = sigma_r2;
-  o->line_enabled = (mode != "off");
   o->line_form = (mode == "smooth") ? "smooth" : "hard";
   o->line_rule = "absolute";
   LineMode lm = LineMode::Off;
   parseLineMode(mode, "absolute", lm);
   o->line_residual_enum = static_cast<int>(lm);
   o->line_variance = plane_equivalent ? "plane_equivalent" : "fit_only";
-  o->line_var_plane_equivalent = o->line_enabled && plane_equivalent;
+  o->line_var_plane_equivalent = (mode != "off") && plane_equivalent;
   // R93A: the gap floor is always on (floor = sigma_r2; 1e-12 makes it inert for these fixtures) and every fit uses the sensor covariance only, which the finite differences below use as well
   return o;
 }

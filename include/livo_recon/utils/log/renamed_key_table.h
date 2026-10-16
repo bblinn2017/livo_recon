@@ -100,7 +100,20 @@ inline const std::vector<std::string>& removedKeyTable()
       "frames/lidar",
       "camera/distortion_model",
       "viz/grid_map",
-      "imu/process_noise/switch/scan"};
+      "imu/process_noise/switch/scan",
+      // R97A Q1: the binned map is the only map (voxel_map/backend); min_frames_to_init was a no-op (default 1) and min_frames_to_converge/
+      // convergence_mode=frame_gated are removed; plane_gate_mode is baked in at "disc" (ellipse/ellipse_area_matched removed); line
+      // residuals are always on (line_residual/enabled, plane_var_min, plane_var_scan_s2 removed with the no-line path); map/
+      // freeze_after_calibration and map/shuffle_insertion_seed were off/0 in every job.
+      "voxel_map/backend",
+      "voxel_map/plane/min_frames_to_init",
+      "voxel_map/plane/min_frames_to_converge",
+      "voxel_map/plane/plane_gate_mode",
+      "voxel_map/plane/line_residual/enabled",
+      "voxel_map/plane/plane_var_min",
+      "voxel_map/plane/plane_var_scan_s2",
+      "voxel_map/map/freeze_after_calibration",
+      "voxel_map/map/shuffle_insertion_seed"};
   return t;
 }
 
@@ -121,6 +134,10 @@ inline std::string removedKeyOrigin(const std::string& key)
                         "state/est/cov_acc", "state/est/cov_gyr", "frames/camera", "frames/lidar", "camera/distortion_model", "viz/grid_map", "imu/process_noise/switch/scan"})
     if (key == k) return "R97";
   if (key == "lio/point_cov/mode" || key == "lio/point_cov/window_s" || key.rfind("lio/time_cov/", 0) == 0) return "R84 (F-521)";
+  if (key == "voxel_map/backend" || key == "voxel_map/plane/min_frames_to_init" || key == "voxel_map/plane/min_frames_to_converge" ||
+      key == "voxel_map/plane/plane_gate_mode" || key == "voxel_map/plane/line_residual/enabled" || key == "voxel_map/plane/plane_var_min" ||
+      key == "voxel_map/plane/plane_var_scan_s2" || key == "voxel_map/map/freeze_after_calibration" || key == "voxel_map/map/shuffle_insertion_seed")
+    return "R97A";
   return "R74 (F-427)";
 }
 

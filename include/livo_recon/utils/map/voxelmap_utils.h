@@ -301,16 +301,15 @@ struct RunningMoments
   }
 };
 
-// Resolved-once-at-load enum mirrors of the two hottest per-point mode
-// strings (VoxelOpts::weight_floor_mode/plane_gate_mode below) -- see
-// VoxelMap::loadParameters()'s doc comment where these are resolved, and
-// voxelplane.cpp's gate()/weightFloor(), which switch on these instead of
-// re-comparing the std::string form on every candidate point, every IEKF
-// iteration. The string fields themselves are unchanged and remain the
-// source of truth (config loading, logging, validation) -- these are a
-// derived cache, not a replacement.
+// Resolved-once-at-load enum mirror of the hottest per-point mode string
+// (VoxelOpts::weight_floor_mode below) -- see VoxelMap::loadParameters()'s
+// doc comment where this is resolved, and voxelplane.cpp's weightFloor(),
+// which switches on this instead of re-comparing the std::string form on
+// every candidate point, every IEKF iteration. The string field itself is
+// unchanged and remains the source of truth (config loading, logging,
+// validation) -- this is a derived cache, not a replacement.
+// R97A: PlaneGateMode is removed; "disc" is the only plane_gate_mode now.
 enum class WeightFloorMode { SensorRange, Incidence, Constant, None, Legacy, Roughness };
-enum class PlaneGateMode { Disc, Ellipse, EllipseAreaMatched };
 
 struct VoxelOpts
 {
@@ -368,42 +367,9 @@ struct VoxelOpts
   // in this mode -- fine for the short investigation runs this was added
   // for, not intended for long/production runs without a rethink of the
   // O(N) full-refit-from-scratch cost in VoxelPlane::update().
-  // "frame_gated": same lock-in as "normal", but ALSO requires
-  // distinct_frames_ >= min_frames_to_converge (VoxelNode's count of
-  // distinct frames that have contributed points since node creation) --
-  // targets the specific failure found when undecimated map insertion lets
-  // a single frame's dense point cluster fill a voxel to max_points before
-  // it's seen enough independent viewpoints/scan passes.
+  // R97A: "frame_gated" and min_frames_to_converge/min_frames_to_init are removed (the latter was a no-op at its default, 1); an
+  // unrecognized convergence_mode value is now REFUSED at start (previously fell through to "normal" silently).
   std::string convergence_mode      = "normal";
-  int    min_frames_to_converge     = 5;
-
-  // 1 (default, no-op) -- a voxel's FIRST plane fit (isInit() threshold,
-  // min_init_points above) may happen off points from a single frame.
-  // >1 -- ALSO require VoxelNode::distinct_frames_ >= min_frames_to_init
-  // before that first fit, same spirit as min_frames_to_converge but
-  // applied at init instead of lock-in. Targets a failure min_frames_to_
-  // converge/max_points can't: with point_filter_num relaxed toward
-  // "keep everything", a single dense frame near the sensor can hand a
-  // voxel min_init_points-worth of points in one shot -- a PCA fit off
-  // points from one instant/viewing angle, immediately live for residuals
-  // (VoxelNode::hasConvergedPlane()'s docs: usable the moment isPlane()
-  // is true, not gated on CONVERGED) -- confirmed empirically: raising
-  // min_init_points alone (a point-count proxy for view diversity) fixed
-  // an NTU_VIRAL point_filter_num=1 ATE regression (eee_01: 1.48m ->
-  // 0.12m) where min_frames_to_converge/max_points changes had zero
-  // effect, but a point-count threshold doesn't generalize across lidars
-  // with different angular resolution/point density the way a frame-count
-  // requirement does.
-  //
-  // Skipped entirely for the calibration/bootstrap frame (global frame
-  // index 0 -- see VoxelNode::insertPoints()'s g_current_frame_idx check,
-  // and CalibProc::estimateFromBuffer()/skipCalibration(), which both push
-  // their very first MeasureGroup as frame 0): that frame already
-  // legitimately aggregates many real distinct lidar frames captured
-  // while the sensor was stationary (CalibProc::collectSamples()'
-  // num_samples), and LIO needs SOME usable planes the instant calibration
-  // ends, not after min_frames_to_init more real frames separately elapse.
-  int    min_frames_to_init         = 1;
 
   // false (default) -- VoxelPlane::update()'s acceptance test trusts the
   // raw empirical eigen_values_(0) (perpendicular/out-of-plane variance)
@@ -518,13 +484,7 @@ struct VoxelOpts
   // the per-scan aggregates above are deliberately NOT strided.
   int log_consistency_corr_stride = 1;
 
-  // History (459-476): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-459
-  std::string plane_gate_mode = "disc";
-  static constexpr const char* PLANE_GATE_MODES[] = {
-      "disc", "ellipse", "ellipse_area_matched" };
-  // Resolved once at load, in VoxelMap::loadParameters() -- see this
-  // header's own enum doc comment above VoxelOpts.
-  PlaneGateMode plane_gate_mode_enum = PlaneGateMode::Disc;
+  // R97A: voxel_map/plane/plane_gate_mode is removed; "disc" (VoxelPlane::gate()'s isotropic radius gate) is the only mode now.
 
   // ── The residual-weight floor ───────────────────────────────────────────
   // MODE: "sensor_range" (default) | "incidence" | "constant" | "none".
@@ -617,8 +577,7 @@ struct VoxelOpts
 
   // R93A: plane_var_denom_floor_en is removed (it was false in every job).
 
-  // History (557-567): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-557
-  int shuffle_insertion_seed = 0;
+  // R97A: voxel_map/map/shuffle_insertion_seed is removed (it was 0 in every job).
 
   // History (570-575): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-570
   bool log_frame_stats_en = false;
@@ -631,17 +590,14 @@ struct VoxelOpts
   // bit-identical). Needs snapshot_post_calibration; parsed and validated in VoxelMap::loadParameters.
   std::vector<int> snapshot_frames;
 
-  // R73 (F-414 secondary control): when true, live frames (advance_live_frame) advance frame_idx_ but insert NOTHING, so the map stays
-  // exactly the calibration (bootstrap) map for the whole run. Default false is bit-identical. A frozen map removes the map-feedback
-  // path from a comparison; it is only a valid control between runs whose end-of-calibration map digests agree (see scan_log.csv).
-  bool freeze_after_calibration = false;
+  // R97A: voxel_map/map/freeze_after_calibration is removed (it was false in every job).
 
-  // R76 (F-445): residual form for voxels that may be lines. line_enabled (default false = bit-identical to R73) switches the whole feature.
-  // line_form (read only when enabled): hard (default; a line voxel gets two rows) | smooth (every matched point gets three rows).
+  // R76 (F-445): residual form for voxels that may be lines. R97A: always on (voxel_map/plane/line_residual/enabled is removed; the
+  // no-line path is gone -- every voxel is a candidate line or a plane, decided at fit time, see lio/voxel_class.h).
+  // line_form: hard (default; a line voxel gets two rows) | smooth (every matched point gets three rows).
   // line_rule (read only when form is hard): absolute (default; second eigenvalue < plane_threshold, the same constant that tests the first) |
   // relative (e1 not distinguishable from e0, rel_sigmas) | relative_noise (relative with e0 floored at the sensor noise variance) |
   // shape (e1 <= line_shape_ratio * e2). See lio/line_residual.h. line_residual_enum is resolved once at load.
-  bool line_enabled = false;
   std::string line_form = "hard";
   std::string line_rule = "absolute";
   double line_rel_sigmas = 3.0;
@@ -672,22 +628,15 @@ struct VoxelOpts
   // R77 (F-433), unconditional since R93A (the key voxel_map/plane/plane_gap_floor_en and the eigengap-denominator guard are removed): the eigenvalue gaps |e0-e1| and |e0-e2| of the eigengap plane variance are floored at the sensor noise
   // variance (weight_sigma_r2, = imu/sensor/range_err^2), keeping the plane and the sign of the eigenvalue order. Needs range_err > 0 with plane_var_mode = eigengap (refused otherwise). Not applied under the information models.
 
-  // R81 (F-468, F-485 Part 3): plane variance term of the weight AND the gate (VoxelPlane::gate(); res.sigma_squared adds the same value). Both default 0.0 = off: the branch is skipped, bit-identical to R80.
-  //   plane_var_scan_s2 (>= 0, finite): plane_var_term += s2 / max(1, distinct frames of the voxel as of its last fit). Applied first.
-  //   plane_var_min     (>= 0, finite): plane_var_term = max(plane_var_term, plane_var_min). Applied second.
-  // Point-to-plane rows only: refused together with voxel_map/plane/line_residual/enabled = true (line and distance rows take their own fit variance and would silently not see it).
-  // See lio/plane_var_r81.h.
-  double plane_var_min = 0.0;
-  double plane_var_scan_s2 = 0.0;
-  // R82 (D2, F-502): write-only diagnostic of the plane variance term (quantiles before / after the scan term, fractions below the candidate floors, mean 1/n); see lio/plane_var_diag.h. Default false.
+  // R97A: voxel_map/plane/plane_var_min and plane_var_scan_s2 are removed (both were 0.0 in every job).
+  // R82 (D2, F-502): write-only diagnostic of the plane variance term; see lio/plane_var_diag.h. Default false.
   bool plane_var_diag_en = false;
 
-  // R88: the "binned" map type (voxel_map/backend = binned, src/map/binned_voxelmap.cpp; accumulator in map/binned/binned_bins.h). Set by BinnedVoxelMap::loadParameters() only; the default map never touches them.
-  //   binned_enabled        : VoxelNode::insertPoints() keeps returns in bins and fits from the occupied bins.
+  // R88: the binned map accumulator (src/map/binned_voxelmap.cpp; map/binned/binned_bins.h). R97A: it is the only map (voxel_map/backend
+  // is removed); binned_enabled is gone with it -- VoxelNode::insertPoints() always keeps returns in bins and fits from the occupied bins.
   //   binned_bin_fraction   : bin edge = this x the node's own edge (0 < f <= 1).
   //   binned_cov_mode       : 0 average (C / k), 1 shrunk (C / k^2).
   //   (R95: binned_weight_mode was removed; the weight of a bin is always its return count k.)
-  bool   binned_enabled = false;
   double binned_bin_fraction = 0.2;
   int    binned_cov_mode = 0;
   // R92: min_init / min_update in a binned map always count the UNIQUE bins that received a return since the last fit (a bin hit in several scans counts once; before the first fit = occupied bins). The R91 member binned_update_count_mode was removed.

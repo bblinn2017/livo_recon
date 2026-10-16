@@ -76,9 +76,10 @@ std::vector<PointXYZCov> boxFixture()
   return v;
 }
 
-// rows: "per_normal" | "distance"; form: "hard" | "smooth"; plane_equivalent selects the variance; line_on = false switches the feature off.
-// line_rows_distance is set directly, as VoxelMap::loadParameters() resolves it (line_enabled && rows == "distance"), except in the forced cases of D3.
-std::shared_ptr<VoxelOpts> mkOpts(bool distance, bool plane_equivalent, const std::string& form = "hard", bool line_on = true, bool force_flag = false)
+// rows: "per_normal" | "distance"; form: "hard" | "smooth"; plane_equivalent selects the variance.
+// R97A: line_on (the former voxel_map/plane/line_residual/enabled) is removed -- line residuals are always on; line_rows_distance is
+// set directly, as VoxelMap::loadParameters() resolves it (rows == "distance"), except in the forced cases of D3.
+std::shared_ptr<VoxelOpts> mkOpts(bool distance, bool plane_equivalent, const std::string& form = "hard", bool force_flag = false)
 {
   auto o = std::make_shared<VoxelOpts>();
   o->max_points = 1000;
@@ -87,17 +88,16 @@ std::shared_ptr<VoxelOpts> mkOpts(bool distance, bool plane_equivalent, const st
   o->min_init_points = 5;
   o->min_update_points = 5;
   o->weight_sigma_r2 = 4e-4;   // the production floor; every tilt gap of the box fixture (~0.05) is far above it, so it never engages
-  o->line_enabled = line_on;
   o->line_form = form;
   o->line_rule = "absolute";
   LineMode lm = LineMode::Off;
   std::string why;
-  resolveLineConfig(line_on, form, "absolute", lm, &why);
+  resolveLineConfig(true, form, "absolute", lm, &why);
   o->line_residual_enum = static_cast<int>(lm);
   o->line_variance = plane_equivalent ? "plane_equivalent" : "fit_only";
-  o->line_var_plane_equivalent = o->line_enabled && plane_equivalent;
+  o->line_var_plane_equivalent = plane_equivalent;
   o->line_rows = distance ? "distance" : "per_normal";
-  o->line_rows_distance = force_flag ? true : (o->line_enabled && distance);
+  o->line_rows_distance = force_flag ? true : distance;
   // R93A: every fit uses the sensor covariance only, which is what the references below use
   return o;
 }
@@ -301,12 +301,10 @@ int main()
     CHECK(relNear(r.plane_var_term, pn->eigen_values_(0) / pn->points_size_, 1e-12) && relNear(r.extra_fit_var[0], pn->eigen_values_(1) / pn->points_size_, 1e-12),
           "D3 per_normal: fit variances e0/N and e1/N");
 
-    auto off = fit(mkOpts(true, false, "hard", false, true), box);   // feature off, flag forced on
-    Residual ro;
-    CHECK(off->computeResidual(query(off->plane_.center + 0.002 * off->plane_.normal + 0.1 * off->x_normal_), ro, -1) && ro.row_kind == kRowPlane && ro.n_extra == 0,
-          "D3 line feature off: the distance flag is inert (ordinary single plane row)");
+    // R97A: the "line feature off" case (mkOpts(..., line_on=false, ...)) is removed -- line residuals are always on, so there is no
+    // longer a path that gives a line-shaped voxel an ordinary plane row.
 
-    auto sm = fit(mkOpts(true, false, "smooth", true, true), box);   // form smooth, flag forced on (the resolver refuses this; here only the glue's own behaviour is checked)
+    auto sm = fit(mkOpts(true, false, "smooth", true), box);   // form smooth, flag forced on (the resolver refuses this; here only the glue's own behaviour is checked)
     Residual rs;
     const V3D ds = 0.002 * sm->plane_.normal + 0.004 * sm->y_normal_ + 0.17 * sm->x_normal_;
     CHECK(sm->computeResidual(query(sm->plane_.center + ds), rs, -1) && rs.row_kind == kRowSmoothU0 && rs.n_extra == 2 && rs.extra_kind[0] == kRowSmoothU1 && rs.extra_kind[1] == kRowSmoothU2,

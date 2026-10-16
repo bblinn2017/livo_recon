@@ -2,7 +2,6 @@
 #include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/lio/line_residual.h"
 #include "livo_recon/lio/voxel_class.h"
-#include "livo_recon/lio/plane_var_r81.h"
 #include "livo_recon/lio/plane_var_diag.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include <fstream>
@@ -29,8 +28,7 @@ std::atomic<int> g_denom_rejected_count{0};
 // R77 (F-433, F-453): cumulative engagement counters (never reset), read by voxelPlaneR77Counters().
 std::atomic<long> g_r77_gap_fits{0}, g_r77_gap_d1{0}, g_r77_gap_d2{0};
 std::atomic<long> g_r77_tilt_voxels{0}, g_r77_tilt_floored_axes{0}, g_r77_tilt_fallbacks{0};
-// R81 (F-468, F-485): engagement of plane_var_scan_s2 / plane_var_min (counted only while a key is on), read by voxelPlaneR81Counters().
-std::atomic<long> g_r81_rows{0}, g_r81_scan_rows{0}, g_r81_clamped{0}, g_r81_sum_nscans{0};
+// R97A: g_r81_* counters removed with voxel_map/plane/plane_var_min and plane_var_scan_s2.
 // R82 (D2, F-502): write-only plane variance diagnostic (only touched when plane_var_diag_en is true), read by voxelPlaneVarDiagSnapshot().
 PlaneVarDiag g_r82_pvdiag;
 // R82 (D4): the line rule of line_residual as LineOptions, built the same way at every call site.
@@ -698,15 +696,7 @@ VoxelPlaneR82Counters voxelPlaneR82Counters()
   return c;
 }
 
-VoxelPlaneR81Counters voxelPlaneR81Counters()
-{
-  VoxelPlaneR81Counters c;
-  c.rows = g_r81_rows.load(std::memory_order_relaxed);
-  c.scan_rows = g_r81_scan_rows.load(std::memory_order_relaxed);
-  c.clamped = g_r81_clamped.load(std::memory_order_relaxed);
-  c.sum_n_scans = g_r81_sum_nscans.load(std::memory_order_relaxed);
-  return c;
-}
+// R97A: voxelPlaneR81Counters() removed with voxel_map/plane/plane_var_min and plane_var_scan_s2.
 
 VoxelPlaneR77Counters voxelPlaneR77Counters()
 {
@@ -759,30 +749,8 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
 
   const V3D d_center = p - plane_.center;
 
-  // Switches on the enum resolved once at load (VoxelMap::loadParameters())
-  // instead of re-comparing opts_->plane_gate_mode (std::string) here --
-  // this runs on every candidate point, every IEKF iteration. Same branch
-  // structure/behavior as the string comparisons it replaces.
-  if (opts_->plane_gate_mode_enum == PlaneGateMode::Ellipse ||
-      opts_->plane_gate_mode_enum == PlaneGateMode::EllipseAreaMatched) {
-    // T8-a: Mahalanobis ellipse of the fit's own sampling, replacing the
-    // isotropic disc -- same x_normal_/y_normal_ basis J_nq uses below, no
-    // new geometry. eigen_values_(2)/(1) are the largest/second-largest
-    // in-plane eigenvalues (x_normal_/y_normal_'s own axes respectively).
-    constexpr double eps = 1e-12;
-    const double l2 = std::max(eigen_values_(2), eps);   // major in-plane
-    const double l1 = std::max(eigen_values_(1), eps);   // minor in-plane
-    const double u1 = d_center.dot(x_normal_);           // along the l2 axis
-    const double u2 = d_center.dot(y_normal_);           // along the l1 axis
-    const double m2 = u1 * u1 / l2 + u2 * u2 / l1;
-    double thr2 = opts_->max_radius * opts_->max_radius;
-    // History (259-272): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-259
-    if (opts_->plane_gate_mode_enum == PlaneGateMode::EllipseAreaMatched) {
-      // History (274-278): see docs/livo_recon_changelog.md#src-lio-voxelplane.cpp-274
-      thr2 *= std::min(4.0, std::sqrt(l2 / l1));
-    }
-    if (m2 > thr2) return false;
-  } else {
+  // R97A: voxel_map/plane/plane_gate_mode is removed; "disc" (the isotropic radius gate) is the only gate mode now (ellipse/ellipse_area_matched removed).
+  {
     const double dis_to_center = d_center.squaredNorm();
     const double range_dis = std::sqrt(std::max(0.0, dis_to_center - r * r));
     if (range_dis > opts_->max_radius * radius_) return false;
@@ -812,20 +780,11 @@ bool VoxelPlane::gate(const V3D& p, const M3D& sensor_cov, const M3D& pose_cov,
   noteGatePose(include_pose_cov_in_gate, include_pose_cov_in_gate ? n.dot(pose_cov * n) : 0.0);
 
   plane_var_term = (J_nq * plane_var_ * J_nq.transpose()).value();
-  // R81 (F-468, F-485 Part 3): scan term first, then the clamp (see lio/plane_var_r81.h). Both keys default to 0.0: this block is then skipped and plane_var_term is untouched, bit for bit.
-  // distinct_frames_ is the voxel's distinct-frame count as of its LAST FIT (VoxelNode::distinct_frames_, handed to the plane by noteFrames()).
-  if (opts_->plane_var_diag_en)   // R82 (D2): write-only; the value is read BEFORE the scan term and the clamp below
-    g_r82_pvdiag.add(plane_var_term, plane_var_term + (opts_->plane_var_scan_s2 > 0.0 ? opts_->plane_var_scan_s2 / static_cast<double>(std::max(1, distinct_frames_)) : 0.0), distinct_frames_);
-  if (opts_->plane_var_scan_s2 > 0.0 || opts_->plane_var_min > 0.0) {
-    bool scan_added = false, clamped = false;
-    plane_var_term = planeVarR81Apply(plane_var_term, opts_->plane_var_scan_s2, opts_->plane_var_min, distinct_frames_, &scan_added, &clamped);
-    g_r81_rows.fetch_add(1, std::memory_order_relaxed);
-    if (scan_added) {
-      g_r81_scan_rows.fetch_add(1, std::memory_order_relaxed);
-      g_r81_sum_nscans.fetch_add(std::max(1, distinct_frames_), std::memory_order_relaxed);
-    }
-    if (clamped) g_r81_clamped.fetch_add(1, std::memory_order_relaxed);
-  }
+  // R97A: voxel_map/plane/plane_var_min and plane_var_scan_s2 are removed (both were 0.0 in every job); plane_var_term is the fit's own
+  // value, untouched, bit for bit. distinct_frames_ is the voxel's distinct-frame count as of its LAST FIT (VoxelNode::distinct_frames_,
+  // handed to the plane by noteFrames()) -- still used by the D2 diagnostic below.
+  if (opts_->plane_var_diag_en)   // R82 (D2): write-only
+    g_r82_pvdiag.add(plane_var_term, plane_var_term, distinct_frames_);
 
   // ONE floor, used by the gate below AND by res.sigma_squared in
   // computeResidual() -- see VoxelOpts::weight_floor_mode.  They used to

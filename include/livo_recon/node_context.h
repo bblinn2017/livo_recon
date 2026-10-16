@@ -42,7 +42,7 @@ struct NodeContext
   StateGroupPtr  state;
   ProfilerPtr    profiler;
   PrinterPtr     printer;
-  MapBackendPtr  voxel_map;  // "voxel" (VoxelMap, default) or "binned" (BinnedVoxelMap) -- see voxel_map/backend
+  MapBackendPtr  voxel_map;  // VoxelMap, the binned map (R88) -- the only MapBackend since R97A (voxel_map/backend removed)
   TrackerPtr     tracker;
 
   NodeContext(ros::NodeHandle& nh_, ros::NodeHandle& pnh_,

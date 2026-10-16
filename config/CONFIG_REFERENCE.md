@@ -296,7 +296,7 @@ These three corrections each modify HtH and Htz, so lio/residual_redundancy/mode
 
 ### lio/residual_binning
 
-Residual binning limits the information that rows sharing one constraint direction can add. Rows are folded by direction onto 13 fixed axes (the sign-folded axes of the 3 by 3 by 3 lattice); the rows of a bin share one unknown shift along its axis, and HtH and Htz are corrected by the Woodbury expression for that shared shift. Bins with fewer rows than min_rows are left unchanged. The mode is also refused together with combined/enable true and with voxel_map/plane/line_residual/enabled true and rows "distance".
+Residual binning limits the information that rows sharing one constraint direction can add. Rows are folded by direction onto 13 fixed axes (the sign-folded axes of the 3 by 3 by 3 lattice); the rows of a bin share one unknown shift along its axis, and HtH and Htz are corrected by the Woodbury expression for that shared shift. Bins with fewer rows than min_rows are left unchanged. The mode is also refused together with combined/enable true and with voxel_map/plane/line_residual/rows "distance".
 
 
 | key | type | code default | value in config/ntu_viral.yaml | meaning | read at |
@@ -353,18 +353,9 @@ All of these only write files; none is read back by the estimator.
 
 ## voxel_map
 
-The map is an octree of voxels hashed by root key. The backend is chosen by `voxel_map/backend` before the other keys are read. After the voxel map reads its keys, the IEKF processor refuses any key left unclaimed under the `voxel_map` namespace. Removed keys `voxel_map/plane/use_bins`, `voxel_map/plane/bin_size_fraction`, `voxel_map/plane/bin_weight_mode_fit` and `voxel_map/plane/bin_weight_mode_var` are refused at start-up when set (see Removed keys).
-
-### voxel_map backend
-
-
-| key | type | code default | value in config/ntu_viral.yaml | meaning | read at |
-|---|---|---|---|---|---|
-| `voxel_map/backend` | string enum | "voxel" | `"binned"` | Map class. "voxel": the plain VoxelMap, whose nodes fit a plane from their stored points. "binned": BinnedVoxelMap, a VoxelMap whose nodes keep returns in bins and fit from the occupied bins (the weight of a bin is its return count). Any other value throws std::runtime_error ("unknown voxel_map/backend ... expected 'voxel' or 'binned'") when the node context is built. | `src/node_context.cpp:25`; src/map/map_backend_factory.cpp:14-23 |
+The map is an octree of voxels hashed by root key. R97A: the binned map (R88) is the only map now; `voxel_map/backend` is removed (see Removed keys). After the voxel map reads its keys, the IEKF processor refuses any key left unclaimed under the `voxel_map` namespace. Removed keys `voxel_map/plane/use_bins`, `voxel_map/plane/bin_size_fraction`, `voxel_map/plane/bin_weight_mode_fit` and `voxel_map/plane/bin_weight_mode_var` are refused at start-up when set (see Removed keys).
 
 ### voxel_map/binned
-
-Read only by BinnedVoxelMap (backend "binned"). Under backend "voxel" these keys are never read; setting them there is refused as unconsumed at the end of loadParameters.
 
 
 | key | type | code default | value in config/ntu_viral.yaml | meaning | read at |
@@ -380,8 +371,6 @@ Read only by BinnedVoxelMap (backend "binned"). Under backend "voxel" these keys
 | `voxel_map/map/voxel_size` | double | 0.5 | `0.425` | Edge of a root voxel in metres. Child voxels at layer L have edge voxel_size / 2^L. A value of 0.10 or less throws std::runtime_error (retired in R70). | `src/map/voxelmap.cpp:179`; src/map/voxelmap.cpp:488 (worldToKey), src/lio/voxelnode.cpp:64, :115, :316 |
 | `voxel_map/map/max_layer` | int | 2 | `2` | Deepest subdivision layer. A node with no plane after fitting subdivides into 8 children while its layer is below this value; at max_layer a non-plane node is disabled. | `src/map/voxelmap.cpp:184`; src/lio/voxelnode.cpp:219 |
 | `voxel_map/map/bootstrap_mode` | string enum | "aggregate" | not set | How the calibration (stationary) scans are inserted to build the first map. "aggregate": all scans flattened into one insertion. "sequential": each stationary scan inserted in turn with the bootstrap-insertion flag on. Any other value throws std::runtime_error. | `src/map/voxelmap.cpp:197`; src/map/voxelmap.cpp:510 (bootstrap) |
-| `voxel_map/map/freeze_after_calibration` | bool | false | not set | When true, live frames advance the frame counter but insert nothing, so the map remains the calibration map for the whole run. | `src/map/voxelmap.cpp:448`; src/map/voxelmap.cpp:546 |
-| `voxel_map/map/shuffle_insertion_seed` | int | 0 | not set | When non-zero, the order in which points of a scan are transformed and appended to the per-voxel buckets is shuffled with a generator seeded by this value XOR the frame index. 0 keeps the scan order. | `src/map/voxelmap.cpp:442`; src/map/voxelmap.cpp:583 |
 | `voxel_map/map/log_frame_stats_en` | bool | true | not set | Writes one line per live map update to frame_stats.txt in the debug log directory (plane counts, voxel counts, residual and information diagnostics). The code default is true although the paramWarn call carries a comment that it was flipped from false. | `src/map/voxelmap.cpp:447`; src/map/voxelmap.cpp:690 |
 | `voxel_map/map/snapshot_post_calibration` | bool | false | not set | When true, writes the map that frame 1 queries (after the bootstrap) as post_calibration_voxelmap.csv plus an observation-support csv in the debug log directory. | `src/map/voxelmap.cpp:186`; src/map/voxelmap.cpp:535, :702 |
 | `voxel_map/map/snapshot_frames` | string (comma-separated ints) | "" | not set | Frames N of 2 or more whose queried map is written as voxelmap_snapshot_f<N>.csv at the end of the live insertion after which the frame index equals N. Empty means none. Refused (std::runtime_error) for a non-integer token, a frame below 2, a repeated frame, more than 20 frames, or a non-empty list while snapshot_post_calibration is false. | `src/map/voxelmap.cpp:190`; src/map/voxelmap.cpp:190-195, :705; src/map/snapshot_frames.h |
@@ -392,14 +381,9 @@ Read only by BinnedVoxelMap (backend "binned"). Under backend "voxel" these keys
 | key | type | code default | value in config/ntu_viral.yaml | meaning | read at |
 |---|---|---|---|---|---|
 | `voxel_map/plane/plane_threshold` | double | 0.01 | `2.5e-3` | A fit is a plane when the smallest eigenvalue of the point scatter is below this value. Also the second-eigenvalue test of line rule "absolute". | `src/map/voxelmap.cpp:204`; src/lio/voxelplane.cpp:1490 |
-| `voxel_map/plane/min_frames_to_init` | int | 1 | not set | A voxel waits for its first fit until the points received came from at least this many distinct frames. 1 does nothing. Not applied in the calibration (frame 0) insertion. | `src/map/voxelmap.cpp:202`; src/lio/voxelnode.cpp:129, :164 |
-| `voxel_map/plane/min_frames_to_converge` | int | 5 | not set | Used only when convergence_mode is "frame_gated": the lock-in at max_points additionally needs this many distinct frames. | `src/map/voxelmap.cpp:201`; src/lio/voxelnode.cpp:255-256 |
-| `voxel_map/plane/convergence_mode` | string, unvalidated | "normal" | not set | "normal": a node locks (CONVERGED if it has a plane, else DISABLED) once it holds max_points. "frame_gated": the same lock needs also min_frames_to_converge distinct frames. "always_update": a node with a plane never locks and refits every min_update points without a bound on stored points. Any other string is not rejected and behaves as "normal". | `src/map/voxelmap.cpp:200`; src/lio/voxelnode.cpp:255-258 |
+| `voxel_map/plane/convergence_mode` | string enum | "normal" | not set | "normal": a node locks (CONVERGED if it has a plane, else DISABLED) once it holds max_points. "always_update": a node with a plane never locks and refits every min_update points without a bound on stored points. R97A: an unrecognized value is now refused (previously fell through to "normal" silently); "frame_gated" and min_frames_to_converge/min_frames_to_init are removed. | `src/map/voxelmap.cpp:200`; src/lio/voxelnode.cpp:213-215 |
 | `voxel_map/plane/sensor_noise_floor_eig0` | bool | false | not set | When true, the smallest eigenvalue is raised to the weighted mean of trace(sensor_cov)/3 of the fit points before the plane test; if that reaches the second eigenvalue, the smallest eigenvalue is set equal to the second. | `src/map/voxelmap.cpp:185`; src/lio/voxelplane.cpp:1450-1475 |
-| `voxel_map/plane/plane_gate_mode` | string enum | "disc" | not set | Spatial admission test of a point against a plane. "disc": distance from the plane centre measured in the plane must be below max_radius times the plane radius. "ellipse": Mahalanobis distance in the plane's two in-plane axes below max_radius squared. "ellipse_area_matched": as ellipse, with the threshold multiplied by min(4, sqrt(l2/l1)). Other values are a config-resolver error. | `src/map/voxelmap.cpp:226`; src/lio/voxelplane.cpp:766-789 |
 | `voxel_map/plane/plane_var_mode` | string enum | "eigengap" | not set | Model of the plane covariance. "eigengap": first-order eigenvector perturbation of the fit, with eigenvalue gaps floored at imu/sensor/range_err squared (needs range_err above 0). "information": Fisher information of the plane parameters, which also records the surface roughness. "information_directional": information model with directional weighting. The two information modes require weight_floor/mode roughness or none (or legacy); weight_floor/mode roughness requires an information mode. Other values are a config-resolver error. | `src/map/voxelmap.cpp:293`; src/lio/voxelplane.cpp:1511-1545 |
-| `voxel_map/plane/plane_var_min` | double | 0.0 | not set | Lower clamp (m^2) on the plane-variance term of the residual weight and gate, applied after the scan term. 0 disables. Negative or non-finite values are refused. Refused together with line_residual/enabled true. | `src/map/voxelmap.cpp:393`; src/lio/voxelplane.cpp:819-821 |
-| `voxel_map/plane/plane_var_scan_s2` | double | 0.0 | not set | Adds this value divided by max(1, distinct frames of the voxel at its last fit) to the plane-variance term. 0 disables. Same refusals as plane_var_min. | `src/map/voxelmap.cpp:394`; src/lio/voxelplane.cpp:819-821 |
 | `voxel_map/plane/plane_var_diag_en` | bool | false | not set | Write-only diagnostic of the plane-variance term, reported in the LIO summary. | `src/map/voxelmap.cpp:395`; src/lio/voxelplane.cpp:817; src/processing/lio_iekf.cpp:550 |
 
 #### voxel_map/plane/weight_floor
@@ -418,9 +402,8 @@ The floor is a variance added to the residual weight and the gate. The sensor ra
 
 | key | type | code default | value in config/ntu_viral.yaml | meaning | read at |
 |---|---|---|---|---|---|
-| `voxel_map/plane/line_residual/enabled` | bool | false | `true` | Switches the line residual rows. When true, voxels classified as lines produce line rows instead of a point-to-plane row (form hard) or every matched point gets three rows (form smooth). | `src/map/voxelmap.cpp:351`; src/lio/voxelplane.cpp:1493; also read in src/processing/lio_base.cpp:503 |
-| `voxel_map/plane/line_residual/form` | string enum | "hard" | `hard` | Read only when enabled is true. "hard": a line voxel gets line rows, others get the plane row. "smooth": three Mahalanobis rows for each point. Other values are a config-resolver error. | `src/map/voxelmap.cpp:352`; src/lio/voxelplane.cpp:1117 |
-| `voxel_map/plane/line_residual/rule` | string enum | "absolute" | `absolute` | Read only when enabled is true and form is hard. "absolute": line when the second eigenvalue is below plane_threshold. "relative": line when e1 <= (1 + rel_sigmas * sqrt(2/(n-1))) * e0. "relative_noise": as relative, with e0 floored at range_err squared. "shape": line when e1 <= shape_ratio * e2. Other values are a config-resolver error. | `src/map/voxelmap.cpp:354`; src/lio/voxelplane.cpp:1493; include/livo_recon/lio/line_residual.h:62-80 |
+| `voxel_map/plane/line_residual/form` | string enum | "hard" | `hard` | R97A: line residuals are always on (voxel_map/plane/line_residual/enabled is removed). "hard": a line voxel gets line rows, others get the plane row. "smooth": three Mahalanobis rows for each point. Other values are a config-resolver error. | `src/map/voxelmap.cpp:340`; src/lio/voxelplane.cpp:1117 |
+| `voxel_map/plane/line_residual/rule` | string enum | "absolute" | `absolute` | Read only when form is hard. "absolute": line when the second eigenvalue is below plane_threshold. "relative": line when e1 <= (1 + rel_sigmas * sqrt(2/(n-1))) * e0. "relative_noise": as relative, with e0 floored at range_err squared. "shape": line when e1 <= shape_ratio * e2. Other values are a config-resolver error. | `src/map/voxelmap.cpp:342`; src/lio/voxelplane.cpp:1493; include/livo_recon/lio/line_residual.h:62-80 |
 | `voxel_map/plane/line_residual/rel_sigmas` | double | 3.0 | not set | Read only for rules "relative" and "relative_noise". Must be finite and above 0. | `src/map/voxelmap.cpp:357`; include/livo_recon/lio/line_residual.h:68 |
 | `voxel_map/plane/line_residual/shape_ratio` | double | 0.1 | not set | Read only for rule "shape". Must be finite and in (0, 1). | `src/map/voxelmap.cpp:360`; include/livo_recon/lio/line_residual.h:80 |
 | `voxel_map/plane/line_residual/variance` | string enum | "fit_only" | `plane_equivalent` | Read only when enabled is true. "fit_only": map-side variance from the eigenvalues of the voxel. "plane_equivalent": fit_only plus the variance of the row's own direction propagated from the point covariances (needs plane_var_mode eigengap, else refused). Other values are a config-resolver error. | `src/map/voxelmap.cpp:375`; src/lio/voxelplane.cpp:1146-1196 |
@@ -675,7 +658,7 @@ These keys are read by the callbacks processor. All are write-only diagnostics.
 
 ## Keys present in a yaml but read by nothing
 
-None. Every key found by flattening the files in `config/*.yaml` is read by at least one parameter call in the source (the check compared the flattened yaml keys with the keys of the source read calls and found no yaml key without a read). The node would in any case refuse a key that nothing reads. Keys that are read only in a scope that is not selected (for example the `tracker` keys when neither `vio/enable` nor `combined/enable` is true, or the line-residual sub-keys when `line_residual/enabled` is false) are accepted by the end-of-load check without being read; they are listed in their own tables above.
+None. Every key found by flattening the files in `config/*.yaml` is read by at least one parameter call in the source (the check compared the flattened yaml keys with the keys of the source read calls and found no yaml key without a read). The node would in any case refuse a key that nothing reads. Keys that are read only in a scope that is not selected (for example the `tracker` keys when neither `vio/enable` nor `combined/enable` is true, or the line-residual sub-keys read only for a specific form/rule) are accepted by the end-of-load check without being read; they are listed in their own tables above.
 
 ## Removed keys
 
@@ -752,6 +735,15 @@ A key in this section is refused at start-up when it is set, whatever its value.
 - `camera/distortion_model`: removed; R97.
 - `viz/grid_map`: removed; R97.
 - `imu/process_noise/switch/scan`: removed; R97.
+- `voxel_map/backend`: removed; R97A Q1 (the binned map is the only map).
+- `voxel_map/plane/min_frames_to_init`: removed; R97A Q1 (was a no-op at its default, 1).
+- `voxel_map/plane/min_frames_to_converge`: removed; R97A Q1 (with convergence_mode "frame_gated").
+- `voxel_map/plane/plane_gate_mode`: removed; R97A Q1 ("disc" is the only gate mode).
+- `voxel_map/plane/line_residual/enabled`: removed; R97A Q1 (line residuals are always on).
+- `voxel_map/plane/plane_var_min`: removed; R97A Q1.
+- `voxel_map/plane/plane_var_scan_s2`: removed; R97A Q1.
+- `voxel_map/map/freeze_after_calibration`: removed; R97A Q1.
+- `voxel_map/map/shuffle_insertion_seed`: removed; R97A Q1.
 
 ### Refused by the loaders
 
@@ -770,7 +762,7 @@ A key in this section is refused at start-up when it is set, whatever its value.
 - `voxel_map/plane/bin_size_fraction`: same as voxel_map/plane/use_bins; R90.
 - `voxel_map/plane/bin_weight_mode_fit`: same as voxel_map/plane/use_bins; R90.
 - `voxel_map/plane/bin_weight_mode_var`: same as voxel_map/plane/use_bins; R90.
-- `voxel_map/plane/line_residual/mode`: replaced by `voxel_map/plane/line_residual/enabled` with `form` and `rule`; round not stated (src/map/voxelmap.cpp:347).
+- `voxel_map/plane/line_residual/mode`: use `form` and `rule` (line residuals are always on since R97A); round not stated (src/map/voxelmap.cpp:336).
 - `voxel_map/plane/line_residual/threshold`: replaced by `voxel_map/plane/line_residual/rule`; round not stated (src/map/voxelmap.cpp:349).
 - `voxel_map/plane/log_consistency_corr_en`: replaced by `voxel_map/plane/log_consistency_mode` (false is off or scan, true is corr); round not stated (src/map/voxelmap.cpp:423).
 - `voxel_map/plane/log_consistency_covariates_en`: replaced by `voxel_map/plane/log_consistency_mode` corr+covariates; round not stated (src/map/voxelmap.cpp:428).

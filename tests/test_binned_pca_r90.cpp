@@ -41,7 +41,9 @@ template <class T, class = void> struct HasBinnedWeightMode : std::false_type {}
 template <class T> struct HasBinnedWeightMode<T, std::void_t<decltype(std::declval<T&>().binned_weight_mode)>> : std::true_type {};
 static_assert(!HasBinnedWeightMode<VoxelOpts>::value, "VoxelOpts::binned_weight_mode was removed in R95 (the weight of a bin is its return count)");
 
-static VoxelOptsPtr makeOpts(bool binned, int cov_mode, int min_init, int min_update, int max_points)
+// R97A: the plain (non-binned) node fit path is removed (VoxelOpts has no binned_enabled member -- the binned map is the only map); this
+// no longer takes a `binned` flag, since every VoxelNode is binned now.
+static VoxelOptsPtr makeOpts(int cov_mode, int min_init, int min_update, int max_points)
 {
   auto o = std::make_shared<VoxelOpts>();
   o->plane_threshold = 0.01;
@@ -52,7 +54,6 @@ static VoxelOptsPtr makeOpts(bool binned, int cov_mode, int min_init, int min_up
   o->max_points = max_points;
   o->voxel_size = 0.25;
   o->max_layer = 0;
-  o->binned_enabled = binned;
   o->binned_bin_fraction = 0.2;
   o->binned_cov_mode = cov_mode;
   return o;
@@ -100,7 +101,7 @@ int main()
   }
   {   // PC2
     const auto pts = patch(0, 25, 3, 1e-6);
-    auto o = makeOpts(false, 0, 3, 1, 50);
+    auto o = makeOpts(0, 3, 1, 50);
     VoxelPlane raw(o);
     raw.update(pts, -1, nullptr, nullptr, nullptr, 1, 0);
     CHECK(raw.isPlane());
@@ -128,11 +129,11 @@ int main()
     CHECK(std::fabs(sr.d - sb.d) < 1e-12);
   }
   std::vector<PlaneUpdate> upd;
-  {   // PC3
+  {   // PC3 (R97A: the raw-node comparison is removed with the plain fit path; the binned-node bin-counting property stays)
     auto stats = std::make_shared<VoxelStats>();
     setBootstrapInsertion(false);
     setCurrentFrame(1);
-    VoxelNode nb(makeOpts(true, 0, 5, 5, 50), stats, 0, V3D(0, 0, 0));
+    VoxelNode nb(makeOpts(0, 5, 5, 50), stats, 0, V3D(0, 0, 0));
     nb.insertPoints(patch(0, 4, 3, 1e-6), upd);              // 12 returns, 4 bins
     CHECK(!nb.hasConvergedPlane());
     CHECK(stats->binned_points.load() == 12);
@@ -143,19 +144,12 @@ int main()
     CHECK(stats->binned_new_bins.load() == 6);
     CHECK(stats->binned_fits.load() == 1);
     CHECK(nb.hasConvergedPlane());
-
-    auto stats_raw = std::make_shared<VoxelStats>();
-    setCurrentFrame(1);
-    VoxelNode nr(makeOpts(false, 0, 5, 5, 50), stats_raw, 0, V3D(0, 0, 0));
-    nr.insertPoints(patch(0, 4, 3, 1e-6), upd);              // the same 12 returns, raw: 12 >= 5, fits at once
-    CHECK(nr.hasConvergedPlane());
-    CHECK(stats_raw->binned_points.load() == 0);
   }
   {   // PC4 (R92: touched count; before R92 this block expected the opened count)
     auto stats = std::make_shared<VoxelStats>();
     setBootstrapInsertion(false);
     setCurrentFrame(1);
-    VoxelNode n(makeOpts(true, 0, 5, 5, 50), stats, 0, V3D(0, 0, 0));
+    VoxelNode n(makeOpts(0, 5, 5, 50), stats, 0, V3D(0, 0, 0));
     n.insertPoints(patch(0, 8, 1, 1e-6), upd);               // 8 bins: fitted
     CHECK(stats->binned_fits.load() == 1);
     setCurrentFrame(2);
@@ -178,8 +172,8 @@ int main()
     auto s_open = std::make_shared<VoxelStats>();
     setBootstrapInsertion(false);
     setCurrentFrame(1);
-    VoxelNode lock(makeOpts(true, 0, 5, 5, 6), s_lock, 0, V3D(0, 0, 0));
-    VoxelNode open(makeOpts(true, 0, 5, 5, 50), s_open, 0, V3D(0, 0, 0));
+    VoxelNode lock(makeOpts(0, 5, 5, 6), s_lock, 0, V3D(0, 0, 0));
+    VoxelNode open(makeOpts(0, 5, 5, 50), s_open, 0, V3D(0, 0, 0));
     lock.insertPoints(patch(0, 8, 1, 1e-6), upd);
     open.insertPoints(patch(0, 8, 1, 1e-6), upd);
     CHECK(s_lock->binned_fits.load() == 1 && s_open->binned_fits.load() == 1);
@@ -194,7 +188,7 @@ int main()
       auto st = std::make_shared<VoxelStats>();
       setBootstrapInsertion(false);
       setCurrentFrame(1);
-      VoxelNode n(makeOpts(true, cov_mode, 5, 5, 50), st, 0, V3D(0, 0, 0));
+      VoxelNode n(makeOpts(cov_mode, 5, 5, 50), st, 0, V3D(0, 0, 0));
       auto pts = patch(0, 10, 1, 1e-6);
       for (int k = 0; k < 4; ++k) { auto more = patch(k, 1, 6, 1e-6); pts.insert(pts.end(), more.begin(), more.end()); }
       n.insertPoints(pts, upd);

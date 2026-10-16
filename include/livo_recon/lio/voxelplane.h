@@ -381,11 +381,7 @@ VoxelPlaneR77Counters voxelPlaneR77Counters();
 // R81 (F-468, F-485): engagement of voxel_map/plane/plane_var_scan_s2 and plane_var_min, cumulative since process start, counted only while a key is on.
 // rows: gate() evaluations that reached the variance term; scan_rows: of those, rows where s2 > 0 added a scan term; clamped: rows the plane_var_min clamp raised;
 // sum_n_scans: sum of max(1, distinct frames) over scan_rows (mean n_scans = sum_n_scans / scan_rows).
-struct VoxelPlaneR81Counters
-{
-  long rows = 0, scan_rows = 0, clamped = 0, sum_n_scans = 0;
-};
-VoxelPlaneR81Counters voxelPlaneR81Counters();
+// R97A: VoxelPlaneR81Counters/voxelPlaneR81Counters() removed with voxel_map/plane/plane_var_min and plane_var_scan_s2.
 // R82 (D2, F-502): snapshot of the plane variance diagnostic (voxel_map/plane/plane_var_diag_en), cumulative since process start. See lio/plane_var_diag.h.
 PlaneVarDiagSnapshot voxelPlaneVarDiagSnapshot();
 // R82 (D4, F-500): engagement of voxel_map/plane/line_residual/classify_at_fit, cumulative since process start. line_classified: fits the classifier called a line;

@@ -147,7 +147,6 @@ add_executable(livo_recon_node
   src/lio/residual_redundancy.cpp
   src/lio/info_scale.cpp
   src/map/voxelmap.cpp
-  src/map/binned_voxelmap.cpp
   src/map/map_backend_factory.cpp
   src/vio/crop_utils.cpp
   src/vio/point_tracker.cpp
@@ -277,11 +276,6 @@ target_compile_definitions(test_line_distance_r80 PRIVATE LIVO_R80_VOXELMAP_SRC=
 target_link_libraries(test_line_distance_r80 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
 add_test(NAME line_distance_r80 COMMAND test_line_distance_r80)
 # R81 (F-468, F-485 Part 3): plane_var_scan_s2 / plane_var_min (pure arithmetic + VoxelPlane::gate() / computeResidual(); the source check reads src/map/voxelmap.cpp).
-add_executable(test_plane_var_r81 tests/test_plane_var_r81.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
-target_include_directories(test_plane_var_r81 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
-target_compile_definitions(test_plane_var_r81 PRIVATE LIVO_R81_VOXELMAP_SRC="${CMAKE_CURRENT_SOURCE_DIR}/src/map/voxelmap.cpp")
-target_link_libraries(test_plane_var_r81 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
-add_test(NAME plane_var_r81 COMMAND test_plane_var_r81)
 
 # R78 (planning agent's patch): which point set the IEKF uses (lio/iekf_point_stream); header only, ROS-free.
 add_executable(test_iekf_stream_r78 tests/test_iekf_stream_r78.cpp)

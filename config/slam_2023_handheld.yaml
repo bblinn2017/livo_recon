@@ -128,7 +128,9 @@ lio:
   ekf:
     max_iterations: 5
 voxel_map:
-  backend: "voxel"  # "voxel" (persistent per-voxel plane fits, VoxelMap), "binned" (VoxelMap whose nodes keep bins) 
+  # R97A: voxel_map/backend is removed -- the binned map (R88) is the only map now. This yaml previously set "voxel"
+  # (the plain/non-binned map), a non-default value Q1's identity claim does not cover -- flagged in REPORT.md as a
+  # real behavior change for this dataset (Bryce to review).
   map:
     # Confirmed via a single-parameter voxel_map ablation this session
     # (hilti_voxelmap_ablation, then hilti_voxelsize_fine to check finer

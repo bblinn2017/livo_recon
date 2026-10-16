@@ -179,7 +179,7 @@ lio:
   ekf:
     max_iterations: 5
 voxel_map:
-  backend: "binned"  # "voxel" (persistent per-voxel plane fits, VoxelMap), "binned" (VoxelMap whose nodes keep bins). R97 default: binned (R96E factor MAP = 1).
+  # R97A: voxel_map/backend is removed -- the binned map (R88) is the only map now.
   binned:
     bin_size_fraction: 0.25   # bin edge = this x the node's own edge
     cov_mode: average         # average (C / k) | shrunk (C / k^2)
@@ -196,9 +196,8 @@ voxel_map:
     max_layer: 2
   plane:
     plane_threshold: 2.5e-3
-    # R97 default: hard lines with the plane-equivalent variance (R96E factor LINES = 1).
+    # R97 default: hard lines with the plane-equivalent variance (R96E factor LINES = 1). R97A: line residuals are always on.
     line_residual:
-      enabled: true
       form: hard
       rule: absolute
       rows: per_normal

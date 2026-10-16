@@ -1,6 +1,5 @@
 #include "livo_recon/lio/line_residual.h"
 #include "livo_recon/lio/plane_test_values.h"
-#include "livo_recon/lio/plane_var_r81.h"
 #include "livo_recon/map/voxelmap.h"
 #include "livo_recon/map/snapshot_frames.h"
 #include "livo_recon/lio/voxelplane.h"
@@ -197,9 +196,6 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   paramWarn<std::string>(pnh, "voxel_map/map/bootstrap_mode", bootstrap_mode_, "aggregate");
   if (bootstrap_mode_ != "aggregate" && bootstrap_mode_ != "sequential")
     throw std::runtime_error("voxel_map/map/bootstrap_mode must be aggregate or sequential");
-  paramWarn<std::string>(pnh, "voxel_map/plane/convergence_mode", opts_->convergence_mode, "normal");
-  paramWarn<int>(pnh, "voxel_map/plane/min_frames_to_converge", opts_->min_frames_to_converge, 5);
-  paramWarn<int>(pnh, "voxel_map/plane/min_frames_to_init", opts_->min_frames_to_init, 1);
 
   paramWarn<double>(pnh, "voxel_map/plane/plane_threshold",           opts_->plane_threshold,           0.01);
 
@@ -223,19 +219,11 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     // last, and so the sub-parameters of an unselected mode cannot be set
     // silently.  See config_resolve.h.
     ConfigResolver cfg(pnh);
-    cfg.mode("voxel_map/plane/plane_gate_mode", opts_->plane_gate_mode, "disc",
-             { "disc", "ellipse", "ellipse_area_matched" });
-    // Resolved once here, not per-candidate-point -- see voxelplane.cpp's
-    // gate(), which used to re-compare opts_->plane_gate_mode (a
-    // std::string) against these same literals on every single candidate,
-    // every IEKF iteration. Mirrors gate()'s own branch structure exactly:
-    // "ellipse_area_matched" first (most specific), then "ellipse", else
-    // "disc" (the default, and the fallback for any unrecognized value --
-    // though cfg.mode() above already refuses those before this runs).
-    opts_->plane_gate_mode_enum =
-        (opts_->plane_gate_mode == "ellipse_area_matched") ? PlaneGateMode::EllipseAreaMatched :
-        (opts_->plane_gate_mode == "ellipse")               ? PlaneGateMode::Ellipse :
-                                                                PlaneGateMode::Disc;
+    // R97A: voxel_map/plane/plane_gate_mode is removed (baked in at "disc", VoxelPlane::gate()'s only remaining branch).
+    // convergence_mode now REFUSES an unrecognized value (previously fell through to "normal" silently); "frame_gated"
+    // and voxel_map/plane/min_frames_to_converge/min_frames_to_init are removed with it.
+    cfg.mode("voxel_map/plane/convergence_mode", opts_->convergence_mode, "normal",
+             { "normal", "always_update" });
 
     // ── residual-weight floor ────────────────────────────────────────────
     // sigma_r2 is MIRRORED from imu/sensor/range_err rather than given its
@@ -345,20 +333,19 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     // below plane_threshold (the constant that tests the first) is a LINE and gets two rows (u0, u1) instead of one point-to-plane row.
     // rule picks another line test (relative, relative_noise, shape).  form=smooth: every matched point gets three rows, no class switch.
     cfg.refuseIfSet("voxel_map/plane/line_residual/mode",
-                    "Use voxel_map/plane/line_residual/enabled (bool) with form (hard|smooth) and rule (absolute|relative|relative_noise|shape).");
+                    "Use form (hard|smooth) and rule (absolute|relative|relative_noise|shape). Line residuals are always on (R97A).");
     cfg.refuseIfSet("voxel_map/plane/line_residual/threshold",
                     "Use voxel_map/plane/line_residual/rule (absolute|relative|relative_noise|shape), read only when form is hard.");
-    cfg.get<bool>("voxel_map/plane/line_residual/enabled", opts_->line_enabled, false);
-    cfg.nestedMode(opts_->line_enabled, "voxel_map/plane/line_residual/enabled=true",
-                   "voxel_map/plane/line_residual/form", opts_->line_form, "hard", { "hard", "smooth" });
-    cfg.nestedMode(opts_->line_enabled && opts_->line_form == "hard", "voxel_map/plane/line_residual/enabled=true,form=hard",
+    // R97A: line residuals are always on (voxel_map/plane/line_residual/enabled is removed; the no-line path is gone).
+    cfg.mode("voxel_map/plane/line_residual/form", opts_->line_form, "hard", { "hard", "smooth" });
+    cfg.nestedMode(opts_->line_form == "hard", "voxel_map/plane/line_residual/form=hard",
                    "voxel_map/plane/line_residual/rule", opts_->line_rule, "absolute",
                    { "absolute", "relative", "relative_noise", "shape" });
-    cfg.nested<double>(opts_->line_enabled && opts_->line_form == "hard" && (opts_->line_rule == "relative" || opts_->line_rule == "relative_noise"),
-                       "voxel_map/plane/line_residual/enabled=true,form=hard,rule=relative|relative_noise",
+    cfg.nested<double>(opts_->line_form == "hard" && (opts_->line_rule == "relative" || opts_->line_rule == "relative_noise"),
+                       "voxel_map/plane/line_residual/form=hard,rule=relative|relative_noise",
                        "voxel_map/plane/line_residual/rel_sigmas", opts_->line_rel_sigmas, 3.0);
-    cfg.nested<double>(opts_->line_enabled && opts_->line_form == "hard" && opts_->line_rule == "shape",
-                       "voxel_map/plane/line_residual/enabled=true,form=hard,rule=shape",
+    cfg.nested<double>(opts_->line_form == "hard" && opts_->line_rule == "shape",
+                       "voxel_map/plane/line_residual/form=hard,rule=shape",
                        "voxel_map/plane/line_residual/shape_ratio", opts_->line_shape_ratio, 0.1);
     if (!(opts_->line_shape_ratio > 0.0) || !(opts_->line_shape_ratio < 1.0) || !std::isfinite(opts_->line_shape_ratio))
       throw std::runtime_error("voxel_map/plane/line_residual/shape_ratio must be finite and in (0, 1)");
@@ -367,40 +354,28 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     {
       LineMode lm = LineMode::Off;
       std::string why;
-      if (!resolveLineConfig(opts_->line_enabled, opts_->line_form, opts_->line_rule, lm, &why))
+      if (!resolveLineConfig(true, opts_->line_form, opts_->line_rule, lm, &why))
         throw std::runtime_error("voxel_map/plane/line_residual: unresolvable combination: " + why);
       opts_->line_residual_enum = static_cast<int>(lm);
     }
     // ── R77 (F-453): how the map-side variance of a line / smooth row is formed ──
-    cfg.nestedMode(opts_->line_enabled, "voxel_map/plane/line_residual/enabled=true",
-                   "voxel_map/plane/line_residual/variance", opts_->line_variance, "fit_only", { "fit_only", "plane_equivalent" });
-    opts_->line_var_plane_equivalent = opts_->line_enabled && opts_->line_variance == "plane_equivalent";
+    cfg.mode("voxel_map/plane/line_residual/variance", opts_->line_variance, "fit_only", { "fit_only", "plane_equivalent" });
+    opts_->line_var_plane_equivalent = opts_->line_variance == "plane_equivalent";
     if (opts_->line_var_plane_equivalent && !eigengap)
       cfg.requireCombination(
           "voxel_map/plane/line_residual/variance = plane_equivalent needs voxel_map/plane/plane_var_mode = eigengap: the tilt term is propagated from the voxel's own points inside "
           "VoxelPlane::update()'s eigengap branch; the information variance (no eigengap) never forms one. Use variance = fit_only with those modes.");
     // ── R80 (F-453, Bryce 2026-10-05): one distance row per hard line voxel instead of the two normal rows ──
-    cfg.nestedMode(opts_->line_enabled, "voxel_map/plane/line_residual/enabled=true",
-                   "voxel_map/plane/line_residual/rows", opts_->line_rows, "per_normal", { "per_normal", "distance" });
-    opts_->line_rows_distance = opts_->line_enabled && opts_->line_rows == "distance";
+    cfg.mode("voxel_map/plane/line_residual/rows", opts_->line_rows, "per_normal", { "per_normal", "distance" });
+    opts_->line_rows_distance = opts_->line_rows == "distance";
     if (opts_->line_rows_distance && opts_->line_form != "hard")
       cfg.requireCombination("voxel_map/plane/line_residual/rows = distance needs form = hard: the smooth form has no line, it gives three Mahalanobis rows.");
     // ── R93A: the eigengap gap floor is unconditional (keys plane_gap_floor_en, plane_var_denom_floor_en and debias_denominator_guard are removed). The floor is range_err^2, so it needs range_err > 0. ──
     if (eigengap && !(opts_->weight_sigma_r2 > 0.0))
       cfg.requireCombination("voxel_map/plane/plane_var_mode = eigengap needs imu/sensor/range_err > 0: the gap floor (always on since R93A) is range_err^2, and at 0 the eigengap plane variance would divide by a near-zero gap.");
-    // ── R81 (F-468, F-485 Part 3): scan term and clamp on the plane variance term of the weight and the gate. Both default 0.0 = off (bit-identical to R80). ──
-    // Read unconditionally (every plane_var_mode): the term is formed in VoxelPlane::gate(), which all of them reach. Negative, NaN and infinite are refused.
-    cfg.get<double>("voxel_map/plane/plane_var_min", opts_->plane_var_min, 0.0);
-    cfg.get<double>("voxel_map/plane/plane_var_scan_s2", opts_->plane_var_scan_s2, 0.0);
+    // R97A: voxel_map/plane/plane_var_min and plane_var_scan_s2 are removed (both were 0.0, i.e. off, in every job; line residuals are
+    // now always on, and these keys were refused together with line residuals anyway).
     cfg.get<bool>("voxel_map/plane/plane_var_diag_en", opts_->plane_var_diag_en, false);   // R82 (D2): write-only diagnostic, default off
-    {
-      const std::string pv_err = planeVarR81Error(opts_->plane_var_min, opts_->plane_var_scan_s2);
-      if (!pv_err.empty()) cfg.requireCombination(pv_err);
-    }
-    if ((opts_->plane_var_min > 0.0 || opts_->plane_var_scan_s2 > 0.0) && opts_->line_enabled)
-      cfg.requireCombination(
-          "voxel_map/plane/plane_var_min / plane_var_scan_s2 > 0 together with voxel_map/plane/line_residual/enabled = true: line, distance and smooth rows take their own fit variance "
-          "(rows[i].fit_var) and never see the plane variance term these keys change, so on line voxels the keys would be silently inert. Turn the lines off (R81 arms run lines off).");
     // ── binning ──────────────────────────────────────────────────────────
     // R90: the pca-only bin path (voxel_map/plane/use_bins and its three nested keys) is removed. Binning is the binned map type, voxel_map/backend = binned (src/map/binned_voxelmap.cpp), for
     // both plane fits. A removed key that is still set is REFUSED rather than ignored: an ignored flag would make a run that asks for binning silently run without it.
@@ -439,13 +414,27 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     }
     ROS_INFO_STREAM("\n" << cfg.report());
   }
-  paramWarn<int>(pnh, "voxel_map/map/shuffle_insertion_seed", opts_->shuffle_insertion_seed, 0);
   // CQ-74 item 1: default flipped false->true, making rule 60's per-frame
   // ATE + position/attitude confidence contract real (was previously
   // opt-in and silently off for every run unless a manifest explicitly
   // set it).
   paramWarn<bool>(pnh, "voxel_map/map/log_frame_stats_en", opts_->log_frame_stats_en, true);
-  paramWarn<bool>(pnh, "voxel_map/map/freeze_after_calibration", opts_->freeze_after_calibration, false);   // R73
+
+  // R88 (binned map; R97A: the only map, voxel_map/backend is removed): bin_size_fraction and cov_mode, folded in from the former
+  // BinnedVoxelMap::loadParameters() override (that subclass is removed -- VoxelMap is the only map class now).
+  {
+    double fraction = 0.2;
+    std::string cov = "average";
+    paramWarn<double>(pnh, "voxel_map/binned/bin_size_fraction", fraction, 0.2);
+    paramWarn<std::string>(pnh, "voxel_map/binned/cov_mode", cov, "average");
+    if (!(fraction > 0.0 && fraction <= 1.0))
+      throw std::runtime_error("[config] refused: voxel_map/binned/bin_size_fraction=" + std::to_string(fraction) + " -- must be in (0, 1]");
+    binned::CovMode cm;
+    if (!binned::parseCovMode(cov, cm))
+      throw std::runtime_error("[config] refused: voxel_map/binned/cov_mode=" + cov + " -- must be average or shrunk");
+    opts_->binned_bin_fraction = fraction;
+    opts_->binned_cov_mode = (cm == binned::CovMode::Shrunk) ? 1 : 0;
+  }
 
   std::ostringstream oss;
   oss << "[params/voxel_map]"
@@ -456,28 +445,26 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  plane/plane_fit_eigs_en:         " << (opts_->plane_fit_eigs_en ? "true" : "false")
       << "\n  plane/sensor_noise_floor_eig0:   " << (opts_->sensor_noise_floor_eig0 ? "true" : "false")
       << "\n  plane/convergence_mode:          " << opts_->convergence_mode
-      << "\n  plane/min_frames_to_converge:    " << opts_->min_frames_to_converge
-      << "\n  plane/min_frames_to_init:        " << opts_->min_frames_to_init
       << "\n  plane/plane_threshold:           " << opts_->plane_threshold
-      << "\n  plane/line_residual:             enabled " << (opts_->line_enabled ? "true" : "false") << " / form " << opts_->line_form << " / rule " << opts_->line_rule << " / rel_sigmas " << opts_->line_rel_sigmas << " / shape_ratio " << opts_->line_shape_ratio << " / enum " << opts_->line_residual_enum << " / variance " << opts_->line_variance << " / rows " << opts_->line_rows
-      << "\n  plane/plane_var_min:             " << opts_->plane_var_min << (opts_->plane_var_min > 0.0 ? "   (R81 ENGAGED: plane_var_term = max(plane_var_term, plane_var_min))" : "   (off)")
-      << "\n  plane/plane_var_scan_s2:         " << opts_->plane_var_scan_s2 << (opts_->plane_var_scan_s2 > 0.0 ? "   (R81 ENGAGED: plane_var_term += s2 / max(1, distinct frames), before the clamp)" : "   (off)")
+      << "\n  plane/line_residual:             form " << opts_->line_form << " / rule " << opts_->line_rule << " / rel_sigmas " << opts_->line_rel_sigmas << " / shape_ratio " << opts_->line_shape_ratio << " / enum " << opts_->line_residual_enum << " / variance " << opts_->line_variance << " / rows " << opts_->line_rows
       << "\n  plane/plane_var_mode:            " << opts_->plane_var_mode
       << "\n  plane/log_variance_shares_en:    " << (opts_->log_variance_shares_en ? "true" : "false")
-      << "\n  plane/plane_gate_mode:           " << opts_->plane_gate_mode
       << "\n  plane/weight_floor/mode:         " << opts_->weight_floor_mode
       << "\n  plane/weight_floor/sigma_r2:     " << opts_->weight_sigma_r2
       << "\n  plane/log_consistency_mode:      " << opts_->log_consistency_mode
       << "\n  plane/log_consistency_corr_stride: " << opts_->log_consistency_corr_stride
-      << "\n  map/shuffle_insertion_seed:      " << opts_->shuffle_insertion_seed
       << "\n  map/log_frame_stats_en:          " << (opts_->log_frame_stats_en ? "true" : "false")
-      << "\n  map/freeze_after_calibration:    " << (opts_->freeze_after_calibration ? "true" : "false")
       << "\n  points/min_init:  " << opts_->min_init_points
       << "\n  points/max:       " << opts_->max_points
       << "\n  points/min_update:" << opts_->min_update_points
       << "\n  residual/sigma_num_squared:  " << opts_->sigma_num_squared
       << "\n  residual/max_radius:         " << opts_->max_radius
-      << "\n  search/neighborhood_size:    " << opts_->neighborhood_size;
+      << "\n  search/neighborhood_size:    " << opts_->neighborhood_size
+      << "\n  binned/bin_size_fraction:        " << opts_->binned_bin_fraction << "   (bin edge " << opts_->binned_bin_fraction * opts_->voxel_size << " m at the root voxel)"
+      << "\n  binned/cov_mode:                 " << (opts_->binned_cov_mode == 1 ? "shrunk" : "average")
+      << "\n  binned/weight:                   count (w = k; the only weight since R95)"
+      << "\n  binned/fit:                      pca, one weighted point per occupied bin"
+      << "\n  binned/min_init, min_update:     " << opts_->min_init_points << ", " << opts_->min_update_points << "   (counted in unique bins touched since the last fit)";
   return oss.str();
 }
 
@@ -543,14 +530,7 @@ void VoxelMap::updateMapInternal(MeasureGroup& mg, bool advance_live_frame) {
   const int insertion_frame = frame_idx_;
   setCurrentFrame(insertion_frame);
   if (advance_live_frame) ++frame_idx_;
-  if (advance_live_frame && opts_->freeze_after_calibration)
-  {
-    // R73 (F-414 control): the frame counter advances, nothing is inserted; the map stays the calibration map.
-    ++frozen_scans_;
-    last_n_map_pts_ = 0;
-    last_n_active_voxels_ = 0;
-    return;
-  }
+  // R97A: voxel_map/map/freeze_after_calibration is removed; frozen_scans_ (scan_log.csv's column) stays at 0 always, matching every job's actual behavior.
   if (opts_->log_frame_stats_en) voxelPlaneFrameStatsReset();
   // The single point set (point_filter_num + ds_leaf_size, see measures.h's
   // docs on MeasureGroup::points) used for both voxel-map insertion and
@@ -580,11 +560,7 @@ void VoxelMap::updateMapInternal(MeasureGroup& mg, bool advance_live_frame) {
       // History (165-172): see docs/livo_recon_changelog.md#src-map-voxelmap.cpp-165
       std::vector<int> proc_order(np);
       std::iota(proc_order.begin(), proc_order.end(), 0);
-      if (opts_->shuffle_insertion_seed != 0) {
-        std::mt19937 rng(static_cast<unsigned int>(opts_->shuffle_insertion_seed) ^
-                          static_cast<unsigned int>(frame_idx_));
-        std::shuffle(proc_order.begin(), proc_order.end(), rng);
-      }
+      // R97A: voxel_map/map/shuffle_insertion_seed is removed (it was 0, i.e. scan order, in every job).
 
       #pragma omp parallel for schedule(static) num_threads(threads)
       for (int oi = 0; oi < np; ++oi) {

@@ -6,7 +6,7 @@
 //       max_points=1000 (batch stored branch). The batch-not-stored branch (points_ already at max_points when B arrives) is not covered here: with a small max_points the children lock
 //       once full and drop their bins, so their returns cannot be counted. Counted as returns in the children's BinSet (numPoints()), not as occupied bins.
 //   VH4 the parent's points_ is empty after the hand-off.
-//   VH5 plain (unbinned) pca control: the same scenario with binned_enabled=false; children hold at least the last batch (not asserted to be all of it).
+//   R97A: VH5 (the plain/unbinned pca control, binned_enabled=false) is removed -- the plain node fit path no longer exists (the binned map is the only map).
 // Exit code 0 = all pass.
 #include <Eigen/Dense>
 #include <algorithm>
@@ -57,11 +57,10 @@ std::vector<PointXYZCov> scatter(std::mt19937& rng, int n)
   return v;
 }
 
-void scenario(const std::string& mode, int max_points, bool expect_history)
+void scenario(int max_points)
 {
   std::mt19937 rng(11);
   auto opts = std::make_shared<VoxelOpts>();
-  opts->binned_enabled = (mode == "binned");
   opts->binned_bin_fraction = 0.1;
   opts->binned_cov_mode = 0;
   opts->max_points = max_points;
@@ -77,8 +76,8 @@ void scenario(const std::string& mode, int max_points, bool expect_history)
   const int nA = 60, nB = 400;
   setCurrentFrame(1);
   node.insertPoints(planar(rng, nA), updates);
-  const std::string tag = mode + " max_points=" + std::to_string(max_points);
-  if (mode == "binned") CHECK(node.plane_.isPlane(), ("VH1 planar batch gives a plane (" + tag + ")").c_str());
+  const std::string tag = "binned max_points=" + std::to_string(max_points);
+  CHECK(node.plane_.isPlane(), ("VH1 planar batch gives a plane (" + tag + ")").c_str());
   setCurrentFrame(2);
   node.insertPoints(scatter(rng, nB), updates);
   std::printf("[INFO] after batch B (%s): status=%d is_plane=%d pointsSize=%d\n", tag.c_str(),
@@ -87,13 +86,9 @@ void scenario(const std::string& mode, int max_points, bool expect_history)
   int sum = 0;
   for (int i = 0; i < 8; ++i) {
     if (!node.leaves_[i]) continue;
-    if (expect_history) { if (node.leaves_[i]->binset_) sum += static_cast<int>(node.leaves_[i]->binset_->numPoints()); }
-    else sum += node.leaves_[i]->plane_.pointsSize();
+    if (node.leaves_[i]->binset_) sum += static_cast<int>(node.leaves_[i]->binset_->numPoints());
   }
-  if (expect_history)
-    CHECK(sum == nA + nB, ("VH3 children hold all history " + std::to_string(sum) + " == " + std::to_string(nA + nB) + " (" + tag + ")").c_str());
-  else
-    CHECK(sum >= nB, ("VH5 control children hold at least the last batch, got " + std::to_string(sum) + " (" + tag + ")").c_str());
+  CHECK(sum == nA + nB, ("VH3 children hold all history " + std::to_string(sum) + " == " + std::to_string(nA + nB) + " (" + tag + ")").c_str());
   CHECK(node.points_.empty(), ("VH4 parent points_ cleared (" + tag + ")").c_str());
 }
 
@@ -101,8 +96,7 @@ void scenario(const std::string& mode, int max_points, bool expect_history)
 
 int main()
 {
-  scenario("binned", 1000, true);
-  scenario("pca", 1000, false);
+  scenario(1000);
   std::printf("ALL PASS\n");
   return 0;
 }

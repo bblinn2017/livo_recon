@@ -18,12 +18,8 @@ using DataQueuesPtr = std::shared_ptr<DataQueues>;
 using StateGroupPtr = std::shared_ptr<StateGroup>;
 using ProfilerPtr   = std::shared_ptr<FrameProfiler>;
 
-// Constructs the concrete MapBackend named by backend_name -- "voxel"
-// (default, today's VoxelMap) or "binned" (BinnedVoxelMap). Called once
-// from NodeContext's construction, before the rest of that backend's own
-// loadParameters() runs (the caller reads voxel_map/backend off pnh
-// itself, ahead of this call, to know which concrete class to build).
-MapBackendPtr createMapBackend(const std::string& backend_name, StateGroupPtr state,
-                               ProfilerPtr profiler, DataQueuesPtr data_queues);
+// Constructs the one concrete MapBackend (VoxelMap, the binned map, R88).
+// R97A: voxel_map/backend is removed; there is no longer a choice to make.
+MapBackendPtr createMapBackend(StateGroupPtr state, ProfilerPtr profiler, DataQueuesPtr data_queues);
 
 }  // namespace livo_recon

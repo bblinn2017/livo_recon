@@ -34,7 +34,6 @@ static VoxelOptsPtr makeOpts(int min_init, int min_update)
   o->min_update_points = min_update;
   o->voxel_size = 0.25;
   o->max_layer = 0;
-  o->binned_enabled = true;
   o->binned_bin_fraction = 0.2;
   o->binned_cov_mode = 0;
   return o;
