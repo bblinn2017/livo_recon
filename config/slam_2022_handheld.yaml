@@ -13,7 +13,6 @@ cuda:
   enable: false  # set true to dispatch H^T*W*H accumulation (LIO) and affine warp (VIO) to GPU
 viz:
   enable: true  # normally overridden by the launch file's viz/enable param, set directly from the rviz:= launch arg (see livo_recon_*.launch) -- this default only applies if that param load is bypassed, e.g. loading this file's params directly outside a launch file
-  grid_map: false
   plane_map: false
   uv_tracking: true  # publish rgb_img with arrows showing vio's tracked uv displacements
   ds:
@@ -111,8 +110,6 @@ state:
     bg: true
     ba: true
     gravity: true
-    cov_acc: false
-    cov_gyr: false
   cov:
     # Initial state covariance only; runtime process noise is under imu/.
     # acc doubled vs the upstream-ported 0.5 starting point above --
@@ -185,9 +182,7 @@ lio:
   ekf:
     max_iterations: 5
 voxel_map:
-  backend: "voxel"  # "voxel" (default, persistent per-voxel plane fits, VoxelMap) or
-                    # "akf" (AKF-LIO-style raw-point Gaussian merge map, AkfMap) -- see
-                    # ~/.claude/plans/imperative-tumbling-karp.md for the design.
+  backend: "voxel"  # "voxel" (persistent per-voxel plane fits, VoxelMap), "binned" (VoxelMap whose nodes keep bins) 
   map:
     # Confirmed via a single-parameter voxel_map ablation this session
     # (hilti_voxelmap_ablation, then hilti_voxelsize_fine to check finer
@@ -294,9 +289,6 @@ topics:
   lidar: "/hesai/pandar"
   imu: "/alphasense/imu"
   queue_size: 20000
-frames:
-  camera: camera_link
-  lidar: lidar_link
 extrinsics:
   R_l2i: [0, -1, 0, -1, 0, 0, 0, 0, -1]
   t_l2i: [-0.001, -0.00855, 0.055]
@@ -309,7 +301,8 @@ camera:
   fy: 351.4911744656785
   cx: 367.8522793375995
   cy: 253.8402144980996
-  distortion_model: equidistant
+  # R97: the key camera/distortion_model was removed (it was read and printed only). The tracker always applies the pinhole radial-tangential model to these four coefficients;
+  # the coefficients of this camera are equidistant (kb4), so VIO undistortion is wrong for it until the tracker is changed. LIO does not use the camera.
   distortion_coeffs: [-0.03696737352869157, -0.008917880497032812, 0.008912969593422046, -0.0037685977496087313]
 preprocess:
   # Rotating Hesai lidar publishes full scans at ~10Hz while this dataset's

@@ -1,9 +1,9 @@
 #pragma once
-// R82 (D4, F-500, Bryce 2026-10-06): one place that decides, at FIT time and for both fits (pca VoxelPlane::update and debiased refitDebiased), whether a voxel is rejected, a plane or a line.
+// R82 (D4, F-500, Bryce 2026-10-06): one place that decides, at FIT time and in VoxelPlane::update, whether a voxel is rejected, a plane or a line.
 // ROS-free and pure so tests/test_voxel_class_r82.cpp can check it. Used only when voxel_map/plane/line_residual/classify_at_fit is true; the default (off) never calls it and every fit is bit-identical to R81.
 //
-// Input: the FINAL eigenvalues e0 <= e1 <= e2 of the fit (for the debiased fit after the noise correction, the clamp at 0, the sensor floor and the e0 <= e1 clamp), the number of points, the threshold the
-// voxel's e0 is tested against (plane_threshold, with the hysteresis factor on the debiased fit), and the line rule (LineOptions of line_residual).
+// Input: the FINAL eigenvalues e0 <= e1 <= e2 of the fit the number of points, the threshold the
+// voxel's e0 is tested against (plane_threshold), and the line rule (LineOptions of line_residual).
 // Order of the decision:
 //   1. non-finite eigenvalue, or e2 < degenerate_floor (a cluster with no direction): Reject (kDegenerate).
 //      With the line model OFF the old test is kept exactly: e1 < degenerate_floor also rejects. With it ON (a hard form) a voxel with e1 < degenerate_floor <= e2 is a perfect line and is kept.

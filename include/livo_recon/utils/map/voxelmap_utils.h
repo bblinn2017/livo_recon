@@ -430,63 +430,10 @@ struct VoxelOpts
   // model says is implausible.
   bool   sensor_noise_floor_eig0    = false;
 
-  // CQ-56: VoxelPlane::addPoints()/refitDebiased() accumulate Spp_ = Sigma
-  // p_i p_i^T from RAW WORLD coordinates, then compute covariance_ =
-  // Spp_/N - mean*mean^T -- textbook catastrophic cancellation (terms of
-  // order |p|^2, answer of order the plane's own thickness, ~1e-4 m^2;
-  // a double's ~16 significant digits run out once |p| reaches the
-  // thousands-of-metres range this project's own trajectories now
-  // routinely traverse). When true, VoxelPlane accumulates (p - ref_)
-  // instead of raw p (ref_ = this voxel's first-ever accumulated point,
-  // set once) -- translation-invariant and exact in infinite-precision
-  // arithmetic, only the cancellation error goes away. Default false --
-  // provably inert (same Spp_/Sp_ values, same fit, when ref_ is never
-  // subtracted).
-  bool   centred_accumulation       = false;
-
-  // "pca" (default): today's unchanged behavior -- unweighted PCA on raw
-  // point positions, plane_var_ (fit uncertainty) a separate O(N)
-  // per-point Jacobian sandwich propagating each point's PointXYZCov::cov.
-  // "debiased": VoxelPlane fits the normal DIRECTLY from a debiased
-  // (noise-corrected) structure tensor, M_debiased = Spp/N - mean*mean^T -
-  // Scov/N (Scov = sum of point covariances) -- a closed-form correction
-  // for the fact that E[(p-mean)(p-mean)^T] = TrueScatter + Cov under
-  // additive per-point measurement noise, so subtracting the accumulated
-  // noise term gives a consistent (unbiased) estimate of the noise-free
-  // plane structure without needing IRLS/iteration. plane_var_ is
-  // reconstructed from a second set of O(1) fixed-size accumulators
-  // (cross-moments of point position against point covariance) instead of
-  // replaying raw points -- see docs/debiased_voxel_plane_fit_2026aug24.md
-  // for the full derivation. VoxelNode never locks a "debiased" voxel into
-  // CONVERGED (no O(N) cost to keep refitting, so no reason to stop and
-  // discard further points) -- min_update_points/max_points/
-  // convergence_mode/min_frames_to_converge are PCA-mode-only under this
-  // setting. KNOWN CAVEAT: the debiasing correction assumes independent
-  // per-point noise; points from a single lidar frame/viewpoint have
-  // documented correlated noise (see sensor_noise_floor_eig0's docs above)
-  // that can make Scov over-subtract and drive the debiased eigenvalue
-  // negative on early/single-frame fits -- min_frames_to_init and the
-  // sensor_noise_floor_eig0 floor both still apply to guard this, but
-  // debiased mode may reject/collapse more often on early voxels than pca
-  // mode until this is characterized by a real comparative sweep.
-  std::string plane_fit_mode        = "pca";
-
   // R93A (Bryce 2026-10-10): plane_fit_pose_cov_mode is removed. Every fit uses the sensor covariance only (the former sensor_only); pos_cov stays on a point for plane_var_mode = information and diagnostics.
 
-  // R64. How the debiased fit applies the sensor-noise correction (only read when plane_fit_mode == "debiased").
-  // "full" (default, bit-identical to R63): subtract the accumulated sensor covariance from the whole 3x3
-  //   scatter, then eigendecompose (normal, lambda0..2 all come from the corrected matrix).
-  // "lambda0_only": eigendecompose the RAW scatter (normal, lambda1, lambda2 uncorrected) and correct only the
-  //   out-of-plane eigenvalue, lambda0_deb = lambda0_raw - n^T Sbar_sensor n (first-order, n = raw normal).
-  // "none": raw scatter, no correction at all. Keeps the persistent accumulators and the never-lock/revoke
-  //   lifecycle of the debiased path but removes the debiasing arithmetic (isolates lifecycle from arithmetic).
-  std::string debias_mode = "full";
-  // R64. Multiplier on plane_threshold applied only when a debiased voxel that WAS a plane is refit (1.0 = off,
-  // bit-identical). > 1 makes an existing plane harder to revoke than a new one is to create.
-  double plane_threshold_hysteresis = 1.0;
-  // R93A: debias_denominator_guard is removed; the one gap floor (below) replaces it.
   // R64. Plane-fit diagnostics (write-only, default off). plane_fit_reasons_en: per-frame counts of fit outcomes by
-  // reason for both fit paths -> plane_fit_reasons.csv. plane_fit_trace_frames > 0: one row per fit attempt for
+  // reason -> plane_fit_reasons.csv. plane_fit_trace_frames > 0: one row per fit attempt for
   // frames 0..plane_fit_trace_frames (frame 0 = bootstrap window) -> plane_fit_trace.csv, at most
   // plane_fit_trace_max_rows rows.
   bool plane_fit_reasons_en = false;
@@ -641,11 +588,8 @@ struct VoxelOpts
   //                   that "lambda0 is a binary admission test only: surface
   //                   roughness never enters the residual variance"; here it
   //                   is the variance component it always was, measured per
-  //                   plane instead of chosen once as a literal.  Available
-  //                   on BOTH fit modes: on the debiased path lambda0 is
-  //                   already noise-corrected, on pca the same subtraction
-  //                   is done at query time (which is one reason the unified
-  //                   model does not need plane_fit_mode as an arm).
+  //                   plane instead of chosen once as a literal.  The noise
+  //                   subtraction is done at query time.
   //                   Requires plane_var_mode = "information", which is what
   //                   computes it; refuses otherwise rather than silently
   //                   floor-ing at zero.
@@ -710,7 +654,7 @@ struct VoxelOpts
   //   u_i, propagated from the points' sensor / pose covariance as a quadratic form in l = (u_a . d, u_b . d, 1) -- the tilt of u_i toward the tilt axes (first-order eigenvector perturbation,
   //   gap floored at the sensor noise variance), the offset variance of the centroid along u_i (n^T (sum w^2 C) n for a plane), and their cross term. Hard rows i = 0, 1 tilt toward u2 only
   //   (the line axis); smooth rows tilt toward the other two axes. R77 plane_equivalent results (tilt only, no offset or cross term) are not reproducible with this key.
-  // Read only with plane_fit_mode = pca and plane_var_mode = eigengap (the information and debiased paths have no per-point fit to propagate): refused otherwise.
+  // Read only with plane_var_mode = eigengap (the information model has no per-point fit to propagate): refused otherwise.
   std::string line_variance = "fit_only";
   bool line_var_plane_equivalent = false;   // resolved once at load from line_variance
   // R80 (F-453, Bryce 2026-10-05): rows = per_normal (default; a hard line voxel gives the two rows u0 and u1, bit for bit what R74 to R79 built) | distance (a hard line voxel gives ONE row:
@@ -719,18 +663,14 @@ struct VoxelOpts
   std::string line_rows = "per_normal";
   bool line_rows_distance = false;   // resolved once at load from line_rows
 
-  // R82 (D4, F-500, Bryce 2026-10-06), unconditional since R93A (the key voxel_map/plane/line_residual/classify_at_fit is removed). Line model at FIT time, in both fits.
-  //   Both fits (pca update(), debiased refitDebiased()) decide reject / plane / line ONCE, right after the eigenvalues are final, with the one function classifyVoxel (include/livo_recon/lio/voxel_class.h), and store the class (VoxelPlane::isLine()):
+  // R82 (D4, F-500, Bryce 2026-10-06), unconditional since R93A (the key voxel_map/plane/line_residual/classify_at_fit is removed). Line model at FIT time.
+  //   The fit (VoxelPlane::update()) decides reject / plane / line ONCE, right after the eigenvalues are final, with the one function classifyVoxel (include/livo_recon/lio/voxel_class.h), and store the class (VoxelPlane::isLine()):
   //     (1) with the hard line form a voxel with e1 < 1e-8 <= e2 is a perfect line and is kept; e2 < 1e-8 rejects (with any other line setting e1 < 1e-8 also rejects, as before).
   //     (2) after the sensor floor, e0 >= e1 is not a reject: e0 is set equal to e1 (the order the pca fit always had).
-  //     (3) the gaps are floored by the one gap floor (below), in both fits.
-  //   debiased_line_equiv (off | mean_cov | moment): the plane_equivalent line variance on the debiased fit (the tilt matrices computeLineTilt builds from points on the pca path). moment = exact, from the debiased fit's own moment accumulators
-  //     (include/livo_recon/lio/line_tilt_moments.h); mean_cov = the mean-covariance approximation. line_residual/variance = plane_equivalent with plane_fit_mode = debiased REQUIRES one of the two (refused with off).
-  std::string debiased_line_equiv = "off";
-  int debiased_line_form = 0;   // 0 off, 1 mean_cov, 2 moment; resolved once at load
+  //     (3) the gaps are floored by the one gap floor (below).
 
-  // R77 (F-433), unconditional since R93A (the key voxel_map/plane/plane_gap_floor_en and the debiased eigengap-denominator guard are removed): the eigenvalue gaps |e0-e1| and |e0-e2| of the eigengap plane variance are floored at the sensor noise
-  // variance (weight_sigma_r2, = imu/sensor/range_err^2), keeping the plane and the sign of the eigenvalue order, in BOTH fits. Needs range_err > 0 with plane_var_mode = eigengap (refused otherwise). Not applied under the information models.
+  // R77 (F-433), unconditional since R93A (the key voxel_map/plane/plane_gap_floor_en and the eigengap-denominator guard are removed): the eigenvalue gaps |e0-e1| and |e0-e2| of the eigengap plane variance are floored at the sensor noise
+  // variance (weight_sigma_r2, = imu/sensor/range_err^2), keeping the plane and the sign of the eigenvalue order. Needs range_err > 0 with plane_var_mode = eigengap (refused otherwise). Not applied under the information models.
 
   // R81 (F-468, F-485 Part 3): plane variance term of the weight AND the gate (VoxelPlane::gate(); res.sigma_squared adds the same value). Both default 0.0 = off: the branch is skipped, bit-identical to R80.
   //   plane_var_scan_s2 (>= 0, finite): plane_var_term += s2 / max(1, distinct frames of the voxel as of its last fit). Applied first.
@@ -743,7 +683,7 @@ struct VoxelOpts
   bool plane_var_diag_en = false;
 
   // R88: the "binned" map type (voxel_map/backend = binned, src/map/binned_voxelmap.cpp; accumulator in map/binned/binned_bins.h). Set by BinnedVoxelMap::loadParameters() only; the default map never touches them.
-  //   binned_enabled        : the debiased branch of VoxelNode::insertPoints() keeps returns in bins and fits from the occupied bins.
+  //   binned_enabled        : VoxelNode::insertPoints() keeps returns in bins and fits from the occupied bins.
   //   binned_bin_fraction   : bin edge = this x the node's own edge (0 < f <= 1).
   //   binned_cov_mode       : 0 average (C / k), 1 shrunk (C / k^2).
   //   (R95: binned_weight_mode was removed; the weight of a bin is always its return count k.)

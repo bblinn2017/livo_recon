@@ -2,8 +2,6 @@
 
 #include "livo_recon/utils/map/voxelmap_utils.h"
 #include "livo_recon/lio/plane_var_diag.h"
-#include "livo_recon/lio/line_tilt_moments.h"
-#include "livo_recon/map/binned/binned_bins.h"
 #include <atomic>
 #include <cstdint>
 
@@ -103,51 +101,11 @@ public:
               const std::vector<double>* var_weights = nullptr,
               int frame_idx = -1, int layer_idx = -1);
 
-  // History (71-102): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-71
-  void addPoints(const std::vector<PointXYZCov>& points, int total_count = -1,
-                 int distinct_frames = -1, bool trust_sensor_noise = true,
-                 int frame_idx = -1, int layer_idx = -1,
-                 bool refit = true);   // R87: false = accumulate only (the admission rule, lio/admission_rule.h, said no fit yet); the previous fit stays
-
-  // R88 (binned map): the debiased path fed from a node's bins instead of from raw points. When refit is true, the debiased accumulators (N_acc_, Sp_, Spp_, Scov_, Scov_sensor_, sum_sensor_var_, V_, W_) are REPLACED by the
-  // statistics of the occupied bins (map/binned/binned_bins.h, under bin_opts) and refitDebiased() runs; the fit itself is the unchanged debiased fit. When refit is false only points_size_ (the number of occupied bins, which is
-  // what isInit() compares with min_init) and the occupancy of an existing plane are updated; the previous fit stays. `batch` is this call's raw points, used for the occupancy update only (and for ref_ when
-  // centred_accumulation is on and ref_ is still unset).
-  void refitFromBins(const binned::BinSet& bins, const binned::Options& bin_opts, const std::vector<PointXYZCov>& batch,
-                     int distinct_frames, int frame_idx, int layer_idx, bool refit);
-
 private:
-  void refitDebiased();
-  // R82 (D4): fills line_tilt_L_ / line_tilt_X_ from the debiased fit's moment accumulators (form 2 = exact, 1 = mean-covariance). Same classification test and floors as computeLineTilt.
-  void computeLineTiltDebiased(int form);
   // R77 (F-453): fills line_tilt_L_ / line_tilt_valid_ from the fit's own points (same weights, same covariance choice, same first-order eigenvector perturbation as plane_var_).
   void computeLineTilt(const std::vector<PointXYZCov>& points, const std::vector<double>* var_weights, double var_weight_sum, bool use_var_weights);
 
-  // Persistent accumulators for addPoints()/refitDebiased() -- RAW
-  // (unweighted, w_i=1) sums, never reset. Normalization (by N or N^2, see
-  // refitDebiased()) is applied only at query time.
-  double N_acc_ = 0.0;
-  V3D    Sp_    = V3D::Zero();  // Sigma p_i (or Sigma (p_i - ref_) when centred_accumulation)
-  M3D    Spp_   = M3D::Zero();  // Sigma p_i p_i^T (or Sigma (p_i-ref_)(p_i-ref_)^T when centred_accumulation)
-  // CQ-56: reference offset for centred_accumulation (voxel_map/plane/
-  // centred_accumulation, default false) -- set once, from this voxel's
-  // FIRST accumulated point, then never changed. Accumulating (p - ref_)
-  // instead of raw world p keeps Spp_'s own magnitude near the plane's
-  // true thickness (~1e-4 m^2) instead of the trajectory's own distance-
-  // from-origin squared (up to ~4e6 m^2 at 2000m) -- translation-invariant,
-  // exact in infinite-precision arithmetic (Cov(p) == Cov(p-ref) for any
-  // constant ref), only removes the catastrophic-cancellation error a raw
-  // Spp_/N - mean*mean^T accumulates as |p| grows. See refitDebiased()
-  // for where ref_ gets added back into plane_.center (the one place a
-  // TRUE, not offset, world position is needed).
-  V3D    ref_ = V3D::Zero();
-  bool   ref_set_ = false;
-  M3D    Scov_  = M3D::Zero();  // Sigma (pt.sensor_cov+pt.pos_cov), combined -- plane_var_'s accumulators only
-  M3D    Scov_sensor_ = M3D::Zero(); // Sigma pt.sensor_cov, independent -- M_debiased's fit correction
-  M3D    V_[3][3];              // V_[a][b] = Sigma p_i(a) p_i(b) Cov_i  (combined cov, plane_var_ only)
-  M3D    W_[3];                 // W_[a]    = Sigma p_i(a) Cov_i        (combined cov, plane_var_ only)
-  double sum_sensor_var_ = 0.0; // Sigma sensor_var_i (see sensor_noise_floor_eig0)
-  int    distinct_frames_ = 1;  // latest VoxelNode::distinct_frames_ seen by addPoints()
+  int    distinct_frames_ = 1;  // latest VoxelNode::distinct_frames_ seen via noteFrames()
 
   // History (122-138): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-122
   // gate_floor_term_out (if non-null): gate()'s own internal weightFloor(
@@ -217,14 +175,13 @@ private:
   bool is_line_ = false;   // R82 (D4): set by the fit when classify_at_fit is on
 
   // Occupied-bin count (J) from this plane's last update() call that used
-  // weights (0 for an unweighted/unbinned fit, or for a refitDebiased()
-  // fit -- debiased mode has no binning concept) -- stored so
+  // weights (0 for an unweighted/unbinned fit) -- stored so
   // computeResidual() can log it per-correspondence without recomputing
   // (see VoxelOpts::log_consistency_mode == "corr+covariates"). Mirrors
   // debugLogPlaneFitStats()'s own `j` local exactly, just persisted.
   int last_fit_j_ = 0;
-  int trace_frame_ = -1;   // R64: frame index of the latest update()/addPoints() call, diagnostics only
-  int trace_layer_ = -1;   // R83B (A1/B4): voxel layer of the latest update()/addPoints() call, diagnostics only
+  int trace_frame_ = -1;   // R64: frame index of the latest update() call, diagnostics only
+  int trace_layer_ = -1;   // R83B (A1/B4): voxel layer of the latest update() call, diagnostics only
 
   // ── the unified (information) plane model ────────────────────────────
   // See VoxelOpts::plane_var_mode.  All three are written by
@@ -252,9 +209,8 @@ private:
 
   // Mean per-point covariance over the points this plane was fitted from,
   // split so the shared (pose) part can be told from the independent
-  // (sensor) part -- the debiased path already keeps these as Scov_/
-  // Scov_sensor_; these are update()'s equivalents for the pca path, which
-  // has no persistent accumulator.  Write-only unless plane_var_mode is
+  // (sensor) part; the pca path has no persistent accumulator, so update()
+  // forms them per fit.  Write-only unless plane_var_mode is
   // "information".
   M3D mean_cov_all_    = M3D::Zero();
   M3D mean_cov_sensor_ = M3D::Zero();
@@ -269,13 +225,9 @@ private:
   // coordinates -- the chart (y_normal_/x_normal_) is applied only when
   // buildInformationCovariance() projects these into H.
   //
-  // update() has the point vector in hand and can form these exactly;
-  // refitDebiased() runs from unweighted persistent sums after the points
-  // are gone and cannot, so info_path_ says which path actually ran:
-  // 1 = exact (weighted moments used), 0 = equal-weight fallback (the
-  // existing diagonal closed form, unchanged). Logged so the two paths'
-  // disagreement -- what the equal-weight approximation costs -- is
-  // measurable rather than silently averaged away.
+  // update() has the point vector in hand and forms these exactly;
+  // info_path_ says which path ran: 1 = exact (weighted moments used),
+  // 0 = equal-weight fallback (the diagonal closed form).
   double Sw_    = 0.0;
   V3D    Swd_   = V3D::Zero();
   M3D    Swdd_  = M3D::Zero();
@@ -284,13 +236,11 @@ private:
   // I = (N_eff/sigma_bar^2)*diag(lambda1, lambda2, 1); plane_var_ = I^-1.
   // Sets is_plane_ = false if the model cannot be formed.
   void buildInformationCovariance(double n_raw, const M3D& mean_cov_all,
-                                  const M3D& mean_cov_sensor,
-                                  bool eig0_already_debiased);
+                                  const M3D& mean_cov_sensor);
 
 public:
   // VoxelNode's distinct-frame counter, needed by the design-effect
-  // correction on the pca path (the debiased path receives it through
-  // addPoints()).  No-op unless plane_var_mode is "information".
+  // correction.  No-op unless plane_var_mode is "information".
   void noteFrames(int distinct_frames)
   { if (distinct_frames > 0) distinct_frames_ = distinct_frames; }
 
@@ -332,14 +282,13 @@ private:
   V3D occ_anchor_center_   = V3D::Zero();
   bool occ_anchored_ = false;
   // P10.  The frame_idx (VoxelNode's g_current_frame_idx, threaded down
-  // through update()/addPoints()) at which the chart last (re)anchored --
+  // through update()) at which the chart last (re)anchored --
   // -1 if never anchored with a known frame_idx (frame_idx defaults to -1
   // for any caller that doesn't thread it, in which case age is just not
   // tracked rather than reporting a wrong number). classifyVisibility()'s
   // caller computes age as (its own scan_id) - occ_anchor_frame_ -- how
   // many frames this chart has survived, the mechanism P10 needs separated
-  // from the scene-geometry explanation for the pca/debiased known-free
-  // split.
+  // from the scene-geometry explanation for the known-free split.
   int occ_anchor_frame_ = -1;
 
   // History (193-201): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-193
@@ -439,13 +388,12 @@ struct VoxelPlaneR81Counters
 VoxelPlaneR81Counters voxelPlaneR81Counters();
 // R82 (D2, F-502): snapshot of the plane variance diagnostic (voxel_map/plane/plane_var_diag_en), cumulative since process start. See lio/plane_var_diag.h.
 PlaneVarDiagSnapshot voxelPlaneVarDiagSnapshot();
-// R82 (D4, F-500): engagement of voxel_map/plane/line_residual/classify_at_fit and debiased_line_equiv, cumulative since process start. line_classified: fits (pca or debiased) the classifier called a line;
+// R82 (D4, F-500): engagement of voxel_map/plane/line_residual/classify_at_fit, cumulative since process start. line_classified: fits the classifier called a line;
 // line_accepted: of those, fits that ended as an accepted voxel; e1_tiny_kept: lines kept although e1 < 1e-8 (the R81 test would have rejected them); e0_clamped: fits whose e0 was set equal to e1 after the sensor floor
-// (the R81 test would have rejected them); gaps_floored: debiased fits whose eigengap denominator the one gap floor lifted (the R81 guard would have rejected them);
-// tilt_voxels_moment / tilt_voxels_meancov: voxels whose line tilt matrices were built on the debiased fit by each form.
+// (the R81 test would have rejected them).
 struct VoxelPlaneR82Counters
 {
-  long line_classified = 0, line_accepted = 0, e1_tiny_kept = 0, e0_clamped = 0, gaps_floored = 0, tilt_voxels_moment = 0, tilt_voxels_meancov = 0;
+  long line_classified = 0, line_accepted = 0, e1_tiny_kept = 0, e0_clamped = 0;
 };
 VoxelPlaneR82Counters voxelPlaneR82Counters();
 // R93A (Bryce 2026-10-10): engagement of lio/gate_state_uncertainty, cumulative since process start. gate_rows: admission-variance evaluations (plane rows and hard line rows); gate_pose_rows: of those, rows whose
@@ -474,7 +422,7 @@ void debugFlushConsistencyCorr();
 // outcomes are recorded inside VoxelPlane. voxelPlaneFitTraceFlush() writes plane_fit_reasons.csv and
 // plane_fit_trace.csv into the debug log dir; called once at shutdown.
 enum PlaneFitEvent { kEvRetire = 16, kEvSubdivide = 17, kEvDisabled = 18 };
-void voxelPlaneFitEvent(const VoxelOpts& o, int frame, bool debiased, int kind);
+void voxelPlaneFitEvent(const VoxelOpts& o, int frame, int kind);
 void voxelPlaneFitTraceFlush();
 
 }  // namespace livo_recon

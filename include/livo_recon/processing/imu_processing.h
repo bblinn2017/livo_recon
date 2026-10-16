@@ -1,7 +1,6 @@
 #pragma once
 
 #include "livo_recon/node_context.h"
-#include "livo_recon/lio/process_noise_switch.h"
 #include "livo_recon/utils/data/measures.h"
 #include "livo_recon/utils/log/profiler.h"
 
@@ -98,10 +97,6 @@ public:
 
   std::string loadParameters(ros::NodeHandle& pnh);
 
-  // R74 (F-426 part 2): call BEFORE processIMU(mg) with the map frame index the scan about to be propagated will have (frame_idx + 1). Applies the
-  // configured process-noise switch once; a no-op (and bit-identical) when imu/process_noise/switch/scan is 0.
-  void maybeSwitchProcessNoise(long next_frame);
-
   void propagate(MeasureGroup& mg);
   // History (78-82): see docs/livo_recon_changelog.md#include-livo_recon-processing-imu_processing.h-78
   void processIMU(MeasureGroup& mg);
@@ -126,10 +121,6 @@ private:
   V3D filtered_gyr_excitation_energy_ = V3D::Zero();
   bool motion_noise_primed_ = false;
   size_t propagation_index_ = 0;
-  ProcessNoiseSwitch switch_;           // R74 (F-426)
-  bool switch_applied_ = false;
-  long switch_applied_frame_ = -1;
-  size_t switch_applied_propagation_ = 0;
   // R66 Gauss-Markov bias engagement counters / magnitude.
   bool gm_ref_set_ = false;
   V3D gm_ref_gyr_ = V3D::Zero(), gm_ref_acc_ = V3D::Zero();
@@ -141,21 +132,6 @@ private:
   double gain_acc_max_ = 1.0, gain_gyr_max_ = 1.0;
 public:
   std::string engagementReport() const;
-
-  // R73 (F-414): a SHADOW instance runs the same propagation with a different process-noise configuration on a state copy that the
-  // shadow owns. It must not write any file the driver instance writes: the shared per-scan IMU diagnostics are skipped, its engagement
-  // report goes to engagement_imu_<tag>.txt, and the per-scan mean process variances it applied are exposed here instead.
-  void markShadow(const std::string& tag) { is_shadow_ = true; shadow_tag_ = tag; }
-  bool isShadow() const { return is_shadow_; }
-  ImuProcOptions& optsMut() { return opts_; }
-  const ImuProcOptions& opts() const { return opts_; }
-  struct ScanQ { V3D q_acc = V3D::Zero(), q_gyr = V3D::Zero(); size_t samples = 0; size_t acc_clamped_axes = 0, gyr_clamped_axes = 0; };
-  const ScanQ& lastScanQ() const { return last_scan_q_; }
-
-private:
-  bool is_shadow_ = false;
-  std::string shadow_tag_;
-  ScanQ last_scan_q_;
 };
 
 }  // namespace livo_recon

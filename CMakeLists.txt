@@ -137,8 +137,7 @@ add_executable(livo_recon_node
   src/processing/vio_processing.cpp
   src/processing/lio_base.cpp
   src/processing/lio_iekf.cpp
-  src/processing/lio_iekf_shadow.cpp
-  src/lio/shadow_lio.cpp
+  src/processing/lio_iekf_scan_log.cpp
   src/processing/combined_processing.cpp
   src/processing/evo_processing.cpp
   src/lio/voxelplane.cpp
@@ -148,8 +147,6 @@ add_executable(livo_recon_node
   src/lio/residual_redundancy.cpp
   src/lio/info_scale.cpp
   src/map/voxelmap.cpp
-  src/map/akf_map.cpp
-  src/map/surface_map.cpp
   src/map/binned_voxelmap.cpp
   src/map/map_backend_factory.cpp
   src/vio/crop_utils.cpp
@@ -168,7 +165,6 @@ target_compile_options(livo_recon_node PRIVATE
 
 target_link_libraries(livo_recon_node
   livo_cuda
-  surface_core
   ${CUDA_LIBRARIES}
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
@@ -223,17 +219,6 @@ add_subdirectory(tests/reference_math)
 
 # R66: the R52 stationary-map research library, its CLI and its test were removed (harness parked and retired by Bryce).
 
-# Surface map core (Eigen + std only): additive cell statistics and the dirty-set merge/split layer used by the
-# "surface" MapBackend (src/map/surface_map.cpp). Kept ROS-free so it can be unit-tested on its own.
-add_library(surface_core
-  src/map/surface/surface_core.cpp
-)
-target_include_directories(surface_core PUBLIC include ${EIGEN3_INCLUDE_DIRS})
-target_link_libraries(surface_core Eigen3::Eigen)
-add_executable(test_surface_core tests/test_surface_core.cpp)
-target_link_libraries(test_surface_core surface_core)
-add_test(NAME surface_core COMMAND test_surface_core)
-
 # R63 (coding agent addition, not part of the planning agent's patch): StateGroup's s2 gravity
 # model, exercised ROS-free via #define private public (no ros::NodeHandle/loadParameters() path
 # needed for these three checks). state.cpp needs roscpp/xmlrpcpp for state.h's ros::NodeHandle/
@@ -247,12 +232,6 @@ add_executable(test_gravity_s2 tests/test_gravity_s2.cpp)
 target_link_libraries(test_gravity_s2 state_lib)
 add_test(NAME gravity_s2 COMMAND test_gravity_s2)
 
-# R64 (planning agent's patch, section 4 of R64_INSTRUCTIONS.md): debiased plane-fit variants
-# unit test.
-add_executable(test_debias_modes tests/test_debias_modes.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
-target_include_directories(test_debias_modes PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
-target_link_libraries(test_debias_modes ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
-add_test(NAME debias_modes COMMAND test_debias_modes)
 
 # R65 (planning agent's patch, section 4 of R65_INSTRUCTIONS.md): per-point pose covariance and
 # voxel-history unit tests.
@@ -319,14 +298,6 @@ add_executable(test_lidar_msg_log_r80 tests/test_lidar_msg_log_r80.cpp)
 target_include_directories(test_lidar_msg_log_r80 PUBLIC include)
 add_test(NAME lidar_msg_log_r80 COMMAND test_lidar_msg_log_r80)
 
-# R80C (F-484): retime grid time and retime_trim point count (header-only, ROS-free)
-add_executable(test_lidar_retime_r80c tests/test_lidar_retime_r80c.cpp)
-target_include_directories(test_lidar_retime_r80c PUBLIC include)
-add_test(NAME lidar_retime_r80c COMMAND test_lidar_retime_r80c)
-# R86A (F-532): second-stream retime_trim (header-only, ROS-free)
-add_executable(test_dry_run_trim_r86a tests/test_dry_run_trim_r86a.cpp)
-target_include_directories(test_dry_run_trim_r86a PUBLIC include)
-add_test(NAME dry_run_trim_r86a COMMAND test_dry_run_trim_r86a)
 add_executable(test_point_time_r82 tests/test_point_time_r82.cpp)
 target_include_directories(test_point_time_r82 PUBLIC include)
 add_test(NAME point_time_r82 COMMAND test_point_time_r82)
@@ -337,22 +308,11 @@ add_test(NAME first_pose_align_r82 COMMAND test_first_pose_align_r82)
 add_executable(test_plane_var_diag_r82 tests/test_plane_var_diag_r82.cpp)
 target_include_directories(test_plane_var_diag_r82 PUBLIC include)
 add_test(NAME plane_var_diag_r82 COMMAND test_plane_var_diag_r82)
-add_executable(test_line_tilt_r82 tests/test_line_tilt_r82.cpp)
-target_include_directories(test_line_tilt_r82 PUBLIC include ${EIGEN3_INCLUDE_DIRS})
-target_link_libraries(test_line_tilt_r82 Eigen3::Eigen)
-add_test(NAME line_tilt_r82 COMMAND test_line_tilt_r82)
 # R82 (D4): drives VoxelPlane directly (same source set as test_line_variance_r77).
-add_executable(test_debiased_line_r82 tests/test_debiased_line_r82.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
-target_include_directories(test_debiased_line_r82 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(test_debiased_line_r82 Eigen3::Eigen ${OpenCV_LIBS})
-add_test(NAME debiased_line_r82 COMMAND test_debiased_line_r82)
 add_executable(test_voxel_class_r82 tests/test_voxel_class_r82.cpp)
 target_include_directories(test_voxel_class_r82 PUBLIC include ${EIGEN3_INCLUDE_DIRS})
 target_link_libraries(test_voxel_class_r82 Eigen3::Eigen)
 add_test(NAME voxel_class_r82 COMMAND test_voxel_class_r82)
-add_executable(test_lidar_offset_r80d tests/test_lidar_offset_r80d.cpp)
-target_include_directories(test_lidar_offset_r80d PUBLIC include)
-add_test(NAME lidar_offset_r80d COMMAND test_lidar_offset_r80d)
 
 # R70 (planning agent's patch): block information scale identities (ROS-free, Eigen only).
 add_executable(test_info_scale tests/test_info_scale.cpp src/lio/info_scale.cpp)
@@ -374,7 +334,7 @@ add_test(NAME residual_binning_r91f COMMAND test_residual_binning_r91f)
 
 # R72 (planning agent's patch; R82: step cap F-403 retired): Q-adaptation alternatives (F-401), failure dump round trip (F-398).
 # ROS-free header-only modules, Eigen only.
-foreach(r72_test q_adapt symmetrize renamed_keys shadow_options bag_clock plane_test_values line_residual line_residual_r75 line_residual_r76 process_noise_switch)
+foreach(r72_test q_adapt symmetrize renamed_keys bag_clock plane_test_values line_residual line_residual_r75 line_residual_r76)
   add_executable(test_${r72_test} tests/test_${r72_test}.cpp)
   target_include_directories(test_${r72_test} PUBLIC include ${EIGEN3_INCLUDE_DIRS})
   target_link_libraries(test_${r72_test} Eigen3::Eigen)
@@ -408,13 +368,7 @@ add_executable(test_p0_pin_r89 tests/test_p0_pin_r89.cpp)
 target_include_directories(test_p0_pin_r89 PUBLIC include ${EIGEN3_INCLUDE_DIRS})
 target_link_libraries(test_p0_pin_r89 Eigen3::Eigen)
 add_test(NAME p0_pin_r89 COMMAND test_p0_pin_r89)
-# R88: VoxelPlane::refitFromBins() and VoxelNode's binned debiased branch (same source set as test_plane_var_r81).
-add_executable(test_binned_node_r88 tests/test_binned_node_r88.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
-target_include_directories(test_binned_node_r88 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
-target_link_libraries(test_binned_node_r88 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
-add_test(NAME binned_node_r88 COMMAND test_binned_node_r88)
-
-# R90: the pca fit on the binned map type: BinSet::representatives() and VoxelNode's binned pca branch (same source set as test_binned_node_r88).
+# R90: the pca fit on the binned map type: BinSet::representatives() and VoxelNode's binned pca branch (links voxelnode.cpp and voxelplane.cpp; no ROS).
 add_executable(test_binned_pca_r90 tests/test_binned_pca_r90.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
 target_include_directories(test_binned_pca_r90 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
 target_link_libraries(test_binned_pca_r90 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)

@@ -11,7 +11,6 @@
 #include "livo_recon/lio/residual_redundancy.h"
 #include "livo_recon/lio/info_scale.h"
 #include "livo_recon/lio/residual_binning.h"
-#include "livo_recon/lio/shadow_options.h"
 
 #include <array>
 #include <initializer_list>
@@ -161,7 +160,7 @@ struct LioProcOptions
   // Row semantics (unchanged, stated here because the R71 comment above was misleading): the residuals of iteration k are evaluated at the state BEFORE the step of
   // iteration k; the state in residual_dump_state.csv is the state AFTER that step (solveSystem applies it before the dump is written).
   bool residual_dump_all_iters = false;
-  // R81 (F-485 2B): append voxel_point_count and voxel_distinct_frames (of each row's voxel) to residual_dump.csv and shadow_residual_dump.csv. Sub-key of lio/residual_dump_frames (refused when that list is empty).
+  // R81 (F-485 2B): append voxel_point_count and voxel_distinct_frames (of each row's voxel) to residual_dump.csv. Sub-key of lio/residual_dump_frames (refused when that list is empty).
   // Default false leaves the header and rows byte-identical.
   bool residual_dump_voxel_info = false;
   // R91C: append line_axis_x/y/z and line_axial to residual_dump.csv (see diagnostics/residual_dump_format.h). Sub-key of lio/residual_dump_frames (refused when that list is empty).
@@ -169,8 +168,6 @@ struct LioProcOptions
   // R91C: write residual_dump.csv in the 14-column slim form. Sub-key of lio/residual_dump_frames (refused when that list is empty).
   bool residual_dump_slim = false;
 
-  // R73 (F-414): shadow LIO update (see lio/shadow_options.h). mode off (default) is bit-identical. iekf estimator only.
-  ShadowOptions shadow;
 
   // R73 (F-414, F-415): scan_log.csv, one row per map-backed scan: whole-map statistics and digests (voxel count, voxels created,
   // plane nodes, planes changed, exact and 1e-3-rounded digests), residual count, reduced chi2 at iteration 0, the step norm of every
@@ -250,9 +247,6 @@ public:
   // internally here.
   virtual std::string processLIO(MeasureGroup& mg) = 0;
 
-  // R73 (F-414): the node hands the shadow instance to the estimator after construction.
-  const ShadowOptions& shadowOptions() const { return opts_.shadow; }
-  void setShadow(std::shared_ptr<class ShadowLio> s) { shadow_ = std::move(s); }
 
   // allow_consistency_log: T0-D's corr.csv wants the FIRST-iteration
   // (pre-update, un-relinearized) innovation only. NON-VIRTUAL: shared
@@ -319,12 +313,8 @@ protected:
   // returning cfg.report().
   std::string finalizeConfig(ConfigResolver& cfg, std::initializer_list<const char*> allowed_unclaimed_namespaces);
 
-  // R73 (F-414): while true, every diagnostic file and engagement counter written by the shared residual machinery is suppressed
-  // (the numerics are not), because the pass in progress is the shadow's.
-  bool shadow_active_ = false;
-  std::shared_ptr<class ShadowLio> shadow_;
   // R73: per-residual dump of the CURRENT residuals_ (and state_) when the current map frame is in lio/residual_dump_frames.
-  void dumpResidualsIfListed(int iteration, bool shadow) const;
+  void dumpResidualsIfListed(int iteration) const;
   // R95: one zsq_per_scan.csv row for the CURRENT residuals_ and map frame (no-op when lio/zsq_log_en is false). Iteration 0 is written inside estimateStateCorrection(); the IEKF loop calls this once more after the loop for the last executed iteration.
   void logZsqIteration(int iteration) const;
   // R95: rows written to zsq_per_scan.csv since process start (engagement counter).
@@ -414,7 +404,7 @@ protected:
   mutable double renorm_c_sum_ = 0.0, renorm_c_max_ = 1.0;
   void redundancyAndRenorm(const std::vector<Residual>& residuals) const;
   void applyInfoScaleToEkf(const std::vector<Residual>& residuals) const;
-  // R91E: engagement counters of the residual binning (written by solveSystem*, which are const; saved and restored around the shadow pass like the info_scale ones).
+  // R91E: engagement counters of the residual binning (written by solveSystem*, which are const).
   mutable long residual_binning_iterations_ = 0;
   mutable long residual_binning_rows_sum_ = 0;       // rows in corrected bins, summed over iterations
   mutable long residual_binning_skipped_sum_ = 0;    // rows left out (distance rows, bad variance), summed over iterations

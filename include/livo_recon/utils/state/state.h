@@ -199,7 +199,6 @@ private:
   {
     int width = 0, height = 0;
     double fx = 0.0, fy = 0.0, cx = 0.0, cy = 0.0;
-    std::string distortion_model = "plumb_bob";
     std::vector<double> distortion_coeffs;
   };
 
@@ -215,8 +214,6 @@ private:
   Eigen::Matrix<double, 3, 2> gravity_basis_ = Eigen::Matrix<double, 3, 2>::Zero();
   double acc_scale_ = 1.0;
   void resetGravityBasis();
-  bool est_cov_acc_ = false;
-  bool est_cov_gyr_ = false;
 
   // EKF state
   M3D rot_;

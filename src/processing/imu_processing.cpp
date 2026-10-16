@@ -134,27 +134,16 @@ std::string ImuProc::engagementReport() const
 {
   std::ostringstream o;
   o << "[engagement/imu] propagations=" << propagation_index_;
-  o << "\n  process_noise_switch scan=" << switch_.scan << " model=" << (switch_.on() ? switch_.model : std::string("off"))
-    << " applied=" << (switch_applied_ ? 1 : 0) << " applied_at_frame=" << switch_applied_frame_ << " applied_at_propagation=" << switch_applied_propagation_;
   o << "\n  q_gain steps=" << gain_steps_ << " steps_with_gain_ne_1=" << gain_steps_applied_
     << " max_gain_acc=" << gain_acc_max_ << " max_gain_gyr=" << gain_gyr_max_;
   return o.str();
-}
-
-void ImuProc::maybeSwitchProcessNoise(long next_frame)
-{
-  if (!processNoiseSwitchDue(switch_, next_frame, switch_applied_)) return;
-  applyProcessNoiseSwitch(opts_, switch_);
-  switch_applied_ = true;
-  switch_applied_frame_ = next_frame;
-  switch_applied_propagation_ = propagation_index_ + 1;   // the propagation that is about to run is the next one
 }
 
 ImuProc::~ImuProc()
 {
   // R73 (F-407): always written, including when no alternative engaged (R72 returned no engagement_imu.txt for the arms where the
   // counters were all zero, and the gate could not tell "inert" from "never written"). A zero-engagement run states its zeros.
-  std::ofstream out(debugLogPath(is_shadow_ ? "engagement_imu_" + shadow_tag_ + ".txt" : std::string("engagement_imu.txt")), std::ios::trunc);
+  std::ofstream out(debugLogPath("engagement_imu.txt"), std::ios::trunc);
   if (out) out << engagementReport() << '\n';
 }
 
@@ -247,22 +236,6 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
       throw std::invalid_argument("IMU motion-noise scales/caps must be finite and nonnegative");
   // R74 (F-427): the local-polynomial energy source and the additive WNOA disturbance were removed; their keys are refused by
   // refuseRenamedKeys() (removedKeyTable) before this point.
-  // R74 (F-426 part 2): process-noise switch at one scan (lio/process_noise_switch.h). The sub-keys are read only when scan > 0, so a sub-key set
-  // with scan 0 is left unconsumed and refused by the all-keys-consumed check, like the other dependent keys.
-  { int sw_scan = 0; paramWarn<int>(pnh, "imu/process_noise/switch/scan", sw_scan, 0); switch_.scan = sw_scan; }
-  if (switch_.on()) {
-    paramWarn<std::string>(pnh, "imu/process_noise/switch/model", switch_.model, std::string("fixed"));
-    if (switch_.model == "isotropic") {
-      paramWarn<double>(pnh, "imu/process_noise/switch/motion_beta", switch_.motion_beta, 0.9);
-      paramWarn<double>(pnh, "imu/process_noise/switch/motion_acc_scale", switch_.motion_acc_scale, 0.3);
-      paramWarn<double>(pnh, "imu/process_noise/switch/motion_gyro_scale", switch_.motion_gyr_scale, 10.0);
-      paramWarn<double>(pnh, "imu/process_noise/switch/motion_acc_cap", switch_.motion_acc_cap, 1.0e6);
-      paramWarn<double>(pnh, "imu/process_noise/switch/motion_gyro_cap", switch_.motion_gyr_cap, 1.0e6);
-    }
-  }
-  { const std::string err = processNoiseSwitchError(switch_); if (!err.empty()) throw std::invalid_argument(err); }
-  if (switch_.on() && switch_.model == opts_.process_noise_model && switch_.model == "fixed")
-    throw std::invalid_argument("imu/process_noise/switch/model=fixed with imu/process_noise/model=fixed switches nothing (inert)");
   // Read directly rather than being wired from LioProcOptions: the two
   // classes are constructed independently and this keeps the single source
   // of truth in the parameter server, where the sweep harness writes it.
@@ -296,7 +269,6 @@ void ImuProc::propagate(MeasureGroup& mg)
   {
     last_imu_sample_.acc  = -state_->rot().transpose() * state_->gravity();
     last_imu_sample_.gyro = V3D::Zero();
-    last_scan_q_ = ScanQ{};   // R73: no samples, no process variance applied this call
     return;
   }
 
@@ -518,12 +490,11 @@ void ImuProc::propagate(MeasureGroup& mg)
     debiased_gyr_energy_sum += debiased_gyr_energy;
     acc_motion_sum += dynamic_acc.norm();
     gyr_motion_sum += dynamic_gyr.norm();
-    if (!is_shadow_)   // R73: a shadow instance never writes the driver's files
-      writeMotionQSampleDiagnostic(
+    writeMotionQSampleDiagnostic(
           propagation_index_, q_samples - 1, tail.t + data_queues_->start_time,
           opts_.process_noise_model, dynamic_acc, dynamic_gyr,
           debiased_acc_energy, debiased_gyr_energy, var_acc_step, var_gyr_step);
-    if (!is_shadow_ && opts_.motion_q_step_log_en)   // R83B (A6/B5)
+    if (opts_.motion_q_step_log_en)   // R83B (A6/B5)
       writeMotionQStepDiagnostic(
           propagation_index_, q_samples - 1, tail.t + data_queues_->start_time,
           var_acc_step, var_gyr_step,
@@ -708,18 +679,13 @@ void ImuProc::propagate(MeasureGroup& mg)
   mg.imu_samples.clear();
 
   state_->setPropagatedState(rot_imu, pos_imu, vel_imu);
-  if (!is_shadow_) writeImuCovGrowthRow(propagation_index_, mg.image.t + data_queues_->start_time, r61_P_start, state_->cov(), r61_Q_acc);
+  writeImuCovGrowthRow(propagation_index_, mg.image.t + data_queues_->start_time, r61_P_start, state_->cov(), r61_Q_acc);
 
   // One compact row per scan; the first post-calibration scan is also logged
   // sample-by-sample above. Both are intentionally small enough for campaign
   // returns.
   const double inv_n = q_samples ? 1.0 / static_cast<double>(q_samples) : 0.0;
-  last_scan_q_.q_acc = q_acc_sum * inv_n;   // R73: the per-scan mean process variance actually applied (both driver and shadow instances)
-  last_scan_q_.q_gyr = q_gyr_sum * inv_n;
-  last_scan_q_.samples = q_samples;
-  last_scan_q_.acc_clamped_axes = acc_clamped;
-  last_scan_q_.gyr_clamped_axes = gyr_clamped;
-  if (!is_shadow_) writeMotionQScanDiagnostic(
+  writeMotionQScanDiagnostic(
       propagation_index_, mg.image.t + data_queues_->start_time,
       opts_.process_noise_model, opts_.motion_beta,
       opts_.motion_acc_scale, opts_.motion_gyr_scale, q_samples,

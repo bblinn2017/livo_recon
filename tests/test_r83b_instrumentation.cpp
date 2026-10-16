@@ -1,11 +1,11 @@
 // R83B unit test for the two new instrumentation outputs (A1/B4 plane_fit_eigs.csv, A6/B5 motion_q_step.csv).
 // ROS-free. Checks
-//   E1  plane_fit_eigs_en=false (default): VoxelPlane::update()/addPoints() behavior and plane_fit_trace.csv /
+//   E1  plane_fit_eigs_en=false (default): VoxelPlane::update() behavior and plane_fit_trace.csv /
 //       plane_fit_reasons.csv are unaffected by the new layer_idx parameter -- no plane_fit_eigs.csv is written.
 //   E2  plane_fit_eigs_en=true: plane_fit_eigs.csv gets one row per fit attempt with the voxel's layer (threaded
 //       through update()'s new layer_idx parameter) and the three eigenvalues of the raw (uncorrected) scatter,
 //       ascending order, matching an independently-computed reference to 1e-10.
-//   E3  addPoints() (the debiased accumulation path) also threads layer_idx through to plane_fit_eigs.csv.
+//   (E3, addPoints() on the debiased path, was removed in R97 with that path.)
 //   E4  writeMotionQStepDiagnostic() writes one row per call with the exact q_acc/q_gyr/clamp values passed in.
 // Exit code 0 = all pass.
 #include "livo_recon/lio/voxelplane.h"
@@ -52,8 +52,6 @@ std::vector<PointXYZCov> makePoints(std::mt19937& rng, int n, double sz, const M
 VoxelOptsPtr makeOpts(bool eigs_en, int trace_frames)
 {
   auto o = std::make_shared<VoxelOpts>();
-  o->plane_fit_mode = "pca";
-  o->debias_mode = "none";
   o->plane_threshold = 0.01;
   o->plane_fit_eigs_en = eigs_en;
   o->plane_fit_trace_frames = trace_frames;
@@ -89,7 +87,7 @@ std::vector<Row> readEigsCsv(const std::string& path)
 
 int main()
 {
-  setDebugLogDir("");   // "" -> /tmp, same convention test_debias_modes.cpp relies on
+  setDebugLogDir("");   // "" -> /tmp
   std::remove("/tmp/plane_fit_eigs.csv");
   std::remove("/tmp/plane_fit_trace.csv");
   std::remove("/tmp/plane_fit_reasons.csv");
@@ -134,29 +132,6 @@ int main()
             "E2 eigenvalues match an independent raw-scatter eigendecomposition", "");
     }
     check(found, "E2 a frame=3 pca row was written", "");
-  }
-
-  // ---- E3: addPoints() (debiased path) also threads layer ----
-  // NOTE: deliberately no std::remove() here -- plane_fit_eigs.csv is written through a function-local static
-  // PersistentLogStream (see voxelPlaneFitTraceFlush()); removing the file mid-process would orphan its already-
-  // open fd onto the unlinked inode, so the next flush's writes would go nowhere visible. Check cumulative content
-  // instead (both E2's frame=3 row and this block's frame=7 row are expected to be present).
-  {
-    auto o = makeOpts(/*eigs_en=*/true, /*trace_frames=*/9);
-    o->plane_fit_mode = "debiased";
-    VoxelPlane vp(o);
-    vp.addPoints(makePoints(rng, 40, 0.02, sens_iso), -1, 1, true, /*frame_idx=*/7, /*layer_idx=*/1);
-    voxelPlaneFitTraceFlush();
-    auto rows = readEigsCsv("/tmp/plane_fit_eigs.csv");
-    bool found = false, e2_still_present = false;
-    for (const auto& r : rows) {
-      if (r.frame == 7 && r.path == "debiased") { found = true;
-        check(r.layer == 1, "E3 addPoints() threads layer_idx through to plane_fit_eigs.csv", "got " + std::to_string(r.layer));
-      }
-      if (r.frame == 3 && r.path == "pca") e2_still_present = true;
-    }
-    check(found, "E3 a frame=7 debiased row was written", "rows=" + std::to_string(rows.size()));
-    check(e2_still_present, "E3 E2's frame=3 row is still present (cumulative, same process)", "");
   }
 
   // ---- E4: writeMotionQStepDiagnostic() writes the exact values passed in ----

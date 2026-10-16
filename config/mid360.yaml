@@ -13,7 +13,6 @@ cuda:
   enable: false  # set true to dispatch H^T*W*H accumulation (LIO) and affine warp (VIO) to GPU
 viz:
   enable: true  # normally overridden by the launch file's viz/enable param, set directly from the rviz:= launch arg (see livo_recon_*.launch) -- this default only applies if that param load is bypassed, e.g. loading this file's params directly outside a launch file
-  grid_map: false
   plane_map: false
   uv_tracking: true  # publish rgb_img with arrows showing vio's tracked uv displacements
   ds:
@@ -75,8 +74,6 @@ state:
     bg: true
     ba: true
     gravity: true
-    cov_acc: true
-    cov_gyr: true
   cov:
     rot_tilt: 1.0e-2
     rot_yaw: 1.0e-2
@@ -200,9 +197,6 @@ topics:
   lidar: "/livox/lidar"
   imu: "/livox/imu"
   queue_size: 20000
-frames:
-  camera: camera_link
-  lidar: lidar_link
 extrinsics:
   R_l2i: [1, 0, 0, 0, 1, 0, 0, 0, 1]
   t_l2i: [0., 0., 0.]
@@ -215,7 +209,6 @@ camera:
   fy: 2149.055417934835
   cx: 1024.0
   cy: 1024.0
-  distortion_model: plumb_bob
   distortion_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
 cbk:
   lidar:

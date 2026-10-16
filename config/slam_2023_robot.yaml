@@ -13,7 +13,6 @@ cuda:
   enable: false  # set true to dispatch H^T*W*H accumulation (LIO) and affine warp (VIO) to GPU
 viz:
   enable: true  # normally overridden by the launch file's viz/enable param, set directly from the rviz:= launch arg (see livo_recon_*.launch) -- this default only applies if that param load is bypassed, e.g. loading this file's params directly outside a launch file
-  grid_map: false
   plane_map: false
   uv_tracking: true  # publish rgb_img with arrows showing vio's tracked uv displacements
   ds:
@@ -75,8 +74,6 @@ state:
     bg: true
     ba: true
     gravity: true
-    cov_acc: false
-    cov_gyr: false
   cov:
     # Ported from FAST-LIVO2's own upstream config/HILTI23_robot.yaml
     # (acc_cov/gyr_cov) -- see slam_2022/state.yaml's matching comment for
@@ -131,9 +128,7 @@ lio:
   ekf:
     max_iterations: 5
 voxel_map:
-  backend: "voxel"  # "voxel" (default, persistent per-voxel plane fits, VoxelMap) or
-                    # "akf" (AKF-LIO-style raw-point Gaussian merge map, AkfMap) -- see
-                    # ~/.claude/plans/imperative-tumbling-karp.md for the design.
+  backend: "voxel"  # "voxel" (persistent per-voxel plane fits, VoxelMap), "binned" (VoxelMap whose nodes keep bins) 
   map:
     # Confirmed via a single-parameter voxel_map ablation this session
     # (hilti_voxelmap_ablation, then hilti_voxelsize_fine to check finer
@@ -240,9 +235,6 @@ topics:
   lidar: "/rslidar_points"
   imu: "/imu/data"
   queue_size: 20000
-frames:
-  camera: camera_link
-  lidar: lidar_link
 extrinsics:
   R_l2i: [0.99938091, -0.00369881, 0.03498741, -0.00339727, -0.99995661, -0.00867399, 0.03501798, 0.00854976, -0.99935011]
   t_l2i: [0.13372435, -0.01130180, 0.01089303]
@@ -255,7 +247,8 @@ camera:
   fy: 567.1293085165794
   cx: 651.55636483273
   cy: 402.9081460847209
-  distortion_model: equidistant
+  # R97: the key camera/distortion_model was removed (it was read and printed only). The tracker always applies the pinhole radial-tangential model to these four coefficients;
+  # the coefficients of this camera are equidistant (kb4), so VIO undistortion is wrong for it until the tracker is changed. LIO does not use the camera.
   distortion_coeffs: [-0.0032589824594531436, 0.004329813673000139, 0.0035601008360336764, -0.002021576943252078]
 preprocess:
   # See slam_2022/cbk.yaml's matching comment -- same lidar/camera rate

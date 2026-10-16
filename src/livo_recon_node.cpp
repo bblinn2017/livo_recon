@@ -11,39 +11,6 @@
 #include <rosbag/bag.h>
 #include <rosbag/view.h>
 
-namespace
-{
-// CQ-49 item 3c/3f: estimator/mode selects WHICH LioProcBase subclass is
-// constructed -- read here, once, with a bare paramWarn (marks the key
-// consumed so checkAllParamsConsumed() stays happy), BEFORE lio_proc_ is
-// built. lio/estimator/mode (the pre-split key) is refused explicitly
-// rather than silently ignored, per rule 4f.
-std::unique_ptr<livo_recon::LioProcBase> makeLioProc(ros::NodeHandle& pnh, livo_recon::NodeContext& ctx)
-{
-  if (pnh.hasParam("lio/estimator/mode"))
-    throw std::runtime_error(
-        "[config] refused: lio/estimator/mode was RENAMED to estimator/mode "
-        "-- it selects which LioProc is constructed and is read at the "
-        "node, not inside LioProc.");
-  std::string mode;
-  livo_recon::paramWarn<std::string>(pnh, "estimator/mode", mode, "iekf");
-  if (mode == "coupled")
-    throw std::runtime_error(
-        "[config] refused: estimator/mode='coupled' -- the coupled joint-knot "
-        "estimator was removed (R89); must be 'iekf'");
-  if (mode == "decoupled")
-    throw std::runtime_error(
-        "[config] refused: estimator/mode='decoupled' was RENAMED to 'iekf' "
-        "(the plain IEKF on IMU-deskewed points; the spline is gone) -- "
-        "must be 'iekf'");
-  if (mode != "iekf")
-    throw std::runtime_error(
-        "[config] refused: estimator/mode='" + mode + "' -- must be "
-        "'iekf'");
-  return std::make_unique<livo_recon::LioProcIekf>(ctx);
-}
-}  // namespace
-
 namespace livo_recon
 {
 
@@ -51,7 +18,7 @@ LivoReconNode::LivoReconNode(ros::NodeHandle& nh, ros::NodeHandle& pnh)
   : nh_(nh), pnh_(pnh), it_(nh_),
     ctx_(nh_, pnh_, it_),
     cbk_proc_(ctx_), pub_proc_(ctx_), calib_proc_(ctx_),
-    imu_proc_(ctx_), lio_proc_(makeLioProc(pnh_, ctx_)),
+    imu_proc_(ctx_), lio_proc_(std::make_unique<LioProcIekf>(ctx_)),
     vio_proc_(ctx_), combined_proc_(ctx_), evo_proc_(ctx_)
 {
   loadParameters();
@@ -134,14 +101,6 @@ void LivoReconNode::loadParameters()
   ctx_.printer->print(PrintCategory::PARAMS, calib_proc_.loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, imu_proc_.loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, lio_proc_->loadParameters(pnh_));
-  if (lio_proc_->shadowOptions().on())   // R73 (F-414)
-  {
-    shadow_ = std::make_shared<ShadowLio>(ctx_, imu_proc_, lio_proc_->shadowOptions());
-    lio_proc_->setShadow(shadow_);
-    ctx_.printer->print(PrintCategory::PARAMS, std::string("[params/shadow]  lio/shadow/mode=on window=[") +
-        std::to_string(lio_proc_->shadowOptions().window_start) + "," + std::to_string(lio_proc_->shadowOptions().window_end) +
-        "] process_noise_model=" + lio_proc_->shadowOptions().process_noise_model);
-  }
   ctx_.printer->print(PrintCategory::PARAMS, evo_proc_.loadParameters(pnh_));
 
   paramWarn<bool>(pnh_, "outputs/auto_terminate_on_idle", auto_terminate_on_idle_, false);
@@ -196,9 +155,6 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
   mg.cov_before_imu = ctx_.state->cov();
   lio_proc_->logPreImuState(mg);   // R86B: write-only pre_imu state_trace row (no-op unless eval/state_trace_pre_imu_frames > 0)
 
-  // R73 (F-414): the shadow starts from the driver's posterior of the previous scan (its state right now), BEFORE the driver propagates.
-  if (shadow_) shadow_->propagateFromDriver(mg, *ctx_.state);
-  imu_proc_.maybeSwitchProcessNoise(static_cast<long>(ctx_.voxel_map->frame_idx_) + 1);   // R74 (F-426): no-op unless imu/process_noise/switch/scan > 0
   { TimedScope ts(ctx_.profiler, "imu"); imu_proc_.processIMU(mg); }
   mg.pos_after_imu = ctx_.state->pos();
   mg.rot_after_imu = ctx_.state->rot();

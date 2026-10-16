@@ -273,8 +273,6 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
       throw std::invalid_argument("state/gravity_model must be vector3 or s2");
     gravity_model_s2_ = (gm == "s2");
   }
-  paramWarn<bool>(pnh, "state/est/cov_acc", est_cov_acc_, false);
-  paramWarn<bool>(pnh, "state/est/cov_gyr", est_cov_gyr_, false);
 
   std::vector<double> R_l2i, t_l2i, R_l2c, t_l2c;
   paramWarn<std::vector<double>>(pnh, "extrinsics/R_l2i", R_l2i, std::vector<double>());
@@ -312,7 +310,6 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "camera/fy",               camera_.fy,               0.0);
   paramWarn<double>(pnh, "camera/cx",               camera_.cx,               0.0);
   paramWarn<double>(pnh, "camera/cy",               camera_.cy,               0.0);
-  paramWarn<std::string>(pnh, "camera/distortion_model", camera_.distortion_model, "plumb_bob");
 
   XmlRpc::XmlRpcValue dist;
   markParamConsumed("camera/distortion_coeffs");
@@ -396,13 +393,10 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
       << "\n  camera: " << camera_.width << "x" << camera_.height
       << "  fx=" << camera_.fx << "  fy=" << camera_.fy
       << "  cx=" << camera_.cx << "  cy=" << camera_.cy
-      << "\n  distortion_model: " << camera_.distortion_model
       << "\n  est/bg=" << (est_bg_ ? "true" : "false")
       << "  est/ba=" << (est_ba_ ? "true" : "false")
       << "  est/gravity=" << (est_gravity_ ? "true" : "false")
       << "  gravity_model=" << gravityModelName()
-      << "  est/cov_acc=" << (est_cov_acc_ ? "true" : "false")
-      << "  est/cov_gyr=" << (est_cov_gyr_ ? "true" : "false")
       << "  dimState=" << dimState()
       << "\n  initial_attitude_cov/tilt=" << init_cov_rot_tilt_
       << "  initial_attitude_cov/yaw=" << init_cov_rot_yaw_;

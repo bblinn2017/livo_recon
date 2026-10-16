@@ -1,8 +1,8 @@
 // R74 unit test (F-419 extension): the plane covariance plane_var_ of a fitted voxel plane is exactly symmetric.
 // Same private-access pattern as test_voxel_history.cpp (standard headers first, then #define private public).
-//   PV1 precondition: the planar batch gives a plane (debiased and pca) and plane_var_ is not the zero matrix (so the check is not vacuous).
+//   PV1 precondition: the planar batch gives a plane (pca) and plane_var_ is not the zero matrix (so the check is not vacuous).
 //   PV2 asymmetryMax(plane_.planeVar()) == 0 exactly, with full (non-diagonal) random sensor and pose covariances on every point, for
-//       plane_fit_mode debiased and pca (R93A: the `combined` pose mode was removed), and plane_var_mode default (eigengap) and information, plus pca + information_directional (the H.inverse() path).
+//       the pca fit (R93A: the `combined` pose mode was removed; R97: the debiased fit was removed), and plane_var_mode default (eigengap) and information, plus pca + information_directional (the H.inverse() path).
 //   PV3 control: a copy of the matrix with one off-diagonal pair perturbed by 1e-12 is reported as asymmetric (the check can fail).
 //   PV4 the symmetrisation does not change the value beyond rounding: |planeVar - planeVar^T| is 0 and planeVar is positive semidefinite
 //       to 1e-12 relative (smallest eigenvalue >= -1e-12 trace).
@@ -62,11 +62,10 @@ std::vector<PointXYZCov> planarWithCov(std::mt19937& rng, int n)
   return v;
 }
 
-void run(const std::string& fit_mode, const std::string& var_mode)
+void run(const std::string& var_mode)
 {
   std::mt19937 rng(74);
   auto opts = std::make_shared<VoxelOpts>();
-  opts->plane_fit_mode = fit_mode;
   if (!var_mode.empty()) opts->plane_var_mode = var_mode;
   opts->max_points = 1000;
   opts->max_layer = 1;
@@ -78,7 +77,7 @@ void run(const std::string& fit_mode, const std::string& var_mode)
   std::vector<PlaneUpdate> updates;
   setCurrentFrame(1);
   node.insertPoints(planarWithCov(rng, 80), updates);
-  const std::string tag = fit_mode + "/" + (var_mode.empty() ? "default" : var_mode);
+  const std::string tag = std::string("pca/") + (var_mode.empty() ? "default" : var_mode);
   CHECK(node.plane_.isPlane(), ("PV1 planar batch gives a plane (" + tag + ")").c_str());
   const M3D V = node.plane_.planeVar();
   CHECK(V.cwiseAbs().maxCoeff() > 0.0, ("PV1 plane_var_ is not the zero matrix (" + tag + ")").c_str());
@@ -94,10 +93,9 @@ void run(const std::string& fit_mode, const std::string& var_mode)
 
 int main()
 {
-  for (const char* fit : {"debiased", "pca"})
-    for (const char* var : {"", "information"})
-      run(fit, var);
-  run("pca", "information_directional");   // the only combination that reaches plane_var_ = H.inverse() (debiased + directional cannot engage, voxelmap.cpp P7)
+  for (const char* var : {"", "information"})
+    run(var);
+  run("information_directional");   // the combination that reaches plane_var_ = H.inverse()
   std::printf("ALL PASS\n");
   return 0;
 }

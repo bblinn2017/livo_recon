@@ -13,12 +13,9 @@ namespace livo_recon
 
 struct MeasureGroup;
 
-// Abstract interface both livo_recon map backends (VoxelMap's persistent
-// per-voxel plane fits, and AkfMap's AKF-LIO-style raw-point Gaussian
-// merge map) implement, so LioProc/PubProc/CombinedProc can drive either
-// one without knowing which is active. See the plan at
-// ~/.claude/plans/imperative-tumbling-karp.md for the full design
-// rationale and Phase 3's AkfMap port -- this header covers Phase 1 only.
+// Abstract interface the livo_recon map backends (VoxelMap's persistent
+// per-voxel plane fits, and its binned variant) implement, so LioProc/PubProc/CombinedProc can drive
+// either one without knowing which is active. (R97: the AKF-LIO-style raw-point map was removed.)
 //
 // Residual/WorldPointCov (voxelmap_utils.h) are the shared currency
 // between a backend and LioProc's residual/Jacobian math -- deliberately
@@ -52,7 +49,7 @@ public:
   // see its own override doc comment): OR'd true when a backend that has a
   // converged/locked plane concept finds one anywhere within its own
   // notion of "neighborhood" of pt, even on an overall miss. Left
-  // unset/ignored by a backend with no such concept (e.g. AkfMap), same
+  // unset/ignored by a backend with no such concept, same
   // convention as hasConvergedNeighbor()'s own default-false below.
   virtual bool findPlaneResidual(const WorldPointCov& pt, Residual& res,
                                  bool* tier0_had_plane = nullptr,
@@ -61,7 +58,7 @@ public:
   // Diagnostic-only (see VoxelMap::hasConvergedNeighbor()'s own doc
   // comment for what this classifies). Default "false" reads naturally as
   // "no coverage signal available" for a backend with no converged/locked
-  // plane concept (e.g. AkfMap) rather than forcing every backend to
+  // plane concept rather than forcing every backend to
   // implement a concept only VoxelMap actually has.
   virtual bool hasConvergedNeighbor(const V3D&) const { return false; }
 

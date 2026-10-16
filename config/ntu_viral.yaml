@@ -13,7 +13,6 @@ cuda:
   enable: false  # set true to dispatch H^T*W*H accumulation (LIO) and affine warp (VIO) to GPU
 viz:
   enable: true  # normally overridden by the launch file's viz/enable param, set directly from the rviz:= launch arg (see livo_recon_*.launch) -- this default only applies if that param load is bypassed, e.g. loading this file's params directly outside a launch file
-  grid_map: false
   plane_map: false
   uv_tracking: true  # publish rgb_img with arrows showing vio's tracked uv displacements
   ds:
@@ -73,28 +72,29 @@ calib:
       gyro_bias: true
       accel_bias: true
   p0:
-    # Baseline-preserving default. Set to calibration_derived for the Stage-1
-    # experiment; calibration is required to begin stationary.
-    mode: configured
+    # R97 default (Bryce 2026-10-15): exact-zero P0. The position, velocity and attitude blocks are exactly zero (a known state); the IMU
+    # propagation makes the covariance positive before anything is inverted. These are the values of the R96E factor P0 = 1 (cell f10001111).
+    # Calibration is required to begin stationary.
+    mode: calibration_derived
     autocov_lags: 20
     # The world/map origin is defined to be exactly zero and the platform is
     # required to start stationary. Positive epsilons keep information-form
     # solves nonsingular while representing those known constraints.
-    known_pos_variance: 1.0e-12
-    known_vel_variance: 1.0e-12
+    known_pos_variance: 0.0
+    known_vel_variance: 0.0
     # R89: attitude block of P0 in calibration_derived mode. Negative = the calibration-derived block (unchanged); 0 or more = that
     # constant on the diagonal with no cross terms (0 = exactly zero). known_pos_variance / known_vel_variance may also be exactly 0
     # (a known state; the IMU propagation makes the covariance positive before anything is inverted).
-    known_theta_variance: -1.0
+    known_theta_variance: 0.0
     # Balanced roll/pitch-vs-b_a ambiguity in acceleration units. 0.0856
     # m/s^2 = g * 0.5 degrees, using the VN-100's published static pitch/roll
     # accuracy as the initial conservative ambiguity scale. Each side gets
     # that same acceleration-equivalent uncertainty and the compensating
     # cross-covariance. This is NOT
     # the later motion-dependent Q scale.
-    tilt_ba_ambiguity_accel_std: 0.0856
-    bg_model_floor: -1.0
-    ba_radial_model_floor: -1.0
+    tilt_ba_ambiguity_accel_std: 0.03
+    bg_model_floor: 1.0e-5
+    ba_radial_model_floor: 1.0e-5
     # Numerical SPD floor for information-form solves. This does not express
     # physical uncertainty and is reported before/after in calibration_p0.txt.
     numerical_eigenvalue_floor: 1.0e-12
@@ -103,8 +103,6 @@ state:
     bg: true
     ba: true
     gravity: true
-    cov_acc: false
-    cov_gyr: false
   cov:
     # Initial state covariance only; runtime process noise is under imu/.
     rot_tilt: 1.0e-2
@@ -121,10 +119,11 @@ state:
     bg: [0., 0., 0.]
 imu:
   process_noise:
-    # "fixed" preserves production behavior. "isotropic" and "axis_aware"
+    # "fixed" is the earlier production behavior. "isotropic" and "axis_aware"
     # use stationary-calibration variance as the floor and add bounded motion
     # variance from gravity-removed acceleration and bias-corrected gyro rate.
-    model: fixed
+    # R97 default: isotropic (R96E factor NOISE = 1: acc_scale 0.15 and the dynamic caps 1e6).
+    model: isotropic
     fixed:
       # FAST-LIVO2's tuned NTU_VIRAL acc_cov/gyr_cov. These operating
       # variances are intentionally separate from the stationary floor.
@@ -134,13 +133,12 @@ imu:
       # beta=0 uses each IMU sample directly; beta in [0,1) low-pass filters
       # the dynamic variance. Scales are dimensionless because the motion
       # signal is squared to produce a variance contribution.
-      # R80 (F-477, Bryce): motion defaults beta 0.9, acc_scale 0.3, gyro_scale 10 (were 0.0 / 1.0 / 1.0);
-      # read only when model != fixed, so model: fixed is unchanged.
+      # Read only when model != fixed.
       beta: 0.9
-      acc_scale: 0.3
+      acc_scale: 0.15
       gyro_scale: 10.0
-      acc_max_dynamic_variance: 0.5
-      gyro_max_dynamic_variance: 0.3
+      acc_max_dynamic_variance: 1.0e6
+      gyro_max_dynamic_variance: 1.0e6
     bias_random_walk:
       gyro_variance_rate: 1.0e-5
       accel_variance_rate: 1.0e-5
@@ -181,9 +179,10 @@ lio:
   ekf:
     max_iterations: 5
 voxel_map:
-  backend: "voxel"  # "voxel" (default, persistent per-voxel plane fits, VoxelMap) or
-                    # "akf" (AKF-LIO-style raw-point Gaussian merge map, AkfMap) -- see
-                    # ~/.claude/plans/imperative-tumbling-karp.md for the design.
+  backend: "binned"  # "voxel" (persistent per-voxel plane fits, VoxelMap), "binned" (VoxelMap whose nodes keep bins). R97 default: binned (R96E factor MAP = 1).
+  binned:
+    bin_size_fraction: 0.25   # bin edge = this x the node's own edge
+    cov_mode: average         # average (C / k) | shrunk (C / k^2)
   map:
     # 2026-08-14: unified to 0.425 to match HILTI (see slam_2022/
     # voxel_map.yaml's comment for the full history) instead of staying at
@@ -197,6 +196,13 @@ voxel_map:
     max_layer: 2
   plane:
     plane_threshold: 2.5e-3
+    # R97 default: hard lines with the plane-equivalent variance (R96E factor LINES = 1).
+    line_residual:
+      enabled: true
+      form: hard
+      rule: absolute
+      rows: per_normal
+      variance: plane_equivalent
   points:
     min_init: 5
     min_update: 5
@@ -207,7 +213,7 @@ voxel_map:
   search:
     neighborhood_size: 1
 vio:
-  enable: true  # set by test_*.sh
+  enable: false  # R97 default: off (every R96E run had it off). Set true to run the visual-inertial odometry.
   ekf:
     # max_iterations/min_diff_error matched to FAST-LIVO2 myvio's own
     # production values (10 / 0.0001, both HILTI/NTU_VIRAL configs) on
@@ -298,9 +304,6 @@ topics:
   lidar: "/os1_cloud_node1/points"
   imu: "/imu/imu"
   queue_size: 20000
-frames:
-  camera: camera_link
-  lidar: lidar_link
 extrinsics:
   R_l2i: [1, 0, 0, 0, 1, 0, 0, 0, 1]
   t_l2i: [-0.050, 0.000, 0.055]
@@ -313,7 +316,6 @@ camera:
   fy: 426.7976260903337
   cx: 386.0151866550880
   cy: 241.9130336743440
-  distortion_model: plumb_bob
   distortion_coeffs: [-0.288105327549552, 0.074578284234601, 7.784489598138802e-04, -2.277853975035461e-04, 0.0]
 preprocess:
   # NTU VIRAL's camera/lidar rates don't have the mismatch HILTI's does
@@ -324,14 +326,7 @@ cbk:
     type: pcl   # avia | mid360 | pcl (NTU VIRAL uses an Ouster OS1, generic PointCloud2)
     blind: 1.0
     point_filter_num: 3
-    # Matches FAST-LIVO2's own NTU_VIRAL.yaml (time_offset/lidar_time_offset:
-    # -0.1) -- corrects a fixed ~100ms clock/latency skew between this
-    # dataset's Ouster lidar driver and its IMU/camera streams. livo_recon
-    # had no equivalent of this at all until it was added specifically to
-    # test whether the missing correction explains a velocity-correlated
-    # (not fixed-frame) position bias found during sustained fast motion
-    # (t=73-85s on eee_01) that FAST-LIVO2 doesn't share.
-    time_offset: -0.1
+    # R97: no lidar time offset. The NTU VIRAL bags are rewritten once (scripts/r97_rewrite_bags.py) so that the header stamp is the start of the scan.
   imu:
     acc_type: "m_s2"  # NTU VIRAL's IMU already reports linear_acceleration in m/s^2 -- confirmed empirically: the old unconditional *G_m_s2 scaling produced a runaway ~-84 m/s^2 accel bias (the EKF trying to absorb a ~9.81x-too-large acceleration reading)
     gyr_type: "rad_s"

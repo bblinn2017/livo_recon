@@ -2,7 +2,7 @@
 //   RK1 every retired name maps to a message that contains both the old and the new name.
 //   RK2 the new names and unrelated keys give an empty message (not refused).
 //   RK3 the renamed table covers the ten q_adapt keys (10 entries; the three continuous_prior entries of R73 moved to the removed table).
-//   RK4 (R74 F-427, R82 F-476 and F-403, R83 F-401 and F-508, R84 F-521, R85 F-520) every removed key gives a message that contains the key and its release; the removed table has 36 entries (R92: voxel_map/binned/update_count_mode; R93A: seven keys; R95: voxel_map/binned/weight_mode).
+//   RK4 (R74 F-427, R82 F-476 and F-403, R83 F-401 and F-508, R84 F-521, R85 F-520) every removed key gives a message that contains the key and its release; the removed table has 56 entries (R92: voxel_map/binned/update_count_mode; R93A: seven keys; R95: voxel_map/binned/weight_mode; R97: estimator/mode, lio/estimator/mode and 18 more).
 //   RK5 a removed key is never also a renamed-key target or source in the renamed table (no key can be both renamed and removed),
 //       and the new gain keys are not removed.
 #include "livo_recon/utils/log/renamed_key_table.h"
@@ -30,12 +30,12 @@ int main()
   CHECK(renamedKeyMessage("lio/zupt/mode").empty(), "RK2 lio/zupt/mode is removed, not renamed");
   CHECK(renamedKeyMessage("imu/process_noise/model").empty(), "RK2 imu/process_noise/model is not retired");
   CHECK(renamedKeyMessage("lio/q_adapt").empty(), "RK2 a prefix alone is not a retired key");
-  CHECK(removedKeyTable().size() == 36, "RK4 removed table has 36 entries (8 from R74, 5 from R82, 9 from R83, 4 from R84, 1 from R85, 1 from R92, 7 from R93A, 1 from R95)");
+  CHECK(removedKeyTable().size() == 56, "RK4 removed table has 56 entries (8 from R74, 5 from R82, 9 from R83, 4 from R84, 1 from R85, 1 from R92, 7 from R93A, 1 from R95, 20 from R97)");
   for (const auto& k : removedKeyTable()) {
     const std::string m = removedKeyMessage(k);
-    if (m.find(k) == std::string::npos || m.find("removed in R7") == std::string::npos && m.find("removed in R82") == std::string::npos && m.find("removed in R83") == std::string::npos && m.find("removed in R84") == std::string::npos && m.find("removed in R85") == std::string::npos && m.find("removed in R92") == std::string::npos && m.find("removed in R93A") == std::string::npos && m.find("removed in R95") == std::string::npos) CHECK(false, "RK4 message names the key and its release");
+    if (m.find(k) == std::string::npos || m.find("removed in R7") == std::string::npos && m.find("removed in R82") == std::string::npos && m.find("removed in R83") == std::string::npos && m.find("removed in R84") == std::string::npos && m.find("removed in R85") == std::string::npos && m.find("removed in R92") == std::string::npos && m.find("removed in R93A") == std::string::npos && m.find("removed in R95") == std::string::npos && m.find("removed in R97") == std::string::npos) CHECK(false, "RK4 message names the key and its release");
   }
-  CHECK(true, "RK4 all 36 removed keys refused with a message that names the key");
+  CHECK(true, "RK4 all 56 removed keys refused with a message that names the key");
   CHECK(removedKeyMessage("lio/zupt/mode").find("R83 (F-401, F-508)") != std::string::npos, "RK6 lio/zupt/mode names R83 F-401 F-508");
   CHECK(removedKeyMessage("lio/zupt/calib_margin_gyro").find("R83") != std::string::npos && removedKeyMessage("lio/zupt/sigma_v").find("R83") != std::string::npos, "RK6 every lio/zupt key is refused");
   CHECK(removedKeyMessage("lio/zupt").empty(), "RK5 the lio/zupt prefix alone is not a removed key");
@@ -50,6 +50,13 @@ int main()
   for (const char* k : {"voxel_map/residual/pose_cov_in_sigma", "voxel_map/plane/plane_fit_pose_cov_mode", "lio/point_cov/insertion_source", "voxel_map/plane/plane_gap_floor_en",
                         "voxel_map/plane/line_residual/classify_at_fit", "voxel_map/plane/debias_denominator_guard", "voxel_map/plane/plane_var_denom_floor_en"})
     CHECK(removedKeyMessage(k).find("removed in R93A") != std::string::npos, "RK8 the R93A keys are refused and name R93A");
+  CHECK(removedKeyMessage("estimator/mode").find("removed in R97") != std::string::npos && removedKeyMessage("lio/estimator/mode").find("removed in R97") != std::string::npos, "RK12 estimator/mode and lio/estimator/mode are refused and name R97");
+  CHECK(removedKeyMessage("estimator").empty(), "RK12 the estimator prefix alone is not a removed key");
+  for (const char* k : {"cbk/lidar/time_offset", "cbk/lidar/overlap_policy", "cbk/lidar/retime_t0_s", "cbk/lidar/retime_period_s", "cbk/lidar/retime_seq0", "cbk/lidar/retime_ref_offset_s",
+                        "voxel_map/plane/plane_fit_mode", "voxel_map/plane/debias_mode", "voxel_map/plane/plane_threshold_hysteresis", "voxel_map/plane/centred_accumulation", "voxel_map/plane/debiased_line_equiv",
+                        "state/est/cov_acc", "state/est/cov_gyr", "frames/camera", "frames/lidar", "camera/distortion_model", "viz/grid_map", "imu/process_noise/switch/scan"})
+    CHECK(removedKeyMessage(k).find("removed in R97") != std::string::npos, "RK13 the R97 keys are refused and name R97");
+  CHECK(removedKeyMessage("cbk/lidar/blind").empty(), "RK13 cbk/lidar/blind is a live key");
   CHECK(removedKeyMessage("lio/gate_state_uncertainty").empty(), "RK8 lio/gate_state_uncertainty is a live key");
   CHECK(removedKeyMessage("lio/ekf/step_cap/mode").find("R82 (F-403)") != std::string::npos, "RK6 step_cap/mode names R82 F-403");
   CHECK(removedKeyMessage("imu/process_noise/gain/nis_lo").find("R82 (F-476)") != std::string::npos, "RK6 nis_lo names R82 F-476");

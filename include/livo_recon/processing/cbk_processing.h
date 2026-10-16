@@ -14,8 +14,6 @@ struct CbkProcOptions
   std::string image_topic  = "/camera/image_raw";
   std::string lidar_topic  = "/points_raw";
   std::string imu_topic    = "/imu/data";
-  std::string camera_frame = "camera_link";
-  std::string lidar_frame  = "lidar_link";
 
   // Different IMU devices/drivers publish sensor_msgs/Imu's linear_acceleration
   // in different units despite the message's own convention being m/s^2 --
@@ -31,35 +29,9 @@ struct CbkProcOptions
   std::string imu_gyr_type = "rad_s";   // "rad_s" | "deg_s"
   int    queue_size  = 10;
   double blind_sqr   = 0.25;
-  // Added to the raw lidar scan header timestamp before it's used as the
-  // scan's reference time (and therefore before every point's absolute
-  // timestamp = scan_time + per-point offset is derived) -- corrects a
-  // fixed clock/latency skew between the lidar driver and the IMU/image
-  // streams, if the dataset has one. Mirrors FAST-LIVO2's LIVMapper.cpp
-  // (lidar_time_offset, applied identically: cur_head_time = header.stamp
-  // + lidar_time_offset) -- e.g. its NTU_VIRAL.yaml uses -0.1s for this
-  // exact dataset. Left at 0 here previously; no equivalent existed in
-  // livo_recon at all until this was added specifically to test whether a
-  // missing lidar/IMU time-sync correction explains a velocity-correlated
-  // (not fixed-frame) position bias found diverging from FAST-LIVO2's own
-  // trajectory during sustained fast motion (see git history/session notes
-  // around the eee_01 t=73-85s Y-axis bias investigation).
-  double lidar_time_offset = 0.0;
-  // R80C (Bryce 2026-10-05, F-484). What to do about the lidar message start time (header stamp is the driver's publish time: it trails a clean 10 Hz grid by a 0 to 35 ms sawtooth) and about the
-  // overlap with the previous accepted message. One enumerated mode (rule 3.4): "discard" (default; R80 behaviour bit for bit: scan time = header + lidar_time_offset, pushLidar drops an overlapping
-  // message), "retime" (scan time = t0 + (seq - seq0) * period, the per-bag lower-envelope grid; pushLidar unchanged), "retime_trim" (retime, then the points earlier than the last accepted
-  // point are removed from the message before the push, so none is discarded). retime_t0_s, retime_period_s and retime_seq0 are sub-options: required with retime / retime_trim, an error with discard.
-  // PointCloud2 callback only.
-  std::string lidar_overlap_policy = "discard";
-  double lidar_retime_t0_s = 0.0;
-  double lidar_retime_period_s = 0.0;
-  int    lidar_retime_seq0 = 0;
-  // R80D (Bryce 2026-10-05, F-484 / F-491). Two additions to the R80C options. (1) overlap_policy "restamp": the same grid mechanism as "retime" (scan time = t0 + (seq - seq0) * period, pushLidar
-  // unchanged, no trimming), but t0 and period are the NTU VIRAL authors' restamp.py rule: t0 = first header of the bag (+ the time offset the manifest bakes in), period = (last header - first
-  // header) / (N - 1). The key set is the same three keys. (2) retime_ref_offset_s: the lidar_time_offset that was baked into retime_t0_s. The scan time gets the extra term
-  // (lidar_time_offset - retime_ref_offset_s), so a cbk/lidar/time_offset sweep moves a retime / retime_trim / restamp grid; when the two are equal the term is exactly 0.0 and the scan time is bit for
-  // bit the R80C value. Unset = lidar_time_offset (term exactly 0.0). A sub-option: an error with discard.
-  double lidar_retime_ref_offset_s = 0.0;
+  // R97: the LiDAR scan time is the header stamp. The former lidar time offset (cbk/lidar/time_offset) and the R80C/R80D overlap policies (cbk/lidar/overlap_policy
+  // discard | retime | retime_trim | restamp, with retime_t0_s, retime_period_s, retime_seq0, retime_ref_offset_s) were removed: the bags are rewritten once (scripts/r97_rewrite_bags.py) so
+  // that the header is the start of the scan and no message overlaps the previous one. pushLidar() still discards an overlapping message (an overlap is now an anomaly; lidar_msg_log.csv shows it).
   // R82 (F-504, Bryce 2026-10-06). Which PointCloud2 field carries the per-point time and how it is read (see PointTimeSpec in utils/lidar/lidar.h). Defaults: field "t", mode offset_ns_u32 (u32
   // nanoseconds since scan start: the R81 behaviour bit for bit). Hilti 2022 (Hesai) carries "timestamp" as FLOAT64 absolute epoch seconds: point_time_mode = absolute_s_f64 with
   // point_time_field = timestamp. point_time_ref (header | min_point) is a sub-option of absolute_s_f64 only: the value that is subtracted (message header stamp, or the smallest finite value).

@@ -2,8 +2,8 @@
 // R88: the bin accumulator of the "binned" map type. Header-only, Eigen + std only (no ROS), so tests/test_binned_bins_r88.cpp can check it alone.
 //
 // What it is. A voxel keeps its returns in small cubic bins (edge = bin_size_fraction x the voxel's own edge) instead of as raw points. Each bin holds the number of returns, the sum of their positions and the sums of their
-// sensor covariances. When the voxel is fitted, every OCCUPIED bin is turned into one representative point (the mean of its returns) with a covariance and a weight, and those representatives are summed into the same additive
-// statistics that the debiased plane fit keeps for raw points (VoxelPlane::N_acc_, Sp_, Spp_, Scov_, Scov_sensor_, V_, W_, sum_sensor_var_). The debiased fit itself is not changed.
+// sensor covariances. When the voxel is fitted, every OCCUPIED bin is turned into one representative point (the mean of its returns) with a covariance and a weight, and the PCA fit (VoxelPlane::update())
+// takes those representatives as weighted points.
 //
 // One choice (the config key voxel_map/binned/cov_mode). R95: the weight of a bin is always the number of returns it holds; the R88 `uniform` weight (w = 1) and its key voxel_map/binned/weight_mode were removed.
 //
@@ -18,11 +18,8 @@
 //   average : sum of covariances = C (the raw sum), N = total returns.   (the raw statistics, with each bin's own scatter replaced by its mean)
 //   shrunk  : sum of covariances = C / k, N = total returns.
 //
-// Trusted returns. The debiased fit subtracts only the covariance of returns from a trusted (post-bootstrap) frame (VoxelPlane::Scov_sensor_). A bin therefore keeps a second covariance sum over its trusted members.
-// The representative's trusted covariance is that sum divided by the same divisor as the all-member sum (k or k^2), so a bin that mixes bootstrap and live returns subtracts less, never more.
-//
-// R90 (PCA on the binned map): representatives() hands the same occupied bins to the PCA fit (VoxelPlane::update()) as one point per bin (the mean of its returns), with the same covariance (cov_mode) and the same weight
-// (w = k) as moments() uses. The PCA fit then takes the weighted mean and covariance of those points and propagates the covariance of each into the plane variance.
+// R90 (PCA on the binned map): representatives() hands the same occupied bins to the PCA fit (VoxelPlane::update()) as one point per bin (the mean of its returns), with the covariance of cov_mode and the weight
+// w = k. The PCA fit then takes the weighted mean and covariance of those points and propagates the covariance of each into the plane variance.
 //
 // Not kept (and so not supported): the pose covariance. Every fit uses the sensor covariance only.
 // Determinism: bins are visited in ascending key order (std::map), so the sums do not depend on hash order or thread count.
@@ -82,36 +79,12 @@ inline BinKey binKeyOf(const V3& p, double bin_size)
 struct Bin
 {
   int count = 0;                 // returns in the bin
-  int count_trusted = 0;         // of which from a trusted (post-bootstrap) frame
   V3 sum_p = V3::Zero();
   M3 sum_cov = M3::Zero();           // sensor covariances, all members
-  M3 sum_cov_trusted = M3::Zero();   // sensor covariances, trusted members only
   long long touch_epoch = -1;        // R91: the fit epoch in which this bin last received a return (-1: never)
 };
 
-// The additive statistics the debiased fit keeps, built from the occupied bins. sp, spp are about `ref`; scov, scov_sensor, v, w are origin-referenced (as VoxelPlane's Scov_, Scov_sensor_, V_, W_).
-struct Moments
-{
-  double n = 0.0;                    // sum of weights (VoxelPlane::N_acc_)
-  std::size_t n_bins = 0;
-  long long n_points = 0;
-  V3 sp = V3::Zero();
-  M3 spp = M3::Zero();
-  M3 scov = M3::Zero();
-  M3 scov_sensor = M3::Zero();
-  double sum_sensor_var = 0.0;
-  M3 v[3][3];
-  M3 w[3];
-  Moments()
-  {
-    for (int a = 0; a < 3; ++a) {
-      w[a].setZero();
-      for (int b = 0; b < 3; ++b) v[a][b].setZero();
-    }
-  }
-};
-
-// One point per occupied bin, in ascending key order: the mean of the bin's returns, the covariance that moments() would add for it (all members), and its weight.
+// One point per occupied bin, in ascending key order: the mean of the bin's returns, the covariance of cov_mode, and its weight.
 struct Reps
 {
   std::vector<V3> p;
@@ -135,8 +108,8 @@ public:
   // Called by the owner when a fit has been made: the next period starts with no bin touched.
   void markFitted() { ++fit_epoch_; dirty_ = 0; }
 
-  // Adds one return. `trusted` = the return comes from a post-bootstrap frame (its covariance may be subtracted by the debiased fit). Returns true when the return opened a new bin.
-  bool add(const V3& p, const M3& sensor_cov, bool trusted)
+  // Adds one return. Returns true when the return opened a new bin.
+  bool add(const V3& p, const M3& sensor_cov)
   {
     const BinKey key = binKeyOf(p, bin_size_);
     auto it = bins_.find(key);
@@ -147,48 +120,11 @@ public:
     ++b.count;
     b.sum_p += p;
     b.sum_cov += sensor_cov;
-    if (trusted) {
-      ++b.count_trusted;
-      b.sum_cov_trusted += sensor_cov;
-    }
     ++n_points_;
     return is_new;
   }
 
-  // The statistics of the occupied bins under `o`, with positions taken relative to `ref` in sp/spp (pass the plane's reference point, or zero).
-  Moments moments(const Options& o, const V3& ref) const
-  {
-    Moments m;
-    m.n_bins = bins_.size();
-    m.n_points = n_points_;
-    for (const auto& kv : bins_) {
-      const Bin& b = kv.second;
-      const double k = static_cast<double>(b.count);
-      const V3 pbar = b.sum_p / k;
-      const double w = k;   // R95: the only weight (the uniform weight was removed); bit-identical to the former count weight
-      const double div = (o.cov_mode == CovMode::Shrunk) ? k * k : k;
-      const M3 cov_all = b.sum_cov / div;
-      const M3 cov_tr = b.sum_cov_trusted / div;
-      const V3 d = pbar - ref;
-      m.n += w;
-      m.sp += w * d;
-      m.spp.noalias() += w * (d * d.transpose());
-      m.scov += w * cov_all;
-      m.scov_sensor += w * cov_tr;
-      m.sum_sensor_var += w * cov_tr.trace() / 3.0;
-      for (int a = 0; a < 3; ++a) {
-        m.w[a] += (w * pbar(a)) * cov_all;
-        for (int c = a; c < 3; ++c) {
-          const M3 term = (w * pbar(a) * pbar(c)) * cov_all;
-          m.v[a][c] += term;
-          if (c != a) m.v[c][a] += term;
-        }
-      }
-    }
-    return m;
-  }
-
-  // The occupied bins as weighted points (see Reps). Same weights and covariances as moments(): w = k; cov = C / k (average) or C / k^2 (shrunk).
+  // The occupied bins as weighted points (see Reps). w = k; cov = C / k (average) or C / k^2 (shrunk).
   Reps representatives(const Options& o) const
   {
     Reps r;
