@@ -11,6 +11,15 @@
 //     average : C / k.      The noise of the representative is the average member noise. This is the assumption that the members' errors are FULLY CORRELATED (a stationary sensor repeating the same beam),
 //                           so averaging does not reduce the error of the mean.
 //     shrunk  : C / k^2.    The noise of the representative is the noise of a mean of k INDEPENDENT returns, so it falls as 1/k.
+//     fused   : R97A R3. Precision-weighted fusion, treating each return as an INDEPENDENT measurement of one point: with
+//               Lambda_i = Sigma_i^-1 (each return's own covariance, clamped before inverting if near-singular), L = sum
+//               Lambda_i, Lp = sum Lambda_i p_i, the representative is p* = L^-1 Lp with covariance L^-1. Unlike average/
+//               shrunk, the representative's POSITION also changes (it is no longer the plain arithmetic mean) -- it is the
+//               precision-weighted mean, so an anisotropic member with low noise along one axis pulls p* towards it on that
+//               axis specifically.
+//     fused_pose : as fused, plus a scene term voxel_map/binned/fused_pose_sigma_m^2 * I that does not shrink with k (the
+//               part of the error shared by every return of the bin, e.g. pose error) -- see R97A_HANDOFF/code_specs/
+//               R3_fused_bins.md.
 //   weight (how much one bin contributes to the sums; not a choice since R95)
 //     w = k.      A bin counts as the k returns it holds.
 //
@@ -24,6 +33,7 @@
 // Not kept (and so not supported): the pose covariance. Every fit uses the sensor covariance only.
 // Determinism: bins are visited in ascending key order (std::map), so the sums do not depend on hash order or thread count.
 #include <Eigen/Dense>
+#include <Eigen/Eigenvalues>
 
 #include <cmath>
 #include <cstddef>
@@ -40,19 +50,34 @@ namespace binned
 using V3 = Eigen::Vector3d;
 using M3 = Eigen::Matrix3d;
 
-enum class CovMode { Average = 0, Shrunk = 1 };
+// R97A R3: Fused/FusedPose add precision-weighted fusion of a bin's returns (see this file's
+// own header comment update below and R97A_HANDOFF/code_specs/R3_fused_bins.md).
+enum class CovMode { Average = 0, Shrunk = 1, Fused = 2, FusedPose = 3 };
 
-inline const char* covModeName(CovMode m) { return m == CovMode::Shrunk ? "shrunk" : "average"; }
+inline const char* covModeName(CovMode m)
+{
+  switch (m) {
+    case CovMode::Shrunk: return "shrunk";
+    case CovMode::Fused: return "fused";
+    case CovMode::FusedPose: return "fused_pose";
+    default: return "average";
+  }
+}
 inline bool parseCovMode(const std::string& s, CovMode& out)
 {
   if (s == "average") { out = CovMode::Average; return true; }
   if (s == "shrunk") { out = CovMode::Shrunk; return true; }
+  if (s == "fused") { out = CovMode::Fused; return true; }
+  if (s == "fused_pose") { out = CovMode::FusedPose; return true; }
   return false;
 }
+inline bool covModeIsFused(CovMode m) { return m == CovMode::Fused || m == CovMode::FusedPose; }
 
 struct Options
 {
   CovMode cov_mode = CovMode::Average;
+  // R97A R3: voxel_map/binned/fused_pose_sigma_m -- only read/validated under cov_mode == FusedPose.
+  double fused_pose_sigma_m = 0.0;
 };
 
 struct BinKey
@@ -82,6 +107,11 @@ struct Bin
   V3 sum_p = V3::Zero();
   M3 sum_cov = M3::Zero();           // sensor covariances, all members
   long long touch_epoch = -1;        // R91: the fit epoch in which this bin last received a return (-1: never)
+  // R97A R3: precision-weighted fusion sums (Fused/FusedPose only; left at zero and unused by
+  // average/shrunk). L = sum Lambda_i (Lambda_i = Sigma_i^-1, clamped per BinSet::add()'s own
+  // doc), Lp = sum Lambda_i * p_i -- both additive, kept per bin as returns arrive.
+  M3 sum_L = M3::Zero();
+  V3 sum_Lp = V3::Zero();
 };
 
 // One point per occupied bin, in ascending key order: the mean of the bin's returns, the covariance of cov_mode, and its weight.
@@ -95,7 +125,11 @@ struct Reps
 class BinSet
 {
 public:
-  explicit BinSet(double bin_size) : bin_size_(bin_size > 1e-9 ? bin_size : 1e-9) {}
+  // R97A R3: `opts.cov_mode` decides, for this BinSet's whole lifetime, whether add() computes
+  // and accumulates the per-return precision (Lambda_i) -- average/shrunk do no extra work, so
+  // the mode is fixed at construction rather than re-decided on every representatives() call.
+  explicit BinSet(double bin_size, const Options& opts = Options())
+    : bin_size_(bin_size > 1e-9 ? bin_size : 1e-9), opts_(opts) {}
 
   double binSize() const { return bin_size_; }
   std::size_t numBins() const { return bins_.size(); }
@@ -107,6 +141,11 @@ public:
   long long dirtyCount() const { return dirty_; }
   // Called by the owner when a fit has been made: the next period starts with no bin touched.
   void markFitted() { ++fit_epoch_; dirty_ = 0; }
+
+  // R97A R3: cumulative count (never reset by markFitted()) of returns whose covariance needed
+  // the numerical floor (smallest eigenvalue <= 1e-12 * trace) before inversion. Always 0 under
+  // average/shrunk (Lambda_i is never computed).
+  long long fusedClampedCount() const { return fused_clamped_; }
 
   // Adds one return. Returns true when the return opened a new bin.
   bool add(const V3& p, const M3& sensor_cov)
@@ -120,11 +159,27 @@ public:
     ++b.count;
     b.sum_p += p;
     b.sum_cov += sensor_cov;
+    if (covModeIsFused(opts_.cov_mode)) {
+      M3 sigma = sensor_cov;
+      Eigen::SelfAdjointEigenSolver<M3> es(sigma);
+      const double trace = sigma.trace();
+      if (es.eigenvalues().minCoeff() <= 1e-12 * trace) {
+        sigma += (1e-12 * trace) * M3::Identity();
+        ++fused_clamped_;
+      }
+      const M3 lambda = sigma.inverse();
+      b.sum_L += lambda;
+      b.sum_Lp += lambda * p;
+    }
     ++n_points_;
     return is_new;
   }
 
-  // The occupied bins as weighted points (see Reps). w = k; cov = C / k (average) or C / k^2 (shrunk).
+  // The occupied bins as weighted points (see Reps). w = k; cov = C / k (average), C / k^2
+  // (shrunk), L^-1 (fused), or L^-1 + s^2*I (fused_pose, s = o.fused_pose_sigma_m) -- L/Lp are
+  // the precision-weighted sums add() accumulated (requires o.cov_mode to match the mode this
+  // BinSet was constructed with, or L/Lp are all zero and this falls back to a degenerate
+  // L^-1 that is not meaningful).
   Reps representatives(const Options& o) const
   {
     Reps r;
@@ -134,8 +189,17 @@ public:
     for (const auto& kv : bins_) {
       const Bin& b = kv.second;
       const double k = static_cast<double>(b.count);
-      r.p.push_back(b.sum_p / k);
-      r.cov.push_back(b.sum_cov / ((o.cov_mode == CovMode::Shrunk) ? k * k : k));
+      if (covModeIsFused(o.cov_mode)) {
+        const M3 l_inv = b.sum_L.inverse();
+        r.p.push_back(l_inv * b.sum_Lp);
+        M3 cov = l_inv;
+        if (o.cov_mode == CovMode::FusedPose)
+          cov += (o.fused_pose_sigma_m * o.fused_pose_sigma_m) * M3::Identity();
+        r.cov.push_back(cov);
+      } else {
+        r.p.push_back(b.sum_p / k);
+        r.cov.push_back(b.sum_cov / ((o.cov_mode == CovMode::Shrunk) ? k * k : k));
+      }
       r.w.push_back(k);
     }
     return r;
@@ -143,10 +207,12 @@ public:
 
 private:
   double bin_size_;
+  Options opts_;
   std::map<BinKey, Bin> bins_;
   long long n_points_ = 0;
   long long fit_epoch_ = 0;   // R91: incremented by markFitted()
   long long dirty_ = 0;       // R91: bins whose touch_epoch == fit_epoch_
+  long long fused_clamped_ = 0;   // R97A R3
 };
 
 }  // namespace binned

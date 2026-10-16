@@ -431,9 +431,22 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       throw std::runtime_error("[config] refused: voxel_map/binned/bin_size_fraction=" + std::to_string(fraction) + " -- must be in (0, 1]");
     binned::CovMode cm;
     if (!binned::parseCovMode(cov, cm))
-      throw std::runtime_error("[config] refused: voxel_map/binned/cov_mode=" + cov + " -- must be average or shrunk");
+      throw std::runtime_error("[config] refused: voxel_map/binned/cov_mode=" + cov + " -- must be average, shrunk, fused, or fused_pose");
     opts_->binned_bin_fraction = fraction;
-    opts_->binned_cov_mode = (cm == binned::CovMode::Shrunk) ? 1 : 0;
+    opts_->binned_cov_mode = static_cast<int>(cm);
+    // R97A R3: voxel_map/binned/fused_pose_sigma_m -- required and > 0 under fused_pose, refused with any other mode.
+    double fused_pose_sigma_m = 0.0;
+    paramWarn<double>(pnh, "voxel_map/binned/fused_pose_sigma_m", fused_pose_sigma_m, 0.0);
+    if (cm == binned::CovMode::FusedPose)
+    {
+      if (!(fused_pose_sigma_m > 0.0))
+        throw std::runtime_error("[config] refused: voxel_map/binned/fused_pose_sigma_m must be > 0 when voxel_map/binned/cov_mode=fused_pose");
+    }
+    else if (pnh.hasParam("voxel_map/binned/fused_pose_sigma_m"))
+    {
+      throw std::runtime_error("[config] refused: voxel_map/binned/fused_pose_sigma_m is set but voxel_map/binned/cov_mode != fused_pose");
+    }
+    opts_->binned_fused_pose_sigma_m = fused_pose_sigma_m;
   }
 
   std::ostringstream oss;
@@ -461,7 +474,8 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       << "\n  residual/max_radius:         " << opts_->max_radius
       << "\n  search/neighborhood_size:    " << opts_->neighborhood_size
       << "\n  binned/bin_size_fraction:        " << opts_->binned_bin_fraction << "   (bin edge " << opts_->binned_bin_fraction * opts_->voxel_size << " m at the root voxel)"
-      << "\n  binned/cov_mode:                 " << (opts_->binned_cov_mode == 1 ? "shrunk" : "average")
+      << "\n  binned/cov_mode:                 " << binned::covModeName(binned::CovMode(opts_->binned_cov_mode))
+      << (opts_->binned_cov_mode == static_cast<int>(binned::CovMode::FusedPose) ? "  (fused_pose_sigma_m=" + std::to_string(opts_->binned_fused_pose_sigma_m) + ")" : "")
       << "\n  binned/weight:                   count (w = k; the only weight since R95)"
       << "\n  binned/fit:                      pca, one weighted point per occupied bin"
       << "\n  binned/min_init, min_update:     " << opts_->min_init_points << ", " << opts_->min_update_points << "   (counted in unique bins touched since the last fit)";

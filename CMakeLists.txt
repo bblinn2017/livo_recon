@@ -360,11 +360,32 @@ target_include_directories(test_binned_bins_r88 PUBLIC include ${EIGEN3_INCLUDE_
 target_link_libraries(test_binned_bins_r88 Eigen3::Eigen)
 add_test(NAME binned_bins_r88 COMMAND test_binned_bins_r88)
 
+# R97A R3: fused/fused_pose bin covariance modes (header-only, Eigen + std only, like R88).
+add_executable(test_binned_fused_r97a_r3 tests/test_binned_fused_r97a_r3.cpp)
+target_include_directories(test_binned_fused_r97a_r3 PUBLIC include ${EIGEN3_INCLUDE_DIRS})
+target_link_libraries(test_binned_fused_r97a_r3 Eigen3::Eigen)
+add_test(NAME binned_fused_r97a_r3 COMMAND test_binned_fused_r97a_r3)
+
 # R89 (planning agent's patch): exact-zero known blocks of P0 (header-only, Eigen only).
 add_executable(test_p0_pin_r89 tests/test_p0_pin_r89.cpp)
 target_include_directories(test_p0_pin_r89 PUBLIC include ${EIGEN3_INCLUDE_DIRS})
 target_link_libraries(test_p0_pin_r89 Eigen3::Eigen)
 add_test(NAME p0_pin_r89 COMMAND test_p0_pin_r89)
+
+# R97A R4: calib/p0/gravity_cov_mode -- gravityCovarianceFromCalibration() is a free function
+# defined in calib_processing.cpp, so that translation unit (and its own direct dependencies) is
+# linked in, like test_deskew_rot_warp_r91h links deskew.cpp.
+add_executable(test_gravity_cov_r4 tests/test_gravity_cov_r4.cpp
+  src/processing/calib_processing.cpp
+  src/diagnostics/calibration_p0_writer.cpp
+  src/diagnostics/bootstrap_diagnostic_writer.cpp
+  src/diagnostics/log/debug_log_dir.cpp
+  src/utils/data/data_queues.cpp
+  src/lio/deskew.cpp
+  src/lio/relpose_noise.cpp)
+target_include_directories(test_gravity_cov_r4 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+target_link_libraries(test_gravity_cov_r4 state_lib ${catkin_LIBRARIES})
+add_test(NAME gravity_cov_r4 COMMAND test_gravity_cov_r4)
 # R90: the pca fit on the binned map type: BinSet::representatives() and VoxelNode's binned pca branch (links voxelnode.cpp and voxelplane.cpp; no ROS).
 add_executable(test_binned_pca_r90 tests/test_binned_pca_r90.cpp src/lio/voxelnode.cpp src/lio/voxelplane.cpp src/diagnostics/log/debug_log_dir.cpp)
 target_include_directories(test_binned_pca_r90 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})

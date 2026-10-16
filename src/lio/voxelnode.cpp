@@ -13,6 +13,19 @@ namespace
 int g_current_frame_idx = -1;
 bool g_bootstrap_insertion = false;
 
+// R97A R3: VoxelOpts::binned_cov_mode's int encoding matches binned::CovMode's own enum values
+// exactly (0 average, 1 shrunk, 2 fused, 3 fused_pose) -- this is the one place that assumption
+// is spelled out, rather than repeating an unchecked static_cast at every call site.
+binned::CovMode binnedCovModeFromInt(int v)
+{
+  switch (v) {
+    case 1: return binned::CovMode::Shrunk;
+    case 2: return binned::CovMode::Fused;
+    case 3: return binned::CovMode::FusedPose;
+    default: return binned::CovMode::Average;
+  }
+}
+
 // Diagnostic-only (see the point_filter_num=1 single-frame-init failure
 // mode investigation): one line per voxel's FIRST plane fit, comparing raw
 // PCA quality (eigenvalues, in-plane radius) and fit-uncertainty
@@ -110,13 +123,20 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     // R90 (binned map, pca fit; R97A: the only map): returns go into bins; min_init / min_update count the unique bins touched since the last fit (R92); the fit is the pca fit of one weighted point per occupied bin
     // (VoxelPlane::update() with the weights of binned::BinSet::representatives()). The admission test reads plane_.isInit() as the pca path always did; pointsSize() is the number of occupied bins at the last
     // fit (so isFull() / points/max also count bins, and a voxel stays open until it holds points/max occupied bins).
-    if (!binset_) binset_.reset(new binned::BinSet(opts_->voxel_size / static_cast<double>(1 << layer_) * opts_->binned_bin_fraction));
+    if (!binset_) {
+      binned::Options init_bo;
+      init_bo.cov_mode = binnedCovModeFromInt(opts_->binned_cov_mode);
+      init_bo.fused_pose_sigma_m = opts_->binned_fused_pose_sigma_m;
+      binset_.reset(new binned::BinSet(opts_->voxel_size / static_cast<double>(1 << layer_) * opts_->binned_bin_fraction, init_bo));
+    }
+    const long long clamped_before = binset_->fusedClampedCount();
     long long opened = 0;
     for (const auto& pt : points_world)
       if (binset_->add(pt.point, pt.sensor_cov)) ++opened;
     update_count_ = static_cast<int>(binset_->dirtyCount());   // R92: unique bins hit since the last fit (the only count; `opened` is kept for the binned_new_bins counter)
     stats_->binned_points.fetch_add(static_cast<long long>(points_world.size()), std::memory_order_relaxed);
     stats_->binned_new_bins.fetch_add(opened, std::memory_order_relaxed);
+    stats_->binned_fused_clamped.fetch_add(binset_->fusedClampedCount() - clamped_before, std::memory_order_relaxed);
     // History for a later subdivision, bounded by max_points.
     batch_stored_in_points_ = false;
     if (static_cast<int>(points_.size()) < opts_->max_points) {
@@ -127,7 +147,8 @@ void VoxelNode::insertPoints(const std::vector<PointXYZCov>& points_world,
     // R97A: voxel_map/plane/min_frames_to_init is removed (it was a no-op at its default, 1).
     plane_.noteFrames(distinct_frames_);
     binned::Options bo;
-    bo.cov_mode = opts_->binned_cov_mode == 1 ? binned::CovMode::Shrunk : binned::CovMode::Average;
+    bo.cov_mode = binnedCovModeFromInt(opts_->binned_cov_mode);
+    bo.fused_pose_sigma_m = opts_->binned_fused_pose_sigma_m;
     const binned::Reps reps = binset_->representatives(bo);
     std::vector<PointXYZCov> bin_reps(reps.p.size());
     for (std::size_t i = 0; i < reps.p.size(); ++i) {

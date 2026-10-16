@@ -12,6 +12,7 @@
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/utils/algo/math.h"
 #include "livo_recon/map/voxelmap.h"
+#include "livo_recon/map/binned/binned_bins.h"
 #include "livo_recon/lio/voxelplane.h"   // voxelPlaneInformationFitCount()
 #include "livo_recon/lio/lio_accumulator.h"
 #include "livo_recon/utils/algo/covariance_math.h"
@@ -414,9 +415,12 @@ std::string LioProcIekf::engagementReport() const
     {   // R88: written for the (only, since R97A) binned map type
       const auto st88 = vm->stats();
       const long long bp = st88 ? st88->binned_points.load() : 0, bb = st88 ? st88->binned_new_bins.load() : 0, bf = st88 ? st88->binned_fits.load() : 0, bt = st88 ? st88->binned_touched_at_fit.load() : 0;
-      o << "\n  voxel_map/backend = binned: bin_size_fraction = " << vm->opts()->binned_bin_fraction << " cov_mode = " << (vm->opts()->binned_cov_mode == 1 ? "shrunk" : "average")
+      const long long bc = st88 ? st88->binned_fused_clamped.load() : 0;   // R97A R3
+      o << "\n  voxel_map/backend = binned: bin_size_fraction = " << vm->opts()->binned_bin_fraction << " cov_mode = " << binned::covModeName(binned::CovMode(vm->opts()->binned_cov_mode))
         << " weight = count binned_points=" << bp << " binned_new_bins=" << bb << " binned_fits=" << bf
         << " update_count = touched binned_touched_at_fit=" << bt;
+      if (vm->opts()->binned_cov_mode == static_cast<int>(binned::CovMode::Fused) || vm->opts()->binned_cov_mode == static_cast<int>(binned::CovMode::FusedPose))
+        o << " binned_fused_clamped=" << bc;
       if (bp == 0)
         o << "   <-- INERT: the binned map was selected and no return was put in a bin";
       else if (bf == 0)
