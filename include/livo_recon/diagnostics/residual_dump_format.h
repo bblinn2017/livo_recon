@@ -4,11 +4,11 @@
 // (tests/test_residual_dump_format_r91c.cpp). Templates on the residual type (livo_recon::Residual in the node, a mock with the same member names in the test).
 //
 // Default (geom = false, slim = false): header and rows are byte-identical to R71..R91 (with the voxel columns only under voxel_info, as since R81).
-// geom = true  (lio/residual_dump_line_geometry): four columns appended after the voxel columns: line_axis_x, line_axis_y, line_axis_z, line_axial. line_axis is the unit
+// geom = true  (log/lio/residual_dump/line_geometry): four columns appended after the voxel columns: line_axis_x, line_axis_y, line_axis_z, line_axial. line_axis is the unit
 //     vector u2 = VoxelPlane::x_normal_ of the row's voxel (the third eigenvector of the point scatter: the LINE AXIS when the voxel is a line, the largest in-plane direction
 //     otherwise); line_axial = u2 . (p - plane centre), p the world point. For a distance row (row_kind 6) hpos is the unit vector q from the line to the point and r = |d - (u2.d) u2|,
 //     so the 2-D perpendicular displacement of the point from the line is r * q (no further column is needed for it).
-// slim = true  (lio/residual_dump_slim): 14 columns instead of 29, enough to rebuild HtH and Htz (w = 1 / sigma_squared, r, hrot, hpos) and to join to the voxel map by node_id:
+// slim = true  (log/lio/residual_dump/slim): 14 columns instead of 29, enough to rebuild HtH and Htz (w = 1 / sigma_squared, r, hrot, hpos) and to join to the voxel map by node_id:
 //     frame,iter,idx,r,sigma_squared,plane_var_term,node_id,row_kind,hrot_x..z,hpos_x..z. Dropped: source_index, t, plane_key, tier, vis, wx..wz, bx..bz, floor_term,
 //     sigma_diag_squared, s_prior_pose, sigma_gate_squared. The voxel and geometry columns follow in the same order as in the full format.
 // The caller sets std::setprecision(9) once, as before.

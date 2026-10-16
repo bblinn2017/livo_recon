@@ -382,7 +382,7 @@ VoxelPlaneR77Counters voxelPlaneR77Counters();
 // rows: gate() evaluations that reached the variance term; scan_rows: of those, rows where s2 > 0 added a scan term; clamped: rows the plane_var_min clamp raised;
 // sum_n_scans: sum of max(1, distinct frames) over scan_rows (mean n_scans = sum_n_scans / scan_rows).
 // R97A: VoxelPlaneR81Counters/voxelPlaneR81Counters() removed with voxel_map/plane/plane_var_min and plane_var_scan_s2.
-// R82 (D2, F-502): snapshot of the plane variance diagnostic (voxel_map/plane/plane_var_diag_en), cumulative since process start. See lio/plane_var_diag.h.
+// R82 (D2, F-502): snapshot of the plane variance diagnostic (log/voxel_map/plane_var_diag), cumulative since process start. See lio/plane_var_diag.h.
 PlaneVarDiagSnapshot voxelPlaneVarDiagSnapshot();
 // R82 (D4, F-500): engagement of voxel_map/plane/line_residual/classify_at_fit, cumulative since process start. line_classified: fits the classifier called a line;
 // line_accepted: of those, fits that ended as an accepted voxel; e1_tiny_kept: lines kept although e1 < 1e-8 (the R81 test would have rejected them); e0_clamped: fits whose e0 was set equal to e1 after the sensor floor
@@ -413,7 +413,7 @@ long voxelPlaneInformationFitCount();
 // History (252-256): see docs/livo_recon_changelog.md#include-livo_recon-lio-voxelplane.h-252
 void debugFlushConsistencyCorr();
 
-// R64: plane-fit outcome accounting (write-only diagnostics, off unless voxel_map/plane/plane_fit_reasons_en or
+// R64: plane-fit outcome accounting (write-only diagnostics, off unless log/voxel_map/plane_fit_reasons or
 // plane_fit_trace_frames > 0). voxelPlaneFitEvent() is the VoxelNode-level hook (kinds below); the fit-level
 // outcomes are recorded inside VoxelPlane. voxelPlaneFitTraceFlush() writes plane_fit_reasons.csv and
 // plane_fit_trace.csv into the debug log dir; called once at shutdown.

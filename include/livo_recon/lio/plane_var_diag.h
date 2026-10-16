@@ -1,6 +1,6 @@
 #pragma once
 // R82 (D2, F-502): write-only diagnostic of the plane variance term, as pure code (no Eigen, no ROS) so tests/test_plane_var_diag_r82.cpp can check the binning and the
-// quantiles. VoxelPlane::gate() calls PlaneVarDiag::add() ONLY when voxel_map/plane/plane_var_diag_en is true (default false: the call is skipped and nothing changes).
+// quantiles. VoxelPlane::gate() calls PlaneVarDiag::add() ONLY when log/voxel_map/plane_var_diag is true (default false: the call is skipped and nothing changes).
 // What is recorded per gate() row that reaches the variance term: the plane variance term the fit gave (`fit`), the term after the scan term and before the clamp (`post`,
 // equal to `fit` when plane_var_scan_s2 is 0), and 1 / max(1, distinct frames) (so mean s2/n = s2 * mean(1/n) for any s2). Histograms are log-spaced, 20 bins per decade over
 // [1e-9, 1] (values outside go to the end bins), so a quantile read from them is exact to a factor of 10^(1/40) = 1.06 either way (geometric bin centre). The fractions below the

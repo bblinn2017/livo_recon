@@ -278,7 +278,7 @@ add_test(NAME line_distance_r80 COMMAND test_line_distance_r80)
 
 # R78 (planning agent's patch): which point set the IEKF uses (lio/iekf_point_stream); header only, ROS-free.
 
-# R79 (planning agent's patch): which frames write a voxel-map snapshot (voxel_map/map/snapshot_frames); header only, ROS-free.
+# R79 (planning agent's patch): which frames write a voxel-map snapshot (log/voxel_map/snapshot_frames); header only, ROS-free.
 add_executable(test_snapshot_frames_r79 tests/test_snapshot_frames_r79.cpp)
 target_include_directories(test_snapshot_frames_r79 PUBLIC include)
 add_test(NAME snapshot_frames_r79 COMMAND test_snapshot_frames_r79)

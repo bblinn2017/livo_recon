@@ -42,8 +42,8 @@ struct LioProcOptions
   bool   update_diag_en        = false;
   bool   live_point_cov_en     = false;
   int    first_frame_dump_frames = 1;
-  // R91C (write-only; empty / false = unchanged and byte-identical): lio/first_frame_dump_frame_list is a comma-separated list of further frame indices that get the solve snapshot
-  // (pose_control_first_frame_solve{.csv,_matrices.txt}) in addition to 1..first_frame_dump_frames; lio/first_frame_dump_slim (refused unless the list is non-empty) writes those frames
+  // R91C (write-only; empty / false = unchanged and byte-identical): log/lio/first_frame_dump/frame_list is a comma-separated list of further frame indices that get the solve snapshot
+  // (pose_control_first_frame_solve{.csv,_matrices.txt}) in addition to 1..first_frame_dump_frames; log/lio/first_frame_dump/slim (refused unless the list is non-empty) writes those frames
   // in the slim form (prior_cov, A_exact, HtH, Htz, the prior and measurement terms, the solution: no H_full, K1, G and no per-residual lines).
   std::vector<int> first_frame_dump_list;
   bool   first_frame_dump_slim = false;
@@ -86,10 +86,10 @@ struct LioProcOptions
   // Write-only. 0 (default) writes nothing and is bit-identical. Frame index = voxel_map_->frame_idx_ when estimateState starts, the same value the post_imu row carries.
   int state_trace_pre_imu_frames = 0;
   // R92: also write pose_cov_trace.csv (the slim per-scan trace: post_lio rotation quaternion, position and the 6 x 6 pose covariance). Write-only; default false writes nothing and is bit-identical.
-  // Independent of eval/state_trace_en, so the sweep can switch the 18 x 18 trace off and keep this one.
+  // Independent of log/state_trace/enable, so the sweep can switch the 18 x 18 trace off and keep this one.
   bool pose_cov_trace_en = false;
   // R92: with pose_cov_trace_en, rows are written only for scans whose time since the bag start is at most this many seconds (the stationary window of the bag; the run continues after it). Negative (default) = every scan.
-  // A refused sub-option without eval/pose_cov_trace_en (a dead key, rule 3.4).
+  // A refused sub-option without log/pose_cov_trace/enable (a dead key, rule 3.4).
   double pose_cov_trace_end_s = -1.0;
 
   // R97A Q2: open_loop (lio/open_loop/mode, reset_period_s), startup_hold_scans and
@@ -119,7 +119,7 @@ struct LioProcOptions
   // the points that got line or smooth rows, the sums of fit variance, tilt variance and total variance, and the cumulative R77 engagement counters
   // (voxelPlaneR77Counters()). Default false writes nothing and is bit-identical.
   bool   line_rows_log_en      = false;
-  // R95 (Bryce 2026-10-11; key lio/zsq_log_en, default false = nothing is written, bit-identical): zsq_per_scan.csv, one row per scan for iteration 0 and one for the last executed iteration, holding
+  // R95 (Bryce 2026-10-11; key log/lio/zsq, default false = nothing is written, bit-identical): zsq_per_scan.csv, one row per scan for iteration 0 and one for the last executed iteration, holding
   // the sums and counts of z squared = r^2 / sigma_squared of the residuals (diagnostics/zsq_summary.h defines every column). Write-only; experimental: the engagement block of the effective config prints the row count and flags a run where the key is on and no row was written.
   bool   zsq_log_en            = false;
 
@@ -127,19 +127,19 @@ struct LioProcOptions
   // iteration 0. Empty (default) writes nothing and is bit-identical.
   std::vector<int> residual_dump_frames;
   // R73 (F-417): also dump the residuals of the LAST executed iteration of each listed frame (iteration index recorded in the
-  // iter column). Sub-key of lio/residual_dump_frames (refused when that list is empty). Default false is bit-identical.
+  // iter column). Sub-key of log/lio/residual_dump/frames (refused when that list is empty). Default false is bit-identical.
   bool residual_dump_last_iter = false;
-  // R86B: dump the residuals of EVERY iteration (iteration index in the iter column) of each listed frame. Sub-key of lio/residual_dump_frames (refused when that
+  // R86B: dump the residuals of EVERY iteration (iteration index in the iter column) of each listed frame. Sub-key of log/lio/residual_dump/frames (refused when that
   // list is empty). Supersedes residual_dump_last_iter (the last iteration is already one of the dumped iterations). Default false is bit-identical.
   // Row semantics (unchanged, stated here because the R71 comment above was misleading): the residuals of iteration k are evaluated at the state BEFORE the step of
   // iteration k; the state in residual_dump_state.csv is the state AFTER that step (solveSystem applies it before the dump is written).
   bool residual_dump_all_iters = false;
-  // R81 (F-485 2B): append voxel_point_count and voxel_distinct_frames (of each row's voxel) to residual_dump.csv. Sub-key of lio/residual_dump_frames (refused when that list is empty).
+  // R81 (F-485 2B): append voxel_point_count and voxel_distinct_frames (of each row's voxel) to residual_dump.csv. Sub-key of log/lio/residual_dump/frames (refused when that list is empty).
   // Default false leaves the header and rows byte-identical.
   bool residual_dump_voxel_info = false;
-  // R91C: append line_axis_x/y/z and line_axial to residual_dump.csv (see diagnostics/residual_dump_format.h). Sub-key of lio/residual_dump_frames (refused when that list is empty).
+  // R91C: append line_axis_x/y/z and line_axial to residual_dump.csv (see diagnostics/residual_dump_format.h). Sub-key of log/lio/residual_dump/frames (refused when that list is empty).
   bool residual_dump_line_geometry = false;
-  // R91C: write residual_dump.csv in the 14-column slim form. Sub-key of lio/residual_dump_frames (refused when that list is empty).
+  // R91C: write residual_dump.csv in the 14-column slim form. Sub-key of log/lio/residual_dump/frames (refused when that list is empty).
   bool residual_dump_slim = false;
 
 
@@ -204,7 +204,7 @@ public:
   // from the raw IMU chain.
   virtual void deskewAndDownsample(MeasureGroup& mg) = 0;
 
-  // R86B. Writes the state_trace.csv row "pre_imu" for frames 1..eval/state_trace_pre_imu_frames. Call it before the IMU propagation of the scan, with the state
+  // R86B. Writes the state_trace.csv row "pre_imu" for frames 1..log/state_trace/pre_imu_frames. Call it before the IMU propagation of the scan, with the state
   // untouched since the previous scan. No-op by default.
   void logPreImuState(const MeasureGroup& mg);
 
@@ -248,7 +248,7 @@ protected:
   // map, never reset per frame, and is deliberately outside the estimator.
   void ensureStationaryReference(const MeasureGroup& mg);
 
-  // R61. Writes one state_trace.csv row (no-op when eval/state_trace_en is false). R92: for phase post_lio it also writes the pose_cov_trace.csv row when eval/pose_cov_trace_en is true.
+  // R61. Writes one state_trace.csv row (no-op when log/state_trace/enable is false). R92: for phase post_lio it also writes the pose_cov_trace.csv row when log/pose_cov_trace/enable is true.
   void logStateTrace(const char* phase, const MeasureGroup& mg, int residual_count, int completed_iterations);
   // R97A Q2: openLoopActive()/startupHoldActive()/openLoopFinishScan() are removed with
   // lio/open_loop/* and lio/startup_hold/scans.
@@ -274,9 +274,9 @@ protected:
   // returning cfg.report().
   std::string finalizeConfig(ConfigResolver& cfg, std::initializer_list<const char*> allowed_unclaimed_namespaces);
 
-  // R73: per-residual dump of the CURRENT residuals_ (and state_) when the current map frame is in lio/residual_dump_frames.
+  // R73: per-residual dump of the CURRENT residuals_ (and state_) when the current map frame is in log/lio/residual_dump/frames.
   void dumpResidualsIfListed(int iteration) const;
-  // R95: one zsq_per_scan.csv row for the CURRENT residuals_ and map frame (no-op when lio/zsq_log_en is false). Iteration 0 is written inside estimateStateCorrection(); the IEKF loop calls this once more after the loop for the last executed iteration.
+  // R95: one zsq_per_scan.csv row for the CURRENT residuals_ and map frame (no-op when log/lio/zsq is false). Iteration 0 is written inside estimateStateCorrection(); the IEKF loop calls this once more after the loop for the last executed iteration.
   void logZsqIteration(int iteration) const;
   // R95: rows written to zsq_per_scan.csv since process start (engagement counter).
   static long zsqRowsWritten();

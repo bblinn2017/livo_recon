@@ -22,12 +22,12 @@ std::string CombinedProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "combined/ekf/min_norm_dt",     opts_.min_norm_dt,     0.0);
   paramWarn<double>(pnh, "combined/ekf/min_diff_error",  opts_.min_diff_error,  -1.0);
   paramWarn<double>(pnh, "combined/ekf/max_avg_error",   opts_.max_avg_error,   5.0);
-  paramWarn<bool>(pnh, "combined/log_debug_en",       opts_.log_debug_en,   false);
-  paramWarn<bool>(pnh, "combined/log_consistency_en", opts_.log_consistency_en, false);
-  // See CombinedProcOptions::log_nll_en_compat -- lio/log_nll_en is read
+  paramWarn<bool>(pnh, "log/combined/debug",       opts_.log_debug_en,   false);
+  paramWarn<bool>(pnh, "log/combined/consistency", opts_.log_consistency_en, false);
+  // See CombinedProcOptions::log_nll_en_compat -- log/lio/nll is read
   // here too so a sweep config using the LIO-only flag name still gets a
   // populated nll.txt in combined mode.
-  paramWarn<bool>(pnh, "lio/log_nll_en",              opts_.log_nll_en_compat, false);
+  paramWarn<bool>(pnh, "log/lio/nll",              opts_.log_nll_en_compat, false);
 
   std::ostringstream oss;
   oss << "[params/combined]"

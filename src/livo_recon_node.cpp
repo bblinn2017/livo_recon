@@ -34,14 +34,22 @@ void LivoReconNode::loadParameters()
   // at load/first-write time. Empty (default) preserves the old hardcoded
   // "/tmp/<name>.txt" behavior for ad hoc/manual runs.
   std::string debug_log_dir;
-  paramWarn<std::string>(pnh_, "outputs/debug_log_dir", debug_log_dir, "");
+  paramWarn<std::string>(pnh_, "log/dir", debug_log_dir, "");
   setDebugLogDir(debug_log_dir);
   ctx_.printer->print(PrintCategory::PARAMS,
       "[params/common]  debug_log_dir: " + (debug_log_dir.empty() ? std::string("(unset, using /tmp)") : debug_log_dir));
 
   std::string profiler_export;
-  paramWarn<std::string>(pnh_, "outputs/profiler/export_path", profiler_export, "");
+  paramWarn<std::string>(pnh_, "log/profiler_path", profiler_export, "");
   ctx_.profiler->setExportPath(profiler_export);
+
+  // R97A Q5: read here, before lio_proc_->loadParameters()'s refuseUnclaimed() scan of the log/run
+  // namespaces below -- these were read AFTER that scan before the move (harmless while they lived
+  // under outputs/diagnostics, which the scan never covered; now under log/run, reading them late
+  // would make the scan see them as unclaimed and refuse the run).
+  paramWarn<bool>(pnh_, "run/auto_terminate_on_idle", auto_terminate_on_idle_, false);
+  paramWarn<double>(pnh_, "run/auto_terminate_idle_secs", auto_terminate_idle_secs_, 5.0);
+  paramWarn<bool>(pnh_, "log/frame_window", frame_window_log_, false);
 
   ctx_.printer->print(PrintCategory::PARAMS, ctx_.printer->loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, ctx_.state->loadParameters(pnh_));
@@ -103,11 +111,7 @@ void LivoReconNode::loadParameters()
   ctx_.printer->print(PrintCategory::PARAMS, lio_proc_->loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, evo_proc_.loadParameters(pnh_));
 
-  paramWarn<bool>(pnh_, "outputs/auto_terminate_on_idle", auto_terminate_on_idle_, false);
-  paramWarn<double>(pnh_, "outputs/auto_terminate_idle_secs", auto_terminate_idle_secs_, 5.0);
-
   paramWarn<bool>(pnh_, "common/insert_map_after_lio", insert_map_after_lio_, false);
-  paramWarn<bool>(pnh_, "diagnostics/frame_window_log", frame_window_log_, false);
   ctx_.printer->print(PrintCategory::PARAMS,
       std::string("[params/common]  insert_map_after_lio: ") +
       (insert_map_after_lio_ ? "true" : "false"));
@@ -131,7 +135,7 @@ void LivoReconNode::loadParameters()
     // genuinely drained, not just paused mid-frame. Force it on rather
     // than hanging forever if the config forgot to set it.
     ctx_.printer->print(PrintCategory::PARAMS,
-        "[node] common/offline_bag_path set but outputs/auto_terminate_on_idle "
+        "[node] common/offline_bag_path set but run/auto_terminate_on_idle "
         "was false -- forcing it on (offline mode has no other way to detect "
         "completion)");
     auto_terminate_on_idle_ = true;
@@ -153,7 +157,7 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
   mg.rot_before_imu = ctx_.state->rot();
   mg.vel_before_imu = ctx_.state->vel();
   mg.cov_before_imu = ctx_.state->cov();
-  lio_proc_->logPreImuState(mg);   // R86B: write-only pre_imu state_trace row (no-op unless eval/state_trace_pre_imu_frames > 0)
+  lio_proc_->logPreImuState(mg);   // R86B: write-only pre_imu state_trace row (no-op unless log/state_trace/pre_imu_frames > 0)
 
   { TimedScope ts(ctx_.profiler, "imu"); imu_proc_.processIMU(mg); }
   mg.pos_after_imu = ctx_.state->pos();
@@ -284,7 +288,7 @@ bool LivoReconNode::drainOnce()
     // Export periodically (every measure group), not just on a clean
     // shutdown (below) -- a killed/crashed run (e.g. a test harness's
     // --terminate, or any non-SIGINT kill) previously left
-    // outputs/profiler/export_path never written at all.
+    // log/profiler_path never written at all.
     ctx_.profiler->exportReport();
   }
   return popped_any;

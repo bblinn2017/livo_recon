@@ -354,7 +354,7 @@ void logResidualGeometry(int frame_idx, const std::vector<Residual>& residuals)
 }
 
 
-// R71 (F-363): write-only per-residual dump for the frames listed in lio/residual_dump_frames (iteration 0, i.e. at the
+// R71 (F-363): write-only per-residual dump for the frames listed in log/lio/residual_dump/frames (iteration 0, i.e. at the
 // propagated state), plus the linearisation state. Lets the information each residual claims (w_i h_i h_i^T) be compared
 // offline with what the residuals jointly deliver (leverage, per-plane groups, split-half and cross-frame solutions).
 // h_rot / h_pos are the rotation and position Jacobian rows (point_cross_normal, normal); w_i = 1 / sigma_squared.
@@ -409,32 +409,32 @@ LioProcBase::LioProcBase(NodeContext& ctx)
 void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh)
 {
   paramWarn<int>(pnh, "lio/ekf/max_iterations",     opts_.max_iterations,  5);
-  paramWarn<bool>(pnh, "lio/log_debug_en",          opts_.log_debug_en,   false);
-  paramWarn<bool>(pnh, "lio/log_pair_corr_en",      opts_.log_pair_corr_en, false);
-  paramWarn<bool>(pnh, "lio/log_eigenspectrum_en",  opts_.log_eigenspectrum_en, false);
-  paramWarn<bool>(pnh, "lio/log_consistency_scan_en", opts_.log_consistency_scan_en, false);
-  paramWarn<bool>(pnh, "lio/log_nll_en", opts_.log_nll_en, false);
-  paramWarn<bool>(pnh, "lio/update_diag_en", opts_.update_diag_en, false);          // R69: lio_update_diag.csv (write-only)
-  paramWarn<bool>(pnh, "lio/live_point_cov_en", opts_.live_point_cov_en, false);    // R69: live_point_cov.csv (write-only)
-  paramWarn<int>(pnh, "lio/first_frame_dump_frames", opts_.first_frame_dump_frames, 1);  // R69: solve dump for frames 1..K (1 = unchanged)
+  paramWarn<bool>(pnh, "log/lio/debug",          opts_.log_debug_en,   false);
+  paramWarn<bool>(pnh, "log/lio/pair_corr",      opts_.log_pair_corr_en, false);
+  paramWarn<bool>(pnh, "log/lio/eigenspectrum",  opts_.log_eigenspectrum_en, false);
+  paramWarn<bool>(pnh, "log/lio/consistency_scan", opts_.log_consistency_scan_en, false);
+  paramWarn<bool>(pnh, "log/lio/nll", opts_.log_nll_en, false);
+  paramWarn<bool>(pnh, "log/lio/update_diag", opts_.update_diag_en, false);          // R69: lio_update_diag.csv (write-only)
+  paramWarn<bool>(pnh, "log/lio/live_point_cov", opts_.live_point_cov_en, false);    // R69: live_point_cov.csv (write-only)
+  paramWarn<int>(pnh, "log/lio/first_frame_dump/frames", opts_.first_frame_dump_frames, 1);  // R69: solve dump for frames 1..K (1 = unchanged)
   {   // R91C: further frames for the solve snapshot; slim form refused unless the list is given. Empty / false is byte-identical.
     std::string ff_list;
-    paramWarn<std::string>(pnh, "lio/first_frame_dump_frame_list", ff_list, std::string());
-    opts_.first_frame_dump_list = dump_rules::parseFrameList(ff_list, "lio/first_frame_dump_frame_list");
-    cfg.nested<bool>(!opts_.first_frame_dump_list.empty(), "lio/first_frame_dump_frame_list is non-empty", "lio/first_frame_dump_slim",
+    paramWarn<std::string>(pnh, "log/lio/first_frame_dump/frame_list", ff_list, std::string());
+    opts_.first_frame_dump_list = dump_rules::parseFrameList(ff_list, "log/lio/first_frame_dump/frame_list");
+    cfg.nested<bool>(!opts_.first_frame_dump_list.empty(), "log/lio/first_frame_dump/frame_list is non-empty", "log/lio/first_frame_dump/slim",
                      opts_.first_frame_dump_slim, false);
   }
   // R97A Q2: lio/dry_run_point_filter_num and lio/iekf_point_stream are removed.
-  paramWarn<bool>(pnh, "eval/nees_per_dof_en", opts_.nees_per_dof_en, false);
-  paramWarn<int>(pnh, "eval/nees_tier1_window_scans", opts_.nees_tier1_window_scans, 489);
-  paramWarn<bool>(pnh, "eval/state_trace_en", opts_.state_trace_en, true);
-  paramWarn<std::string>(pnh, "eval/state_trace_run_id", opts_.state_trace_run_id, "run");
-  paramWarn<bool>(pnh, "eval/pose_cov_trace_en", opts_.pose_cov_trace_en, false);   // R92
-  paramWarn<double>(pnh, "eval/pose_cov_trace_end_s", opts_.pose_cov_trace_end_s, -1.0);   // R92
+  paramWarn<bool>(pnh, "log/nees/per_dof", opts_.nees_per_dof_en, false);
+  paramWarn<int>(pnh, "log/nees/tier1_window_scans", opts_.nees_tier1_window_scans, 489);
+  paramWarn<bool>(pnh, "log/state_trace/enable", opts_.state_trace_en, true);
+  paramWarn<std::string>(pnh, "log/state_trace/run_id", opts_.state_trace_run_id, "run");
+  paramWarn<bool>(pnh, "log/pose_cov_trace/enable", opts_.pose_cov_trace_en, false);   // R92
+  paramWarn<double>(pnh, "log/pose_cov_trace/end_s", opts_.pose_cov_trace_end_s, -1.0);   // R92
   if (opts_.pose_cov_trace_end_s >= 0.0 && !opts_.pose_cov_trace_en)
-    throw std::invalid_argument("eval/pose_cov_trace_end_s needs eval/pose_cov_trace_en = true; the key is dead without it");
-  paramWarn<int>(pnh, "eval/state_trace_pre_imu_frames", opts_.state_trace_pre_imu_frames, 0);   // R86B: pre_imu rows for frames 1..K (0 = none)
-  if (opts_.state_trace_pre_imu_frames < 0) throw std::invalid_argument("eval/state_trace_pre_imu_frames must be >= 0");
+    throw std::invalid_argument("log/pose_cov_trace/end_s needs log/pose_cov_trace/enable = true; the key is dead without it");
+  paramWarn<int>(pnh, "log/state_trace/pre_imu_frames", opts_.state_trace_pre_imu_frames, 0);   // R86B: pre_imu rows for frames 1..K (0 = none)
+  if (opts_.state_trace_pre_imu_frames < 0) throw std::invalid_argument("log/state_trace/pre_imu_frames must be >= 0");
   paramWarn<bool>(pnh, "cuda/enable",               cuda_enable_,          false);
 
   // History (134-136): see docs/livo_recon_changelog.md#src-processing-lio_processing.cpp-134
@@ -496,10 +496,10 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
                                "so it cannot key a bin (distance rows would be skipped, leaving the line voxels, which carry nearly all the information, uncorrected).");
     }
   }
-  cfg.get<bool>("lio/scan_log_en", opts_.scan_log_en, false);   // R73 (F-414, F-415)
+  cfg.get<bool>("log/lio/scan", opts_.scan_log_en, false);   // R73 (F-414, F-415)
   {   // R71: per-residual dump frames, a comma-separated list of frame indices in ONE string key (job overrides carry scalars only); empty = off
     std::string dump_frames;
-    paramWarn<std::string>(pnh, "lio/residual_dump_frames", dump_frames, std::string());
+    paramWarn<std::string>(pnh, "log/lio/residual_dump/frames", dump_frames, std::string());
     opts_.residual_dump_frames.clear();
     std::stringstream ss(dump_frames);
     std::string tok;
@@ -508,27 +508,27 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
       char* end = nullptr;
       const long v = std::strtol(tok.c_str(), &end, 10);
       if (end == tok.c_str() || *end != '\0' || v < 1)
-        throw std::invalid_argument("lio/residual_dump_frames: '" + tok + "' is not a positive integer frame index (comma-separated list, e.g. \"1,2,3,10\")");
+        throw std::invalid_argument("log/lio/residual_dump/frames: '" + tok + "' is not a positive integer frame index (comma-separated list, e.g. \"1,2,3,10\")");
       opts_.residual_dump_frames.push_back(static_cast<int>(v));
     }
     // R73 (F-417): last-iteration dump; refused unless a frame list is given.
-    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "lio/residual_dump_frames is non-empty", "lio/residual_dump_last_iter",
+    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "log/lio/residual_dump/frames is non-empty", "log/lio/residual_dump/last_iter",
                      opts_.residual_dump_last_iter, false);
     // R86B: every-iteration dump; refused unless a frame list is given. Default false is byte-identical.
-    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "lio/residual_dump_frames is non-empty", "lio/residual_dump_all_iters",
+    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "log/lio/residual_dump/frames is non-empty", "log/lio/residual_dump/all_iters",
                      opts_.residual_dump_all_iters, false);
     // R81 (F-485 2B): two more columns (voxel_point_count, voxel_distinct_frames) in residual_dump.csv; refused unless a frame list is given. Default false is byte-identical.
-    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "lio/residual_dump_frames is non-empty", "lio/residual_dump_voxel_info",
+    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "log/lio/residual_dump/frames is non-empty", "log/lio/residual_dump/voxel_info",
                      opts_.residual_dump_voxel_info, false);
     // R91C: line axis columns / 14-column slim form of residual_dump.csv; refused unless a frame list is given. Default false is byte-identical.
-    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "lio/residual_dump_frames is non-empty", "lio/residual_dump_line_geometry",
+    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "log/lio/residual_dump/frames is non-empty", "log/lio/residual_dump/line_geometry",
                      opts_.residual_dump_line_geometry, false);
-    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "lio/residual_dump_frames is non-empty", "lio/residual_dump_slim",
+    cfg.nested<bool>(!opts_.residual_dump_frames.empty(), "log/lio/residual_dump/frames is non-empty", "log/lio/residual_dump/slim",
                      opts_.residual_dump_slim, false);
   }
-  paramWarn<bool>(pnh, "lio/residual_geometry_en", opts_.residual_geometry_en, false);   // R70: residual_geometry.csv (write-only)
-  paramWarn<bool>(pnh, "lio/line_rows_log_en", opts_.line_rows_log_en, false);   // R77 (F-451): line_rows_per_scan.csv (write-only)
-  paramWarn<bool>(pnh, "lio/zsq_log_en", opts_.zsq_log_en, false);   // R95: zsq_per_scan.csv (write-only)
+  paramWarn<bool>(pnh, "log/lio/residual_geometry", opts_.residual_geometry_en, false);   // R70: residual_geometry.csv (write-only)
+  paramWarn<bool>(pnh, "log/lio/line_rows", opts_.line_rows_log_en, false);   // R77 (F-451): line_rows_per_scan.csv (write-only)
+  paramWarn<bool>(pnh, "log/lio/zsq", opts_.zsq_log_en, false);   // R95: zsq_per_scan.csv (write-only)
 
   // R97A Q2: lio/open_loop/mode and reset_period_s are removed.
 

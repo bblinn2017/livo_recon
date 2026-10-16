@@ -317,7 +317,10 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
   // read by paramWarn() in voxelmap.cpp, so they are unclaimed here and would
   // be reported as dead when they are merely read elsewhere. Widen this only
   // as those move onto a resolver.
-  return finalizeConfig(cfg, { "spline", "adaptive_q", "akf_q", "lio/ekf", "voxel_map" });
+  // R97A Q5: log/* and run/* are added -- every other reader's paramWarn() calls run before this (the shared last-step
+  // check), so an unknown key under either namespace (a typo, or a stale old name outside this patch's own replacements)
+  // is now refused the same way spline/adaptive_q/akf_q/lio/ekf/voxel_map already are.
+  return finalizeConfig(cfg, { "spline", "adaptive_q", "akf_q", "lio/ekf", "voxel_map", "log", "run" });
 }
 
 // LIO Processing
@@ -397,9 +400,9 @@ std::string LioProcIekf::engagementReport() const
       else if (!opts_.gate_state_uncertainty && c93.gate_pose_rows != 0)
         o << "   <-- ERROR: the gate was set to exclude the pose covariance and " << c93.gate_pose_rows << " rows received it";
     }
-    {   // R95 (Bryce 2026-10-11): lio/zsq_log_en -- the per-scan z squared summary (engagement counter)
+    {   // R95 (Bryce 2026-10-11): log/lio/zsq -- the per-scan z squared summary (engagement counter)
       const long zr = zsqRowsWritten();
-      o << "\n  lio/zsq_log_en = " << (opts_.zsq_log_en ? "true" : "false") << " zsq_rows_written=" << zr;
+      o << "\n  log/lio/zsq = " << (opts_.zsq_log_en ? "true" : "false") << " zsq_rows_written=" << zr;
       if (opts_.zsq_log_en && zr == 0)
         o << "   <-- INERT: the key is on and no row was written";
       else if (!opts_.zsq_log_en && zr != 0)
@@ -419,7 +422,7 @@ std::string LioProcIekf::engagementReport() const
     if (vm->opts()->plane_var_diag_en)   // R82 (D2, F-502): written only when the key is on
     {
       const PlaneVarDiagSnapshot d = voxelPlaneVarDiagSnapshot();
-      o << "\n  voxel_map/plane/plane_var_diag_en rows=" << d.rows;
+      o << "\n  log/voxel_map/plane_var_diag rows=" << d.rows;
       if (d.rows > 0)
       {
         const double qs[5] = {0.10, 0.25, 0.50, 0.70, 0.90};
@@ -470,7 +473,7 @@ std::string LioProcIekf::engagementReport() const
       o << "   <-- NOTE: the 26 x 26 factorisation failed " << residual_binning_solve_failed_sum_ << " time(s); the correction was not applied in those iterations";
   }
 
-  if (opts_.scan_log_en) o << "\n  lio/scan_log_en=true  (scan_log.csv written)";
+  if (opts_.scan_log_en) o << "\n  log/lio/scan=true  (scan_log.csv written)";
   o << "\n[engagement] a flag marked INERT above did not test anything; the "
        "cell is invalid, not null.";
   return o.str();

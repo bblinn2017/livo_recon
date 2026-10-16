@@ -252,7 +252,7 @@ public:
 
   // CQ-74 item 2 (native): writes one ate_per_frame_<stage>_<mode>.csv per
   // non-empty matched_*_ buffer, via debugLogPath() -- same shared
-  // outputs/debug_log_dir resolution every other per-file debug log in
+  // log/dir resolution every other per-file debug log in
   // this codebase uses, no separate path plumbing needed. Uses ONE global
   // Kabsch/Horn alignment (computeAte() over the WHOLE buffer -- never
   // refit per-row, matching the same "global, not incremental"

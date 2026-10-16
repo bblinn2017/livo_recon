@@ -17,7 +17,9 @@ viz:
   uv_tracking: true  # publish rgb_img with arrows showing vio's tracked uv displacements
   ds:
     ds_leaf_size: 0.05
-outputs:
+# R97A Q5: outputs/auto_terminate_* moved to run/*; outputs/profiler/export_path and outputs/printer/* moved to log/* (see
+# r97a_inputs/log_key_map.tsv). outputs/path, outputs/pcd/*, outputs/image/* stay (they are outputs).
+run:
   # Self-shutdown for headless/scripted test runs: once popMeasureGroup()
   # has come back empty for auto_terminate_idle_secs real (wall-clock)
   # seconds straight, LivoReconNode::run() exits its own loop cleanly
@@ -28,14 +30,8 @@ outputs:
   # quiet for seconds at a time mid-frame while blocked on a GPU kernel).
   auto_terminate_on_idle: true
   auto_terminate_idle_secs: 5.0
-  profiler:
-    export_path: "/tmp/livo_recon_profile.txt"
-  path: "/root/catkin_ws/Log"          # base directory for COLMAP dataset export (empty = disabled)
-  pcd:
-    export: false   # accumulate and write sparse/0/points3D.bin on shutdown
-  image:
-    export: false   # save images to images/ and write cameras.bin + images.bin on shutdown
-    interval: 1     # export every N-th frame (must be >= 1)
+log:
+  profiler_path: "/tmp/livo_recon_profile.txt"
   printer:
     # params/calib default to true (matching Printer's own C++ constructor
     # default) so load-confirmation output -- tracker backend load status
@@ -45,23 +41,35 @@ outputs:
     # failed tracker load) ever printed, making a real investigation (does
     # the tracker actually load, what did calib produce) impossible without
     # first discovering and overriding this flag by hand.
-    params:
-      enable: true
-    voxel:
-      enable: false
-    state:
-      enable: false
-    calib:
-      enable: true
-    vio:
-      enable: false
-    lio:
-      enable: false
-    evo:
-      enable: true
-    profiler:
-      enable: false
+    params: true
+    voxel: false
+    state: false
+    calib: true
+    vio: false
+    lio: false
+    evo: true
+    profiler: false
     throttle_s: 0.
+  vio:
+    iterations: false
+    point_residuals: false
+    residual_counts: false
+    raw_tracker_output: false
+    norm_l_low_frac: 0.3
+    # path deliberately NOT set here -- letting VioProc::loadParameters()'s
+    # own C++ default (debugLogPath("livo_recon_myvio_log.txt"), see
+    # utils/log/debug_log_dir.h) apply. A hardcoded "/tmp/..." string here
+    # would always win (rosparam values set by a <rosparam file> load take
+    # precedence over a pnh.param() call's C++ default, which is only a
+    # fallback for keys never set on the server at all) and silently defeat
+    # log/dir regardless of what it's set to.
+outputs:
+  path: "/root/catkin_ws/Log"          # base directory for COLMAP dataset export (empty = disabled)
+  pcd:
+    export: false   # accumulate and write sparse/0/points3D.bin on shutdown
+  image:
+    export: false   # save images to images/ and write cameras.bin + images.bin on shutdown
+    interval: 1     # export every N-th frame (must be >= 1)
 calib:
   stationary:
     num_samples: 500
@@ -122,19 +130,6 @@ vio:
     anchor_split_depth: 0.0  # pos_/neg_epipolar_residual_var split threshold -- see that option's doc comment
     distortion_weight_on: false  # rigorous per-point distortion weighting -- see that option's doc comment
     weight_pixel_noise_px: 0.5   # only consulted when distortion_weight_on is true
-  log:
-    log_iterations: false
-    log_point_residuals: false
-    log_residual_counts: false
-    log_raw_tracker_output: false
-    log_norm_l_low_frac: 0.3
-    # log_path deliberately NOT set here -- letting VioProc::loadParameters()'s
-    # own C++ default (debugLogPath("livo_recon_myvio_log.txt"), see
-    # utils/log/debug_log_dir.h) apply. A hardcoded "/tmp/..." string here
-    # would always win (rosparam values set by a <rosparam file> load take
-    # precedence over a pnh.param() call's C++ default, which is only a
-    # fallback for keys never set on the server at all) and silently defeat
-    # outputs/debug_log_dir regardless of what it's set to.
 combined:
   # Opt-in joint LIO+VIO EKF step (default off -- see combined_processing.h).
   # Requires vio/enable: true too (see livo_recon_node.cpp's loadParameters()

@@ -1,6 +1,6 @@
 #pragma once
 
-// R95 (Bryce 2026-10-11): the per-scan summary of z squared = r^2 / sigma_squared, written as zsq_per_scan.csv under lio/zsq_log_en (default false: nothing is written, bit-identical).
+// R95 (Bryce 2026-10-11): the per-scan summary of z squared = r^2 / sigma_squared, written as zsq_per_scan.csv under log/lio/zsq (default false: nothing is written, bit-identical).
 // Header-only and ROS-free so that tests/test_zsq_summary_r95.cpp can check the format and the arithmetic alone; templated on the residual type (livo_recon::Residual in the node, a mock in the test).
 //
 // One row per (scan, iteration). The node writes iteration 0 (the residuals at the propagated state) and the last executed iteration (the residuals of the last iteration, as the R73 last-iteration dump does);

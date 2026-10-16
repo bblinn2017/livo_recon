@@ -29,8 +29,8 @@ int main()
   { std::string big; for (int i = 1; i <= kMaxDumpListFrames + 1; ++i) { if (i > 1) big += ","; big += std::to_string(i); } CK(throws(big.c_str())); }
   { std::string ok; for (int i = 1; i <= kMaxDumpListFrames; ++i) { if (i > 1) ok += ","; ok += std::to_string(i); } CK(!throws(ok.c_str())); }
   // the error message names the key.
-  try { parseFrameList("x", "lio/first_frame_dump_frame_list"); CK(false); }
-  catch (const std::invalid_argument& e) { CK(std::string(e.what()).find("lio/first_frame_dump_frame_list") != std::string::npos); }
+  try { parseFrameList("x", "log/lio/first_frame_dump/frame_list"); CK(false); }
+  catch (const std::invalid_argument& e) { CK(std::string(e.what()).find("log/lio/first_frame_dump/frame_list") != std::string::npos); }
 
   // decision: default (K = 1, empty list) = frame 1 full, nothing else (as before R91C).
   const std::vector<int> none;

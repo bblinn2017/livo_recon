@@ -119,12 +119,12 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<std::string>(pnh, "cbk/imu/acc_type", opts_.imu_acc_type, "g");
   paramWarn<std::string>(pnh, "cbk/imu/gyr_type", opts_.imu_gyr_type, "rad_s");
 
-  paramWarn<bool>(pnh, "data_queues/log_sync_debug", opts_.log_sync_debug, false);
-  paramWarn<std::string>(pnh, "data_queues/sync_debug_log_path", opts_.sync_debug_log_path,
+  paramWarn<bool>(pnh, "log/data_queues/sync_debug", opts_.log_sync_debug, false);
+  paramWarn<std::string>(pnh, "log/data_queues/sync_debug_path", opts_.sync_debug_log_path,
                           debugLogPath("livo_recon_sync_debug.txt"));
-  paramWarn<bool>(pnh, "data_queues/log_raw_point_count", opts_.log_raw_point_count, false);
-  paramWarn<bool>(pnh, "data_queues/log_sensor_stamps", opts_.log_sensor_stamps, false);   // R65
-  paramWarn<bool>(pnh, "data_queues/log_lidar_msgs", opts_.log_lidar_msgs, false);           // R80 (F-389): lidar_msg_log.csv, write-only
+  paramWarn<bool>(pnh, "log/data_queues/raw_point_count", opts_.log_raw_point_count, false);
+  paramWarn<bool>(pnh, "log/data_queues/sensor_stamps", opts_.log_sensor_stamps, false);   // R65
+  paramWarn<bool>(pnh, "log/data_queues/lidar_msgs", opts_.log_lidar_msgs, false);           // R80 (F-389): lidar_msg_log.csv, write-only
   paramWarn<double>(pnh, "cbk/lidar/perturb_std_m", opts_.perturb_std_m, 0.0);               // R65
   paramWarn<int>(pnh, "cbk/lidar/perturb_seed", opts_.perturb_seed, 0);                       // R65
   if (!(opts_.perturb_std_m >= 0.0))
@@ -153,9 +153,9 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  cbk/lidar/type:   " << lidar_type_str
       << "\n  cbk/imu/acc_type: " << opts_.imu_acc_type
       << "\n  cbk/imu/gyr_type: " << opts_.imu_gyr_type
-      << "\n  data_queues/log_sync_debug: " << (opts_.log_sync_debug ? "true" : "false")
-      << "\n  data_queues/sync_debug_log_path: " << opts_.sync_debug_log_path
-      << "\n  data_queues/log_lidar_msgs: " << (opts_.log_lidar_msgs ? "true" : "false")   // R80 (F-389)
+      << "\n  log/data_queues/sync_debug: " << (opts_.log_sync_debug ? "true" : "false")
+      << "\n  log/data_queues/sync_debug_path: " << opts_.sync_debug_log_path
+      << "\n  log/data_queues/lidar_msgs: " << (opts_.log_lidar_msgs ? "true" : "false")   // R80 (F-389)
       << "\n  preprocess/image_subsample_n: " << opts_.image_subsample_n
       << "\n  evo/enable (gt ingestion): " << (opts_.evo_enable ? "true" : "false")
       << "\n  evo/gt_source: " << opts_.evo_gt_source

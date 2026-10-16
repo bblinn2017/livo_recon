@@ -18,7 +18,7 @@ namespace
 
 // Debug trace of each pipeline stage's independently-aligned ATE/RTE/ROE/
 // ARE, one line per stage per frame -- unlike printer_->print(PrintCategory
-// ::EVO, ...) (throttled to outputs/printer/throttle_s, default 5s -- far
+// ::EVO, ...) (throttled to log/printer/throttle_s, default 5s -- far
 // too coarse to see iteration-to-iteration behavior, and only reports the
 // VIO stage), this logs every stage on every call. Truncated at the start
 // of each process (first call), appended thereafter. Format matches what

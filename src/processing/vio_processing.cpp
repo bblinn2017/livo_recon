@@ -71,13 +71,13 @@ std::string VioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "vio/ekf/distortion_weight_on",  opts_.distortion_weight_on,  false);
   paramWarn<double>(pnh, "vio/ekf/weight_pixel_noise_px", opts_.weight_pixel_noise_px, 0.5);
 
-  paramWarn<bool>(pnh, "vio/log/log_iterations",       opts_.log_iterations,       false);
-  paramWarn<bool>(pnh, "vio/log/log_point_residuals",  opts_.log_point_residuals,  false);
-  paramWarn<bool>(pnh, "vio/log/log_residual_counts",  opts_.log_residual_counts,  false);
-  paramWarn<bool>(pnh, "vio/log/log_consistency_corr_en", opts_.log_consistency_corr_en, false);
-  paramWarn<bool>(pnh, "vio/log/log_raw_tracker_output", opts_.log_raw_tracker_output, false);
-  paramWarn<double>(pnh, "vio/log/log_norm_l_low_frac", opts_.log_norm_l_low_frac, 0.3);
-  paramWarn<std::string>(pnh, "vio/log/log_path",       opts_.log_path,             debugLogPath("livo_recon_myvio_log.txt"));
+  paramWarn<bool>(pnh, "log/vio/iterations",       opts_.log_iterations,       false);
+  paramWarn<bool>(pnh, "log/vio/point_residuals",  opts_.log_point_residuals,  false);
+  paramWarn<bool>(pnh, "log/vio/residual_counts",  opts_.log_residual_counts,  false);
+  paramWarn<bool>(pnh, "log/vio/consistency_corr", opts_.log_consistency_corr_en, false);
+  paramWarn<bool>(pnh, "log/vio/raw_tracker_output", opts_.log_raw_tracker_output, false);
+  paramWarn<double>(pnh, "log/vio/norm_l_low_frac", opts_.log_norm_l_low_frac, 0.3);
+  paramWarn<std::string>(pnh, "log/vio/path",       opts_.log_path,             debugLogPath("livo_recon_myvio_log.txt"));
 
   std::ostringstream oss;
   oss << "[params/vio/ekf]"

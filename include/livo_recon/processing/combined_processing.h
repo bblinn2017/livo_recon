@@ -37,14 +37,14 @@ struct CombinedProcOptions
 
   // SW-5 bug-ledger fix: CombinedProc's primary loop never calls
   // LioProc::processLIO() (only accumulateForCombined()), so LioProc's own
-  // "lio/log_nll_en"-gated nll.txt write inside processLIO() never fires
-  // in combined mode -- a sweep config that sets lio/log_nll_en (the
+  // "log/lio/nll"-gated nll.txt write inside processLIO() never fires
+  // in combined mode -- a sweep config that sets log/lio/nll (the
   // LIO-only convention every existing sweep script uses) produces a
   // near-empty nll.txt with no warning. CombinedProc has its own
   // logConsistencyNll() call, gated on log_consistency_en above, that
   // already writes a per-channel ("lio"/"vio") row every frame from
   // accumulateForCombined()'s own residual -- it was simply never wired to
-  // the flag any existing config actually sets. Read lio/log_nll_en here
+  // the flag any existing config actually sets. Read log/lio/nll here
   // too and OR it into the same gate (loadParameters()) so an existing
   // sweep config needs no change.
   bool   log_nll_en_compat = false;

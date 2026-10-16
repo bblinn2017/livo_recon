@@ -394,7 +394,7 @@ void flushCorrScan(CorrScanAccum& a)
   // CQ-60 item 0b: was a raw function-local static std::ofstream, opened
   // once via a fixed relative path that resolved to the process's cwd
   // (/tmp under this project's launch convention) rather than the run's
-  // own outputs/debug_log_dir, AND never explicitly flushed -- writes sat
+  // own log/dir, AND never explicitly flushed -- writes sat
   // in libstdc++'s buffer and were lost on anything but a clean static-
   // destructor exit. PersistentLogStream (every other diagnostic in this
   // file already uses it) fixes both: it redirects through debugLogPath()
@@ -1042,9 +1042,9 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
   res.sigma_gate_squared = sigma_gate_squared_out;   // R80: write-only
   res.sigma_squared  = floor_term + sigma_diag_squared;
   res.plane_id       = this;
-  res.voxel_point_count = points_size_;           // R81 (F-485 2B): write-only, read by the residual dump when lio/residual_dump_voxel_info
+  res.voxel_point_count = points_size_;           // R81 (F-485 2B): write-only, read by the residual dump when log/lio/residual_dump/voxel_info
   res.voxel_distinct_frames = distinct_frames_;
-  res.line_axis = x_normal_;                                  // R91C: write-only (residual dump under lio/residual_dump_line_geometry)
+  res.line_axis = x_normal_;                                  // R91C: write-only (residual dump under log/lio/residual_dump/line_geometry)
   res.line_axial = x_normal_.dot(pt.point - plane_.center);   // R91C: write-only
   res.plane_var_term = plane_var_term;
   res.plane_jacobian = J_nq.transpose();

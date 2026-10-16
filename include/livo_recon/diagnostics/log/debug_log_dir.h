@@ -9,7 +9,7 @@
 // path directly, which meant every test run needed a separate copy-out
 // step (see run_one()'s DEBUG_LOG_DEST mechanism) to preserve them before
 // the next run's SAME hardcoded path overwrote them. Set once, at startup,
-// from outputs/debug_log_dir (see LivoReconNode::loadParameters()) -- empty
+// from log/dir (see LivoReconNode::loadParameters()) -- empty
 // (the default, e.g. for ad hoc/manual runs) falls back to "/tmp" exactly
 // like the old hardcoded behavior. Mirrors FAST-LIVO2's own fix for the
 // identical problem (LIVMapper::readParameters() redirecting vio/log_path/
@@ -22,14 +22,14 @@ void setDebugLogDir(const std::string& dir);
 // Returns "<debugLogDir>/<basename>" ("/tmp/<basename>" if unset). Every
 // per-file debugLogXxx() helper and every *Options::log_path default in
 // this codebase should build its path through this function rather than
-// hardcoding "/tmp/...", so a single outputs/debug_log_dir setting (e.g.
+// hardcoding "/tmp/...", so a single log/dir setting (e.g.
 // pointed at a test run's own log/ directory) captures all of them.
 std::string debugLogPath(const std::string& basename);
 
 // CQ-36: fixes a real regression introduced by CQ-35's "open once, keep the
 // handle" optimization. The OLD per-call pattern (a fresh std::ofstream on
 // every call) re-resolved debugLogPath() every time, which was self-healing
-// against outputs/debug_log_dir being set AFTER a debugLogXxx() function's
+// against log/dir being set AFTER a debugLogXxx() function's
 // very first call in the process (confirmed happening in practice: every
 // fixed-basename debug file landed at /tmp, 0 bytes, for the entire
 // duration of a real run -- CQ-35's static ofstream froze onto whatever
@@ -48,7 +48,7 @@ public:
 
   // Returns a ready-to-write stream. *just_opened (if non-null) reports
   // whether THIS call (re)opened the file -- true on the very first call,
-  // and again if outputs/debug_log_dir ever changes underneath a long-lived
+  // and again if log/dir ever changes underneath a long-lived
   // process -- so a caller can gate a one-time header write on it, exactly
   // like the old first_call flag did.
   std::ofstream& stream(bool* just_opened = nullptr)

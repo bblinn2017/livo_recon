@@ -182,11 +182,11 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
                              " -- voxel sizes <= 0.10 m are retired (R70, F-340)");
   paramWarn<int>(pnh, "voxel_map/map/max_layer",       opts_->max_layer,    2);
   paramWarn<bool>(pnh, "voxel_map/plane/sensor_noise_floor_eig0", opts_->sensor_noise_floor_eig0, false);
-  paramWarn<bool>(pnh, "voxel_map/map/snapshot_post_calibration",
+  paramWarn<bool>(pnh, "log/voxel_map/snapshot_post_calibration",
                   opts_->snapshot_post_calibration, false);
   {   // R79: snapshot frames N >= 2, one comma-separated string key (job overrides carry scalars only); empty = off. Refused when contradictory (map/snapshot_frames.h).
     std::string snapshot_frames;
-    paramWarn<std::string>(pnh, "voxel_map/map/snapshot_frames", snapshot_frames, std::string());
+    paramWarn<std::string>(pnh, "log/voxel_map/snapshot_frames", snapshot_frames, std::string());
     try {
       opts_->snapshot_frames = parseSnapshotFrames(snapshot_frames, opts_->snapshot_post_calibration);
     } catch (const std::invalid_argument& e) {
@@ -205,13 +205,13 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
 
   { double sigma_num; paramWarn<double>(pnh, "voxel_map/residual/sigma_num", sigma_num, 3.); opts_->sigma_num_squared = sigma_num * sigma_num; }
   paramWarn<double>(pnh, "voxel_map/residual/max_radius",  opts_->max_radius,          3.);
-  paramWarn<bool>(pnh, "voxel_map/point_cov_stats_en", opts_->point_cov_stats_en, false);   // R65
-  paramWarn<bool>(pnh, "voxel_map/plane/log_debug_en", opts_->log_debug_en, false);
-  paramWarn<bool>(pnh, "voxel_map/plane/plane_fit_reasons_en", opts_->plane_fit_reasons_en, false);
-  paramWarn<int>(pnh, "voxel_map/plane/plane_fit_trace_frames", opts_->plane_fit_trace_frames, 0);
-  paramWarn<int>(pnh, "voxel_map/plane/plane_fit_trace_max_rows", opts_->plane_fit_trace_max_rows, 200000);
-  paramWarn<bool>(pnh, "voxel_map/plane/plane_fit_eigs_en", opts_->plane_fit_eigs_en, false);   // R83B (A1/B4)
-  paramWarn<bool>(pnh, "voxel_map/plane/log_variance_shares_en", opts_->log_variance_shares_en, false);
+  paramWarn<bool>(pnh, "log/voxel_map/point_cov_stats", opts_->point_cov_stats_en, false);   // R65
+  paramWarn<bool>(pnh, "log/voxel_map/plane_debug", opts_->log_debug_en, false);
+  paramWarn<bool>(pnh, "log/voxel_map/plane_fit_reasons", opts_->plane_fit_reasons_en, false);
+  paramWarn<int>(pnh, "log/voxel_map/plane_fit_trace/frames", opts_->plane_fit_trace_frames, 0);
+  paramWarn<int>(pnh, "log/voxel_map/plane_fit_trace/max_rows", opts_->plane_fit_trace_max_rows, 200000);
+  paramWarn<bool>(pnh, "log/voxel_map/plane_fit_eigs", opts_->plane_fit_eigs_en, false);   // R83B (A1/B4)
+  paramWarn<bool>(pnh, "log/voxel_map/variance_shares", opts_->log_variance_shares_en, false);
   paramWarn<int>(pnh, "voxel_map/search/neighborhood_size", opts_->neighborhood_size,   1);
   {
     // Modes go through ConfigResolver so an unrecognised value REFUSES rather
@@ -375,7 +375,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       cfg.requireCombination("voxel_map/plane/plane_var_mode = eigengap needs imu/sensor/range_err > 0: the gap floor (always on since R93A) is range_err^2, and at 0 the eigengap plane variance would divide by a near-zero gap.");
     // R97A: voxel_map/plane/plane_var_min and plane_var_scan_s2 are removed (both were 0.0, i.e. off, in every job; line residuals are
     // now always on, and these keys were refused together with line residuals anyway).
-    cfg.get<bool>("voxel_map/plane/plane_var_diag_en", opts_->plane_var_diag_en, false);   // R82 (D2): write-only diagnostic, default off
+    cfg.get<bool>("log/voxel_map/plane_var_diag", opts_->plane_var_diag_en, false);   // R82 (D2): write-only diagnostic, default off
     // ── binning ──────────────────────────────────────────────────────────
     // R90: the pca-only bin path (voxel_map/plane/use_bins and its three nested keys) is removed. Binning is the binned map type, voxel_map/backend = binned (src/map/binned_voxelmap.cpp), for
     // both plane fits. A removed key that is still set is REFUSED rather than ignored: an ignored flag would make a run that asks for binning silently run without it.
@@ -389,19 +389,19 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
     // See VoxelOpts::log_consistency_mode. The two booleans this replaces
     // made the cheap per-scan aggregate reachable only by also paying for
     // the ~1 GB/job per-correspondence rows.
-    cfg.mode("voxel_map/plane/log_consistency_mode", opts_->log_consistency_mode,
+    cfg.mode("log/voxel_map/consistency/mode", opts_->log_consistency_mode,
              "off", { "off", "scan", "corr", "corr+covariates" });
     cfg.nested<int>(opts_->logCorrRows(),
-                    "voxel_map/plane/log_consistency_mode=corr|corr+covariates",
-                    "voxel_map/plane/log_consistency_corr_stride",
+                    "log/voxel_map/consistency/mode=corr|corr+covariates",
+                    "log/voxel_map/consistency/corr_stride",
                     opts_->log_consistency_corr_stride, 1);
     cfg.refuseIfSet("voxel_map/plane/log_consistency_corr_en",
-                    "Use voxel_map/plane/log_consistency_mode instead: "
+                    "Use log/voxel_map/consistency/mode instead: "
                     "false -> 'off' (or 'scan' if you want the cheap per-scan "
                     "aggregates, which this flag used to gate too), "
                     "true -> 'corr'.");
     cfg.refuseIfSet("voxel_map/plane/log_consistency_covariates_en",
-                    "Use voxel_map/plane/log_consistency_mode instead: "
+                    "Use log/voxel_map/consistency/mode instead: "
                     "true -> 'corr+covariates'.");
 
     if (!cfg.ok())
@@ -418,7 +418,7 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
   // ATE + position/attitude confidence contract real (was previously
   // opt-in and silently off for every run unless a manifest explicitly
   // set it).
-  paramWarn<bool>(pnh, "voxel_map/map/log_frame_stats_en", opts_->log_frame_stats_en, true);
+  paramWarn<bool>(pnh, "log/voxel_map/frame_stats", opts_->log_frame_stats_en, true);
 
   // R88 (binned map; R97A: the only map, voxel_map/backend is removed): bin_size_fraction and cov_mode, folded in from the former
   // BinnedVoxelMap::loadParameters() override (that subclass is removed -- VoxelMap is the only map class now).
@@ -850,7 +850,7 @@ void VoxelMap::writeSnapshotFile(const std::string& filename, int snapshot_frame
                                               opts_->plane_threshold, r.is_plane, r.point_count));
     out << '\n';
   }
-  // R80 (N-8): the engagement line of the snapshot keys (voxel_map/map/snapshot_post_calibration, voxel_map/map/snapshot_frames): one line per file written, so a run
+  // R80 (N-8): the engagement line of the snapshot keys (log/voxel_map/snapshot_post_calibration, log/voxel_map/snapshot_frames): one line per file written, so a run
   // log shows that the key engaged, for which map frame, and how large the output is (a run with the key set and no line here wrote nothing: an error).
   ROS_INFO_STREAM("[snapshot] engaged file=" << filename << " map_frame=" << snapshot_frame_label << " plane_rows=" << rows.size()
                   << " file_bytes=" << static_cast<long long>(out.tellp())

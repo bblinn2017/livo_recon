@@ -256,7 +256,7 @@ bool VoxelNode::findPlaneResidual(const WorldPointCov& pt, Residual& res, int sc
   if (plane_retired_) return false;
   if (!plane_.computeResidual(pt, res, scan_id)) return false;
   res.plane_node_id = node_id_;
-  res.voxel_layer = layer_;   // R83: write-only (residual dump under lio/residual_dump_voxel_info)
+  res.voxel_layer = layer_;   // R83: write-only (residual dump under log/lio/residual_dump/voxel_info)
   return true;
 }
 

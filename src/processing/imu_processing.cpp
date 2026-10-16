@@ -149,8 +149,8 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // History (61-65): see docs/livo_recon_changelog.md#src-processing-imu_processing.cpp-61
   refuseRenamedKeys(pnh);   // R73 F-404
   paramWarn<bool>(pnh, "imu/second_order",   opts_.second_order, true);
-  paramWarn<bool>(pnh, "imu/log_debug_en", opts_.log_debug_en, false);
-  paramWarn<bool>(pnh, "imu/log_qhat_en", opts_.log_qhat_en, false);
+  paramWarn<bool>(pnh, "log/imu/debug", opts_.log_debug_en, false);
+  paramWarn<bool>(pnh, "log/imu/qhat", opts_.log_qhat_en, false);
   paramWarn<std::string>(pnh, "imu/process_noise/model",
                          opts_.process_noise_model, std::string("fixed"));
   paramWarn<double>(pnh, "imu/process_noise/motion/beta", opts_.motion_beta, 0.9);   // R80 F-477 (Bryce): was 0.0; read only under model != fixed
@@ -167,8 +167,8 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
           "imu/first_scan_head was removed in R63: the first interval head "
           "is always seeded from the first IMU sample");
   }
-  paramWarn<bool>(pnh, "eval/imu_first_scans_en", opts_.first_scans_log_en, false);
-  paramWarn<bool>(pnh, "imu/motion_q_step_log_en", opts_.motion_q_step_log_en, false);   // R83B (A6/B5)
+  paramWarn<bool>(pnh, "log/imu_first_scans", opts_.first_scans_log_en, false);
+  paramWarn<bool>(pnh, "log/imu/motion_q_step", opts_.motion_q_step_log_en, false);   // R83B (A6/B5)
   if (opts_.process_noise_model != "fixed" &&
       opts_.process_noise_model != "isotropic" &&
       opts_.process_noise_model != "axis_aware")

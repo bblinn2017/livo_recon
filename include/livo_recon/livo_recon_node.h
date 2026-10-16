@@ -84,7 +84,7 @@ private:
   CombinedProc combined_proc_;
   EvoProc      evo_proc_;
 
-  // Opt-in (outputs/auto_terminate_on_idle, default false) self-shutdown
+  // Opt-in (run/auto_terminate_on_idle, default false) self-shutdown
   // for headless/scripted test runs: once popMeasureGroup() has come back
   // empty for auto_terminate_idle_secs_ real (wall-clock) seconds straight
   // -- i.e. every input queue has been empty that whole time, meaning the
@@ -110,7 +110,7 @@ private:
   // once, in updateMaps() (called after estimateState() fully returns, so
   // after BOTH LIO and VIO have corrected the state).
   bool insert_map_after_lio_ = false;
-  // R66 item 0b: per-frame window log (diagnostics/frame_window_log, default false).
+  // R66 item 0b: per-frame window log (log/frame_window, default false).
   bool frame_window_log_ = false;
   std::size_t frame_window_index_ = 0;
 };

@@ -13,7 +13,84 @@ inline const std::vector<std::pair<std::string, std::string>>& renamedKeyTable()
   // R97A Q3: the 10 lio/q_adapt/* -> imu/process_noise/gain/* renames are removed -- the rename TARGET
   // (imu/process_noise/gain/*, the whole adaptive-gain module) no longer exists either, so both the old
   // and new names now move to removedKeyTable() instead (a key cannot be both a renamed-target and removed).
-  static const std::vector<std::pair<std::string, std::string>> t = {};
+  // R97A Q5: 73 old_key -> new_key moves under log/ and run/ (r97a_inputs/log_key_map.tsv). The two outputs/auto_terminate_*
+  // keys move to run/*; every other row moves to log/*.
+  static const std::vector<std::pair<std::string, std::string>> t = {
+      {"outputs/debug_log_dir", "log/dir"},
+      {"outputs/profiler/export_path", "log/profiler_path"},
+      {"outputs/pose_pair/export", "log/pose_pair/export"},
+      {"outputs/printer/throttle_s", "log/printer/throttle_s"},
+      {"outputs/printer/params/enable", "log/printer/params"},
+      {"outputs/printer/state/enable", "log/printer/state"},
+      {"outputs/printer/calib/enable", "log/printer/calib"},
+      {"outputs/printer/vio/enable", "log/printer/vio"},
+      {"outputs/printer/lio/enable", "log/printer/lio"},
+      {"outputs/printer/profiler/enable", "log/printer/profiler"},
+      {"outputs/printer/voxel/enable", "log/printer/voxel"},
+      {"outputs/printer/evo/enable", "log/printer/evo"},
+      {"eval/state_trace_en", "log/state_trace/enable"},
+      {"eval/state_trace_run_id", "log/state_trace/run_id"},
+      {"eval/state_trace_pre_imu_frames", "log/state_trace/pre_imu_frames"},
+      {"eval/pose_cov_trace_en", "log/pose_cov_trace/enable"},
+      {"eval/pose_cov_trace_end_s", "log/pose_cov_trace/end_s"},
+      {"eval/nees_per_dof_en", "log/nees/per_dof"},
+      {"eval/nees_tier1_window_scans", "log/nees/tier1_window_scans"},
+      {"eval/imu_first_scans_en", "log/imu_first_scans"},
+      {"diagnostics/frame_window_log", "log/frame_window"},
+      {"data_queues/log_sync_debug", "log/data_queues/sync_debug"},
+      {"data_queues/sync_debug_log_path", "log/data_queues/sync_debug_path"},
+      {"data_queues/log_raw_point_count", "log/data_queues/raw_point_count"},
+      {"data_queues/log_sensor_stamps", "log/data_queues/sensor_stamps"},
+      {"data_queues/log_lidar_msgs", "log/data_queues/lidar_msgs"},
+      {"imu/log_debug_en", "log/imu/debug"},
+      {"imu/log_qhat_en", "log/imu/qhat"},
+      {"imu/motion_q_step_log_en", "log/imu/motion_q_step"},
+      {"lio/log_debug_en", "log/lio/debug"},
+      {"lio/log_pair_corr_en", "log/lio/pair_corr"},
+      {"lio/log_eigenspectrum_en", "log/lio/eigenspectrum"},
+      {"lio/log_consistency_scan_en", "log/lio/consistency_scan"},
+      {"lio/log_nll_en", "log/lio/nll"},
+      {"lio/update_diag_en", "log/lio/update_diag"},
+      {"lio/live_point_cov_en", "log/lio/live_point_cov"},
+      {"lio/first_frame_dump_frames", "log/lio/first_frame_dump/frames"},
+      {"lio/first_frame_dump_frame_list", "log/lio/first_frame_dump/frame_list"},
+      {"lio/first_frame_dump_slim", "log/lio/first_frame_dump/slim"},
+      {"lio/scan_log_en", "log/lio/scan"},
+      {"lio/residual_dump_frames", "log/lio/residual_dump/frames"},
+      {"lio/residual_dump_last_iter", "log/lio/residual_dump/last_iter"},
+      {"lio/residual_dump_all_iters", "log/lio/residual_dump/all_iters"},
+      {"lio/residual_dump_voxel_info", "log/lio/residual_dump/voxel_info"},
+      {"lio/residual_dump_line_geometry", "log/lio/residual_dump/line_geometry"},
+      {"lio/residual_dump_slim", "log/lio/residual_dump/slim"},
+      {"lio/residual_geometry_en", "log/lio/residual_geometry"},
+      {"lio/line_rows_log_en", "log/lio/line_rows"},
+      {"lio/zsq_log_en", "log/lio/zsq"},
+      {"voxel_map/map/log_frame_stats_en", "log/voxel_map/frame_stats"},
+      {"voxel_map/map/snapshot_post_calibration", "log/voxel_map/snapshot_post_calibration"},
+      {"voxel_map/map/snapshot_frames", "log/voxel_map/snapshot_frames"},
+      {"voxel_map/plane/plane_var_diag_en", "log/voxel_map/plane_var_diag"},
+      {"voxel_map/point_cov_stats_en", "log/voxel_map/point_cov_stats"},
+      {"voxel_map/plane/log_debug_en", "log/voxel_map/plane_debug"},
+      {"voxel_map/plane/plane_fit_reasons_en", "log/voxel_map/plane_fit_reasons"},
+      {"voxel_map/plane/plane_fit_trace_frames", "log/voxel_map/plane_fit_trace/frames"},
+      {"voxel_map/plane/plane_fit_trace_max_rows", "log/voxel_map/plane_fit_trace/max_rows"},
+      {"voxel_map/plane/plane_fit_eigs_en", "log/voxel_map/plane_fit_eigs"},
+      {"voxel_map/plane/log_variance_shares_en", "log/voxel_map/variance_shares"},
+      {"voxel_map/plane/log_consistency_mode", "log/voxel_map/consistency/mode"},
+      {"voxel_map/plane/log_consistency_corr_stride", "log/voxel_map/consistency/corr_stride"},
+      {"vio/log/log_iterations", "log/vio/iterations"},
+      {"vio/log/log_point_residuals", "log/vio/point_residuals"},
+      {"vio/log/log_residual_counts", "log/vio/residual_counts"},
+      {"vio/log/log_consistency_corr_en", "log/vio/consistency_corr"},
+      {"vio/log/log_raw_tracker_output", "log/vio/raw_tracker_output"},
+      {"vio/log/log_norm_l_low_frac", "log/vio/norm_l_low_frac"},
+      {"vio/log/log_path", "log/vio/path"},
+      {"combined/log_debug_en", "log/combined/debug"},
+      {"combined/log_consistency_en", "log/combined/consistency"},
+      {"outputs/auto_terminate_on_idle", "run/auto_terminate_on_idle"},
+      {"outputs/auto_terminate_idle_secs", "run/auto_terminate_idle_secs"}
+
+  };
   return t;
 }
 
@@ -251,9 +328,10 @@ inline std::string removedKeyMessage(const std::string& key)
 // Pure function (unit-testable without a parameter server): returns the refusal message for `key`, or "" when `key` is not a retired name.
 inline std::string renamedKeyMessage(const std::string& key)
 {
+  // R97A Q5: the table's only entries now are the log/run move (R73's own entries were removed with their target in Q3).
   for (const auto& kv : renamedKeyTable())
     if (kv.first == key)
-      return "configuration key '" + key + "' was renamed in R73 and is refused under its old name; use '" + kv.second + "'";
+      return "configuration key '" + key + "' was renamed in R97A and is refused under its old name; use '" + kv.second + "'";
   return std::string();
 }
 

@@ -73,14 +73,14 @@ struct Residual
   int vis_state = -1;
 
   // R81 (F-485 2B): the owning voxel's point count (VoxelPlane::pointsSize()) and distinct-frame count (VoxelPlane::distinctFrames()) at the time the row was built,
-  // copied in VoxelPlane::computeResidual(). Write-only: read only by the residual dump when lio/residual_dump_voxel_info is true. -1 on a path that does not set them.
+  // copied in VoxelPlane::computeResidual(). Write-only: read only by the residual dump when log/lio/residual_dump/voxel_info is true. -1 on a path that does not set them.
   int voxel_point_count = -1;
   int voxel_distinct_frames = -1;
   // R83 (F-428 follow-up, Bryce 2026-10-06 on whether subdividing voxels is useful): octree layer of the owning node (0 = root), copied in VoxelNode::findPlaneResidual().
-  // Write-only, read only by the residual dump under lio/residual_dump_voxel_info. -1 on a path that does not set it.
+  // Write-only, read only by the residual dump under log/lio/residual_dump/voxel_info. -1 on a path that does not set it.
   int voxel_layer = -1;
   // R91C (Bryce 2026-10-09, binning the residuals by direction): the unit vector u2 = VoxelPlane::x_normal_ of the owning voxel (third eigenvector of the point scatter: the line axis of a
-  // line voxel) and the axial coordinate u2 . (p - plane centre) of the point. Write-only: read only by the residual dump under lio/residual_dump_line_geometry. Zero on a path that does not set them.
+  // line voxel) and the axial coordinate u2 . (p - plane centre) of the point. Write-only: read only by the residual dump under log/lio/residual_dump/line_geometry. Zero on a path that does not set them.
   Eigen::Vector3d line_axis = Eigen::Vector3d::Zero();
   double line_axial = 0.0;
 

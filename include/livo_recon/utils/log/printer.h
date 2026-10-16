@@ -16,14 +16,14 @@ class Printer
   static constexpr int N = static_cast<int>(PrintCategory::COUNT);
 
   static constexpr const char* kParamKeys[N] = {
-    "outputs/printer/params/enable",
-    "outputs/printer/state/enable",
-    "outputs/printer/calib/enable",
-    "outputs/printer/vio/enable",
-    "outputs/printer/lio/enable",
-    "outputs/printer/profiler/enable",
-    "outputs/printer/voxel/enable",
-    "outputs/printer/evo/enable",
+    "log/printer/params",
+    "log/printer/state",
+    "log/printer/calib",
+    "log/printer/vio",
+    "log/printer/lio",
+    "log/printer/profiler",
+    "log/printer/voxel",
+    "log/printer/evo",
   };
 
   static constexpr const char* kParamNames[N] = {
@@ -58,7 +58,7 @@ public:
 
   std::string loadParameters(ros::NodeHandle& pnh)
   {
-    paramWarn<double>(pnh, "outputs/printer/throttle_s", throttle_s_, 5.0);
+    paramWarn<double>(pnh, "log/printer/throttle_s", throttle_s_, 5.0);
     for (int i = 0; i < N; ++i)
       paramWarn<bool>(pnh, kParamKeys[i], enabled_[i], true);
 

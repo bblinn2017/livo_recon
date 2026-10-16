@@ -94,7 +94,7 @@ public:
   // reweighting failure's own signature (H_pp collapsed ~4-4.6x while H_rr
   // was untouched) and is the single most diagnostic number for LD-1's
   // decimation rungs.  Set every frame; written only under
-  // voxel_map/map/log_frame_stats_en.
+  // log/voxel_map/frame_stats.
   void noteLioFrameDiag(const LioFrameDiag& d) { lio_frame_diag_ = d; }
   visualization_msgs::MarkerArray buildVizMarkers(const std::string& frame_id,
                                                   const ros::Time& stamp) override;

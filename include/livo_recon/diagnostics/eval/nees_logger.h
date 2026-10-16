@@ -79,7 +79,7 @@ public:
 
   // Call once per scan with that scan's own (scan_id, t_abs, R, p, P).
   // window_size <= 0 disables this (every call is a no-op) -- the caller's
-  // own eval/nees_per_dof_en gate should already prevent calls entirely in
+  // own log/nees/per_dof gate should already prevent calls entirely in
   // that case, this is a second, cheap line of defense.
   void addScan(const char* channel, int scan_id, double t_abs,
                const M3D& R, const V3D& p, const Eigen::Matrix<double, 6, 6>& P);
@@ -92,11 +92,11 @@ private:
 };
 
 // Appends one row to nees_per_dof.txt (report-only, PersistentLogStream --
-// redirected through outputs/debug_log_dir like every other diagnostic in
+// redirected through log/dir like every other diagnostic in
 // this codebase). `channel` distinguishes which tier/path/config produced
 // the row (e.g. "tier1_iekf", "tier2_coupled_n13") since multiple
 // sources can share one log file within a run. Callers gate the call to
-// this function on eval/nees_per_dof_en themselves (this function does not
+// this function on log/nees/per_dof themselves (this function does not
 // re-check it) -- matches every other opts_-gated diagnostic in this
 // codebase's own convention.
 void logNeesPerDof(const char* channel, int scan_id, double t_abs, const NeesResult& r);

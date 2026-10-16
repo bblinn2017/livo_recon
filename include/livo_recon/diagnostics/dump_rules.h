@@ -4,14 +4,14 @@
 //
 //   preImuTraceWanted(frames, frame_idx): a "pre_imu" state_trace row is written for frame indices 1..frames. frames == 0 (default) writes none.
 //   residualDumpIterationWanted(all_iters, iteration): the residual dump of a listed frame is written at iteration 0 only (default, as before R86B), or at every
-//     iteration >= 0 when lio/residual_dump_all_iters is on. A negative iteration (no iteration context) is never dumped.
-//   lastIterDumpWanted(last_iter, all_iters): the separate dump after the iteration loop (lio/residual_dump_last_iter) is suppressed when every iteration is dumped,
+//     iteration >= 0 when log/lio/residual_dump/all_iters is on. A negative iteration (no iteration context) is never dumped.
+//   lastIterDumpWanted(last_iter, all_iters): the separate dump after the iteration loop (log/lio/residual_dump/last_iter) is suppressed when every iteration is dumped,
 //     otherwise the last iteration would be written twice.
 
 // R91C. The solve-snapshot decision and the frame-list parser of the R91C write-only dumps (tests/test_dump_rules_r91c.cpp).
 //
 //   firstFrameSolveDumpMode(frame_idx, k, list, slim): 0 = no solve snapshot for this frame, 1 = the full snapshot (frames 1..k, as before R91C), 2 = the slim snapshot (frame is in
-//     lio/first_frame_dump_frame_list, not in 1..k, and lio/first_frame_dump_slim is on). A listed frame with slim off gets the full snapshot (mode 1).
+//     log/lio/first_frame_dump/frame_list, not in 1..k, and log/lio/first_frame_dump/slim is on). A listed frame with slim off gets the full snapshot (mode 1).
 //   parseFrameList(text, key): comma-separated positive integers, no repeats, at most kMaxDumpListFrames of them; anything else throws std::invalid_argument naming the key (rule 3.4: never silently ignored).
 
 #include <algorithm>

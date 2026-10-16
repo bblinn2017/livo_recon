@@ -1,8 +1,9 @@
 // R73 unit test (F-404): retired configuration key names are refused with a message that names the new key.
 //   RK1 every retired name maps to a message that contains both the old and the new name.
 //   RK2 the new names and unrelated keys give an empty message (not refused).
-//   RK3 (R97A Q3) the renamed table is empty: the ten q_adapt keys' RENAME TARGET (imu/process_noise/gain/*) is now itself removed, so both
-//       the old and new names moved to the removed table instead of staying a rename.
+//   RK3 (R97A Q3) the ten q_adapt keys' RENAME TARGET (imu/process_noise/gain/*) is now itself removed, so both the old and new
+//       names moved to the removed table instead of staying a rename; the table was empty after Q3 and Q5 repopulates it with
+//       the 73 log/run key moves (r97a_inputs/log_key_map.tsv).
 //   RK4 (R74 F-427, R82 F-476 and F-403, R83 F-401 and F-508, R84 F-521, R85 F-520) every removed key gives a message that contains the key and its release; the removed table has 137 entries (..., R97A Q1: voxel_map/backend and 8 more, R97A Q2: 17 more, R97A Q3: 36 more, R97A Q4: 19 more).
 //   RK5 a removed key is never also a renamed-key target or source in the renamed table (no key can be both renamed and removed).
 #include "livo_recon/utils/log/renamed_key_table.h"
@@ -20,13 +21,13 @@ using namespace livo_recon;
 
 int main()
 {
-  CHECK(renamedKeyTable().size() == 0, "RK3 renamed table has 0 entries (R97A Q3: the 10 lio/q_adapt/* renames are removed with their target)");
+  CHECK(renamedKeyTable().size() == 73, "RK3 renamed table has 73 entries (R97A Q5: the log/run key moves; R73's own entries were removed with their target in Q3)");
   for (const auto& kv : renamedKeyTable()) {
     const std::string m = renamedKeyMessage(kv.first);
     if (m.find(kv.first) == std::string::npos || m.find(kv.second) == std::string::npos) CHECK(false, "RK1 message names old and new key");
     if (!renamedKeyMessage(kv.second).empty()) CHECK(false, "RK2 new name is not refused");
   }
-  CHECK(true, "RK1 vacuously true: no renamed-table entries remain");
+  CHECK(true, "RK1 every renamed-table entry's message names both keys");
   CHECK(renamedKeyMessage("lio/zupt/mode").empty(), "RK2 lio/zupt/mode is removed, not renamed");
   CHECK(renamedKeyMessage("imu/process_noise/model").empty(), "RK2 imu/process_noise/model is not retired");
   CHECK(renamedKeyMessage("lio/q_adapt").empty(), "RK2 a prefix alone is not a retired key");

@@ -47,7 +47,7 @@ int main()
   std::string many;
   for (int i = 2; i < 2 + kMaxSnapshotFrames + 1; ++i) many += (many.empty() ? "" : ",") + std::to_string(i);
   CHECK(refused(many, true, "more than"), "SF3 more than kMaxSnapshotFrames frames is refused");
-  CHECK(refused("2,3", false, "needs voxel_map/map/snapshot_post_calibration"), "SF3 a non-empty list without snapshot_post_calibration is refused");
+  CHECK(refused("2,3", false, "needs log/voxel_map/snapshot_post_calibration"), "SF3 a non-empty list without snapshot_post_calibration is refused");
   CHECK(!refused("2,3", true, "x") , "SF4 the refusal check itself can say no: a valid list is not refused");
   std::printf("ALL PASS\n");
   return 0;
