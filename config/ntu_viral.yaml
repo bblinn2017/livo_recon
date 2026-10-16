@@ -137,8 +137,6 @@ imu:
       beta: 0.9
       acc_scale: 0.15
       gyro_scale: 10.0
-      acc_max_dynamic_variance: 1.0e6
-      gyro_max_dynamic_variance: 1.0e6
     bias_random_walk:
       gyro_variance_rate: 1.0e-5
       accel_variance_rate: 1.0e-5

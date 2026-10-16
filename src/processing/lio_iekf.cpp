@@ -310,58 +310,7 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
   iekf_tier1_nees_ = Tier1NeesBuffer(opts_.nees_per_dof_en ? opts_.nees_tier1_window_scans : 0);
 
   // The scan spline and AdaptiveQ were removed (Bryce, 2026-09-30). Any spline/*, adaptive_q/* or akf_q/* key (R66 AKF-style Q adaptation, removed in R97) left in a config is refused by finalizeConfig() below.
-
-  // ── R72 (F-401): innovation-driven Q gain (opt-in). Sub-keys are refused unless their mode is selected; a configuration that
-  // could not change anything (gain bounds both 1, forgetting 1, inflate 1) is refused as inert. ──
-  cfg.mode("imu/process_noise/gain/mode", q_gain_opts_.mode, "off", { "off", "innovation_scale", "nis_gate", "nis_smooth" });
-  {
-    const bool ia = q_gain_opts_.mode == "innovation_scale";
-    const bool ng = q_gain_opts_.mode == "nis_gate";
-    const bool ns = q_gain_opts_.mode == "nis_smooth";   // R81 (F-478)
-    const bool any = ia || ng || ns;
-    cfg.nestedMode(any, "imu/process_noise/gain/mode!=off", "imu/process_noise/gain/apply", q_gain_opts_.apply, "both", { "both", "acc", "gyr" });
-    cfg.nested<double>(any, "imu/process_noise/gain/mode!=off", "imu/process_noise/gain/min_gain", q_gain_opts_.min_gain, 1.0);
-    cfg.nested<double>(any, "imu/process_noise/gain/mode!=off", "imu/process_noise/gain/max_gain", q_gain_opts_.max_gain, 100.0);
-    cfg.nested<double>(ia, "imu/process_noise/gain/mode=innovation_scale", "imu/process_noise/gain/forgetting", q_gain_opts_.forgetting, 0.9);
-    cfg.nested<double>(ia, "imu/process_noise/gain/mode=innovation_scale", "imu/process_noise/gain/rho_clamp", q_gain_opts_.rho_clamp, 4.0);
-    cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/nis_hi", q_gain_opts_.nis_hi, 1.5);
-    cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/inflate", q_gain_opts_.inflate, 1.25);
-    cfg.nested<double>(ng || ns, "imu/process_noise/gain/mode=nis_gate or nis_smooth", "imu/process_noise/gain/decay", q_gain_opts_.decay, 0.95);   // R81 (F-478): ONE read shared by the two modes (two nested() calls on one key would make a set decay a dead-scope refusal in whichever mode did not read it)
-    cfg.nested<double>(ng, "imu/process_noise/gain/mode=nis_gate", "imu/process_noise/gain/whiteness_max", q_gain_opts_.whiteness_max, 0.0);
-    cfg.nested<double>(ns, "imu/process_noise/gain/mode=nis_smooth", "imu/process_noise/gain/nis_slope", q_gain_opts_.nis_slope, 0.1);   // R81 (F-478)
-    cfg.nested<double>(ns, "imu/process_noise/gain/mode=nis_smooth", "imu/process_noise/gain/nis_clip", q_gain_opts_.nis_clip, 0.0);   // R81 (F-478)
-    if (any)
-    {
-      if (!(q_gain_opts_.min_gain > 0.0) || !(q_gain_opts_.max_gain >= q_gain_opts_.min_gain))
-        throw std::invalid_argument("imu/process_noise/gain/min_gain must be > 0 and <= max_gain");
-      if (q_gain_opts_.min_gain == 1.0 && q_gain_opts_.max_gain == 1.0)
-        throw std::invalid_argument("imu/process_noise/gain gain bounds min_gain == max_gain == 1 are inert (use mode=off)");
-    }
-    if (ia)
-    {
-      if (!(q_gain_opts_.forgetting >= 0.0 && q_gain_opts_.forgetting <= 1.0) || !(q_gain_opts_.rho_clamp >= 1.0))
-        throw std::invalid_argument("imu/process_noise/gain/forgetting must be in [0,1] and rho_clamp >= 1");
-      if (q_gain_opts_.forgetting == 1.0)
-        throw std::invalid_argument("imu/process_noise/gain/mode=innovation_scale with forgetting == 1 never moves the gain (inert)");
-    }
-    if (ns)
-    {
-      if (!(q_gain_opts_.nis_slope > 0.0) || !std::isfinite(q_gain_opts_.nis_slope) || !(q_gain_opts_.nis_clip > 0.0) || !std::isfinite(q_gain_opts_.nis_clip) ||
-          !(q_gain_opts_.decay >= 0.0 && q_gain_opts_.decay < 1.0))
-        throw std::invalid_argument("imu/process_noise/gain nis_smooth: nis_slope > 0 and finite, nis_clip > 0 and finite (no default: absent = 0 = refused; the value is Bryce's), decay in [0,1)");
-    }
-    if (ng)
-    {
-      if (!(q_gain_opts_.nis_hi > 0.0) || !(q_gain_opts_.inflate >= 1.0) || !(q_gain_opts_.decay >= 0.0 && q_gain_opts_.decay <= 1.0) ||
-          !(q_gain_opts_.whiteness_max >= 0.0 && q_gain_opts_.whiteness_max <= 1.0))
-        throw std::invalid_argument("imu/process_noise/gain nis_gate: nis_hi > 0, inflate >= 1, decay in [0,1], whiteness_max in [0,1]");
-      if (q_gain_opts_.inflate == 1.0)
-        throw std::invalid_argument("imu/process_noise/gain/mode=nis_gate with inflate == 1 never moves the gain (inert)");
-      if (q_gain_opts_.min_gain < 1.0)
-        throw std::invalid_argument("imu/process_noise/gain/mode=nis_gate with min_gain < 1: the one-sided gate never deflates below 1 (inert); min_gain < 1 is valid for nis_smooth only (R82: F-476 retired)");
-    }
-    q_gain_.configure(q_gain_opts_);
-  }
+  // R97A Q3 item 3: the innovation-driven Q gain (imu/process_noise/gain/*) is removed; it was off at the yaml.
 
   // Anything left over in the spline/*, adaptive_q/* and akf_q/* namespaces (all removed) is a key nobody consumes.
   // Deliberately NOT extended to voxel_map/: several of its keys are still
@@ -371,73 +320,15 @@ std::string LioProcIekf::loadParameters(ros::NodeHandle& pnh)
   return finalizeConfig(cfg, { "spline", "adaptive_q", "akf_q", "lio/ekf", "voxel_map" });
 }
 
-// R72 (F-401): once per scan, from the iteration-0 residuals (evaluated at the propagated prior) and the frame's fixed prior.
-void LioProcIekf::updateQGainFromResiduals()
-{
-  std::vector<InnovationRow> rows;
-  rows.reserve(residuals_.size());
-  for (const auto& r : residuals_)
-  {
-    InnovationRow row;
-    row.r = r.r;
-    row.sigma2 = r.sigma_squared;
-    row.h << r.point_cross_normal, r.normal;   // (rotation 3, position 3): the same rows accumulateLioResiduals() uses
-    rows.push_back(row);
-  }
-  const Eigen::Matrix<double, 6, 6> P6 = prior_cov_.block<6, 6>(StateGroup::idxR(), StateGroup::idxR());
-  const InnovationStats st = innovationStats(rows, P6);
-  const double g_before = q_gain_.gain();
-  q_gain_.update(st);
-  state_->setQGain(q_gain_.gainAcc(), q_gain_.gainGyr());   // read by ImuProc::propagate on the NEXT scan's steps
-  ++qa_scans_;
-  if (q_gain_.gain() != 1.0) ++qa_scans_gain_ne_1_;
-  qa_nis_sum_ += st.nis;
-  qa_rho_sum_ += st.rho;
-  qa_lag1_abs_sum_ += std::abs(st.lag1);
-  static PersistentLogStream log("q_adapt.csv");
-  bool first = false;
-  std::ofstream& o = log.stream(&first);
-  if (first) o << "frame,n,nis,rho,lag1,sum_r2,sum_sigma2,sum_hph,valid,gain_before,gain_after\n";
-  o << std::setprecision(10) << voxel_map_->frame_idx_ << ',' << st.n << ',' << st.nis << ',' << st.rho << ',' << st.lag1 << ','
-    << st.sum_r2 << ',' << st.sum_sigma2 << ',' << st.sum_hph << ',' << (st.valid ? 1 : 0) << ',' << g_before << ','
-    << q_gain_.gain() << '\n';
-}
-
 // LIO Processing
 
 void LioProcIekf::deskewAndDownsample(MeasureGroup& mg)
 {
   TimedScope ts(profiler_, "lio/deskew");
 
-  // R91H: the rotation-warp scale applies on frames 0 .. rot_warp_last_frame (frame_idx_ is the `frame` of the residual dump of this same scan: deskew runs before
-  // estimateState, updateMap increments after). Outside the window, and whenever the scale is 1, the baseline options are used unchanged.
-  const bool rot_warp_on = opts_.deskew.rot_warp_scale != 1.0;
-  const long deskew_frame = voxel_map_ ? static_cast<long>(voxel_map_->frame_idx_) : 0;
-  const bool rot_warp_applied = rot_warp_on && deskew_frame <= static_cast<long>(opts_.rot_warp_last_frame);
-  DeskewOptions deskew_opts = opts_.deskew;
-  if (rot_warp_on && !rot_warp_applied) deskew_opts.rot_warp_scale = 1.0;
-  DeskewRotStats rot_stats;
-
+  // R97A Q3 item 5: the rotation-warp branch (imu/undistort/rot_warp_scale, rot_warp_last_frame) is removed; 1.0 was the baseline path.
   std::vector<PointXYZCov> deskewed;
-  deskewPoints(state_, mg.poses, mg.image.t, mg.lidar_points, deskew_opts, deskewed, rot_warp_on ? &rot_stats : nullptr);
-
-  if (rot_warp_on)
-  {
-    ++rot_warp_scans_;
-    if (rot_warp_applied) ++rot_warp_scans_applied_;
-    rot_warp_points_ += rot_stats.points;
-    rot_warp_points_rescaled_ += rot_stats.points_rescaled;
-    rot_warp_sum_theta_raw_ += rot_stats.sum_theta_raw;
-    rot_warp_sum_theta_applied_ += rot_stats.sum_theta_applied;
-    if (rot_stats.max_theta_raw > rot_warp_max_theta_raw_) rot_warp_max_theta_raw_ = rot_stats.max_theta_raw;
-    static PersistentLogStream warp_log("deskew_rot_warp.csv");
-    bool first = false;
-    std::ofstream& o = warp_log.stream(&first);
-    if (first) o << "frame,scale_applied,points,points_rescaled,mean_theta_raw_rad,mean_theta_applied_rad,max_theta_raw_rad\n";
-    const double np = rot_stats.points > 0 ? static_cast<double>(rot_stats.points) : 1.0;
-    o << std::setprecision(12) << deskew_frame << ',' << deskew_opts.rot_warp_scale << ',' << rot_stats.points << ',' << rot_stats.points_rescaled << ','
-      << rot_stats.sum_theta_raw / np << ',' << rot_stats.sum_theta_applied / np << ',' << rot_stats.max_theta_raw << '\n';
-  }
+  deskewPoints(state_, mg.poses, mg.image.t, mg.lidar_points, opts_.deskew, deskewed);
 
   if (opts_.dsOn()) {
     DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
@@ -579,31 +470,6 @@ std::string LioProcIekf::engagementReport() const
       o << "   <-- NOTE: the 26 x 26 factorisation failed " << residual_binning_solve_failed_sum_ << " time(s); the correction was not applied in those iterations";
   }
 
-  if (rot_warp_on_report())   // R91H: written only when imu/undistort/rot_warp_scale != 1
-  {
-    const double np = rot_warp_points_ > 0 ? static_cast<double>(rot_warp_points_) : 1.0;
-    o << "\n  imu/undistort/rot_warp_scale = " << opts_.deskew.rot_warp_scale << " last_frame = " << opts_.rot_warp_last_frame << " scans=" << rot_warp_scans_
-      << " scans_applied=" << rot_warp_scans_applied_ << " points=" << rot_warp_points_ << " points_rescaled=" << rot_warp_points_rescaled_
-      << " mean_theta_raw_rad=" << rot_warp_sum_theta_raw_ / np << " mean_theta_applied_rad=" << rot_warp_sum_theta_applied_ / np << " max_theta_raw_rad=" << rot_warp_max_theta_raw_;
-    if (rot_warp_scans_applied_ == 0)
-      o << "   <-- INERT: the rotation-warp scale was set and no scan was warped inside the window";
-    else if (rot_warp_points_rescaled_ == 0)
-      o << "   <-- NOT ENGAGED: no point had a non-zero warp rotation";
-  }
-
-  if (q_gain_opts_.on())
-  {
-    o << "\n  imu/process_noise/gain mode=" << q_gain_opts_.mode << " apply=" << q_gain_opts_.apply << " scans=" << qa_scans_
-      << " scans_with_gain_ne_1=" << qa_scans_gain_ne_1_ << " max_gain=" << q_gain_.maxSeen()
-      << " mean_nis=" << (qa_scans_ > 0 ? qa_nis_sum_ / qa_scans_ : 0.0) << " mean_rho=" << (qa_scans_ > 0 ? qa_rho_sum_ / qa_scans_ : 0.0)
-      << " mean_abs_lag1=" << (qa_scans_ > 0 ? qa_lag1_abs_sum_ / qa_scans_ : 0.0) << " inflating_scans=" << q_gain_.inflating() << " deflating_scans=" << q_gain_.deflating() << " min_gain_seen=" << q_gain_.minSeen()
-      << " whiteness_blocked=" << q_gain_.whitenessBlocked();
-    if (qa_scans_ == 0)
-      o << "   <-- INERT: q_adapt selected and no scan produced residuals";
-    else if (qa_scans_gain_ne_1_ == 0)
-      o << "   <-- NOT ENGAGED: the gain never left 1 (a valid null: the model never looked inconsistent; the IMU-side q_gain counter in "
-           "engagement_imu.txt must agree)";
-  }
   if (opts_.scan_log_en) o << "\n  lio/scan_log_en=true  (scan_log.csv written)";
   o << "\n[engagement] a flag marked INERT above did not test anything; the "
        "cell is invalid, not null.";
@@ -717,7 +583,6 @@ std::string LioProcIekf::processLIO(MeasureGroup& mg)
       setDiagnosticGnIteration(iter);
       double error = estimateStateCorrection(iekf_points, dtheta, dt, /*allow_consistency_log=*/iter == 0);
       if (capture_update) recordIteration(drv_rec_, iter, dtheta, dt);   // R73
-      if (iter == 0 && q_gain_opts_.on() && !residuals_.empty()) updateQGainFromResiduals();   // R72 (F-401)
       writeStationaryIterationDiagnostics(
           firstFrameArchitectureName(), firstFrameArchitectureName(),
           voxel_map_->frame_idx_, iter,

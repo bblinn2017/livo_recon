@@ -10,17 +10,10 @@ namespace livo_recon
 {
 inline const std::vector<std::pair<std::string, std::string>>& renamedKeyTable()
 {
-  static const std::vector<std::pair<std::string, std::string>> t = {
-      {"lio/q_adapt/mode", "imu/process_noise/gain/mode"},
-      {"lio/q_adapt/apply", "imu/process_noise/gain/apply"},
-      {"lio/q_adapt/min_gain", "imu/process_noise/gain/min_gain"},
-      {"lio/q_adapt/max_gain", "imu/process_noise/gain/max_gain"},
-      {"lio/q_adapt/forgetting", "imu/process_noise/gain/forgetting"},
-      {"lio/q_adapt/rho_clamp", "imu/process_noise/gain/rho_clamp"},
-      {"lio/q_adapt/nis_hi", "imu/process_noise/gain/nis_hi"},
-      {"lio/q_adapt/inflate", "imu/process_noise/gain/inflate"},
-      {"lio/q_adapt/decay", "imu/process_noise/gain/decay"},
-      {"lio/q_adapt/whiteness_max", "imu/process_noise/gain/whiteness_max"}};
+  // R97A Q3: the 10 lio/q_adapt/* -> imu/process_noise/gain/* renames are removed -- the rename TARGET
+  // (imu/process_noise/gain/*, the whole adaptive-gain module) no longer exists either, so both the old
+  // and new names now move to removedKeyTable() instead (a key cannot be both a renamed-target and removed).
+  static const std::vector<std::pair<std::string, std::string>> t = {};
   return t;
 }
 
@@ -133,7 +126,49 @@ inline const std::vector<std::string>& removedKeyTable()
       "lio/bootstrap_inflate/factor",
       "lio/startup_hold/scans",
       "lio/open_loop/mode",
-      "lio/open_loop/reset_period_s"};
+      "lio/open_loop/reset_period_s",
+      // R97A Q3 item 3: the adaptive Q gain module (imu/process_noise/gain/*, off at the yaml) and its
+      // predecessor names (lio/q_adapt/*, already-renamed as of R73 -- removed here with their target).
+      "lio/q_adapt/mode",
+      "lio/q_adapt/apply",
+      "lio/q_adapt/min_gain",
+      "lio/q_adapt/max_gain",
+      "lio/q_adapt/forgetting",
+      "lio/q_adapt/rho_clamp",
+      "lio/q_adapt/nis_hi",
+      "lio/q_adapt/inflate",
+      "lio/q_adapt/decay",
+      "lio/q_adapt/whiteness_max",
+      "imu/process_noise/gain/mode",
+      "imu/process_noise/gain/apply",
+      "imu/process_noise/gain/min_gain",
+      "imu/process_noise/gain/max_gain",
+      "imu/process_noise/gain/forgetting",
+      "imu/process_noise/gain/rho_clamp",
+      "imu/process_noise/gain/nis_hi",
+      "imu/process_noise/gain/inflate",
+      "imu/process_noise/gain/decay",
+      "imu/process_noise/gain/whiteness_max",
+      "imu/process_noise/gain/nis_slope",
+      "imu/process_noise/gain/nis_clip",
+      // R97A Q3 item 1: the Gauss-Markov bias model.
+      "imu/process_noise/bias_model",
+      "imu/process_noise/gauss_markov/gyro/correlation_time_s",
+      "imu/process_noise/gauss_markov/gyro/sigma",
+      "imu/process_noise/gauss_markov/accel/correlation_time_s",
+      "imu/process_noise/gauss_markov/accel/sigma",
+      // R97A Q3 item 2: the motion-dependent Q floor scales and dynamic-variance caps.
+      "imu/process_noise/motion/acc_floor_scale",
+      "imu/process_noise/motion/gyro_floor_scale",
+      "imu/process_noise/motion/acc_max_dynamic_variance",
+      "imu/process_noise/motion/gyro_max_dynamic_variance",
+      // R97A Q3 item 4: the three Q scale alphas (all identity at 1.0).
+      "imu/q_alpha_acc",
+      "imu/q_alpha_gyr",
+      "imu/q_alpha_bias",
+      // R97A Q3 item 5: the rotation-warp branch.
+      "imu/undistort/rot_warp_scale",
+      "imu/undistort/rot_warp_last_frame"};
   return t;
 }
 
@@ -162,8 +197,15 @@ inline std::string removedKeyOrigin(const std::string& key)
                         "lio/residual_redundancy/mode", "lio/residual_redundancy/rho", "lio/residual_redundancy/renorm",
                         "lio/p_inflate/alpha", "lio/p_floor/min_eig", "lio/p_fading/lambda",
                         "lio/bootstrap_inflate/scans", "lio/bootstrap_inflate/factor", "lio/startup_hold/scans",
-                        "lio/open_loop/mode", "lio/open_loop/reset_period_s"})
+                        "lio/open_loop/mode", "lio/open_loop/reset_period_s",
+                        "imu/process_noise/bias_model",
+                        "imu/process_noise/motion/acc_floor_scale", "imu/process_noise/motion/gyro_floor_scale",
+                        "imu/process_noise/motion/acc_max_dynamic_variance", "imu/process_noise/motion/gyro_max_dynamic_variance",
+                        "imu/q_alpha_acc", "imu/q_alpha_gyr", "imu/q_alpha_bias",
+                        "imu/undistort/rot_warp_scale", "imu/undistort/rot_warp_last_frame"})
     if (key == k) return "R97A";
+  if (key.rfind("lio/q_adapt/", 0) == 0 || key.rfind("imu/process_noise/gain/", 0) == 0 ||
+      key.rfind("imu/process_noise/gauss_markov/", 0) == 0) return "R97A";
   return "R74 (F-427)";
 }
 

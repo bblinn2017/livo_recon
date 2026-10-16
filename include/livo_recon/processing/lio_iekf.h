@@ -1,7 +1,6 @@
 #pragma once
 
 #include "livo_recon/processing/lio_base.h"
-#include "livo_recon/lio/q_adapt.h"
 #include "livo_recon/diagnostics/eval/nees_logger.h"
 
 #include <array>
@@ -57,19 +56,9 @@ private:
   // once loadParameters() has run.
   Tier1NeesBuffer iekf_tier1_nees_{0};
 
-  // R72 (F-401): innovation-driven gain on the IMU step variance (imu/process_noise/gain/*). Default off (bit-identical); engagement counters below feed engagementReport().
   // R83: the zero-velocity pseudo-update (lio/zupt/*) was removed (Bryce 2026-10-06).
-  QGainOptions q_gain_opts_;
-  QGain        q_gain_;
-  long   qa_scans_ = 0, qa_scans_gain_ne_1_ = 0;
-  double qa_nis_sum_ = 0.0, qa_rho_sum_ = 0.0, qa_lag1_abs_sum_ = 0.0;
-  void updateQGainFromResiduals();
-
-  // R91H: rotation-warp scale engagement (written only when imu/undistort/rot_warp_scale != 1). Scans warped, scans on which the scale was applied (frame <= rot_warp_last_frame), and
-  // the summed counters of the primary stream over those scans.
-  long   rot_warp_scans_ = 0, rot_warp_scans_applied_ = 0, rot_warp_points_ = 0, rot_warp_points_rescaled_ = 0;
-  double rot_warp_sum_theta_raw_ = 0.0, rot_warp_sum_theta_applied_ = 0.0, rot_warp_max_theta_raw_ = 0.0;
-  bool   rot_warp_on_report() const { return opts_.deskew.rot_warp_scale != 1.0; }
+  // R97A Q3 item 3: the innovation-driven Q gain (imu/process_noise/gain/*) is removed.
+  // R97A Q3 item 5: the rotation-warp branch (imu/undistort/rot_warp_scale) is removed.
 };
 
 }  // namespace livo_recon

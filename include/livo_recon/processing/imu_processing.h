@@ -15,11 +15,6 @@ struct ImuProcOptions
   bool   log_qhat_en   = false;
   bool   second_order = true;
 
-  // History (24-44): see docs/livo_recon_changelog.md#include-livo_recon-processing-imu_processing.h-24
-  double q_alpha_acc = 1.0;
-  double q_alpha_gyr = 1.0;
-  double q_alpha_bias = 1.0;
-
   // Runtime accelerometer/gyroscope process-noise model. "fixed" is the
   // production control. The dynamic modes use the stationary-calibration
   // variance as their floor and add a bounded motion-dependent variance.
@@ -27,27 +22,12 @@ struct ImuProcOptions
   double motion_beta = 0.9;  // 0 = instantaneous; larger = more smoothing (R80 F-477: default 0.9, was 0.0)
   double motion_acc_scale = 0.3;   // R80 F-477: was 1.0
   double motion_gyr_scale = 10.0;  // R80 F-477: was 1.0
-  double motion_acc_max_dynamic_variance = 0.5;
-  // R64: multipliers on the stationary calibration floor inside the motion-dependent Q (1.0 = bit-identical).
-  // var_step = floor_scale * floor + scale^2 * max(0, filtered energy - floor) (the excess is still measured
-  // against the UNSCALED floor). Refused under the "fixed" model, where there is no floor term.
-  double motion_acc_floor_scale = 1.0;
-  double motion_gyr_floor_scale = 1.0;
-  double motion_gyr_max_dynamic_variance = 0.3;
 
   // Per-IMU-step trace of the first three propagations (imu_first_scans.csv).
   bool first_scans_log_en = false;
   // R83B (A6/B5): per-IMU-step motion-Q + per-axis clamp flags, every scan, not just the first three
   // (motion_q_step.csv). Independent of first_scans_log_en. Default off.
   bool motion_q_step_log_en = false;
-
-  // R66: bias process model. "random_walk" (default) is the existing behaviour, bit-identical.
-  // "gauss_markov": b_{k+1} = mu + e^{-dt/tau} (b_k - mu) + w, var w = sigma^2 (1 - e^{-2 dt/tau}); mu is the
-  // calibrated bias (the bias value at the first propagation). Error-state F bias block = e^{-dt/tau} I,
-  // Q bias block = q_alpha_bias * sigma^2 (1 - e^{-2 dt/tau}). All four numbers are required when on.
-  std::string bias_model = "random_walk";   // random_walk|gauss_markov
-  double gm_gyr_tau = 0.0, gm_gyr_sigma = 0.0;   // s, rad/s
-  double gm_acc_tau = 0.0, gm_acc_sigma = 0.0;   // s, m/s^2
 };
 
 // T7-a: the two quantities the Myers-Tapley process-noise estimator needs,
@@ -121,15 +101,6 @@ private:
   V3D filtered_gyr_excitation_energy_ = V3D::Zero();
   bool motion_noise_primed_ = false;
   size_t propagation_index_ = 0;
-  // R66 Gauss-Markov bias engagement counters / magnitude.
-  bool gm_ref_set_ = false;
-  V3D gm_ref_gyr_ = V3D::Zero(), gm_ref_acc_ = V3D::Zero();
-  long gm_steps_ = 0;
-  double gm_max_q_gyr_ = 0.0, gm_max_q_acc_ = 0.0;     // largest Q bias entry injected in one step
-  double gm_max_dev_gyr_ = 0.0, gm_max_dev_acc_ = 0.0; // largest |b - mu| seen (norm)
-  // R72 (F-401) engagement counters.
-  long gain_steps_ = 0, gain_steps_applied_ = 0;          // steps seen / steps whose variance was multiplied by a gain != 1
-  double gain_acc_max_ = 1.0, gain_gyr_max_ = 1.0;
 public:
   std::string engagementReport() const;
 };

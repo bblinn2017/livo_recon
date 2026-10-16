@@ -368,19 +368,29 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
   // CQ-55 item 10: state/cov/bg and state/cov/ba used to seed BOTH the
   // initial covariance (units rad^2/s^2, "we just calibrated and are not
   // sure") AND the random-walk RATE (units rad^2/s^3, imu_processing.cpp's
-  // q_alpha_bias*covBiasGyr()*dt term) -- two independent physical facts
-  // that cannot correctly share one value. Measured: with the initial
-  // value (1e-5 in config/ntu_viral.yaml) used as the rate, the licensed
-  // 1-sigma gyro-bias walk over a 69.4s window is 543x a MEMS sensor's own
-  // quoted in-run stability. Split into their own keys, each DEFAULTING TO
-  // THE SAME VALUE the (still-present) initial-covariance key uses, so this
-  // is provably md5-inert unless a config explicitly sets the new key --
-  // rule 26 item 1, no new default chosen here.
-  double bias_gyr_rw = init_cov_bg_, bias_acc_rw = init_cov_ba_;
+  // covBiasGyr()*dt term) -- two independent physical facts that cannot
+  // correctly share one value. Measured: with the initial value (1e-5 in
+  // config/ntu_viral.yaml) used as the rate, the licensed 1-sigma
+  // gyro-bias walk over a 69.4s window is 543x a MEMS sensor's own quoted
+  // in-run stability. Split into their own keys.
+  // R97A Q3 item 1: with the Gauss-Markov bias model removed, random walk
+  // is the only bias model; these two keys default to the code constant
+  // 1e-5 (the yaml value) rather than mirroring state/cov/bg|ba (which Q4
+  // removes). Identity at ntu_viral.yaml: both yamls set these keys
+  // explicitly, so the default never applies there. Report: any OTHER
+  // yaml that relied on the old default (sharing state/cov/bg|ba) now
+  // gets 1e-5 instead.
+  double bias_gyr_rw = 1.0e-5, bias_acc_rw = 1.0e-5;
   paramWarn<double>(pnh, "imu/process_noise/bias_random_walk/gyro_variance_rate",
-                    bias_gyr_rw, init_cov_bg_);
+                    bias_gyr_rw, 1.0e-5);
   paramWarn<double>(pnh, "imu/process_noise/bias_random_walk/accel_variance_rate",
-                    bias_acc_rw, init_cov_ba_);
+                    bias_acc_rw, 1.0e-5);
+  if (!std::isfinite(bias_gyr_rw) || bias_gyr_rw <= 0.0)
+    throw std::invalid_argument(
+        "imu/process_noise/bias_random_walk/gyro_variance_rate must be finite and > 0");
+  if (!std::isfinite(bias_acc_rw) || bias_acc_rw <= 0.0)
+    throw std::invalid_argument(
+        "imu/process_noise/bias_random_walk/accel_variance_rate must be finite and > 0");
   cov_bias_acc_ = V3D::Constant(bias_acc_rw);
   cov_bias_gyr_ = V3D::Constant(bias_gyr_rw);
 

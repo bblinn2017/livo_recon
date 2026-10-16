@@ -3,7 +3,6 @@
 #include "livo_recon/utils/state/state.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
 #include "livo_recon/diagnostics/motion_q_writer.h"
-#include "livo_recon/lio/q_adapt.h"
 #include "livo_recon/utils/log/renamed_keys.h"
 #include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/diagnostics/state_trace.h"
@@ -134,8 +133,6 @@ std::string ImuProc::engagementReport() const
 {
   std::ostringstream o;
   o << "[engagement/imu] propagations=" << propagation_index_;
-  o << "\n  q_gain steps=" << gain_steps_ << " steps_with_gain_ne_1=" << gain_steps_applied_
-    << " max_gain_acc=" << gain_acc_max_ << " max_gain_gyr=" << gain_gyr_max_;
   return o.str();
 }
 
@@ -152,9 +149,6 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   // History (61-65): see docs/livo_recon_changelog.md#src-processing-imu_processing.cpp-61
   refuseRenamedKeys(pnh);   // R73 F-404
   paramWarn<bool>(pnh, "imu/second_order",   opts_.second_order, true);
-  paramWarn<double>(pnh, "imu/q_alpha_acc", opts_.q_alpha_acc, 1.0);
-  paramWarn<double>(pnh, "imu/q_alpha_gyr", opts_.q_alpha_gyr, 1.0);
-  paramWarn<double>(pnh, "imu/q_alpha_bias", opts_.q_alpha_bias, 1.0);
   paramWarn<bool>(pnh, "imu/log_debug_en", opts_.log_debug_en, false);
   paramWarn<bool>(pnh, "imu/log_qhat_en", opts_.log_qhat_en, false);
   paramWarn<std::string>(pnh, "imu/process_noise/model",
@@ -164,12 +158,6 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
                     opts_.motion_acc_scale, 0.3);   // R80 F-477 (Bryce): was 1.0
   paramWarn<double>(pnh, "imu/process_noise/motion/gyro_scale",
                     opts_.motion_gyr_scale, 10.0);   // R80 F-477 (Bryce): was 1.0
-  paramWarn<double>(pnh, "imu/process_noise/motion/acc_floor_scale", opts_.motion_acc_floor_scale, 1.0);
-  paramWarn<double>(pnh, "imu/process_noise/motion/gyro_floor_scale", opts_.motion_gyr_floor_scale, 1.0);
-  paramWarn<double>(pnh, "imu/process_noise/motion/acc_max_dynamic_variance",
-                    opts_.motion_acc_max_dynamic_variance, 0.5);
-  paramWarn<double>(pnh, "imu/process_noise/motion/gyro_max_dynamic_variance",
-                    opts_.motion_gyr_max_dynamic_variance, 0.3);
   {
     // R63 (F-118): the zero-initialised head sample is removed. The key is
     // no longer an option; a config that still sets it is refused rather
@@ -181,39 +169,6 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   }
   paramWarn<bool>(pnh, "eval/imu_first_scans_en", opts_.first_scans_log_en, false);
   paramWarn<bool>(pnh, "imu/motion_q_step_log_en", opts_.motion_q_step_log_en, false);   // R83B (A6/B5)
-  // R66: bias process model (dependency structure: the four Gauss-Markov numbers exist only under gauss_markov,
-  // the random-walk rate keys only under random_walk; a key out of scope is an error, not ignored).
-  paramWarn<std::string>(pnh, "imu/process_noise/bias_model", opts_.bias_model, std::string("random_walk"));
-  {
-    const char* gm_keys[4] = {"imu/process_noise/gauss_markov/gyro/correlation_time_s",
-                              "imu/process_noise/gauss_markov/gyro/sigma",
-                              "imu/process_noise/gauss_markov/accel/correlation_time_s",
-                              "imu/process_noise/gauss_markov/accel/sigma"};
-    for (const char* k : gm_keys) markParamConsumed(k);
-    if (opts_.bias_model != "random_walk" && opts_.bias_model != "gauss_markov")
-      throw std::invalid_argument("imu/process_noise/bias_model must be random_walk or gauss_markov");
-    if (opts_.bias_model == "random_walk")
-    {
-      for (const char* k : gm_keys)
-        if (pnh.hasParam(k))
-          throw std::invalid_argument(std::string(k) + " is set but imu/process_noise/bias_model=random_walk");
-    }
-    else
-    {
-      for (const char* k : {"imu/process_noise/bias_random_walk/gyro_variance_rate",
-                            "imu/process_noise/bias_random_walk/accel_variance_rate"})
-        if (pnh.hasParam(k))
-          throw std::invalid_argument(std::string(k) + " is set but imu/process_noise/bias_model=gauss_markov");
-      double* dst[4] = {&opts_.gm_gyr_tau, &opts_.gm_gyr_sigma, &opts_.gm_acc_tau, &opts_.gm_acc_sigma};
-      for (int i = 0; i < 4; ++i)
-      {
-        if (!pnh.getParam(gm_keys[i], *dst[i]))
-          throw std::invalid_argument(std::string(gm_keys[i]) + " is required when imu/process_noise/bias_model=gauss_markov");
-        if (!std::isfinite(*dst[i]) || *dst[i] <= 0.0)
-          throw std::invalid_argument(std::string(gm_keys[i]) + " must be finite and > 0");
-      }
-    }
-  }
   if (opts_.process_noise_model != "fixed" &&
       opts_.process_noise_model != "isotropic" &&
       opts_.process_noise_model != "axis_aware")
@@ -222,18 +177,9 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   if (!std::isfinite(opts_.motion_beta) || opts_.motion_beta < 0.0 ||
       opts_.motion_beta >= 1.0)
     throw std::invalid_argument("imu/process_noise/motion/beta must be in [0,1)");
-  for (double v : {opts_.motion_acc_floor_scale, opts_.motion_gyr_floor_scale})
-    if (!std::isfinite(v) || v <= 0.0)
-      throw std::invalid_argument("imu/process_noise/motion/{acc,gyro}_floor_scale must be finite and > 0");
-  if (opts_.process_noise_model == "fixed" &&
-      (opts_.motion_acc_floor_scale != 1.0 || opts_.motion_gyr_floor_scale != 1.0))
-    throw std::invalid_argument(
-        "imu/process_noise/motion/*_floor_scale != 1 has no effect under process_noise/model=fixed (no floor term)");
-  for (double v : {opts_.motion_acc_scale, opts_.motion_gyr_scale,
-                   opts_.motion_acc_max_dynamic_variance,
-                   opts_.motion_gyr_max_dynamic_variance})
+  for (double v : {opts_.motion_acc_scale, opts_.motion_gyr_scale})
     if (!std::isfinite(v) || v < 0.0)
-      throw std::invalid_argument("IMU motion-noise scales/caps must be finite and nonnegative");
+      throw std::invalid_argument("IMU motion-noise scales must be finite and nonnegative");
   // R74 (F-427): the local-polynomial energy source and the additive WNOA disturbance were removed; their keys are refused by
   // refuseRenamedKeys() (removedKeyTable) before this point.
   // Read directly rather than being wired from LioProcOptions: the two
@@ -244,20 +190,10 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   std::ostringstream oss;
   oss << "[params/imu]"
       << "\n  second_order:         " << (opts_.second_order ? "true" : "false")
-      << "\n  q_alpha_acc:          " << opts_.q_alpha_acc
-      << "\n  q_alpha_gyr:          " << opts_.q_alpha_gyr
-      << "\n  q_alpha_bias:         " << opts_.q_alpha_bias
       << "\n  process_noise/model:  " << opts_.process_noise_model
       << "\n  motion/beta:          " << opts_.motion_beta
       << "\n  motion/acc_scale:     " << opts_.motion_acc_scale
       << "\n  motion/gyro_scale:    " << opts_.motion_gyr_scale
-      << "\n  motion/acc_floor_scale: " << opts_.motion_acc_floor_scale
-      << "\n  motion/gyro_floor_scale:" << opts_.motion_gyr_floor_scale
-      << "\n  motion/acc_cap:       " << opts_.motion_acc_max_dynamic_variance
-      << "\n  motion/gyro_cap:      " << opts_.motion_gyr_max_dynamic_variance
-      << "\n  bias_model:           " << opts_.bias_model
-      << "  gm gyro tau/sigma=" << opts_.gm_gyr_tau << "/" << opts_.gm_gyr_sigma
-      << "  gm accel tau/sigma=" << opts_.gm_acc_tau << "/" << opts_.gm_acc_sigma
       << "\n  first_scan_head:      always seeded from first sample (R63)"
       << "\n  log_qhat_en:          " << (opts_.log_qhat_en ? "true" : "false");
   return oss.str();
@@ -320,7 +256,9 @@ void ImuProc::propagate(MeasureGroup& mg)
 
   ++propagation_index_;
   const bool dynamic_q = opts_.process_noise_model != "fixed";
-  size_t q_samples = 0, acc_clamped = 0, gyr_clamped = 0;
+  size_t q_samples = 0;
+  // R97A Q3: the per-axis clamp was removed; motion_q_scan.csv's clamp columns stay, permanently 0.
+  const size_t acc_clamped = 0, gyr_clamped = 0;
   V3D q_acc_sum = V3D::Zero(), q_gyr_sum = V3D::Zero();
   V3D debiased_acc_energy_sum = V3D::Zero();
   V3D debiased_gyr_energy_sum = V3D::Zero();
@@ -338,20 +276,6 @@ void ImuProc::propagate(MeasureGroup& mg)
     ROS_INFO_STREAM("[imu] first interval head seeded from first sample (engagement "
                     << first_head_seed_count_ << "): head acc=["
                     << last_imu_sample_.acc.transpose() << "]");
-  }
-  const bool gm_on = opts_.bias_model == "gauss_markov";
-  if (gm_on && !gm_ref_set_)
-  {
-    gm_ref_set_ = true;
-    gm_ref_gyr_ = state_->biasGyr();
-    gm_ref_acc_ = state_->biasAcc();
-    ROS_INFO_STREAM("[imu] gauss_markov bias model ON: reference (calibrated) bias gyr=["
-                    << gm_ref_gyr_.transpose() << "] acc=[" << gm_ref_acc_.transpose()
-                    << "]  gyro tau=" << opts_.gm_gyr_tau << " s sigma=" << opts_.gm_gyr_sigma
-                    << " rad/s  accel tau=" << opts_.gm_acc_tau << " s sigma=" << opts_.gm_acc_sigma
-                    << " m/s^2  (equivalent short-time random-walk rates 2 sigma^2/tau: gyro "
-                    << 2.0 * opts_.gm_gyr_sigma * opts_.gm_gyr_sigma / opts_.gm_gyr_tau << " (rad/s)^2/s, accel "
-                    << 2.0 * opts_.gm_acc_sigma * opts_.gm_acc_sigma / opts_.gm_acc_tau << " (m/s^2)^2/s)");
   }
   ImuSample head = last_imu_sample_;
   auto it = mg.imu_samples.begin();
@@ -401,8 +325,6 @@ void ImuProc::propagate(MeasureGroup& mg)
     V3D gyr_dynamic_variance = V3D::Zero();
     V3D debiased_acc_energy = V3D::Zero();
     V3D debiased_gyr_energy = V3D::Zero();
-    bool step_acc_clamped[3] = {false, false, false};   // R83B (A6/B5): this step's per-axis clamp flags
-    bool step_gyr_clamped[3] = {false, false, false};
     if (dynamic_q)
     {
       if ((state_->varAccFloor().array() <= 0.0).any() ||
@@ -459,30 +381,10 @@ void ImuProc::propagate(MeasureGroup& mg)
           debiased_acc_energy;
       gyr_dynamic_variance = opts_.motion_gyr_scale * opts_.motion_gyr_scale *
           debiased_gyr_energy;
-      for (int axis = 0; axis < 3; ++axis)
-      {
-        step_acc_clamped[axis] = acc_dynamic_variance(axis) > opts_.motion_acc_max_dynamic_variance;
-        step_gyr_clamped[axis] = gyr_dynamic_variance(axis) > opts_.motion_gyr_max_dynamic_variance;
-        if (step_acc_clamped[axis]) ++acc_clamped;
-        if (step_gyr_clamped[axis]) ++gyr_clamped;
-        acc_dynamic_variance(axis) = std::min(
-            acc_dynamic_variance(axis), opts_.motion_acc_max_dynamic_variance);
-        gyr_dynamic_variance(axis) = std::min(
-            gyr_dynamic_variance(axis), opts_.motion_gyr_max_dynamic_variance);
-      }
-      var_acc_step = state_->varAccFloor() * opts_.motion_acc_floor_scale + acc_dynamic_variance;
-      var_gyr_step = state_->varGyrFloor() * opts_.motion_gyr_floor_scale + gyr_dynamic_variance;
+      var_acc_step = state_->varAccFloor() + acc_dynamic_variance;
+      var_gyr_step = state_->varGyrFloor() + gyr_dynamic_variance;
     }
-    // R72 (F-401): imu/process_noise/gain gain (written once per scan by the LIO side; 1.0 = untouched, bit-identical).
-    ++gain_steps_;
-    if (state_->qGainAcc() != 1.0 || state_->qGainGyr() != 1.0)
-    {
-      var_acc_step *= state_->qGainAcc();
-      var_gyr_step *= state_->qGainGyr();
-      ++gain_steps_applied_;
-      gain_acc_max_ = std::max(gain_acc_max_, state_->qGainAcc());
-      gain_gyr_max_ = std::max(gain_gyr_max_, state_->qGainGyr());
-    }
+    // R97A Q3 item 3: the Q gain (imu/process_noise/gain/*) is removed.
     ++q_samples;
     q_acc_sum += var_acc_step;
     q_gyr_sum += var_gyr_step;
@@ -495,11 +397,13 @@ void ImuProc::propagate(MeasureGroup& mg)
           opts_.process_noise_model, dynamic_acc, dynamic_gyr,
           debiased_acc_energy, debiased_gyr_energy, var_acc_step, var_gyr_step);
     if (opts_.motion_q_step_log_en)   // R83B (A6/B5)
+      // R97A Q3: the per-axis clamp (imu/process_noise/motion/*_max_dynamic_variance) was removed;
+      // this column stays in motion_q_step.csv's schema, permanently false.
       writeMotionQStepDiagnostic(
           propagation_index_, q_samples - 1, tail.t + data_queues_->start_time,
           var_acc_step, var_gyr_step,
-          step_acc_clamped[0], step_acc_clamped[1], step_acc_clamped[2],
-          step_gyr_clamped[0], step_gyr_clamped[1], step_gyr_clamped[2]);
+          false, false, false,
+          false, false, false);
 
     // ---- save head state for pose storage ----
     const M3D rot_at_head = rot_imu;
@@ -543,66 +447,31 @@ void ImuProc::propagate(MeasureGroup& mg)
 
     // Rotation noise
     cov_w.block<3,3>(StateGroup::idxR(), StateGroup::idxR()).diagonal() =
-        opts_.q_alpha_gyr * var_gyr_step * dt2;
+        var_gyr_step * dt2;
 
     // Velocity noise
     cov_w.block<3,3>(StateGroup::idxV(), StateGroup::idxV()) =
-        opts_.q_alpha_acc * acc_noise_world * dt2;
+        acc_noise_world * dt2;
 
-    // R66: Gauss-Markov bias factors (1.0 / unused under random_walk).
-    double gm_a_gyr = 1.0, gm_a_acc = 1.0;
-    if (gm_on)
-    {
-      gm_a_gyr = std::exp(-dt / opts_.gm_gyr_tau);
-      gm_a_acc = std::exp(-dt / opts_.gm_acc_tau);
-      if (state_->estBG())
-        F_x.block<3,3>(state_->idxBG(), state_->idxBG()) = M3D::Identity() * gm_a_gyr;
-      if (state_->estBA())
-        F_x.block<3,3>(state_->idxBA(), state_->idxBA()) = M3D::Identity() * gm_a_acc;
-    }
-
-    // Bias Gyro noise (random walk, or Gauss-Markov driving noise)
+    // Bias Gyro noise (random walk)
     if (state_->estBG())
-    {
-      if (gm_on)
-      {
-        const double q_g = opts_.q_alpha_bias * opts_.gm_gyr_sigma * opts_.gm_gyr_sigma *
-                           (1.0 - gm_a_gyr * gm_a_gyr);
-        cov_w.block(state_->idxBG(), state_->idxBG(), 3, 3).diagonal() = V3D::Constant(q_g);
-        gm_max_q_gyr_ = std::max(gm_max_q_gyr_, q_g);
-      }
-      else
-        cov_w.block(state_->idxBG(), state_->idxBG(), 3, 3).diagonal() =
-            (opts_.q_alpha_bias * state_->covBiasGyr() * dt).eval();
-    }
+      cov_w.block(state_->idxBG(), state_->idxBG(), 3, 3).diagonal() =
+          (state_->covBiasGyr() * dt).eval();
 
-    // Bias Acc noise (random walk, or Gauss-Markov driving noise)
+    // Bias Acc noise (random walk)
     if (state_->estBA())
-    {
-      if (gm_on)
-      {
-        const double q_a = opts_.q_alpha_bias * opts_.gm_acc_sigma * opts_.gm_acc_sigma *
-                           (1.0 - gm_a_acc * gm_a_acc);
-        cov_w.block(state_->idxBA(), state_->idxBA(), 3, 3).diagonal() = V3D::Constant(q_a);
-        gm_max_q_acc_ = std::max(gm_max_q_acc_, q_a);
-      }
-      else
-        cov_w.block(state_->idxBA(), state_->idxBA(), 3, 3).diagonal() =
-            (opts_.q_alpha_bias * state_->covBiasAcc() * dt).eval();
-    }
+      cov_w.block(state_->idxBA(), state_->idxBA(), 3, 3).diagonal() =
+          (state_->covBiasAcc() * dt).eval();
 
     if (opts_.second_order)
     {
       // Position noise from dp = 0.5*R*n_a*dt²; cross-term with dv = R*n_a*dt
-      // -- both derived from the same accel noise, so scaled by q_alpha_acc.
-      cov_w.block<3,3>(StateGroup::idxP(), StateGroup::idxP()) = opts_.q_alpha_acc * 0.25 * dt2 * dt2 * acc_noise_world;
-      cov_w.block<3,3>(StateGroup::idxP(), StateGroup::idxV()) = opts_.q_alpha_acc * 0.5  * dt  * dt2 * acc_noise_world;
-      cov_w.block<3,3>(StateGroup::idxV(), StateGroup::idxP()) = opts_.q_alpha_acc * 0.5  * dt  * dt2 * acc_noise_world;
+      // -- both derived from the same accel noise.
+      cov_w.block<3,3>(StateGroup::idxP(), StateGroup::idxP()) = 0.25 * dt2 * dt2 * acc_noise_world;
+      cov_w.block<3,3>(StateGroup::idxP(), StateGroup::idxV()) = 0.5  * dt  * dt2 * acc_noise_world;
+      cov_w.block<3,3>(StateGroup::idxV(), StateGroup::idxP()) = 0.5  * dt  * dt2 * acc_noise_world;
     }
 
-    // T0-E/T7 step 2: each block above is already pre-scaled by its own
-    // q_alpha_{acc,gyr,bias} -- cov_w is added unscaled here. All three
-    // at 1.0 (default) is bit-identical to the pre-split formula.
     state_->covMut() = symmetrized(F_x * state_->cov() * F_x.transpose() + cov_w);   // R73 F-419: never store the plain product
     r61_Q_acc = symmetrized(F_x * r61_Q_acc * F_x.transpose() + cov_w);
 
@@ -648,31 +517,12 @@ void ImuProc::propagate(MeasureGroup& mg)
     mg.imu_state_transitions.push_back(F_x);
     mg.imu_process_covariances.push_back(cov_w);
 
-    // R66: Gauss-Markov mean reversion of the bias estimate toward the calibrated bias, after this step used the
-    // bias (the error-state F block above is the matching e^{-dt/tau}).
-    if (gm_on)
-    {
-      if (state_->estBG())
-        state_->biasGyrMut() = gm_ref_gyr_ + gm_a_gyr * (state_->biasGyr() - gm_ref_gyr_);
-      if (state_->estBA())
-        state_->biasAccMut() = gm_ref_acc_ + gm_a_acc * (state_->biasAcc() - gm_ref_acc_);
-      ++gm_steps_;
-      gm_max_dev_gyr_ = std::max(gm_max_dev_gyr_, (state_->biasGyr() - gm_ref_gyr_).norm());
-      gm_max_dev_acc_ = std::max(gm_max_dev_acc_, (state_->biasAcc() - gm_ref_acc_).norm());
-    }
-
     head = tail;
 
     if (is_last)
       break;
   }
 
-
-  if (gm_on && (propagation_index_ == 1 || propagation_index_ % 500 == 0))
-    ROS_INFO_STREAM("[imu] gauss_markov engagement: steps=" << gm_steps_ << " max Q bias entry gyr=" << gm_max_q_gyr_
-                    << " acc=" << gm_max_q_acc_ << " max |b-mu| gyr=" << gm_max_dev_gyr_ << " acc=" << gm_max_dev_acc_);
-  if (gm_on && propagation_index_ == 200 && (gm_max_q_gyr_ <= 0.0 && gm_max_q_acc_ <= 0.0))
-    ROS_ERROR_STREAM("[imu] gauss_markov bias model is ON but injected no bias process noise (inert-when-on)");
 
   last_imu_sample_ = head;
   mg.n_imu_samples = static_cast<int>(mg.imu_samples.size());

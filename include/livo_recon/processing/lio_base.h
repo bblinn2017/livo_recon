@@ -154,9 +154,6 @@ struct LioProcOptions
 
   // History (161-165): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-161
   DeskewOptions deskew;
-  // R91H: last frame (frame_idx_ at the time of the warp = the `frame` column of the residual dump) on which deskew.rot_warp_scale applies. Read only when
-  // imu/undistort/rot_warp_scale != 1; later frames use the baseline warp. Default 480 (the stationary window ends at about scan 475).
-  int rot_warp_last_frame = 480;
 
   // History (168-172): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-168
   // See VoxelOpts-style modes: "off" is a value of imu/ds/mode, not a magic

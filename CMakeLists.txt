@@ -324,7 +324,7 @@ add_test(NAME residual_binning_r91f COMMAND test_residual_binning_r91f)
 
 # R72 (planning agent's patch; R82: step cap F-403 retired): Q-adaptation alternatives (F-401), failure dump round trip (F-398).
 # ROS-free header-only modules, Eigen only.
-foreach(r72_test q_adapt symmetrize renamed_keys bag_clock plane_test_values line_residual line_residual_r75 line_residual_r76)
+foreach(r72_test symmetrize renamed_keys bag_clock plane_test_values line_residual line_residual_r75 line_residual_r76)
   add_executable(test_${r72_test} tests/test_${r72_test}.cpp)
   target_include_directories(test_${r72_test} PUBLIC include ${EIGEN3_INCLUDE_DIRS})
   target_link_libraries(test_${r72_test} Eigen3::Eigen)

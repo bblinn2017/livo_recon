@@ -555,16 +555,7 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
   cfg.mode("imu/undistort/time_based_process_noise",
            opts_.deskew.time_based_process_noise, "var_acc",
            { "none", "state", "var_acc" });
-  // R91H (experimental, default 1 = baseline, inert): scale of the rotation part of the within-scan warp, applied to frames 0 .. rot_warp_last_frame.
-  // The last-frame key is a sub-option of the scale: setting it while the scale is 1 is refused (nested()).
-  cfg.get<double>("imu/undistort/rot_warp_scale", opts_.deskew.rot_warp_scale, 1.0);
-  if (!std::isfinite(opts_.deskew.rot_warp_scale) || opts_.deskew.rot_warp_scale < 0.0 || opts_.deskew.rot_warp_scale > 1.0)
-    throw std::invalid_argument("imu/undistort/rot_warp_scale must be a finite number in [0, 1] (1 = baseline warp, 0 = no rotation in the warp)");
-  cfg.nested<int>(opts_.deskew.rot_warp_scale != 1.0, "imu/undistort/rot_warp_scale != 1",
-                  "imu/undistort/rot_warp_last_frame", opts_.rot_warp_last_frame, 480);
-  if (opts_.rot_warp_last_frame < 1)
-    throw std::invalid_argument("imu/undistort/rot_warp_last_frame must be >= 1");
-
+  // R97A Q3 item 5: the rotation-warp branch (imu/undistort/rot_warp_scale, rot_warp_last_frame) is removed; 1.0 was the baseline path.
 }
 
 // CQ-49: the shared finish -- refuse anything left unclaimed in the given
