@@ -9,9 +9,44 @@
 namespace livo_recon
 {
 
+// R97A R1: the group-counting policy `collectSamples()` uses, factored out as a pure function so
+// it can be unit-tested against a synthetic stream of group sizes without a live DataQueues/ROS
+// stack. One call = one group with `imu_count` IMU samples in it; `num_frames` <= 0 means "no
+// frame-count stop" (the caller only wants to know whether the group qualifies). Returns whether
+// this group counts towards num_frames (>= 2 IMU samples).
+struct CalibFrameStopState
+{
+  long groups_seen = 0;
+  long groups_short_imu = 0;
+  long groups_qualifying = 0;
+  // Raw (untrimmed) sum of imu_count over qualifying groups -- the value the
+  // "calib/stationary: frames = <n> samples = <m>" log line reports under
+  // num_frames > 0 (distinct from calib_imu_samples.size(), which is this
+  // sum minus one IMU sample per qualifying group -- the existing boundary
+  // trim collectSamples() performs when inserting into calib_imu_samples).
+  long raw_samples_qualifying = 0;
+};
+
+inline bool calibFrameStopConsumeGroup(CalibFrameStopState& s, int imu_count)
+{
+  ++s.groups_seen;
+  if (imu_count < 2)
+  {
+    ++s.groups_short_imu;
+    return false;
+  }
+  ++s.groups_qualifying;
+  s.raw_samples_qualifying += imu_count;
+  return true;
+}
+
 struct CalibProcOptions
 {
   int  num_samples       = 200;
+  // R97A R1: when > 0, the calibration stops after this many measure groups
+  // (image windows) with >= 2 IMU samples have been consumed, instead of
+  // stopping at num_samples IMU samples. 0 (default) is today's behaviour.
+  int  num_frames        = 0;
   std::string ds_mode = "first";
   double ds_leaf_size = 0.15;
 
@@ -104,6 +139,8 @@ private:
   long   calib_groups_seen_      = 0;
   long   calib_groups_short_imu_ = 0;
   long   calib_images_consumed_  = 0;
+  // R97A R1: num_frames stop-condition bookkeeping (see CalibFrameStopState above).
+  CalibFrameStopState calib_frame_stop_;
 
   std::vector<std::vector<PointXYZT>> calib_observations_raw_;
   std::vector<std::vector<PointXYZCov>> bootstrap_observations_;

@@ -375,3 +375,7 @@ add_executable(test_binned_touch_r91 tests/test_binned_touch_r91.cpp src/lio/vox
 target_include_directories(test_binned_touch_r91 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
 target_link_libraries(test_binned_touch_r91 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
 add_test(NAME binned_touch_r91 COMMAND test_binned_touch_r91)
+
+add_executable(test_calib_num_frames_r1 tests/test_calib_num_frames_r1.cpp)
+target_include_directories(test_calib_num_frames_r1 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+add_test(NAME calib_num_frames_r1 COMMAND test_calib_num_frames_r1)

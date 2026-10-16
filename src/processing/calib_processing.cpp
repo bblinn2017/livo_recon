@@ -33,6 +33,12 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
           legacy + "; use calib/stationary, calib/p0, and imu/process_noise");
   }
   paramWarn<int>(pnh, "calib/stationary/num_samples", opts_.num_samples, 200);
+  paramWarn<int>(pnh, "calib/stationary/num_frames", opts_.num_frames, 0);
+  if (opts_.num_frames < 0)
+    throw std::invalid_argument("calib/stationary/num_frames must be >= 0");
+  if (opts_.num_frames > 0 && pnh.hasParam("calib/stationary/num_samples") && opts_.num_samples < 2)
+    throw std::invalid_argument(
+        "calib/stationary/num_frames > 0 together with an explicit calib/stationary/num_samples < 2 is refused");
   paramWarn<std::string>(pnh, "imu/ds/mode", opts_.ds_mode, "first");
   if (opts_.ds_mode != "off" && opts_.ds_mode != "first" && opts_.ds_mode != "average")
     throw std::runtime_error("imu/ds/mode must be off, first, or average");
@@ -78,7 +84,8 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
   std::ostringstream oss;
   oss << "[params/calib/stationary]"
       << "\n  required: true"
-      << "\n  num_samples: " << opts_.num_samples;
+      << "\n  num_samples: " << opts_.num_samples
+      << "\n  num_frames: " << opts_.num_frames;
   oss << "\n  bootstrap point covariance: sensor model"
       << "\n  sensor sigma_r2, sigma_a2: " << opts_.sensor_sigma_r2 << ", " << opts_.sensor_sigma_a2;
   oss << "\n  p0/autocov_lags: " << opts_.p0_autocov_lags
@@ -117,11 +124,13 @@ bool CalibProc::collectSamples()
 {
   std::deque<ImuSample> imu_samples;
   std::vector<PointXYZT> points;
+  const bool frame_stop = opts_.num_frames > 0;
 
-  while (calib_imu_samples.size() < static_cast<size_t>(opts_.num_samples) &&
+  while ((frame_stop
+              ? calib_frame_stop_.groups_qualifying < opts_.num_frames
+              : calib_imu_samples.size() < static_cast<size_t>(opts_.num_samples)) &&
          data_queues_->ready())
   {
-    ++calib_groups_seen_;
     ++calib_images_consumed_;
     calib_last_img_ = data_queues_->popImage();
 
@@ -137,20 +146,21 @@ bool CalibProc::collectSamples()
     // mode below remains the exact regression control.
     calib_observations_raw_.push_back(points);
 
-    if (imu_samples.size() < 2)
-    {
+    const bool qualifies = calibFrameStopConsumeGroup(calib_frame_stop_, static_cast<int>(imu_samples.size()));
+    calib_groups_seen_ = calib_frame_stop_.groups_seen;
+    calib_groups_short_imu_ = calib_frame_stop_.groups_short_imu;
+    if (!qualifies)
       // Counted, not silent -- this discard is the most likely reason the
       // sample count never grows, and it was invisible.
-      ++calib_groups_short_imu_;
       continue;
-    }
     calib_imu_samples.insert(
         calib_imu_samples.end(),
         imu_samples.begin(),
         imu_samples.end() - 1);
   }
 
-  return calib_imu_samples.size() >= static_cast<size_t>(opts_.num_samples);
+  return frame_stop ? calib_frame_stop_.groups_qualifying >= opts_.num_frames
+                     : calib_imu_samples.size() >= static_cast<size_t>(opts_.num_samples);
 }
 
 void CalibProc::computeBiasAndNoise(V3D& acc_bias, V3D& gyro_bias,
@@ -402,7 +412,14 @@ std::string CalibProc::estimateFromBuffer()
       << "\n  initialized P0:\n" << state_->cov()
       << "\n  groups_seen=" << calib_groups_seen_
       << " groups_dropped_for_fewer_than_2_imu=" << calib_groups_short_imu_
-      << "\n  R_init_roll_deg=" << r_init_rpy(0) << " R_init_pitch_deg=" << r_init_rpy(1);
+      << "\n  R_init_roll_deg=" << r_init_rpy(0) << " R_init_pitch_deg=" << r_init_rpy(1)
+      // R97A R1: calib/stationary/num_frames > 0 stops by qualifying-group count instead of
+      // IMU-sample count; "samples" here is the raw (untrimmed) IMU-sample sum over those
+      // groups, distinct from calib_imu_samples.size() (which drops one sample per group at
+      // the group boundary) -- the number asked for by R1's own worked example.
+      << "\ncalib/stationary: frames = " << calib_frame_stop_.groups_qualifying
+      << " samples = " << (opts_.num_frames > 0 ? calib_frame_stop_.raw_samples_qualifying
+                                                 : static_cast<long>(calib_imu_samples.size()));
   const std::string done_msg = oss.str();
 
   data_queues_->setStartTime(calib_last_img_.t);
