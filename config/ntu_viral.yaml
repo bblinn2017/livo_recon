@@ -120,6 +120,11 @@ imu:
       beta: 0.9
       acc_scale: 0.15
       gyro_scale: 10.0
+      # R97A Q3-fix: restored -- bisection found removing this cap caused a real divergence
+      # on r97a_c_nya_02_id1 (the dynamic variance legitimately exceeds this cap at some point
+      # in that trajectory). See REPORT.md.
+      acc_max_dynamic_variance: 1.0e6
+      gyro_max_dynamic_variance: 1.0e6
     bias_random_walk:
       gyro_variance_rate: 1.0e-5
       accel_variance_rate: 1.0e-5

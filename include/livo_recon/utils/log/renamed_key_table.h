@@ -234,11 +234,12 @@ inline const std::vector<std::string>& removedKeyTable()
       "imu/process_noise/gauss_markov/gyro/sigma",
       "imu/process_noise/gauss_markov/accel/correlation_time_s",
       "imu/process_noise/gauss_markov/accel/sigma",
-      // R97A Q3 item 2: the motion-dependent Q floor scales and dynamic-variance caps.
+      // R97A Q3 item 2: the motion-dependent Q floor scales.
+      // R97A Q3-fix: the dynamic-variance caps (acc_max_dynamic_variance, gyro_max_dynamic_variance)
+      // are NOT removed -- bisection found removing them caused a real divergence on
+      // r97a_c_nya_02_id1 (see REPORT.md); they are restored as real options, not refused keys.
       "imu/process_noise/motion/acc_floor_scale",
       "imu/process_noise/motion/gyro_floor_scale",
-      "imu/process_noise/motion/acc_max_dynamic_variance",
-      "imu/process_noise/motion/gyro_max_dynamic_variance",
       // R97A Q3 item 4: the three Q scale alphas (all identity at 1.0).
       "imu/q_alpha_acc",
       "imu/q_alpha_gyr",
@@ -302,7 +303,6 @@ inline std::string removedKeyOrigin(const std::string& key)
                         "lio/open_loop/mode", "lio/open_loop/reset_period_s",
                         "imu/process_noise/bias_model",
                         "imu/process_noise/motion/acc_floor_scale", "imu/process_noise/motion/gyro_floor_scale",
-                        "imu/process_noise/motion/acc_max_dynamic_variance", "imu/process_noise/motion/gyro_max_dynamic_variance",
                         "imu/q_alpha_acc", "imu/q_alpha_gyr", "imu/q_alpha_bias",
                         "imu/undistort/rot_warp_scale", "imu/undistort/rot_warp_last_frame",
                         "calib/stationary/stall_calls_max",

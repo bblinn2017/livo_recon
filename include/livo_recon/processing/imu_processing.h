@@ -22,6 +22,12 @@ struct ImuProcOptions
   double motion_beta = 0.9;  // 0 = instantaneous; larger = more smoothing (R80 F-477: default 0.9, was 0.0)
   double motion_acc_scale = 0.3;   // R80 F-477: was 1.0
   double motion_gyr_scale = 10.0;  // R80 F-477: was 1.0
+  // R97A Q3-fix: restored after bisection found R97A Q3's removal of this cap caused a real
+  // divergence (not a no-op) on r97a_c_nya_02_id1 -- the motion-dependent dynamic variance
+  // legitimately exceeds the configured cap at some point in that trajectory, and leaving it
+  // uncapped lets a transient huge process noise destabilize the filter. See REPORT.md.
+  double motion_acc_max_dynamic_variance = 0.5;
+  double motion_gyr_max_dynamic_variance = 0.3;
 
   // Per-IMU-step trace of the first three propagations (imu_first_scans.csv).
   bool first_scans_log_en = false;

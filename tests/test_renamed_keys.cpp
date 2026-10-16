@@ -31,12 +31,12 @@ int main()
   CHECK(renamedKeyMessage("lio/zupt/mode").empty(), "RK2 lio/zupt/mode is removed, not renamed");
   CHECK(renamedKeyMessage("imu/process_noise/model").empty(), "RK2 imu/process_noise/model is not retired");
   CHECK(renamedKeyMessage("lio/q_adapt").empty(), "RK2 a prefix alone is not a retired key");
-  CHECK(removedKeyTable().size() == 137, "RK4 removed table has 137 entries (8 from R74, 5 from R82, 9 from R83, 4 from R84, 1 from R85, 1 from R92, 7 from R93A, 1 from R95, 20 from R97, 9 from R97A Q1, 17 from R97A Q2, 36 from R97A Q3, 19 from R97A Q4)");
+  CHECK(removedKeyTable().size() == 135, "RK4 removed table has 135 entries (8 from R74, 5 from R82, 9 from R83, 4 from R84, 1 from R85, 1 from R92, 7 from R93A, 1 from R95, 20 from R97, 9 from R97A Q1, 17 from R97A Q2, 34 from R97A Q3 after the R97A Q3-fix restored 2 of the 36, 19 from R97A Q4)");
   for (const auto& k : removedKeyTable()) {
     const std::string m = removedKeyMessage(k);
     if (m.find(k) == std::string::npos || m.find("removed in R7") == std::string::npos && m.find("removed in R82") == std::string::npos && m.find("removed in R83") == std::string::npos && m.find("removed in R84") == std::string::npos && m.find("removed in R85") == std::string::npos && m.find("removed in R92") == std::string::npos && m.find("removed in R93A") == std::string::npos && m.find("removed in R95") == std::string::npos && m.find("removed in R97") == std::string::npos && m.find("removed in R97A") == std::string::npos) CHECK(false, "RK4 message names the key and its release");
   }
-  CHECK(true, "RK4 all 137 removed keys refused with a message that names the key");
+  CHECK(true, "RK4 all 135 removed keys refused with a message that names the key");
   CHECK(removedKeyMessage("lio/zupt/mode").find("R83 (F-401, F-508)") != std::string::npos, "RK6 lio/zupt/mode names R83 F-401 F-508");
   CHECK(removedKeyMessage("lio/zupt/calib_margin_gyro").find("R83") != std::string::npos && removedKeyMessage("lio/zupt/sigma_v").find("R83") != std::string::npos, "RK6 every lio/zupt key is refused");
   CHECK(removedKeyMessage("lio/zupt").empty(), "RK5 the lio/zupt prefix alone is not a removed key");
@@ -99,15 +99,19 @@ int main()
                         "imu/process_noise/gauss_markov/gyro/correlation_time_s", "imu/process_noise/gauss_markov/gyro/sigma",
                         "imu/process_noise/gauss_markov/accel/correlation_time_s", "imu/process_noise/gauss_markov/accel/sigma",
                         "imu/process_noise/motion/acc_floor_scale", "imu/process_noise/motion/gyro_floor_scale",
-                        "imu/process_noise/motion/acc_max_dynamic_variance", "imu/process_noise/motion/gyro_max_dynamic_variance",
                         "imu/q_alpha_acc", "imu/q_alpha_gyr", "imu/q_alpha_bias",
                         "imu/undistort/rot_warp_scale", "imu/undistort/rot_warp_last_frame"})
     CHECK(removedKeyMessage(k).find("removed in R97A") != std::string::npos, "RK16 the R97A Q3 keys are refused and name R97A");
+  // R97A Q3-fix: acc/gyro_max_dynamic_variance were restored (bisection found their removal
+  // caused a real divergence, not a no-op) -- they must NOT be in the removed table.
   CHECK(removedKeyMessage("imu/process_noise/bias_random_walk/gyro_variance_rate").empty()
         && removedKeyMessage("imu/process_noise/bias_random_walk/accel_variance_rate").empty()
         && removedKeyMessage("imu/process_noise/model").empty()
-        && removedKeyMessage("imu/undistort/time_based_process_noise").empty(),
-        "RK16 the keys that stay (bias_random_walk rates, process_noise/model, undistort/time_based_process_noise) are not removed");
+        && removedKeyMessage("imu/undistort/time_based_process_noise").empty()
+        && removedKeyMessage("imu/process_noise/motion/acc_max_dynamic_variance").empty()
+        && removedKeyMessage("imu/process_noise/motion/gyro_max_dynamic_variance").empty(),
+        "RK16 the keys that stay (bias_random_walk rates, process_noise/model, undistort/time_based_process_noise, "
+        "the R97A Q3-fix-restored dynamic-variance caps) are not removed");
   std::printf("ALL PASS\n");
   return 0;
 }

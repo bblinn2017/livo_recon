@@ -158,6 +158,11 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
                     opts_.motion_acc_scale, 0.3);   // R80 F-477 (Bryce): was 1.0
   paramWarn<double>(pnh, "imu/process_noise/motion/gyro_scale",
                     opts_.motion_gyr_scale, 10.0);   // R80 F-477 (Bryce): was 1.0
+  // R97A Q3-fix: restored (see imu_processing.h).
+  paramWarn<double>(pnh, "imu/process_noise/motion/acc_max_dynamic_variance",
+                    opts_.motion_acc_max_dynamic_variance, 0.5);
+  paramWarn<double>(pnh, "imu/process_noise/motion/gyro_max_dynamic_variance",
+                    opts_.motion_gyr_max_dynamic_variance, 0.3);
   {
     // R63 (F-118): the zero-initialised head sample is removed. The key is
     // no longer an option; a config that still sets it is refused rather
@@ -180,6 +185,9 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   for (double v : {opts_.motion_acc_scale, opts_.motion_gyr_scale})
     if (!std::isfinite(v) || v < 0.0)
       throw std::invalid_argument("IMU motion-noise scales must be finite and nonnegative");
+  for (double v : {opts_.motion_acc_max_dynamic_variance, opts_.motion_gyr_max_dynamic_variance})
+    if (!std::isfinite(v) || v <= 0.0)
+      throw std::invalid_argument("imu/process_noise/motion/{acc,gyro}_max_dynamic_variance must be finite and > 0");
   // R74 (F-427): the local-polynomial energy source and the additive WNOA disturbance were removed; their keys are refused by
   // refuseRenamedKeys() (removedKeyTable) before this point.
   // Read directly rather than being wired from LioProcOptions: the two
@@ -194,6 +202,8 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  motion/beta:          " << opts_.motion_beta
       << "\n  motion/acc_scale:     " << opts_.motion_acc_scale
       << "\n  motion/gyro_scale:    " << opts_.motion_gyr_scale
+      << "\n  motion/acc_cap:       " << opts_.motion_acc_max_dynamic_variance
+      << "\n  motion/gyro_cap:      " << opts_.motion_gyr_max_dynamic_variance
       << "\n  first_scan_head:      always seeded from first sample (R63)"
       << "\n  log_qhat_en:          " << (opts_.log_qhat_en ? "true" : "false");
   return oss.str();
@@ -257,8 +267,9 @@ void ImuProc::propagate(MeasureGroup& mg)
   ++propagation_index_;
   const bool dynamic_q = opts_.process_noise_model != "fixed";
   size_t q_samples = 0;
-  // R97A Q3: the per-axis clamp was removed; motion_q_scan.csv's clamp columns stay, permanently 0.
-  const size_t acc_clamped = 0, gyr_clamped = 0;
+  // R97A Q3-fix: the per-axis clamp was restored (see imu_processing.h) after bisection found its
+  // removal caused a real divergence, so these counters are live again.
+  size_t acc_clamped = 0, gyr_clamped = 0;
   V3D q_acc_sum = V3D::Zero(), q_gyr_sum = V3D::Zero();
   V3D debiased_acc_energy_sum = V3D::Zero();
   V3D debiased_gyr_energy_sum = V3D::Zero();
@@ -325,6 +336,8 @@ void ImuProc::propagate(MeasureGroup& mg)
     V3D gyr_dynamic_variance = V3D::Zero();
     V3D debiased_acc_energy = V3D::Zero();
     V3D debiased_gyr_energy = V3D::Zero();
+    bool step_acc_clamped[3] = {false, false, false};   // R97A Q3-fix: restored
+    bool step_gyr_clamped[3] = {false, false, false};
     if (dynamic_q)
     {
       if ((state_->varAccFloor().array() <= 0.0).any() ||
@@ -381,6 +394,18 @@ void ImuProc::propagate(MeasureGroup& mg)
           debiased_acc_energy;
       gyr_dynamic_variance = opts_.motion_gyr_scale * opts_.motion_gyr_scale *
           debiased_gyr_energy;
+      // R97A Q3-fix: per-axis clamp restored.
+      for (int axis = 0; axis < 3; ++axis)
+      {
+        step_acc_clamped[axis] = acc_dynamic_variance(axis) > opts_.motion_acc_max_dynamic_variance;
+        step_gyr_clamped[axis] = gyr_dynamic_variance(axis) > opts_.motion_gyr_max_dynamic_variance;
+        if (step_acc_clamped[axis]) ++acc_clamped;
+        if (step_gyr_clamped[axis]) ++gyr_clamped;
+        acc_dynamic_variance(axis) = std::min(
+            acc_dynamic_variance(axis), opts_.motion_acc_max_dynamic_variance);
+        gyr_dynamic_variance(axis) = std::min(
+            gyr_dynamic_variance(axis), opts_.motion_gyr_max_dynamic_variance);
+      }
       var_acc_step = state_->varAccFloor() + acc_dynamic_variance;
       var_gyr_step = state_->varGyrFloor() + gyr_dynamic_variance;
     }
@@ -397,13 +422,11 @@ void ImuProc::propagate(MeasureGroup& mg)
           opts_.process_noise_model, dynamic_acc, dynamic_gyr,
           debiased_acc_energy, debiased_gyr_energy, var_acc_step, var_gyr_step);
     if (opts_.motion_q_step_log_en)   // R83B (A6/B5)
-      // R97A Q3: the per-axis clamp (imu/process_noise/motion/*_max_dynamic_variance) was removed;
-      // this column stays in motion_q_step.csv's schema, permanently false.
       writeMotionQStepDiagnostic(
           propagation_index_, q_samples - 1, tail.t + data_queues_->start_time,
           var_acc_step, var_gyr_step,
-          false, false, false,
-          false, false, false);
+          step_acc_clamped[0], step_acc_clamped[1], step_acc_clamped[2],
+          step_gyr_clamped[0], step_gyr_clamped[1], step_gyr_clamped[2]);
 
     // ---- save head state for pose storage ----
     const M3D rot_at_head = rot_imu;
