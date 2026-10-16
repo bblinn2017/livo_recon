@@ -2,6 +2,7 @@
 
 #include "livo_recon/processing/lio_base.h"
 #include "livo_recon/diagnostics/eval/nees_logger.h"
+#include "livo_recon/lio/deskew.h"
 
 #include <array>
 #include <string>
@@ -59,6 +60,8 @@ private:
   // R83: the zero-velocity pseudo-update (lio/zupt/*) was removed (Bryce 2026-10-06).
   // R97A Q3 item 3: the innovation-driven Q gain (imu/process_noise/gain/*) is removed.
   // R97A Q3 item 5: the rotation-warp branch (imu/undistort/rot_warp_scale) is removed.
+  // R97A R2: engagement counters for imu/undistort/time_based_process_noise = relpose_q|relpose_full.
+  RelposeStats relpose_stats_;
 };
 
 }  // namespace livo_recon

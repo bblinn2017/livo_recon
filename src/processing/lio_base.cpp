@@ -554,7 +554,7 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
         "exists to remove; write imu/ds/mode: off instead");
   cfg.mode("imu/undistort/time_based_process_noise",
            opts_.deskew.time_based_process_noise, "var_acc",
-           { "none", "state", "var_acc" });
+           { "none", "state", "var_acc", "relpose_q", "relpose_full" });
   // R97A Q3 item 5: the rotation-warp branch (imu/undistort/rot_warp_scale, rot_warp_last_frame) is removed; 1.0 was the baseline path.
 }
 

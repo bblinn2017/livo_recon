@@ -144,6 +144,7 @@ add_executable(livo_recon_node
   src/lio/voxelnode.cpp
   src/lio/lio_accumulator.cpp
   src/lio/deskew.cpp
+  src/lio/relpose_noise.cpp
   src/lio/info_scale.cpp
   src/map/voxelmap.cpp
   src/map/map_backend_factory.cpp
@@ -238,10 +239,16 @@ target_link_libraries(test_point_cov state_lib)
 add_test(NAME point_cov COMMAND test_point_cov)
 
 # R91H: rotation-warp scale of deskewPoints (ROS-free, like point_cov)
-add_executable(test_deskew_rot_warp_r91h tests/test_deskew_rot_warp_r91h.cpp src/lio/deskew.cpp)
+add_executable(test_deskew_rot_warp_r91h tests/test_deskew_rot_warp_r91h.cpp src/lio/deskew.cpp src/lio/relpose_noise.cpp)
 target_include_directories(test_deskew_rot_warp_r91h PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
 target_link_libraries(test_deskew_rot_warp_r91h state_lib)
 add_test(NAME deskew_rot_warp_r91h COMMAND test_deskew_rot_warp_r91h)
+
+# R97A R2: relpose_q/relpose_full (ROS-free, like point_cov/deskew_rot_warp_r91h)
+add_executable(test_deskew_relpose tests/test_deskew_relpose.cpp src/lio/deskew.cpp src/lio/relpose_noise.cpp)
+target_include_directories(test_deskew_relpose PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
+target_link_libraries(test_deskew_relpose state_lib)
+add_test(NAME deskew_relpose COMMAND test_deskew_relpose)
 
 add_executable(test_r83b_instrumentation tests/test_r83b_instrumentation.cpp src/lio/voxelplane.cpp
                src/diagnostics/log/debug_log_dir.cpp src/diagnostics/motion_q_writer.cpp)

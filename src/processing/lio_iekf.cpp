@@ -331,7 +331,10 @@ void LioProcIekf::deskewAndDownsample(MeasureGroup& mg)
 
   // R97A Q3 item 5: the rotation-warp branch (imu/undistort/rot_warp_scale, rot_warp_last_frame) is removed; 1.0 was the baseline path.
   std::vector<PointXYZCov> deskewed;
-  deskewPoints(state_, mg.poses, mg.image.t, mg.lidar_points, opts_.deskew, deskewed);
+  const Eigen::MatrixXd* p0_at_scan_start =
+      mg.pose_covariances.empty() ? nullptr : &mg.pose_covariances.front();
+  deskewPoints(state_, mg.poses, mg.image.t, mg.lidar_points, opts_.deskew, deskewed,
+               &mg.imu_process_covariances, p0_at_scan_start, &relpose_stats_);
 
   if (opts_.dsOn()) {
     DsMode mode = (opts_.ds_mode == "average") ? DsMode::AVERAGE : DsMode::FIRST;
@@ -474,6 +477,14 @@ std::string LioProcIekf::engagementReport() const
   }
 
   if (opts_.scan_log_en) o << "\n  log/lio/scan=true  (scan_log.csv written)";
+  if (opts_.deskew.time_based_process_noise == "relpose_q" || opts_.deskew.time_based_process_noise == "relpose_full")
+  {
+    o << "\n  imu/undistort/time_based_process_noise=" << opts_.deskew.time_based_process_noise
+      << " scans=" << relpose_stats_.scans_total
+      << " scans_skipped_no_imu=" << relpose_stats_.scans_skipped_no_imu;
+    if (relpose_stats_.scans_total > 0 && relpose_stats_.scans_skipped_no_imu == relpose_stats_.scans_total)
+      o << "   <-- INERT: no scan had any IMU steps to build the relative-pose term from";
+  }
   o << "\n[engagement] a flag marked INERT above did not test anything; the "
        "cell is invalid, not null.";
   return o.str();

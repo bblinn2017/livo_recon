@@ -4,6 +4,7 @@
 #include "livo_recon/utils/algo/hashing.h"
 #include "livo_recon/utils/algo/symmetrize.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
+#include "livo_recon/lio/relpose_noise.h"
 
 #include <Eigen/Geometry>
 #include <algorithm>
@@ -53,8 +54,14 @@ void deskewPoints(
     double scan_end_time,
     const std::vector<PointXYZT>& points,
     const DeskewOptions& opts,
-    std::vector<PointXYZCov>& points_out)
+    std::vector<PointXYZCov>& points_out,
+    const std::vector<Eigen::MatrixXd>* imu_process_covariances,
+    const Eigen::MatrixXd* p0_at_scan_start,
+    RelposeStats* relpose_stats)
 {
+  const bool relpose_on = opts.time_based_process_noise == "relpose_q" ||
+                          opts.time_based_process_noise == "relpose_full";
+
   if (points.empty()) { points_out.clear(); return; }
   points_out.resize(points.size());
 
@@ -65,6 +72,7 @@ void deskewPoints(
       points_out[i].t = points[i].t;
       points_out[i].raw_body_point = points_out[i].point;  // no motion to compensate
     }
+    if (relpose_on && relpose_stats) { ++relpose_stats->scans_total; ++relpose_stats->scans_skipped_no_imu; }
     return;
   }
 
@@ -81,6 +89,45 @@ void deskewPoints(
     vel_noise_end = R_end_T * P_VV * R_end_T.transpose();
   } else if (opts.time_based_process_noise == "var_acc") {
     vel_noise_end = state->varAcc().asDiagonal();
+  }
+
+  // R97A R2: relpose_q / relpose_full build a suffix-sum table of the per-step process-noise
+  // blocks (rotated into the scan-end body frame), used in place of the var_acc/state term above.
+  RelposeSuffixTables relpose_tabs;
+  bool relpose_have_steps = false;
+  M3D relpose_P_vv_end = M3D::Zero(), relpose_P_baba_end = M3D::Zero(),
+      relpose_P_vba_end = M3D::Zero(), relpose_P_bgbg_end = M3D::Zero();
+  bool relpose_full_have_p0 = false;
+  if (relpose_on) {
+    if (relpose_stats) ++relpose_stats->scans_total;
+    if (imu_process_covariances && imu_process_covariances->size() == poses.size() && !poses.empty()) {
+      std::vector<RelposeStepNoise> steps(poses.size());
+      for (size_t k = 0; k < poses.size(); ++k) {
+        const Eigen::MatrixXd& Qw = (*imu_process_covariances)[k];
+        RelposeStepNoise& s = steps[k];
+        s.t = poses[k].t;
+        s.dt = poses[k].dt;
+        s.Q_theta = R_end_T * Qw.block<3, 3>(StateGroup::idxR(), StateGroup::idxR()) * R_end_T.transpose();
+        s.Q_v     = R_end_T * Qw.block<3, 3>(StateGroup::idxV(), StateGroup::idxV()) * R_end_T.transpose();
+        s.Q_p     = R_end_T * Qw.block<3, 3>(StateGroup::idxP(), StateGroup::idxP()) * R_end_T.transpose();
+        s.Q_pv    = R_end_T * Qw.block<3, 3>(StateGroup::idxP(), StateGroup::idxV()) * R_end_T.transpose();
+      }
+      relpose_tabs = buildRelposeSuffixTables(steps, scan_end_time);
+      relpose_have_steps = true;
+    }
+    if (opts.time_based_process_noise == "relpose_full" && p0_at_scan_start && p0_at_scan_start->rows() > 0) {
+      const Eigen::MatrixXd& P0 = *p0_at_scan_start;
+      const M3D P_vv   = P0.block<3, 3>(StateGroup::idxV(), StateGroup::idxV());
+      const M3D P_baba = P0.block<3, 3>(StateGroup::idxBA(), StateGroup::idxBA());
+      const M3D P_vba  = P0.block<3, 3>(StateGroup::idxV(), StateGroup::idxBA());
+      const M3D P_bgbg = P0.block<3, 3>(StateGroup::idxBG(), StateGroup::idxBG());
+      relpose_P_vv_end   = R_end_T * P_vv * R_end_T.transpose();
+      relpose_P_baba_end = R_end_T * P_baba * R_end_T.transpose();
+      relpose_P_vba_end  = R_end_T * P_vba * R_end_T.transpose();
+      relpose_P_bgbg_end = R_end_T * P_bgbg * R_end_T.transpose();
+      relpose_full_have_p0 = true;
+    }
+    if (!relpose_have_steps && relpose_stats) ++relpose_stats->scans_skipped_no_imu;
   }
 
   // Per-point transform against a given (head, R_base, t_base, vel_term)
@@ -101,7 +148,25 @@ void deskewPoints(
     const M3D cov_lidar_end = symmetrized(M3D(R_rel * cov_lidar_i * R_rel.transpose()));   // R80 F-419 (Bryce): per-point covariance, no exemption
     M3D cov_imu_end   = state->lidarToImu(cov_lidar_end);
 
-    if (opts.time_based_process_noise != "none") {
+    if (relpose_on) {
+      // R97A R2: process-noise-only relative-pose covariance, in place of the var_acc/state term.
+      M3D sigma_theta = M3D::Zero(), sigma_p = M3D::Zero();
+      if (relpose_have_steps)
+        relposeProcessNoiseFromSuffix(relpose_tabs, pt.t, sigma_theta, sigma_p);
+      if (relpose_full_have_p0) {
+        const double Delta = scan_end_time - pt.t;
+        const double a = Delta, b = 0.5 * Delta * Delta;
+        sigma_p.noalias() += a * a * relpose_P_vv_end + b * b * relpose_P_baba_end +
+            a * b * (relpose_P_vba_end + relpose_P_vba_end.transpose());
+        sigma_theta.noalias() += a * a * relpose_P_bgbg_end;
+      }
+      M3D q_skew;
+      q_skew <<            0.0, -p_imu_end.z(),  p_imu_end.y(),
+                  p_imu_end.z(),            0.0, -p_imu_end.x(),
+                 -p_imu_end.y(),  p_imu_end.x(),            0.0;
+      const M3D sigma_add = sigma_p + q_skew * sigma_theta * q_skew.transpose();
+      cov_imu_end.noalias() += sigma_add;
+    } else if (opts.time_based_process_noise != "none") {
       const double total_dt = scan_end_time - pt.t;
       if (opts.time_based_process_noise == "state")
         cov_imu_end.noalias() += (total_dt * total_dt) * vel_noise_end;
