@@ -75,31 +75,6 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
   opts_.blind_sqr = blind * blind;
 
   paramWarn<int>(pnh, "cbk/lidar/point_filter_num", opts_.point_filter_num, 1);
-  paramWarn<double>(pnh, "cbk/lidar/time_offset", opts_.lidar_time_offset, 0.0);
-  // R80C (F-484): lidar overlap policy and its grid (see CbkProcOptions::lidar_overlap_policy). Sub-options are refused unless the mode needs them.
-  pnh.param<std::string>("cbk/lidar/overlap_policy", opts_.lidar_overlap_policy, "discard");   // plain param, not paramWarn: the default path prints exactly what R80 printed
-  markParamConsumed("cbk/lidar/overlap_policy");   // R80C agent fix: plain pnh.param() does not register with checkAllParamsConsumed() the way paramWarn() does
-  if (opts_.lidar_overlap_policy != "discard" && opts_.lidar_overlap_policy != "retime" && opts_.lidar_overlap_policy != "retime_trim" && opts_.lidar_overlap_policy != "restamp")   // R80D: restamp added
-    throw std::invalid_argument("cbk/lidar/overlap_policy must be discard, retime, retime_trim or restamp (got '" + opts_.lidar_overlap_policy + "')");
-  const bool retime_on = (opts_.lidar_overlap_policy != "discard");
-  const bool retime_keys_given = pnh.hasParam("cbk/lidar/retime_t0_s") || pnh.hasParam("cbk/lidar/retime_period_s") || pnh.hasParam("cbk/lidar/retime_seq0") || pnh.hasParam("cbk/lidar/retime_ref_offset_s");   // R80D: retime_ref_offset_s added
-  if (!retime_on && retime_keys_given)
-    throw std::invalid_argument("cbk/lidar/retime_t0_s, retime_period_s, retime_seq0 and retime_ref_offset_s are only valid with cbk/lidar/overlap_policy = retime, retime_trim or restamp");
-  opts_.lidar_retime_ref_offset_s = opts_.lidar_time_offset;   // R80D: default, so the offset term is exactly 0.0 unless the key says otherwise
-  if (retime_on)
-  {
-    pnh.param<double>("cbk/lidar/retime_t0_s", opts_.lidar_retime_t0_s, 0.0);
-    pnh.param<double>("cbk/lidar/retime_period_s", opts_.lidar_retime_period_s, 0.0);
-    pnh.param<int>("cbk/lidar/retime_seq0", opts_.lidar_retime_seq0, -1);
-    markParamConsumed("cbk/lidar/retime_t0_s");       // R80C agent fix: see overlap_policy's markParamConsumed above
-    markParamConsumed("cbk/lidar/retime_period_s");
-    markParamConsumed("cbk/lidar/retime_seq0");
-    pnh.param<double>("cbk/lidar/retime_ref_offset_s", opts_.lidar_retime_ref_offset_s, opts_.lidar_time_offset);   // R80D
-    markParamConsumed("cbk/lidar/retime_ref_offset_s");
-    if (!(opts_.lidar_retime_t0_s > 1.0e8) || !(opts_.lidar_retime_period_s > 0.09 && opts_.lidar_retime_period_s < 0.11) || opts_.lidar_retime_seq0 < 0)
-      throw std::invalid_argument("cbk/lidar/overlap_policy = " + opts_.lidar_overlap_policy +
-                                  " needs cbk/lidar/retime_t0_s (> 1e8 s), cbk/lidar/retime_period_s (0.09 to 0.11 s) and cbk/lidar/retime_seq0 (>= 0)");
-  }
   // R82 (F-504): per-point time field. Plain params (not paramWarn) so the default path prints exactly what R81 printed; the engagement line below appears only when a key is set.
   {
     opts_.point_time_explicit = pnh.hasParam("cbk/lidar/point_time_field") || pnh.hasParam("cbk/lidar/point_time_mode") || pnh.hasParam("cbk/lidar/point_time_ref");
@@ -142,9 +117,6 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
     opts_.lidar_type = LidarType::PCL;
   }
   const bool lidar_is_pcl = (opts_.lidar_type == LidarType::PCL);
-  if (retime_on && !lidar_is_pcl)
-    throw std::invalid_argument("cbk/lidar/overlap_policy = " + opts_.lidar_overlap_policy + " is implemented for the PointCloud2 callback only (cbk/lidar/type pcl)");
-
   if (opts_.point_time_explicit && !lidar_is_pcl)
     throw std::invalid_argument("cbk/lidar/point_time_field, point_time_mode and point_time_ref are implemented for the PointCloud2 callback only (cbk/lidar/type pcl)");
   paramWarn<std::string>(pnh, "cbk/imu/acc_type", opts_.imu_acc_type, "g");
@@ -180,12 +152,6 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  topics/quiet_margin_s:     " << data_queues_->quiet_margin_s
       << "\n  cbk/lidar/blind:  " << blind
       << "\n  cbk/lidar/point_filter_num: " << opts_.point_filter_num
-      << "\n  cbk/lidar/time_offset: " << opts_.lidar_time_offset
-      << "\n  cbk/lidar/overlap_policy: " << opts_.lidar_overlap_policy                                   // R80C (F-484)
-      << "\n  cbk/lidar/retime_t0_s: " << std::fixed << std::setprecision(9) << opts_.lidar_retime_t0_s
-      << "\n  cbk/lidar/retime_period_s: " << opts_.lidar_retime_period_s << std::defaultfloat << std::setprecision(6)
-      << "\n  cbk/lidar/retime_seq0: " << opts_.lidar_retime_seq0
-      << "\n  cbk/lidar/retime_ref_offset_s: " << opts_.lidar_retime_ref_offset_s                         // R80D
       << (opts_.point_time_explicit ? "\n  cbk/lidar/point_time: field=" + opts_.point_time_field + " mode=" + opts_.point_time_mode + (opts_.point_time_mode == "absolute_s_f64" ? " ref=" + opts_.point_time_ref : std::string()) : std::string())   // R82 (F-504): printed only when a key is set
       << "\n  cbk/lidar/type:   " << lidar_type_str
       << "\n  cbk/imu/acc_type: " << opts_.imu_acc_type
@@ -228,7 +194,7 @@ void logSensorStamp(char kind, double stamp, std::size_t n_raw, std::size_t n_ke
 // R80 (F-389 / F-311): one row of lidar_msg_log.csv (see CbkProcOptions::log_lidar_msgs and lidar_msg_log.h). Called only from the PointCloud2 callback, which runs on one thread;
 // the mutex is for the static state (message counter, previous header stamp), not for concurrency.
 void logLidarMsg(unsigned seq, double header_stamp, double scan_time, std::size_t n_raw, std::size_t n_kept, double t_first, double t_last,
-                 double prev_accepted_last_t, LidarMsgVerdict verdict, double retime_shift_s = 0.0, std::size_t n_trimmed = 0)
+                 double prev_accepted_last_t, LidarMsgVerdict verdict)
 {
   static std::mutex mtx;
   std::lock_guard<std::mutex> lock(mtx);
@@ -242,7 +208,6 @@ void logLidarMsg(unsigned seq, double header_stamp, double scan_time, std::size_
   r.msg_index = msg_index++; r.seq = seq; r.header_stamp = header_stamp; r.scan_time = scan_time; r.prev_header_stamp = prev_header;
   r.n_raw = static_cast<long long>(n_raw); r.n_kept = static_cast<long long>(n_kept); r.t_first = t_first; r.t_last = t_last;
   r.prev_accepted_last_t = prev_accepted_last_t; r.verdict = verdict;
-  r.retime_shift_s = retime_shift_s; r.n_trimmed = static_cast<long long>(n_trimmed);   // R80C
   prev_header = header_stamp;
   ofs << formatLidarMsgRow(r);
   ofs.flush();
@@ -309,7 +274,7 @@ void CbkProc::imageCallback(const sensor_msgs::ImageConstPtr& msg)
 void CbkProc::lidarCallbackMsg(const livox_ros_driver::CustomMsg::ConstPtr& msg)
 {
   TimedScope ts(profiler_, "cbk/lidar");
-  const double scan_time = msg->header.stamp.toSec() + opts_.lidar_time_offset;
+  const double scan_time = msg->header.stamp.toSec();
   const double end_time = scan_time + static_cast<double>(msg->points.back().offset_time) * 1e-9;
   if (!measures_->isValid(end_time))
   {
@@ -353,22 +318,8 @@ void CbkProc::lidarCallbackMsg(const livox_ros_driver::CustomMsg::ConstPtr& msg)
 void CbkProc::lidarCallbackPcl(const sensor_msgs::PointCloud2::ConstPtr& msg)
 {
   TimedScope ts(profiler_, "cbk/lidar");
-  const double header_scan_time = msg->header.stamp.toSec() + opts_.lidar_time_offset;
-  // R80C (F-484): under retime / retime_trim / restamp (R80D) the scan time is the grid time of the message's seq (plus the R80D offset term, exactly 0.0 unless cbk/lidar/time_offset differs from retime_ref_offset_s), not its own header; the discard policy is exactly the R80 line above.
-  const bool retime = (opts_.lidar_overlap_policy != "discard");
-  const double scan_time = retime ? retimeScanTimeWithOffset(msg->header.seq, opts_.lidar_retime_seq0, opts_.lidar_retime_t0_s, opts_.lidar_retime_period_s, opts_.lidar_time_offset, opts_.lidar_retime_ref_offset_s) : header_scan_time;
-  const double retime_shift = scan_time - header_scan_time;   // exactly 0.0 under discard
-  {
-    // engagement and magnitude (rule 3.3): counted per message, printed on the first message, every 500th, and an error if the policy is on and never moved a scan time
-    static long long n_msgs = 0;
-    static double sum_shift = 0.0, max_abs_shift = 0.0;
-    ++n_msgs; sum_shift += retime_shift; max_abs_shift = std::max(max_abs_shift, std::fabs(retime_shift));
-    if (retime && (n_msgs == 1 || n_msgs % 500 == 0))
-      ROS_INFO_STREAM("[lidar_overlap_policy] policy=" << opts_.lidar_overlap_policy << " msgs=" << n_msgs << " mean_shift_ms=" << 1e3 * sum_shift / static_cast<double>(n_msgs)
-                      << " max_abs_shift_ms=" << 1e3 * max_abs_shift);
-    if (retime && n_msgs == 100 && max_abs_shift == 0.0)
-      ROS_ERROR_STREAM("[lidar_overlap_policy] policy=" << opts_.lidar_overlap_policy << " is on but no scan time moved in 100 messages (inert when on)");
-  }
+  // R97: the scan time is the header stamp. The bags carry the scan-start time in the header and no overlapping points (scripts/r97_rewrite_bags.py); the lidar time offset and the retime / retime_trim / restamp policies were removed.
+  const double scan_time = msg->header.stamp.toSec();
   if (opts_.log_raw_point_count)
   {
     static PersistentLogStream raw_count_log("lidar_raw_point_count.txt");
@@ -384,7 +335,7 @@ void CbkProc::lidarCallbackPcl(const sensor_msgs::PointCloud2::ConstPtr& msg)
     ROS_WARN_STREAM("Received an old LiDAR scan. Ignoring. stamp=" << msg->header.stamp);
     if (opts_.log_lidar_msgs)   // R80 (F-389): write-only
       logLidarMsg(msg->header.seq, msg->header.stamp.toSec(), scan_time, static_cast<std::size_t>(msg->width) * static_cast<std::size_t>(msg->height), 0,
-                  std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN(), data_queues_->latestLidarTime(), LidarMsgVerdict::DroppedOld, retime_shift);
+                  std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN(), data_queues_->latestLidarTime(), LidarMsgVerdict::DroppedOld);
     return;
   }
 
@@ -421,42 +372,24 @@ void CbkProc::lidarCallbackPcl(const sensor_msgs::PointCloud2::ConstPtr& msg)
   perturbPoints(points, scan_time, opts_.perturb_std_m, opts_.perturb_seed);                                                     // R65
 
   // See lidarCallbackMsg()'s matching comment.
-  // R86A (F-532): under retime_trim the second stream is trimmed against ITS OWN last queued point time, exactly as the primary stream is below. Before R86A it was pushed untrimmed, and
-  // pushDryRunLidar then rejected the whole message wherever the primary stream only trimmed a few points (R86: 40 of 595 frames received a fraction of the second-stream points).
   if (opts_.dry_run_point_filter_num > 0)
   {
     std::vector<PointXYZT> dry_run_points = pointsFromPointCloud2(
         *msg, scan_time, opts_.blind_sqr, measures_, opts_.dry_run_point_filter_num, pt_spec);
-    std::size_t dry_trimmed = 0;
-    if (opts_.lidar_overlap_policy == "retime_trim" && !dry_run_points.empty())
-      dry_trimmed = trimStreamOverlap(dry_run_points, data_queues_->latestDryRunLidarTime());
     const bool dry_nonempty = !dry_run_points.empty();
     const bool dry_pushed = dry_nonempty && data_queues_->pushDryRunLidar(std::move(dry_run_points));
-    static long long dr_seen = 0, dr_trim_msgs = 0, dr_trim_pts = 0, dr_pushed = 0, dr_rejected = 0;
-    ++dr_seen; if (dry_trimmed > 0) { ++dr_trim_msgs; dr_trim_pts += static_cast<long long>(dry_trimmed); }
+    static long long dr_seen = 0, dr_pushed = 0, dr_rejected = 0;
+    ++dr_seen;
     if (dry_pushed) ++dr_pushed; else if (dry_nonempty) ++dr_rejected;
     if (dr_seen == 1 || dr_seen % 100 == 0)
-      ROS_INFO_STREAM("[dry_run_stream] msgs=" << dr_seen << " trimmed_msgs=" << dr_trim_msgs << " trimmed_points=" << dr_trim_pts << " pushed_msgs=" << dr_pushed << " rejected_msgs=" << dr_rejected);
-  }
-
-  // R80C (F-484), retime_trim only: the points earlier than the last point of the last accepted message are removed here, so the unchanged pushLidar() rule cannot fire. `points` is sorted
-  // ascending by time (pointsFromPointCloud2 sorts it). A point at exactly the previous end stays (the pushLidar boundary: strictly earlier is the overlap).
-  std::size_t n_trimmed = 0;
-  if (opts_.lidar_overlap_policy == "retime_trim" && !points.empty())
-  {
-    n_trimmed = countPointsBefore(points, data_queues_->latestLidarTime());
-    if (n_trimmed > 0) points.erase(points.begin(), points.begin() + static_cast<std::ptrdiff_t>(n_trimmed));
-    static long long n_trim_msgs = 0, n_trim_pts = 0, n_trim_seen = 0;
-    ++n_trim_seen; if (n_trimmed > 0) { ++n_trim_msgs; n_trim_pts += static_cast<long long>(n_trimmed); }
-    if (n_trim_seen == 1 || n_trim_seen % 500 == 0)
-      ROS_INFO_STREAM("[lidar_overlap_policy] retime_trim msgs=" << n_trim_seen << " trimmed_msgs=" << n_trim_msgs << " trimmed_points=" << n_trim_pts);
+      ROS_INFO_STREAM("[dry_run_stream] msgs=" << dr_seen << " pushed_msgs=" << dr_pushed << " rejected_msgs=" << dr_rejected);
   }
 
   if (points.empty())
   {
     if (opts_.log_lidar_msgs)   // R80 (F-389): write-only
       logLidarMsg(msg->header.seq, msg->header.stamp.toSec(), scan_time, static_cast<std::size_t>(msg->width) * static_cast<std::size_t>(msg->height), 0,
-                  std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN(), data_queues_->latestLidarTime(), LidarMsgVerdict::NoPoints, retime_shift, n_trimmed);
+                  std::numeric_limits<double>::quiet_NaN(), std::numeric_limits<double>::quiet_NaN(), data_queues_->latestLidarTime(), LidarMsgVerdict::NoPoints);
     return;
   }
   // R80 (F-389): the first / last point time and the queue's state are read BEFORE the push (the push moves the points and rewrites the times); the push itself is unchanged.
@@ -467,7 +400,7 @@ void CbkProc::lidarCallbackPcl(const sensor_msgs::PointCloud2::ConstPtr& msg)
   const bool accepted = data_queues_->pushLidar(std::move(points));
   if (log_msg)
     logLidarMsg(msg->header.seq, msg->header.stamp.toSec(), scan_time, static_cast<std::size_t>(msg->width) * static_cast<std::size_t>(msg->height), msg_n_kept,
-                msg_t_first, msg_t_last, prev_accepted_last_t, accepted ? LidarMsgVerdict::Accepted : LidarMsgVerdict::DroppedOverlap, retime_shift, n_trimmed);
+                msg_t_first, msg_t_last, prev_accepted_last_t, accepted ? LidarMsgVerdict::Accepted : LidarMsgVerdict::DroppedOverlap);
 }
 
 void CbkProc::imuCallback(const sensor_msgs::ImuConstPtr& msg)

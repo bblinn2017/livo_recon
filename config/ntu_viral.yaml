@@ -315,14 +315,7 @@ cbk:
     type: pcl   # avia | mid360 | pcl (NTU VIRAL uses an Ouster OS1, generic PointCloud2)
     blind: 1.0
     point_filter_num: 3
-    # Matches FAST-LIVO2's own NTU_VIRAL.yaml (time_offset/lidar_time_offset:
-    # -0.1) -- corrects a fixed ~100ms clock/latency skew between this
-    # dataset's Ouster lidar driver and its IMU/camera streams. livo_recon
-    # had no equivalent of this at all until it was added specifically to
-    # test whether the missing correction explains a velocity-correlated
-    # (not fixed-frame) position bias found during sustained fast motion
-    # (t=73-85s on eee_01) that FAST-LIVO2 doesn't share.
-    time_offset: -0.1
+    # R97: no lidar time offset. The NTU VIRAL bags are rewritten once (scripts/r97_rewrite_bags.py) so that the header stamp is the start of the scan.
   imu:
     acc_type: "m_s2"  # NTU VIRAL's IMU already reports linear_acceleration in m/s^2 -- confirmed empirically: the old unconditional *G_m_s2 scaling produced a runaway ~-84 m/s^2 accel bias (the EKF trying to absorb a ~9.81x-too-large acceleration reading)
     gyr_type: "rad_s"

@@ -83,6 +83,12 @@ inline const std::vector<std::string>& removedKeyTable()
       "lio/estimator/mode",
       // R97 (Bryce 2026-10-15): the lidar time offset and the overlap policy (with its four retime parameters) are replaced by rewritten bags (scripts/r97_rewrite_bags.py); the debiased plane-fit path was removed with its five keys;
       // the inert keys of the R97 sweep (read and printed only, or dead) were removed. Keys of the removed akf and surface backends, shadow, akf_q and process_noise/switch/* sub-keys are refused as unknown keys.
+      "cbk/lidar/time_offset",
+      "cbk/lidar/overlap_policy",
+      "cbk/lidar/retime_t0_s",
+      "cbk/lidar/retime_period_s",
+      "cbk/lidar/retime_seq0",
+      "cbk/lidar/retime_ref_offset_s",
       "voxel_map/plane/plane_fit_mode",
       "voxel_map/plane/debias_mode",
       "voxel_map/plane/plane_threshold_hysteresis",
@@ -110,7 +116,8 @@ inline std::string removedKeyOrigin(const std::string& key)
       key == "voxel_map/plane/line_residual/classify_at_fit" || key == "voxel_map/plane/debias_denominator_guard" || key == "voxel_map/plane/plane_var_denom_floor_en") return "R93A";
   if (key == "voxel_map/binned/weight_mode") return "R95";
   if (key == "estimator/mode" || key == "lio/estimator/mode") return "R97";
-  for (const char* k : {"voxel_map/plane/plane_fit_mode", "voxel_map/plane/debias_mode", "voxel_map/plane/plane_threshold_hysteresis", "voxel_map/plane/centred_accumulation", "voxel_map/plane/debiased_line_equiv",
+  for (const char* k : {"cbk/lidar/time_offset", "cbk/lidar/overlap_policy", "cbk/lidar/retime_t0_s", "cbk/lidar/retime_period_s", "cbk/lidar/retime_seq0", "cbk/lidar/retime_ref_offset_s",
+                        "voxel_map/plane/plane_fit_mode", "voxel_map/plane/debias_mode", "voxel_map/plane/plane_threshold_hysteresis", "voxel_map/plane/centred_accumulation", "voxel_map/plane/debiased_line_equiv",
                         "state/est/cov_acc", "state/est/cov_gyr", "frames/camera", "frames/lidar", "camera/distortion_model", "viz/grid_map", "imu/process_noise/switch/scan"})
     if (key == k) return "R97";
   if (key == "lio/point_cov/mode" || key == "lio/point_cov/window_s" || key.rfind("lio/time_cov/", 0) == 0) return "R84 (F-521)";

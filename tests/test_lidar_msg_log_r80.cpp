@@ -31,7 +31,7 @@ int main()
   const std::string hdr = lidarMsgLogHeader();
   CHECK(!hdr.empty() && hdr.back() == '\n');
   const size_t ncol = split(hdr.substr(0, hdr.size() - 1)).size();
-  CHECK(ncol == 17);   // R80C: retime_shift_s, n_trimmed appended
+  CHECK(ncol == 15);   // R97: the R80C columns retime_shift_s and n_trimmed were removed with the retime policies
 
   // Accepted message, first point delayed 5 ms, span 99.9 ms.
   LidarMsgRow r;
@@ -46,7 +46,6 @@ int main()
   CHECK(std::fabs(std::stod(f[11]) - 0.0999) < 1e-6);    // span_s
   CHECK(std::fabs(std::stod(f[13]) - (999.8 - 999.905)) < 1e-6);  // overlap_s negative = no overlap
   CHECK(f[14] == "0");
-  CHECK(f[15] == "0.000000000" && f[16] == "0");   // R80C: default row = discard policy (no shift, nothing trimmed)
 
   // Overlapping drop: previous ended 3 ms after this one starts.
   LidarMsgRow d = r; d.prev_accepted_last_t = 999.908; d.verdict = LidarMsgVerdict::DroppedOverlap;
