@@ -14,7 +14,8 @@ namespace livo_recon
 
 void writeCalibrationP0Diagnostic(
     const StateGroup& state, int sample_count,
-    int autocov_lags, const M3D& acc_mean_cov, const M3D& gyro_mean_cov)
+    int autocov_lags, const M3D& acc_mean_cov, const M3D& gyro_mean_cov,
+    const Eigen::MatrixXd& gravity_before)
 {
   static PersistentLogStream log("calibration_p0.txt");
   std::ofstream& out = log.stream();
@@ -55,6 +56,8 @@ void writeCalibrationP0Diagnostic(
       << "P0_ba_ba\n" << P.block(state.idxBA(), state.idxBA(), 3, 3) << '\n'
       << "P0_theta_ba\n" << P.block(state.idxR(), state.idxBA(), 3, 3) << '\n'
       << "P0_g_g\n" << P.block(state.idxG(), state.idxG(), state.gravDim(), state.gravDim()) << '\n';
+  // R97A R4: calib/p0/gravity_cov_mode's effect, before and after.
+  out << "P0_g_g_before\n" << gravity_before << '\n';
   out << "P0_full\n" << P << '\n';
   if (eig.info() == Eigen::Success)
     out << "P0_eigenvalues " << eig.eigenvalues().transpose() << '\n';

@@ -12,9 +12,13 @@ namespace livo_recon
 // One machine-readable text artifact per run, written after stationary
 // calibration and before the first propagation. This is the actual P0 used by
 // the estimator, not a reconstruction from configuration values.
+// R97A R4: `gravity_before` is the gravity block of P0 as it was before applyCalibrationDerivedP0()
+// ran (gravDim() x gravDim(), always state/cov/gravity * I at that point) -- printed alongside the
+// final block (already in `state`'s own cov()) so calib/p0/gravity_cov_mode's effect is visible.
 void writeCalibrationP0Diagnostic(
     const StateGroup& state, int sample_count,
-    int autocov_lags, const M3D& acc_mean_cov, const M3D& gyro_mean_cov);
+    int autocov_lags, const M3D& acc_mean_cov, const M3D& gyro_mean_cov,
+    const Eigen::MatrixXd& gravity_before);
 
 // R62: the raw quantities behind gravity alignment, so tilt P0 can be tested
 // against the accelerometer itself. One small text file per run

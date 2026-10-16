@@ -17,6 +17,17 @@
 namespace livo_recon
 {
 
+Eigen::MatrixXd gravityCovarianceFromCalibration(
+    const V3D& u, const M3D& R_init, const M3D& acc_mean_cov, double s_r2,
+    bool gravity_s2, const Eigen::Matrix<double, 3, 2>& basis)
+{
+  const M3D T = M3D::Identity() - u * u.transpose();
+  const M3D C_tan = symmetrized(M3D(T * (R_init * acc_mean_cov * R_init.transpose()) * T));
+  if (gravity_s2)
+    return symmetrized(Eigen::Matrix2d(basis.transpose() * C_tan * basis));
+  return C_tan + s_r2 * u * u.transpose();
+}
+
 CalibProc::CalibProc(NodeContext& ctx)
   : data_queues_(ctx.data_queues), measures_(ctx.measures), state_(ctx.state),
     profiler_(ctx.profiler)
@@ -71,6 +82,9 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
                     opts_.p0_ba_radial_model_floor, 1.0e-5);
   paramWarn<double>(pnh, "calib/p0/numerical_eigenvalue_floor",
                     opts_.p0_numerical_eigenvalue_floor, 1e-12);
+  paramWarn<std::string>(pnh, "calib/p0/gravity_cov_mode", opts_.p0_gravity_cov_mode, std::string("fixed"));
+  if (opts_.p0_gravity_cov_mode != "fixed" && opts_.p0_gravity_cov_mode != "calibration")
+    throw std::invalid_argument("calib/p0/gravity_cov_mode must be fixed or calibration");
 
   if (opts_.num_samples < 1)
     opts_.num_samples = 1;
@@ -95,6 +109,7 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
       << opts_.p0_ba_radial_model_floor;
   oss << "\n  p0/numerical_eigenvalue_floor: "
       << opts_.p0_numerical_eigenvalue_floor;
+  oss << "\n  p0/gravity_cov_mode: " << opts_.p0_gravity_cov_mode;
   return oss.str();
 }
 
@@ -308,8 +323,22 @@ void CalibProc::applyCalibrationDerivedP0(
   // removing states from a positive semi-definite matrix leaves it positive semi-definite.
   p0::applyKnownBlocks(P, knownP0Blocks());
 
-  // Gravity magnitude/direction is deliberately left at state/cov/gravity:
-  // one stationary accelerometer mean cannot separate gravity from b_a.
+  // R97A R4: calib/p0/gravity_cov_mode. "fixed" (default) leaves the gravity block exactly at
+  // state/cov/gravity (the identity path below is unreachable at the default -- nothing above or
+  // below this point touches P.block(idxG, idxG, ...)). Gravity magnitude/direction is otherwise
+  // deliberately left at state/cov/gravity: one stationary accelerometer mean cannot separate
+  // gravity from b_a (the radial part, |g| vs b_a along gravity, is NOT separable at rest).
+  p0_gravity_before_ = P.block(state_->idxG(), state_->idxG(), state_->gravDim(), state_->gravDim());
+  if (opts_.p0_gravity_cov_mode == "calibration")
+  {
+    // Cross-covariance between gravity and every other block (bg, ba, theta, p, v) stays zero --
+    // the tilt/ba/gravity coupling is a known omission, not modeled here.
+    const Eigen::MatrixXd P_g = gravityCovarianceFromCalibration(
+        state_->gravity().normalized(), R_init, acc_mean_cov, state_->initCovGravity(),
+        state_->gravityS2(), state_->gravityBasis());
+    P.block(state_->idxG(), state_->idxG(), state_->gravDim(), state_->gravDim()) = P_g;
+  }
+
   P = symmetrized(P);
 
   ROS_INFO_STREAM("[calib/P0] balanced tilt-b_a ambiguity: accel_std="
@@ -387,7 +416,7 @@ std::string CalibProc::estimateFromBuffer()
       R_init, *state_, true_acc_bias);
   writeCalibrationP0Diagnostic(
       *state_, static_cast<int>(calib_imu_samples.size()),
-      opts_.p0_autocov_lags, acc_mean_cov, gyro_mean_cov);
+      opts_.p0_autocov_lags, acc_mean_cov, gyro_mean_cov, p0_gravity_before_);
 
   // TQ-34, Bryce 2026-09-18: groups_seen/groups_dropped/stall_calls were
   // only ever printed on the STALL path (above) -- a normal, successful

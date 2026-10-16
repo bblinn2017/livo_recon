@@ -40,6 +40,17 @@ inline bool calibFrameStopConsumeGroup(CalibFrameStopState& s, int imu_count)
   return true;
 }
 
+// R97A R4: calib/p0/gravity_cov_mode=calibration's math, factored out for unit testing (pure,
+// no StateGroup/ROS dependency). `u` is the unit gravity direction (world frame). `R_init` is the
+// initial attitude aligned to the mean specific force. `acc_mean_cov` is the covariance of the
+// sample mean of the accelerometer readings (the calibration's own Bartlett-window estimate).
+// `s_r2` is state/cov/gravity (the fixed radial value: |g| vs b_a along gravity is not separable
+// at rest, so the radial part always keeps this value). Under `gravity_s2`, `basis` is the state's
+// 3x2 tangent basis and the result is 2x2; otherwise it is 3x3.
+Eigen::MatrixXd gravityCovarianceFromCalibration(
+    const V3D& u, const M3D& R_init, const M3D& acc_mean_cov, double s_r2,
+    bool gravity_s2, const Eigen::Matrix<double, 3, 2>& basis);
+
 struct CalibProcOptions
 {
   int  num_samples       = 200;
@@ -85,6 +96,14 @@ struct CalibProcOptions
   // model: it only makes the symmetric P0 strictly positive definite for
   // information-form solves when a physically valid construction is PSD.
   double p0_numerical_eigenvalue_floor = 1e-12;
+
+  // R97A R4: "fixed" (default) leaves the gravity block of P0 at state/cov/gravity (isotropic),
+  // untouched by calibration. "calibration" overwrites it with the calibration's own transverse
+  // specific-force noise, projected onto the plane perpendicular to gravity (the radial part --
+  // |g| vs b_a along gravity -- stays at the fixed value; one stationary accelerometer mean cannot
+  // separate the two). Gravity's cross-covariance with every other block stays zero either way
+  // (the tilt/ba/gravity coupling is a known omission).
+  std::string p0_gravity_cov_mode = "fixed";
 
   // A stationary calibration window measures the sensor's noise *floor*,
   // not the process noise real dynamic motion needs. The measured floor is
@@ -148,6 +167,10 @@ private:
   ImageData              calib_last_img_;
 
   CalibProcOptions opts_;
+  // R97A R4: the gravity block of P0 as it was BEFORE applyCalibrationDerivedP0() ran (always
+  // state/cov/gravity * I at that point, by construction -- nothing else touches it earlier) --
+  // calibration_p0.txt reports it alongside the final (possibly calibration-derived) block.
+  Eigen::MatrixXd p0_gravity_before_;
 
   DataQueuesPtr data_queues_;
   MeasuresPtr measures_;
