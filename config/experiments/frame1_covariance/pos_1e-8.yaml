@@ -1,3 +1,0 @@
-state:
-  cov:
-    pos: 1.0e-8   # 0.1 mm marginal sigma per axis; numerical floor experiment

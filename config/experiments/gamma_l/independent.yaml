@@ -1,4 +1,0 @@
-# Phase-3 control: ordinary diagonal residual covariance.
-lio:
-  residual_redundancy:
-    mode: off

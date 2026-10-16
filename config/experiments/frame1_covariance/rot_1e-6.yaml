@@ -1,7 +1,0 @@
-# Strong attitude prior sensitivity check. Gravity alignment constrains tilt,
-# but not yaw; interpret this only alongside gravity-tilt and full-attitude
-# diagnostics.
-state:
-  cov:
-    rot_tilt: 1.0e-6
-    rot_yaw: 1.0e-6   # former isotropic 0.001 rad marginal sigma

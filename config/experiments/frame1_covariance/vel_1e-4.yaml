@@ -1,4 +1,0 @@
-# One-factor velocity initialization ablation; position remains baseline.
-state:
-  cov:
-    vel: 1.0e-4   # 1 cm/s marginal sigma per axis

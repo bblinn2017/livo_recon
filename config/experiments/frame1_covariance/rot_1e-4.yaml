@@ -1,5 +1,0 @@
-# One-factor attitude initialization ablation; position remains baseline.
-state:
-  cov:
-    rot_tilt: 1.0e-4
-    rot_yaw: 1.0e-4   # former isotropic 0.01 rad marginal sigma

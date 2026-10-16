@@ -1,5 +1,0 @@
-# Textbook fully shared plane-fit uncertainty; load after the normal run config.
-lio:
-  residual_redundancy:
-    mode: woodbury
-    rho: 1.0

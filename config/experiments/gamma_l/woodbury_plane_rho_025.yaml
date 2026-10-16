@@ -1,5 +1,0 @@
-# Experimental shared-plane covariance; load after the normal run config.
-lio:
-  residual_redundancy:
-    mode: woodbury
-    rho: 0.25
