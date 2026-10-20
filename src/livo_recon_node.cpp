@@ -438,7 +438,14 @@ void LivoReconNode::runOffline(const std::string& bag_path)
     }
     else if (m.getTopic() == cbk_opts.lidar_topic)
     {
-      if (cbk_opts.lidar_type == LidarType::AVIA)
+      // 2026-10-20 (mid360): this must match CbkProc::loadParameters()'s own live-subscription
+      // dispatch (lidar_is_pcl = lidar_type == PCL; AVIA and MID360 both subscribe the raw
+      // CustomMsg callback there). This offline path previously special-cased only AVIA, so a
+      // MID360 bag's /livox/lidar (livox_ros_driver2::CustomMsg) silently failed every single
+      // m.instantiate<PointCloud2>() call (type/MD5 mismatch -> null, if (msg) false) -- zero
+      // lidar data ever reached the pipeline, and ready() (which requires the lidar stream to
+      // settle) never returned true, hanging calibration at "0 samples collected" forever.
+      if (cbk_opts.lidar_type != LidarType::PCL)
       {
         livox_ros_driver::CustomMsg::ConstPtr msg = m.instantiate<livox_ros_driver::CustomMsg>();
         if (msg) cbk_proc_.lidarCallbackMsg(msg);

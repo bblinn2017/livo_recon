@@ -53,10 +53,11 @@ Eigen::MatrixXd gravityCovarianceFromCalibration(
 
 struct CalibProcOptions
 {
-  int  num_samples       = 200;
-  // R97A R1: when > 0, the calibration stops after this many measure groups
-  // (image windows) with >= 2 IMU samples have been consumed, instead of
-  // stopping at num_samples IMU samples. 0 (default) is today's behaviour.
+  // R97A R1: the calibration stops after this many measure groups (image windows) with >= 2
+  // IMU samples have been consumed. 2026-10-20 (Bryce's call): num_samples (the older,
+  // sample-count stop condition) is removed -- calib/stationary/num_samples is now a refused
+  // key (see loadParameters()) and num_frames must be set and > 0 (no default; 0 is no longer
+  // "disabled", it is invalid).
   int  num_frames        = 0;
   std::string ds_mode = "first";
   double ds_leaf_size = 0.15;

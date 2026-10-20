@@ -83,7 +83,10 @@ outputs:
     interval: 1     # export every N-th frame (must be >= 1)
 calib:
   stationary:
-    num_samples: 100
+    # 2026-10-20 (Bryce's call): num_samples removed, num_frames is the only stop condition now.
+    # Converted from the old num_samples=100 using exp01's own measured rates (image ~40.1Hz,
+    # IMU ~400.7Hz -> ~10.0 IMU samples/frame) -- a straightforward unit conversion, not a fresh tune.
+    num_frames: 10
   # R97A Q4: calib/p0/mode (and its "configured" branch) is removed -- P0's position, velocity and attitude blocks are
   # always exactly zero now. This WAS a real behavior change here specifically: this file's mode was "configured" (not
   # "calibration_derived"), so applyCalibrationDerivedP0() was never called at all and P0 came entirely from state/cov/*

@@ -74,7 +74,11 @@ calib:
   # Stationary initialization is mandatory. Its measured variance is stored
   # as a sensor floor; it never silently replaces runtime process noise.
   stationary:
-    num_samples: 100
+    # 2026-10-20 (Bryce's call): num_samples removed, num_frames is the only stop condition now.
+    # Converted from the old num_samples=100 using eee_01's own measured rates
+    # (tools/r69/bag_params.json: imu_rate_hz 197.5, lidar_rate_hz 9.71 -> ~20.3 IMU
+    # samples/frame) -- a straightforward unit conversion, not a fresh tune.
+    num_frames: 5
   p0:
     # R97A Q4: calib/p0/mode (and known_{pos,vel,theta}_variance) are removed -- P0's position, velocity and attitude blocks
     # are always exactly zero now (the values this yaml's own calibration_derived/0.0/0.0/0.0 already selected).

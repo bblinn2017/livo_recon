@@ -43,13 +43,15 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
       throw std::invalid_argument(std::string("removed ambiguous calibration key: ") +
           legacy + "; use calib/stationary, calib/p0, and imu/process_noise");
   }
-  paramWarn<int>(pnh, "calib/stationary/num_samples", opts_.num_samples, 200);
-  paramWarn<int>(pnh, "calib/stationary/num_frames", opts_.num_frames, 0);
-  if (opts_.num_frames < 0)
-    throw std::invalid_argument("calib/stationary/num_frames must be >= 0");
-  if (opts_.num_frames > 0 && pnh.hasParam("calib/stationary/num_samples") && opts_.num_samples < 2)
+  // 2026-10-20 (Bryce's call): calib/stationary/num_samples (the sample-count stop condition) is
+  // removed -- num_frames is now the only stop condition and must be set and > 0.
+  if (pnh.hasParam("calib/stationary/num_samples"))
     throw std::invalid_argument(
-        "calib/stationary/num_frames > 0 together with an explicit calib/stationary/num_samples < 2 is refused");
+        "calib/stationary/num_samples was removed in R106+ (Bryce, 2026-10-20): "
+        "use calib/stationary/num_frames instead (must be > 0)");
+  paramWarn<int>(pnh, "calib/stationary/num_frames", opts_.num_frames, 0);
+  if (opts_.num_frames <= 0)
+    throw std::invalid_argument("calib/stationary/num_frames must be set and > 0");
   paramWarn<std::string>(pnh, "imu/ds/mode", opts_.ds_mode, "first");
   if (opts_.ds_mode != "off" && opts_.ds_mode != "first" && opts_.ds_mode != "average")
     throw std::runtime_error("imu/ds/mode must be off, first, or average");
@@ -86,8 +88,6 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
   if (opts_.p0_gravity_cov_mode != "fixed" && opts_.p0_gravity_cov_mode != "calibration")
     throw std::invalid_argument("calib/p0/gravity_cov_mode must be fixed or calibration");
 
-  if (opts_.num_samples < 1)
-    opts_.num_samples = 1;
   opts_.p0_autocov_lags = std::max(0, opts_.p0_autocov_lags);
   if (!std::isfinite(opts_.p0_tilt_ba_ambiguity_accel_std) || opts_.p0_tilt_ba_ambiguity_accel_std < 0.0 ||
       !std::isfinite(opts_.p0_bg_model_floor) || opts_.p0_bg_model_floor < 0.0 ||
@@ -98,7 +98,6 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
   std::ostringstream oss;
   oss << "[params/calib/stationary]"
       << "\n  required: true"
-      << "\n  num_samples: " << opts_.num_samples
       << "\n  num_frames: " << opts_.num_frames;
   oss << "\n  bootstrap point covariance: sensor model"
       << "\n  sensor sigma_r2, sigma_a2: " << opts_.sensor_sigma_r2 << ", " << opts_.sensor_sigma_a2;
@@ -139,12 +138,10 @@ bool CalibProc::collectSamples()
 {
   std::deque<ImuSample> imu_samples;
   std::vector<PointXYZT> points;
-  const bool frame_stop = opts_.num_frames > 0;
 
-  while ((frame_stop
-              ? calib_frame_stop_.groups_qualifying < opts_.num_frames
-              : calib_imu_samples.size() < static_cast<size_t>(opts_.num_samples)) &&
-         data_queues_->ready())
+  // 2026-10-20: num_frames is the only stop condition now (loadParameters() requires it > 0);
+  // the old num_samples-count fallback is removed.
+  while (calib_frame_stop_.groups_qualifying < opts_.num_frames && data_queues_->ready())
   {
     ++calib_images_consumed_;
     calib_last_img_ = data_queues_->popImage();
@@ -174,8 +171,7 @@ bool CalibProc::collectSamples()
         imu_samples.end() - 1);
   }
 
-  return frame_stop ? calib_frame_stop_.groups_qualifying >= opts_.num_frames
-                     : calib_imu_samples.size() >= static_cast<size_t>(opts_.num_samples);
+  return calib_frame_stop_.groups_qualifying >= opts_.num_frames;
 }
 
 void CalibProc::computeBiasAndNoise(V3D& acc_bias, V3D& gyro_bias,

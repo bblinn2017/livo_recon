@@ -26,6 +26,9 @@ struct ImuProcOptions
   // divergence (not a no-op) on r97a_c_nya_02_id1 -- the motion-dependent dynamic variance
   // legitimately exceeds the configured cap at some point in that trajectory, and leaving it
   // uncapped lets a transient huge process noise destabilize the filter. See REPORT.md.
+  // 2026-10-20 (mid360, Bryce's call, with that risk explicitly acknowledged): a value <= 0
+  // disables the cap entirely (no clamping) rather than being refused -- see loadParameters()'s
+  // validation and the clamp site in propagate().
   double motion_acc_max_dynamic_variance = 0.5;
   double motion_gyr_max_dynamic_variance = 0.3;
 

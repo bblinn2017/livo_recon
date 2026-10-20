@@ -72,7 +72,10 @@ outputs:
     interval: 1     # export every N-th frame (must be >= 1)
 calib:
   stationary:
-    num_samples: 100
+    # 2026-10-20 (Bryce's call): num_samples removed, num_frames is the only stop condition now.
+    # Converted from the old num_samples=100 using this device's own measured rates (capture_10_20_no2.bag:
+    # image ~10.0Hz, IMU ~200.9Hz -> ~20.1 IMU samples/frame) -- a straightforward unit conversion.
+    num_frames: 5
 # R97A Q4: calib/stationary/stall_calls_max, apply_to_state/*, state/est/{bg,ba,gravity}, state/cov/{rot_tilt,rot_yaw,pos,vel,bg,ba},
 # and state/init_state/{vel,ba,bg} are removed. state/cov/gravity and state/init_state/gravity are kept.
 state:
@@ -82,14 +85,28 @@ state:
     gravity: [0., 0., -9.81]
 imu:
   process_noise:
-    fixed:
-      acc_variance: 1.0
-      gyro_variance: 1.0
+    # 2026-10-20: mid360's own first pass -- model isotropic (not fixed, so fixed/{acc,gyro}_variance
+    # below are dropped as unused), same beta as ntu_viral; acc_scale/gyro_scale start at ntu_viral's
+    # own tuned values but are the planned sweep variable for this sensor, not assumed correct yet.
+    model: isotropic
+    motion:
+      beta: 0.9
+      acc_scale: 0.15
+      gyro_scale: 10.0
+      # Bryce's explicit call, with the R97A Q3-fix divergence risk acknowledged: cap removed
+      # entirely (<= 0 disables clamping, see imu_processing.h/.cpp's 2026-10-20 comments) rather
+      # than set to a large finite stand-in.
+      acc_max_dynamic_variance: -1.0
+      gyro_max_dynamic_variance: -1.0
     bias_random_walk:
       gyro_variance_rate: 1.0e-5
       accel_variance_rate: 1.0e-5
   second_order: true   # include dt² Jacobian terms F_x[P,R] and F_x[P,G]
   sensor:
+    # 2026-10-20: Livox Mid-360 datasheet (livoxtech.com/mid-360/specs): range precision (1σ)
+    # <= 2cm (range_err, already correct before this comment -- coincided with the generic
+    # default), angular precision (1σ) < 0.15° (angle_err_deg, also already the generic
+    # fallback value -- now set explicitly and cited rather than left implicit).
     range_err: 0.02
     angle_err_deg: 0.15
   ds:
@@ -102,11 +119,21 @@ lio:
     # non-zero values, a real behavior change -- flagged in REPORT.md).
     max_iterations: 5
 voxel_map:
+  # 2026-10-20: copied from ntu_viral (not yet separately tuned for mid360).
+  binned:
+    bin_size_fraction: 0.25   # bin edge = this x the node's own edge
+    cov_mode: average         # average (C / k) | shrunk (C / k^2)
   map:
-    voxel_size: 0.5
+    voxel_size: 0.425  # 2026-10-20: starting point, ntu_viral/HILTI's shared tuned value
     max_layer: 2
   plane:
     plane_threshold: 2.5e-3
+    # 2026-10-20: copied from ntu_viral (not yet separately tuned for mid360).
+    line_residual:
+      form: hard
+      rule: absolute
+      rows: per_normal
+      variance: plane_equivalent
   points:
     min_init: 5
     min_update: 5
@@ -171,27 +198,34 @@ evo:
     compute_roe: false  # relative rotation error (RPE's rotation part) -- topic mode only; a diagnostic curiosity against position-only ground truth, not a true orientation error (see evo_processing.cpp's logStage())
     delta_s: 1.0         # seconds between the pose pair RTE/ROE compare
 topics:
-  image: "/ximea_cam/image_out"
+  # 2026-10-20: fixed from /ximea_cam/image_out -- every real mid360 bag (calibration and the
+  # 4 new captures) publishes the camera on /ximea_cam/image_raw; image_out was never produced.
+  image: "/ximea_cam/image_raw"
   lidar: "/livox/lidar"
   imu: "/livox/imu"
   queue_size: 20000
 extrinsics:
   R_l2i: [1, 0, 0, 0, 1, 0, 0, 0, 1]
   t_l2i: [0., 0., 0.]
-  R_l2c: [0.005707, -0.999935, 0.009827, 0.358419, -0.007129, -0.933534, 0.933543, 0.008850, 0.358355]
-  t_l2c: [-0.016126, -0.069857, 0.004646]
+  # 2026-10-20: direct_visual_lidar_calibration (calib_10_20_pc2.bag). Its own calib.json saves
+  # results.T_lidar_camera (p_lidar = T_lidar_camera * p_camera, i.e. camera-to-lidar); R_l2c/t_l2c
+  # here is the opposite direction (p_camera = R_l2c * p_lidar + t_l2c), so this is that result's
+  # INVERSE, not a direct copy of calib.json's own numbers.
+  R_l2c: [-0.000508, -0.999989, -0.004629, -0.022352, 0.004639, -0.999739, 0.999750, -0.000404, -0.022354]
+  t_l2c: [0.063469, -0.016757, -0.035479]
 camera:
   width: 2048
   height: 2048
-  fx: 2143.219665264417
-  fy: 2149.055417934835
+  fx: 2234.8900949301365
+  fy: 2240.9754561513673
   cx: 1024.0
   cy: 1024.0
-  distortion_coeffs: [0.0, 0.0, 0.0, 0.0, 0.0]
+  distortion_coeffs: [-0.2051169263683994, 0.096234768611292015, 0.00030620867113155477, -0.00085412363674615063, 0.0]
 cbk:
   lidar:
     type: mid360   # avia | mid360 | pcl
     blind: 0.5
+    point_filter_num: 1  # 2026-10-20: Bryce's explicit call
   imu:
     acc_type: "g"  # this device's IMU reports linear_acceleration in units of gravity, not m/s^2
     gyr_type: "rad_s"

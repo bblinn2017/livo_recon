@@ -185,9 +185,11 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   for (double v : {opts_.motion_acc_scale, opts_.motion_gyr_scale})
     if (!std::isfinite(v) || v < 0.0)
       throw std::invalid_argument("IMU motion-noise scales must be finite and nonnegative");
+  // 2026-10-20 (mid360): a value <= 0 disables the cap entirely (see the clamp site in
+  // propagate()) rather than being refused -- only a non-finite value (NaN/inf) is rejected now.
   for (double v : {opts_.motion_acc_max_dynamic_variance, opts_.motion_gyr_max_dynamic_variance})
-    if (!std::isfinite(v) || v <= 0.0)
-      throw std::invalid_argument("imu/process_noise/motion/{acc,gyro}_max_dynamic_variance must be finite and > 0");
+    if (!std::isfinite(v))
+      throw std::invalid_argument("imu/process_noise/motion/{acc,gyro}_max_dynamic_variance must be finite (<= 0 disables the cap)");
   // R74 (F-427): the local-polynomial energy source and the additive WNOA disturbance were removed; their keys are refused by
   // refuseRenamedKeys() (removedKeyTable) before this point.
   // Read directly rather than being wired from LioProcOptions: the two
@@ -394,17 +396,23 @@ void ImuProc::propagate(MeasureGroup& mg)
           debiased_acc_energy;
       gyr_dynamic_variance = opts_.motion_gyr_scale * opts_.motion_gyr_scale *
           debiased_gyr_energy;
-      // R97A Q3-fix: per-axis clamp restored.
+      // R97A Q3-fix: per-axis clamp restored. 2026-10-20 (mid360): a cap <= 0 disables clamping
+      // for that axis entirely (see loadParameters()'s validation) -- the risk this clamp was
+      // added to guard against (R97A Q3-fix's documented divergence) is explicitly accepted.
+      const bool acc_cap_on = opts_.motion_acc_max_dynamic_variance > 0.0;
+      const bool gyr_cap_on = opts_.motion_gyr_max_dynamic_variance > 0.0;
       for (int axis = 0; axis < 3; ++axis)
       {
-        step_acc_clamped[axis] = acc_dynamic_variance(axis) > opts_.motion_acc_max_dynamic_variance;
-        step_gyr_clamped[axis] = gyr_dynamic_variance(axis) > opts_.motion_gyr_max_dynamic_variance;
+        step_acc_clamped[axis] = acc_cap_on && acc_dynamic_variance(axis) > opts_.motion_acc_max_dynamic_variance;
+        step_gyr_clamped[axis] = gyr_cap_on && gyr_dynamic_variance(axis) > opts_.motion_gyr_max_dynamic_variance;
         if (step_acc_clamped[axis]) ++acc_clamped;
         if (step_gyr_clamped[axis]) ++gyr_clamped;
-        acc_dynamic_variance(axis) = std::min(
-            acc_dynamic_variance(axis), opts_.motion_acc_max_dynamic_variance);
-        gyr_dynamic_variance(axis) = std::min(
-            gyr_dynamic_variance(axis), opts_.motion_gyr_max_dynamic_variance);
+        if (acc_cap_on)
+          acc_dynamic_variance(axis) = std::min(
+              acc_dynamic_variance(axis), opts_.motion_acc_max_dynamic_variance);
+        if (gyr_cap_on)
+          gyr_dynamic_variance(axis) = std::min(
+              gyr_dynamic_variance(axis), opts_.motion_gyr_max_dynamic_variance);
       }
       var_acc_step = state_->varAccFloor() + acc_dynamic_variance;
       var_gyr_step = state_->varGyrFloor() + gyr_dynamic_variance;

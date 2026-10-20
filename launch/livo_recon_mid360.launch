@@ -1,5 +1,17 @@
 <launch>
   <arg name="rviz" default="true" />
+  <!-- 2026-10-20: added to match every other dataset's launch file (ntu_viral, slam_2022/2023,
+       slam_2023_robot): this file never had an overrides_file arg, so run_one()'s own
+       per-job overrides_file (including the all-important common/offline_bag_path that
+       switches the node into runOffline() instead of run()) were silently never loaded. A
+       mid360 job always fell through to live ROS mode (ros::spinOnce(), nothing ever
+       arriving since no rosbag play/live sensor is running) regardless of its own job.env/
+       config.yaml. Test-only escape hatch: a rosparam file loaded LAST (after
+       config/mid360.yaml below), so a real override file passed via
+       overrides_file:=/path/to/file.yaml always wins without editing the checked-in config.
+       Defaults to a real, empty, valid-YAML no-op file so normal/default runs are unaffected. -->
+  <arg name="overrides_file" default="$(find livo_recon)/config/mid360_no_overrides.yaml" />
+  <arg name="base_config_file" default="$(find livo_recon)/config/mid360.yaml" />
 
   <node pkg="livo_recon"
         type="livo_recon_node"
@@ -8,7 +20,8 @@
     <!-- 2026-08-16: consolidated from config/defaults/*.yaml + config/
          mid360/*.yaml (~22 separate files) into one self-contained
          config/mid360.yaml, see that file's own header comment -->
-    <rosparam file="$(find livo_recon)/config/mid360.yaml" command="load" />
+    <rosparam file="$(arg base_config_file)" command="load" />
+    <rosparam file="$(arg overrides_file)"                    command="load" />
     <!-- viz/enable follows the rviz arg directly, placed after every
          rosparam load above (including dataset specific viz.yaml overrides,
          see mid360's), so it always wins: no rviz window means livo_recon's

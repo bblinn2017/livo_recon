@@ -72,7 +72,11 @@ outputs:
     interval: 1     # export every N-th frame (must be >= 1)
 calib:
   stationary:
-    num_samples: 100
+    # 2026-10-20 (Bryce's call): num_samples removed, num_frames is the only stop condition now.
+    # Converted from the old num_samples=100 using site2_robot_1's own measured rates
+    # (image ~10.0Hz, IMU ~200.2Hz -> ~20.0 IMU samples/frame) -- a straightforward unit
+    # conversion, not a fresh tune.
+    num_frames: 5
 # R97A Q4: calib/stationary/stall_calls_max, apply_to_state/*, state/est/{bg,ba,gravity}, state/cov/{rot_tilt,rot_yaw,pos,vel,bg,ba},
 # and state/init_state/{vel,ba,bg} are removed. state/cov/gravity and state/init_state/gravity are kept.
 state:
