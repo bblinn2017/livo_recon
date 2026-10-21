@@ -16,7 +16,10 @@ viz:
   plane_map: false
   uv_tracking: true  # publish rgb_img with arrows showing vio's tracked uv displacements
   ds:
-    ds_leaf_size: 0.05
+    # 0.0 disables visualization downsampling entirely (publishCloud()'s own
+    # do_ds = vis_ds_leaf_size > 0.0 check) -- every camera-frame-projected
+    # point is published, not just the first one seen per 5cm voxel.
+    ds_leaf_size: 0.0
 # R97A Q5: outputs/auto_terminate_* moved to run/*; outputs/profiler/export_path and outputs/printer/* moved to log/* (see
 # r97a_inputs/log_key_map.tsv). outputs/path, outputs/pcd/*, outputs/image/* stay (they are outputs).
 run:
