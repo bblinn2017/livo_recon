@@ -32,6 +32,12 @@
   </node>
 
   <group if="$(arg rviz)">
+    <!-- livo_recon never publishes TF (every display already carries data in
+         its own header.frame_id), so this bridges /livo_recon/odometry to a
+         camera_init to body TF broadcast purely so rviz's ThirdPersonFollower
+         camera (Target Frame: body) has a live frame to chase. Visualization
+         only, no effect on the pipeline. -->
+    <node pkg="livo_recon" type="odom_to_tf.py" name="odom_to_tf" />
     <node launch-prefix="nice" pkg="rviz" type="rviz" name="rviz"
           args="-d $(find livo_recon)/rviz_cfg/livo_recon.rviz" />
   </group>
