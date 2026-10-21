@@ -16,7 +16,13 @@
   <node pkg="livo_recon"
         type="livo_recon_node"
         name="livo_recon"
-        output="screen">
+        output="screen"
+        required="true">
+    <!-- required="true": when this node exits, including the offline
+         auto-terminate-on-idle shutdown ("no new measure group for Ns"),
+         roslaunch tears down every other node in this launch too, so rviz
+         (and odom_to_tf) don't linger showing a frozen window after the
+         node that feeds them is already gone. -->
     <!-- 2026-08-16: consolidated from config/defaults/*.yaml + config/
          mid360/*.yaml (~22 separate files) into one self-contained
          config/mid360.yaml, see that file's own header comment -->
