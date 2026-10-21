@@ -189,8 +189,8 @@ Visualization Manager:
           Queue Size: 10
           Shape:
             Alpha: 1
-            Axes Length: 0.5
-            Axes Radius: 0.15000000596046448
+            Axes Length: 1.2
+            Axes Radius: 0.25
             Color: 255; 85; 0
             Head Length: 0
             Head Radius: 0
@@ -266,7 +266,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz/ThirdPersonFollower
-      Distance: 25.669620513916016
+      Distance: 21.294
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -274,22 +274,22 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: 0
-        Y: 0
-        Z: 0
+        X: 9.441
+        Y: 1.168
+        Z: 0.167
       Focal Shape Fixed Size: false
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: -0.10520334541797638
-      Target Frame: body
+      Pitch: 0.8500000238418579
+      Target Frame: camera_init
       Yaw: 3.161787748336792
     Saved: ~
 Window Geometry:
   Displays:
     collapsed: false
-  Height: 1334
+  Height: 1080
   Hide Left Dock: false
   Hide Right Dock: false
   Image:
@@ -303,6 +303,6 @@ Window Geometry:
     collapsed: false
   Views:
     collapsed: false
-  Width: 2289
-  X: 87
-  Y: 192
+  Width: 1920
+  X: 0
+  Y: 0
