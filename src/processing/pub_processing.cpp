@@ -1,5 +1,6 @@
 #include "livo_recon/processing/pub_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
+#include <algorithm>
 #include "livo_recon/utils/state/state.h"
 #include "livo_recon/utils/log/printer.h"
 #include "livo_recon/map/voxelmap.h"
@@ -105,19 +106,37 @@ std::string PubProc::loadParameters(ros::NodeHandle& pnh)
         ROS_ERROR_STREAM("[output] failed to open " << cam_path << " — disabling image export");
         opts_.export_images = false;
       } else {
+        // Exported images are the raw (distorted) camera frames -- tracker_'s
+        // own undistortPixel() only corrects pixel COORDINATES for VIO math,
+        // it never rewrites mg.image.image. So the model written here must
+        // match that: PINHOLE only if the configured distortion is actually
+        // zero, otherwise OPENCV (COLMAP id 4, 8 params: fx,fy,cx,cy,k1,k2,
+        // p1,p2) so colmap image_undistorter can correctly rectify these
+        // images downstream, same as the SfM pipeline's own OPENCV path.
+        const auto& dist = state_->cameraDistortionCoeffs();
+        const bool has_distortion = std::any_of(dist.begin(), dist.end(),
+          [](double c){ return c != 0.0; });
+
         const uint64_t n_cams = 1;
         f.write(reinterpret_cast<const char*>(&n_cams), 8);
         const uint32_t cam_id = 1;
-        const int32_t  model  = 1;  // PINHOLE
+        const int32_t  model  = has_distortion ? 4 : 1;  // OPENCV : PINHOLE
         f.write(reinterpret_cast<const char*>(&cam_id), 4);
         f.write(reinterpret_cast<const char*>(&model),  4);
         const uint64_t w = static_cast<uint64_t>(state_->cameraWidth());
         const uint64_t h = static_cast<uint64_t>(state_->cameraHeight());
         f.write(reinterpret_cast<const char*>(&w), 8);
         f.write(reinterpret_cast<const char*>(&h), 8);
-        const double params[4] = { state_->cameraFx(), state_->cameraFy(),
-                                   state_->cameraCx(), state_->cameraCy() };
-        f.write(reinterpret_cast<const char*>(params), 32);
+        if (has_distortion) {
+          const double params[8] = { state_->cameraFx(), state_->cameraFy(),
+                                     state_->cameraCx(), state_->cameraCy(),
+                                     dist[0], dist[1], dist[2], dist[3] };
+          f.write(reinterpret_cast<const char*>(params), 64);
+        } else {
+          const double params[4] = { state_->cameraFx(), state_->cameraFy(),
+                                     state_->cameraCx(), state_->cameraCy() };
+          f.write(reinterpret_cast<const char*>(params), 32);
+        }
       }
     }
     // images.bin — open for streaming; placeholder count patched on shutdown
@@ -470,8 +489,13 @@ void PubProc::enqueueExport(const MeasureGroup& mg)
   }
 
   if (do_image) {
+    // Named by absolute (epoch) timestamp, matching extract_bag_images.py's
+    // "<secs>.<nsecs:06d>.png" convention used for the SfM/COLMAP pipeline's
+    // own image set -- lets the two reconstructions' frame sets be
+    // intersected by filename later.
+    const ros::Time stamp(mg.image.t + data_queues_->start_time);
     std::ostringstream img_ss;
-    img_ss << std::setw(5) << std::setfill('0') << export_image_count_ << ".png";
+    img_ss << stamp.sec << "." << std::setw(6) << std::setfill('0') << stamp.nsec << ".png";
     task.img_name    = img_ss.str();
     task.write_image = true;
     task.image       = mg.image.image.clone();
