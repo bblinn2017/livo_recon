@@ -21,43 +21,28 @@ struct PointTrackerOptions
   // "vio/select_and_track". Must be non-null.
   ProfilerPtr profiler;
 
-  // Once fewer than this fraction of the currently seeded grid remain
-  // visible, needsReseed() reports true.
-  double reseed_active_fraction = 0.5;
-
   // Resolution the backend's traced TorchScript graph(s) were exported at
-  // (see co-tracker/export_pairwise_tracker.py, tapnext/export_pairwise_tapnext.py) --
-  // validRegion()/encoding center-crop to this aspect ratio before resizing.
+  // (see co-tracker/export_pairwise_tracker.py) -- validRegion()/encoding
+  // center-crop to this aspect ratio before resizing.
   int interp_width  = 512;
   int interp_height = 384;
 };
 
-// Shared interface abstracting over the native (LibTorch) point-tracking
-// backends vio can run (CoTrackerBackend, TAPNextBackend,
-// TrackOnBackend), so VioProc only ever needs to hold one polymorphic
-// PointTracker instead of a separate member (and separate select/track code
-// path) per backend.
-//
-// Both backends maintain a persistent set of tracked points internally
-// (query pixel positions chosen once via a seed, then carried forward frame
-// by frame) rather than picking a fresh query grid every frame: this is a
-// hard requirement for TAPNext, whose own persistent recurrent state (see
-// vio/tapnext) only gives a meaningful benefit if the same logical
-// points are tracked continuously -- feeding it a brand new query set every
-// frame would mean discarding and rebuilding that state every single call.
-// CoTrackerBackend mirrors the same lifecycle (chaining pairwise
-// correspondences frame-to-frame from each track's last known position) so
-// a single stored PointTracker can abstract over both.
+// Interface wrapping the native (LibTorch) point-tracking backend vio
+// runs (CoTrackerBackend -- the only PointTracker implementation; TAPNext
+// and Track-On backends existed here previously and were removed, since
+// no config ever used them and CoTracker has no persistent state for
+// their coverage-triggered reseed design to apply to anyway).
 //
 // PointTracker itself only ever deals in raw 2D pixel positions -- it has
 // no notion of what a query point "means" (e.g. vio's LIDAR-anchored
-// 3D points with covariance). Query point *selection* and the *decision* of
-// when to reseed are therefore entirely the caller's responsibility
-// (VioProc::updateTracker, called once per measure group after this
-// frame's state has been fully corrected -- see livo_recon_node.cpp's
-// updateMaps): step() only ever advances the existing persistent tracks by
-// one frame, and reseed() only ever (re-)seeds on exactly the image handed
-// to it, whenever the caller decides (via needsReseed()) that it should.
+// 3D points with covariance). Query point *selection* is the caller's
+// responsibility (VioProc::updateTracker, called once per measure group
+// after this frame's state has been fully corrected -- see
+// livo_recon_node.cpp's updateMaps): step() only ever advances the
+// existing tracked set by one frame, and reseed() only ever (re-)seeds on
+// exactly the image handed to it -- the caller (Tracker::
+// stepAndReseedOnce()) calls both every single frame, unconditionally.
 class PointTracker
 {
 public:
@@ -65,7 +50,7 @@ public:
   virtual ~PointTracker() = default;
 
   // Backend-specific model file paths (CoTracker: frame_encoder.pt +
-  // pair_tracker.pt; TAPNext: tapnext_init.pt + tapnext_step.pt).
+  // pair_tracker.pt).
   virtual void load(const std::string& model_path_a, const std::string& model_path_b) = 0;
 
   // True once this tracker has been seeded at least once -- i.e. whether
@@ -73,12 +58,6 @@ public:
   // (and, for the caller, a valid previous pose to compare a baseline
   // displacement against).
   bool hasPrev() const { return have_prev_; }
-
-  // True once too few of the currently-seeded grid remain visible (per
-  // opts_.reseed_active_fraction) to keep good coverage -- or, for a
-  // backend with no persistent state worth preserving across frames (see
-  // CoTrackerBackend), unconditionally true every call.
-  virtual bool needsReseed() const = 0;
 
   // (Re-)initializes the persistent track set from scratch at
   // `query_points` (raw camera pixels, guaranteed within validRegion()),

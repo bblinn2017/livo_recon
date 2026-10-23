@@ -20,37 +20,27 @@ namespace livo_recon
 
 struct TrackerOptions
 {
-  // "cotracker", "tapnext", or "trackon" -- which PointTracker backend
-  // (see vio/point_tracker.h) to run. Each backend's model file paths
-  // are fixed (see tracker.cpp) rather than configurable, since they're
-  // paired 1:1 with the backend itself.
-  std::string backend = "cotracker";
-
   std::string device = "cuda";
 
-  // CoTracker-only (ignored by tapnext/trackon): "jit" (default), "aot"
-  // (AOTInductor + fp16), or "aot_fp32" (AOTInductor, full precision) --
-  // see tracker.cpp's model_path_a/model_path_b selection.
+  // "jit" (default), "aot" (AOTInductor + fp16), or "aot_fp32"
+  // (AOTInductor, full precision) -- see tracker.cpp's model_path_a/
+  // model_path_b selection. CoTracker is the only PointTracker backend
+  // (TAPNext/Track-On were removed -- unused by any config, and CoTracker
+  // has no persistent state for their coverage-triggered reseed design to
+  // apply to anyway).
   std::string tracker_format = "jit";
 
-  // Grid-bucketed selection of the persistent tracked-point set's anchors
-  // (see Tracker::selectAnchors): each grid_rows x grid_cols cell picks the
+  // Grid-bucketed selection of the tracked-point set's anchors (see
+  // Tracker::selectAnchors): each grid_rows x grid_cols cell picks the
   // image's own best Shi-Tomasi corner (cv::cornerMinEigenVal) within that
   // cell as its anchor -- purely image-based, no LIDAR depth is needed (the
   // epipolar residual only ever needs a 2D seed pixel). A cell whose crop
   // lands entirely outside the valid image region contributes no anchor, so
   // the tracked-point count is variable (up to grid_rows*grid_cols), not
-  // fixed.
+  // fixed. Reselected from scratch every single frame -- see Tracker::
+  // stepAndReseedOnce(), which reseeds unconditionally every call.
   int    grid_rows            = 10;
   int    grid_cols            = 10;
-
-  // ── Reseed sub-options (tracker/reseed/* in tracker.yaml) ───────────
-  // Once fewer than this fraction of the currently seeded grid remain
-  // visible, the whole grid is due for a reseed (see PointTracker::
-  // needsReseed()). CoTrackerBackend ignores this entirely (its
-  // needsReseed() always reports true: it has no persistent state worth
-  // preserving across frames, see cotracker_backend.h).
-  double reseed_active_fraction = 0.5;
 
   // Minimum fraction of grid_rows*grid_cols selectAnchors() must find a
   // candidate for before a reseed is actually committed to -- below this,
@@ -87,14 +77,14 @@ struct TrackerOptions
 
 // Owns the vio point-tracking subsystem as a single ctx_-level object
 // (see NodeContext::tracker), mirroring VoxelMap: holds the
-// state, the underlying PointTracker backend (CoTracker/TAPNext/Track-On),
-// and anchor selection -- everything VioProc needs from "the tracker" that
-// isn't itself part of the EKF residual/update logic.
+// state, the underlying PointTracker backend (CoTracker), and anchor
+// selection -- everything VioProc needs from "the tracker" that isn't
+// itself part of the EKF residual/update logic.
 //
 // ── Async tracking pipeline (task #145) ──────────────────────────────────
 // step()+reseed() (stepAndReseedOnce(), below) run on a dedicated
 // background thread, NOT on the caller's thread -- both are genuinely
-// expensive (CoTracker/TAPNext/Track-On neural-net inference), and calling
+// expensive (CoTracker neural-net inference), and calling
 // them synchronously from LivoReconNode::run()'s main loop previously
 // blocked that loop's own ros::spinOnce() for however long each call took,
 // starving ROS callback processing (message queues) for the whole
@@ -144,13 +134,13 @@ public:
   bool loaded() const { return static_cast<bool>(backend_) || static_cast<bool>(cache_reader_); }
   bool replayMode() const { return static_cast<bool>(cache_reader_); }
 
-  // ── PointTracker pass-throughs ──────────────────────────────────────
+  // ── PointTracker pass-through ────────────────────────────────────────
   // hasPrev(): whether there's a real previous frame to track against at
   // all (the sole gate on whether stepAndReseedOnce() attempts step() --
-  // see task #145, this and needsReseed() below are the ONLY conditions
-  // left; no camera-motion/baseline gate).
+  // see task #145, this is the ONLY condition left; no camera-motion/
+  // baseline gate). Reseeding itself is unconditional every frame (see
+  // stepAndReseedOnce()), so there is no separate needsReseed() gate.
   bool hasPrev() const { return backend_ && backend_->hasPrev(); }
-  bool needsReseed() const { return backend_ && backend_->needsReseed(); }
 
   // ── Async tracking pipeline ──────────────────────────────────────────
   // Starts the background tracking thread. Call exactly once, after the
@@ -247,11 +237,11 @@ public:
 
 private:
   // The actual per-image work (step() using the CURRENT anchor set, then
-  // conditionally reseed -- see TrackedFrame's own doc comment for why
+  // unconditionally reseed -- see TrackedFrame's own doc comment for why
   // `anchors`/`indices` in the result are a pre-reseed snapshot). Runs
   // ONLY on the background tracking thread once started. Pose-independent
-  // (see task #145): hasPrev()/needsReseed() are the sole gates, no
-  // camera-motion/baseline check.
+  // (see task #145): hasPrev() is the sole gate on the step(), no
+  // camera-motion/baseline check; the reseed always runs regardless.
   TrackedFrame stepAndReseedOnce(const cv::Mat& image);
 
   void asyncTrackingLoop();

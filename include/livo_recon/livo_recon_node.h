@@ -113,6 +113,17 @@ private:
   // R66 item 0b: per-frame window log (log/frame_window, default false).
   bool frame_window_log_ = false;
   std::size_t frame_window_index_ = 0;
+  // log/vio_correction/enable (default false): sequential-path only, see
+  // diagnostics/vio_correction.h's doc comment for why combined mode has
+  // no equivalent "post-LIO, pre-VIO" checkpoint to log this way.
+  bool vio_correction_log_ = false;
+  std::size_t vio_correction_frame_index_ = 0;
+  // log/lidar_image_bounds (default false): see diagnostics/lidar_image_bounds.h's doc comment.
+  bool lidar_image_bounds_log_ = false;
+  std::size_t lidar_image_bounds_frame_index_ = 0;
+  // log/state_correction_trace (default false): see diagnostics/state_correction_trace.h's doc comment.
+  bool state_correction_trace_log_ = false;
+  std::size_t state_correction_trace_frame_index_ = 0;
 };
 
 }  // namespace livo_recon

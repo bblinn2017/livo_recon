@@ -37,7 +37,7 @@ void writeCalibrationP0Diagnostic(
       << " bg[" << state.idxBG() << ':' << state.idxBG()+3 << ']'
       << " ba[" << state.idxBA() << ':' << state.idxBA()+3 << ']'
       << " g[" << state.idxG() << ':' << state.idxG()+state.gravDim() << ']'
-      << " gravity_model " << state.gravityModelName();
+      << " gravity_model vector3";
   // R97A Q4 item 6: configured_init_variances' tilt/yaw/p/v/bg/ba fields are removed with their state/cov/* keys -- only
   // gravity's survives.
   out << "\nconfigured_init_variances g " << state.initCovGravity() << '\n'

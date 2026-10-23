@@ -88,19 +88,20 @@ state:
     gravity: [0., 0., -9.81]
 imu:
   process_noise:
-    # 2026-10-20: mid360's own first pass -- model isotropic (not fixed, so fixed/{acc,gyro}_variance
-    # below are dropped as unused), same beta as ntu_viral; acc_scale/gyro_scale start at ntu_viral's
-    # own tuned values but are the planned sweep variable for this sensor, not assumed correct yet.
+    # R97B: motion/beta and the acc/gyro_max_dynamic_variance clamp were removed entirely -- the
+    # beta=0 vs beta=0.9 acc/gyro_scale sweep comparison found no meaningful difference either way.
+    # 2026-10-23: acc_scale/gyro_scale refined to Bryce's updated joint-fit values
+    # (gyro_scale 95% CI [0.204,0.239], acc_scale 95% CI [0.156,0.693]) -- supersedes the
+    # 2026-10-22 qscale_20261022_141821 values (0.802/0.289). These only affect the
+    # MOTION-dependent excess-energy term (imu_processing.cpp); the stationary floor itself
+    # comes from CalibProc::computeBiasAndNoise()'s fixed constants, not from these scales --
+    # but that excess-energy term was found (2026-10-23 session) to be THE dominant driver of
+    # frame-1 position/velocity uncertainty growth (~87%, vs <2% combined for every P0
+    # initialization term), so this scale materially affects how conservative the filter is.
     model: isotropic
     motion:
-      beta: 0.9
-      acc_scale: 0.15
-      gyro_scale: 10.0
-      # Bryce's explicit call, with the R97A Q3-fix divergence risk acknowledged: cap removed
-      # entirely (<= 0 disables clamping, see imu_processing.h/.cpp's 2026-10-20 comments) rather
-      # than set to a large finite stand-in.
-      acc_max_dynamic_variance: -1.0
-      gyro_max_dynamic_variance: -1.0
+      acc_scale: 0.455
+      gyro_scale: 0.223
     bias_random_walk:
       gyro_variance_rate: 1.0e-5
       accel_variance_rate: 1.0e-5
@@ -174,14 +175,12 @@ combined:
     min_diff_error: -1.0
     max_avg_error: 5.0
 tracker:
-  backend: "cotracker"  # set by test_*.sh
   device: "cuda"
   tracker_format: "jit"  # "jit" (default), "aot" (AOTInductor, fp16), or "aot_fp32" (AOTInductor, full precision) -- cotracker only, see Tracker::loadParameters. AOT packages must match grid_selection/grid_rows x grid_cols (filename-encoded query count).
   grid_selection:
     grid_rows: 16
     grid_cols: 16  # set by test_*.sh
   reseed:
-    active_fraction: 0.9  # reseed the whole tracked-point grid once fewer than this fraction stay visible -- ignored by the cotracker backend, which always reseeds
     min_candidate_fraction: 0.25  # fraction of grid_rows*grid_cols selectAnchors must find a candidate for before a reseed is actually committed to. NOTE: the achievable fraction under healthy conditions drops as grid_rows*grid_cols grows -- retune lower when increasing grid resolution
   track_cache_path: ""  # path to a .rlivtrackcache file (src/tools/cache_tracker_output.cpp). Empty (default) = live tracking. When set, skips the GPU tracker pass entirely and replays cached TrackedFrame records by timestamp -- see TrackerOptions::track_cache_path's doc comment.
 common:
@@ -208,8 +207,13 @@ topics:
   imu: "/livox/imu"
   queue_size: 20000
 extrinsics:
+  # 2026-10-22: factory values (Livox Mid-360 User Manual v1.0, IMU section)
+  # -- R_LI is identity (unchanged), t_LI is the LiDAR origin in the IMU
+  # frame. Replaces the previous t_l2i=[0,0,0] placeholder; LI_Init's own
+  # per-run estimate (2.5-6.6cm off these factory values, non-reproducible
+  # across replays of identical data) is not used.
   R_l2i: [1, 0, 0, 0, 1, 0, 0, 0, 1]
-  t_l2i: [0., 0., 0.]
+  t_l2i: [-0.011, -0.02329, 0.04412]
   # 2026-10-20: direct_visual_lidar_calibration (calib_10_20_pc2.bag). Its own calib.json saves
   # results.T_lidar_camera (p_lidar = T_lidar_camera * p_camera, i.e. camera-to-lidar); R_l2c/t_l2c
   # here is the opposite direction (p_camera = R_l2c * p_lidar + t_l2c), so this is that result's

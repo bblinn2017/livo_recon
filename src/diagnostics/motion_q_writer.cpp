@@ -39,59 +39,47 @@ void writeMotionQSampleDiagnostic(
 
 void writeMotionQStepDiagnostic(
     size_t scan_index, size_t step_index, double t_abs,
-    const V3D& q_acc, const V3D& q_gyr,
-    bool acc_clamped_x, bool acc_clamped_y, bool acc_clamped_z,
-    bool gyr_clamped_x, bool gyr_clamped_y, bool gyr_clamped_z)
+    const V3D& q_acc, const V3D& q_gyr)
 {
   static PersistentLogStream log("motion_q_step.csv");
   bool first = false;
   std::ofstream& out = log.stream(&first);
   if (first)
-    out << "scan_index,step_index,t_abs,q_acc_x,q_acc_y,q_acc_z,q_gyr_x,q_gyr_y,q_gyr_z,"
-           "acc_clamped_x,acc_clamped_y,acc_clamped_z,gyr_clamped_x,gyr_clamped_y,gyr_clamped_z\n";
+    out << "scan_index,step_index,t_abs,q_acc_x,q_acc_y,q_acc_z,q_gyr_x,q_gyr_y,q_gyr_z\n";
   out << std::setprecision(17) << scan_index << ',' << step_index << ',' << t_abs << ','
       << q_acc.x() << ',' << q_acc.y() << ',' << q_acc.z() << ','
-      << q_gyr.x() << ',' << q_gyr.y() << ',' << q_gyr.z() << ','
-      << (acc_clamped_x ? 1 : 0) << ',' << (acc_clamped_y ? 1 : 0) << ',' << (acc_clamped_z ? 1 : 0) << ','
-      << (gyr_clamped_x ? 1 : 0) << ',' << (gyr_clamped_y ? 1 : 0) << ',' << (gyr_clamped_z ? 1 : 0) << '\n';
+      << q_gyr.x() << ',' << q_gyr.y() << ',' << q_gyr.z() << '\n';
   out.flush();
 }
 
 void writeMotionQScanDiagnostic(
-    size_t scan_index, double t_abs, const std::string& model, double beta,
+    size_t scan_index, double t_abs, const std::string& model,
     double acc_scale, double gyr_scale,
     size_t sample_count, double mean_dynamic_acc_norm,
     double mean_dynamic_gyr_norm, const V3D& mean_q_acc,
     const V3D& mean_q_gyr, const V3D& mean_debiased_acc_energy,
-    const V3D& mean_debiased_gyr_energy, size_t acc_clamped_axes,
-    size_t gyr_clamped_axes)
+    const V3D& mean_debiased_gyr_energy)
 {
   static PersistentLogStream log("motion_q_scan.csv");
   bool first = false;
   std::ofstream& out = log.stream(&first);
   if (first)
-    out << "scan_index,t_abs,t_rel_s,model,beta,acc_scale,gyro_scale,n_samples,mean_dynamic_acc_norm,"
+    out << "scan_index,t_abs,t_rel_s,model,acc_scale,gyro_scale,n_samples,mean_dynamic_acc_norm,"
            "mean_dynamic_gyr_norm,mean_q_acc_x,mean_q_acc_y,mean_q_acc_z,"
-           "mean_q_gyr_x,mean_q_gyr_y,mean_q_gyr_z,acc_clamped_axes,"
-           "gyr_clamped_axes,mean_debiased_acc_energy_x,"
+           "mean_q_gyr_x,mean_q_gyr_y,mean_q_gyr_z,mean_debiased_acc_energy_x,"
            "mean_debiased_acc_energy_y,mean_debiased_acc_energy_z,"
            "mean_debiased_gyr_energy_x,mean_debiased_gyr_energy_y,"
-           "mean_debiased_gyr_energy_z,acc_cap_fraction,gyr_cap_fraction\n";
+           "mean_debiased_gyr_energy_z\n";
   out << std::setprecision(17) << scan_index << ',' << t_abs << ',' << tRelString(t_abs) << ',' << model
-      << ',' << beta << ',' << acc_scale << ',' << gyr_scale << ','
+      << ',' << acc_scale << ',' << gyr_scale << ','
       << sample_count << ',' << mean_dynamic_acc_norm
       << ',' << mean_dynamic_gyr_norm << ',' << mean_q_acc.x() << ','
       << mean_q_acc.y() << ',' << mean_q_acc.z() << ',' << mean_q_gyr.x()
       << ',' << mean_q_gyr.y() << ',' << mean_q_gyr.z() << ','
-      << acc_clamped_axes << ',' << gyr_clamped_axes << ','
       << mean_debiased_acc_energy.x() << ',' << mean_debiased_acc_energy.y()
       << ',' << mean_debiased_acc_energy.z() << ','
       << mean_debiased_gyr_energy.x() << ',' << mean_debiased_gyr_energy.y()
-      << ',' << mean_debiased_gyr_energy.z() << ','
-      << (sample_count ? static_cast<double>(acc_clamped_axes) /
-                         (3.0 * sample_count) : 0.0) << ','
-      << (sample_count ? static_cast<double>(gyr_clamped_axes) /
-                         (3.0 * sample_count) : 0.0) << '\n';
+      << ',' << mean_debiased_gyr_energy.z() << '\n';
   out.flush();
 }
 

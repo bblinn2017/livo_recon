@@ -45,11 +45,10 @@ inline bool calibFrameStopConsumeGroup(CalibFrameStopState& s, int imu_count)
 // initial attitude aligned to the mean specific force. `acc_mean_cov` is the covariance of the
 // sample mean of the accelerometer readings (the calibration's own Bartlett-window estimate).
 // `s_r2` is state/cov/gravity (the fixed radial value: |g| vs b_a along gravity is not separable
-// at rest, so the radial part always keeps this value). Under `gravity_s2`, `basis` is the state's
-// 3x2 tangent basis and the result is 2x2; otherwise it is 3x3.
+// at rest, so the radial part always keeps this value). Result is always 3x3 (the s2
+// tangent-gravity model was removed; gravity is always the free 3-vector).
 Eigen::MatrixXd gravityCovarianceFromCalibration(
-    const V3D& u, const M3D& R_init, const M3D& acc_mean_cov, double s_r2,
-    bool gravity_s2, const Eigen::Matrix<double, 3, 2>& basis);
+    const V3D& u, const M3D& R_init, const M3D& acc_mean_cov, double s_r2);
 
 struct CalibProcOptions
 {
@@ -87,12 +86,16 @@ struct CalibProcOptions
   // pinned, excluded-from-the-floor path "calibration_derived" always
   // selected with known_pos/vel/theta_variance == 0.
   int p0_autocov_lags = 20;
-  // Standard deviation of the ONE transverse specific-force ambiguity
-  // shared equally (in acceleration-equivalent units) by gravity tilt and
-  // accelerometer bias.
-  double p0_tilt_ba_ambiguity_accel_std = 0.03;
+  // 2026-10-23: calib/p0/tilt_ba_ambiguity_accel_std and
+  // calib/p0/ba_radial_model_floor are removed. Both were hardcoded
+  // additions on top of P_ba (the calibration's own measured
+  // J*acc_mean_cov*J^T) modeling the transverse tilt/accelerometer-bias
+  // degeneracy and a radial floor respectively -- a direct ablation
+  // (holding gravity/Q-scale/extrinsic fixed at their own defaults, 2026-
+  // 10-22/23 session) found zeroing both changed frame-1 position drift
+  // by <0.5%, i.e. neither was adding real information. P_ba is now
+  // exactly J*acc_mean_cov*J^T, nothing added.
   double p0_bg_model_floor = 1.0e-5;
-  double p0_ba_radial_model_floor = 1.0e-5;
   // Purely numerical covariance floor. This is not a physical uncertainty
   // model: it only makes the symmetric P0 strictly positive definite for
   // information-form solves when a physically valid construction is PSD.

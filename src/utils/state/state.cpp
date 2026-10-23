@@ -24,28 +24,9 @@ void StateGroup::initCov(double cov_gravity)
       cov_gravity * Eigen::MatrixXd::Identity(gravDim(), gravDim());
 }
 
-void StateGroup::resetGravityBasis()
-{
-  gravity_basis_.setZero();
-  const double n = gravity_.norm();
-  if (n < 1e-9) return;
-  const V3D u = gravity_ / n;
-  Eigen::Index k = 0;
-  u.cwiseAbs().minCoeff(&k);
-  V3D e = V3D::Zero();
-  e(k) = 1.0;
-  const V3D t1 = u.cross(e).normalized();
-  const V3D t2 = u.cross(t1);
-  gravity_basis_.col(0) = t1;
-  gravity_basis_.col(1) = t2;
-}
-
 Eigen::MatrixXd StateGroup::gravityJacobian() const
 {
-  if (!gravity_model_s2_) return Eigen::MatrixXd::Identity(3, 3);
-  M3D gx;
-  gx << SKEW_SYM_MATRX(gravity_);
-  return -gx * gravity_basis_;
+  return Eigen::MatrixXd::Identity(3, 3);
 }
 
 StateGroup::StateGroup()
@@ -75,8 +56,6 @@ StateGroup::StateGroup()
 StateGroup& StateGroup::operator=(const StateGroup& o)
 {
   if (this != &o) {
-    gravity_model_s2_ = o.gravity_model_s2_;
-    gravity_basis_ = o.gravity_basis_;
     acc_scale_ = o.acc_scale_;
     rot_ = o.rot_; pos_ = o.pos_; vel_ = o.vel_;
     bias_gyr_ = o.bias_gyr_; bias_acc_ = o.bias_acc_; gravity_ = o.gravity_;
@@ -184,18 +163,7 @@ void StateGroup::applyDelta(const Eigen::VectorXd& dx)
   vel_      += dx.segment<3>(idxV());
   bias_gyr_ += dx.segment<3>(idxBG());
   bias_acc_ += dx.segment<3>(idxBA());
-  if (!gravity_model_s2_)
-    gravity_ += dx.segment<3>(idxG());
-  else
-  {
-    // Retraction on the sphere: rotate g about an axis orthogonal to g,
-    // and rotate the tangent basis by the same rotation (parallel
-    // transport along the geodesic).
-    const V3D w = gravity_basis_ * dx.segment<2>(idxG());
-    const M3D Rg = Exp(w);
-    gravity_ = Rg * gravity_;
-    gravity_basis_ = Rg * gravity_basis_;
-  }
+  gravity_ += dx.segment<3>(idxG());
   updateDerivedTransforms();
 }
 
@@ -208,20 +176,7 @@ Eigen::VectorXd StateGroup::boxminusFromPropagat(const StateGroup& propagat) con
   vec.segment<3>(idxV()) = propagat.vel_ - vel_;
   vec.segment<3>(idxBG()) = propagat.bias_gyr_ - bias_gyr_;
   vec.segment<3>(idxBA()) = propagat.bias_acc_ - bias_acc_;
-  if (!gravity_model_s2_)
-    vec.segment<3>(idxG()) = propagat.gravity_ - gravity_;
-  else
-  {
-    // Geodesic deviation of the prior gravity direction from the current
-    // one, in the current tangent basis: delta = B_c^T w, where w has
-    // magnitude equal to the angle between the two vectors and direction
-    // g_c x g_p (normalised).
-    const V3D c = gravity_.cross(propagat.gravity_);
-    const double cn = c.norm();
-    const double ang = std::atan2(cn, gravity_.dot(propagat.gravity_));
-    const V3D w = (cn > 1e-15) ? V3D(c * (ang / cn)) : V3D(V3D::Zero());
-    vec.segment<2>(idxG()) = gravity_basis_.transpose() * w;
-  }
+  vec.segment<3>(idxG()) = propagat.gravity_ - gravity_;
   return vec;
 }
 
@@ -238,13 +193,10 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
   }
   refuseRenamedKeys(pnh);   // R97A Q4: catches state/est/{bg,ba,gravity}, state/cov/*, state/init_state/{vel,ba,bg}, etc.
   // R97A Q4 item 5: state/est/{bg,ba,gravity} are removed -- all three are always true.
-  {
-    std::string gm;
-    paramWarn<std::string>(pnh, "state/gravity_model", gm, std::string("vector3"));
-    if (gm != "vector3" && gm != "s2")
-      throw std::invalid_argument("state/gravity_model must be vector3 or s2");
-    gravity_model_s2_ = (gm == "s2");
-  }
+  if (pnh.hasParam("state/gravity_model"))
+    throw std::invalid_argument(
+        "state/gravity_model was removed: the s2 tangent-gravity model is gone, gravity is "
+        "always the free 3-vector (vector3) -- remove this key");
 
   std::vector<double> R_l2i, t_l2i, R_l2c, t_l2c;
   paramWarn<std::vector<double>>(pnh, "extrinsics/R_l2i", R_l2i, std::vector<double>());
@@ -317,7 +269,6 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
   std::vector<double> g_vec;
   paramWarn<std::vector<double>>(pnh, "state/init_state/gravity", g_vec,  {0., 0., -G_m_s2});
   gravity_  = V3D(g_vec[0],  g_vec[1],  g_vec[2]);
-  resetGravityBasis();
 
   // Fixed IMU propagation noise. Stationary calibration records a separate
   // sensor floor and never silently replaces these operating values.
@@ -364,7 +315,7 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
       << "\n  camera: " << camera_.width << "x" << camera_.height
       << "  fx=" << camera_.fx << "  fy=" << camera_.fy
       << "  cx=" << camera_.cx << "  cy=" << camera_.cy
-      << "  gravity_model=" << gravityModelName()
+      << "  gravity_model=vector3"
       << "  dimState=" << dimState();
   return oss.str();
 }

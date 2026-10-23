@@ -31,7 +31,7 @@ int main()
   CHECK(renamedKeyMessage("lio/zupt/mode").empty(), "RK2 lio/zupt/mode is removed, not renamed");
   CHECK(renamedKeyMessage("imu/process_noise/model").empty(), "RK2 imu/process_noise/model is not retired");
   CHECK(renamedKeyMessage("lio/q_adapt").empty(), "RK2 a prefix alone is not a retired key");
-  CHECK(removedKeyTable().size() == 135, "RK4 removed table has 135 entries (8 from R74, 5 from R82, 9 from R83, 4 from R84, 1 from R85, 1 from R92, 7 from R93A, 1 from R95, 20 from R97, 9 from R97A Q1, 17 from R97A Q2, 34 from R97A Q3 after the R97A Q3-fix restored 2 of the 36, 19 from R97A Q4)");
+  CHECK(removedKeyTable().size() == 138, "RK4 removed table has 138 entries (8 from R74, 5 from R82, 9 from R83, 4 from R84, 1 from R85, 1 from R92, 7 from R93A, 1 from R95, 20 from R97, 9 from R97A Q1, 17 from R97A Q2, 34 from R97A Q3 after the R97A Q3-fix restored 2 of the 36, 19 from R97A Q4, 3 from R97B)");
   for (const auto& k : removedKeyTable()) {
     const std::string m = removedKeyMessage(k);
     if (m.find(k) == std::string::npos || m.find("removed in R7") == std::string::npos && m.find("removed in R82") == std::string::npos && m.find("removed in R83") == std::string::npos && m.find("removed in R84") == std::string::npos && m.find("removed in R85") == std::string::npos && m.find("removed in R92") == std::string::npos && m.find("removed in R93A") == std::string::npos && m.find("removed in R95") == std::string::npos && m.find("removed in R97") == std::string::npos && m.find("removed in R97A") == std::string::npos) CHECK(false, "RK4 message names the key and its release");
@@ -71,7 +71,7 @@ int main()
   CHECK(removedKeyMessage("imu/process_noise/gain/mode").find("R97A") != std::string::npos, "RK5 gain/mode (live through R82) is itself removed by R97A Q3 (the whole gain module)");
   CHECK(removedKeyMessage("imu/process_noise/model").empty(), "RK5 process_noise/model is not removed");
   CHECK(removedKeyMessage("imu/process_noise/disturbance").empty(), "RK5 a prefix alone is not a removed key");
-  CHECK(removedKeyMessage("imu/process_noise/motion/beta").empty(), "RK5 motion/beta (kept) is not removed");
+  CHECK(removedKeyMessage("imu/process_noise/motion/beta").find("R97B") != std::string::npos, "RK5 motion/beta is removed by R97B");
   for (const char* k : {"voxel_map/backend", "voxel_map/plane/min_frames_to_init", "voxel_map/plane/min_frames_to_converge", "voxel_map/plane/plane_gate_mode",
                         "voxel_map/plane/line_residual/enabled", "voxel_map/plane/plane_var_min", "voxel_map/plane/plane_var_scan_s2",
                         "voxel_map/map/freeze_after_calibration", "voxel_map/map/shuffle_insertion_seed"})
@@ -102,16 +102,18 @@ int main()
                         "imu/q_alpha_acc", "imu/q_alpha_gyr", "imu/q_alpha_bias",
                         "imu/undistort/rot_warp_scale", "imu/undistort/rot_warp_last_frame"})
     CHECK(removedKeyMessage(k).find("removed in R97A") != std::string::npos, "RK16 the R97A Q3 keys are refused and name R97A");
-  // R97A Q3-fix: acc/gyro_max_dynamic_variance were restored (bisection found their removal
-  // caused a real divergence, not a no-op) -- they must NOT be in the removed table.
   CHECK(removedKeyMessage("imu/process_noise/bias_random_walk/gyro_variance_rate").empty()
         && removedKeyMessage("imu/process_noise/bias_random_walk/accel_variance_rate").empty()
         && removedKeyMessage("imu/process_noise/model").empty()
-        && removedKeyMessage("imu/undistort/time_based_process_noise").empty()
-        && removedKeyMessage("imu/process_noise/motion/acc_max_dynamic_variance").empty()
-        && removedKeyMessage("imu/process_noise/motion/gyro_max_dynamic_variance").empty(),
-        "RK16 the keys that stay (bias_random_walk rates, process_noise/model, undistort/time_based_process_noise, "
-        "the R97A Q3-fix-restored dynamic-variance caps) are not removed");
+        && removedKeyMessage("imu/undistort/time_based_process_noise").empty(),
+        "RK16 the keys that stay (bias_random_walk rates, process_noise/model, undistort/time_based_process_noise) "
+        "are not removed");
+  // R97B: motion/beta and the acc/gyro_max_dynamic_variance clamp are removed -- the mid360
+  // beta=0 vs beta=0.9 sweep comparison found no meaningful difference either way.
+  CHECK(removedKeyMessage("imu/process_noise/motion/beta").find("R97B") != std::string::npos
+        && removedKeyMessage("imu/process_noise/motion/acc_max_dynamic_variance").find("R97B") != std::string::npos
+        && removedKeyMessage("imu/process_noise/motion/gyro_max_dynamic_variance").find("R97B") != std::string::npos,
+        "RK17 motion/beta and the dynamic-variance caps are removed by R97B");
   std::printf("ALL PASS\n");
   return 0;
 }

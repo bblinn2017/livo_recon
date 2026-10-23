@@ -94,6 +94,11 @@ struct TrackedFrame
 
   bool ok = false;                        // mirrors step()'s own return value; uv_curr/indices only meaningful when true
   std::vector<cv::Point2f> uv_curr;
+  // Parallel to uv_curr, but the RAW (pre-undistortion) tracked pixel --
+  // i.e. directly comparable to AnchorPoint::uv_seed (also raw), unlike
+  // uv_curr itself. Diagnostic only (log/vio/raw_uv_dump): nothing in the
+  // EKF correction path reads this, only uv_curr.
+  std::vector<cv::Point2f> uv_curr_raw;
   // Parallel to uv_curr -- see AnchorPoint::uv_jacobian_seed's doc comment,
   // same quantity but evaluated at each point's CURRENT raw tracked pixel
   // (computed fresh every frame, unlike the anchor's own Jacobian which is

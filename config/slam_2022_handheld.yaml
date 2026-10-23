@@ -114,12 +114,11 @@ imu:
     # ZERO behavior change for R82 -- added for documentation parity /
     # future rounds that might run Hilti under model=motion without an
     # explicit per-job override. Every "motion:" value below is IDENTICAL
-    # to imu_processing.cpp's own compiled default (beta=0.9,
-    # acc_scale=0.3, gyro_scale=10.0; R97A Q3 removed acc/gyro_max_dynamic_variance)
+    # to imu_processing.cpp's own compiled default (acc_scale=0.3,
+    # gyro_scale=10.0; R97B removed motion/beta and the acc/gyro clamp)
     # -- not a tuning port, just stating the default explicitly.
     model: fixed
     motion:
-      beta: 0.9
       acc_scale: 0.3
       gyro_scale: 10.0
     fixed:
@@ -221,14 +220,12 @@ combined:
     min_diff_error: -1.0
     max_avg_error: 5.0
 tracker:
-  backend: "cotracker"  # set by test_*.sh
   device: "cuda"
   tracker_format: "jit"  # "jit" (default), "aot" (AOTInductor, fp16), or "aot_fp32" (AOTInductor, full precision) -- cotracker only, see Tracker::loadParameters. AOT packages must match grid_selection/grid_rows x grid_cols (filename-encoded query count).
   grid_selection:
     grid_rows: 16
     grid_cols: 16  # set by test_*.sh
   reseed:
-    active_fraction: 0.9  # reseed the whole tracked-point grid once fewer than this fraction stay visible -- ignored by the cotracker backend, which always reseeds
     min_candidate_fraction: 0.25  # fraction of grid_rows*grid_cols selectAnchors must find a candidate for before a reseed is actually committed to. NOTE: the achievable fraction under healthy conditions drops as grid_rows*grid_cols grows -- retune lower when increasing grid resolution
   track_cache_path: ""  # path to a .rlivtrackcache file (src/tools/cache_tracker_output.cpp). Empty (default) = live tracking. When set, skips the GPU tracker pass entirely and replays cached TrackedFrame records by timestamp -- see TrackerOptions::track_cache_path's doc comment.
 common:

@@ -21,25 +21,18 @@ public:
 
   // History (22-29): see docs/livo_recon_changelog.md#include-livo_recon-utils-state-state.h-22
   // R97A Q4 item 5: rotation, position, velocity, gyro bias, accelerometer bias, then gravity LAST -- all five fixed-width
-  // blocks are always estimated (state/est/bg|ba|gravity were always true), so every index but gravity's own width is a
-  // compile-time constant. gravity is the only runtime-dependent part (3 free Euclidean components, or 2 tangent coordinates
-  // under state/gravity_model=s2).
+  // blocks are always estimated (state/est/bg|ba|gravity were always true), so every index including gravity's own width
+  // is a compile-time constant (the s2 tangent-gravity model was removed; gravity is always the free 3-vector).
   static constexpr int idxR()  { return 0; }
   static constexpr int idxP()  { return 3; }
   static constexpr int idxV()  { return 6; }
   static constexpr int idxBG() { return 9; }
   static constexpr int idxBA() { return 12; }
   static constexpr int idxG()  { return 15; }
-  // R63: gravity block width. vector3 (historical): 3 free Euclidean
-  // components. s2: 2 tangent coordinates on the sphere |g| = const.
-  int gravDim() const { return gravity_model_s2_ ? 2 : 3; }
-  int dimState() const { return idxG() + gravDim(); }
-  bool gravityS2() const { return gravity_model_s2_; }
-  const char* gravityModelName() const { return gravity_model_s2_ ? "s2" : "vector3"; }
-  // d(gravity vector)/d(gravity error coordinates), 3 x gravDim():
-  // I3 for vector3; -[g]x B for s2 (B = current 3x2 tangent basis).
+  static constexpr int gravDim() { return 3; }
+  static constexpr int dimState() { return idxG() + gravDim(); }
+  // d(gravity vector)/d(gravity error coordinates) = I3.
   Eigen::MatrixXd gravityJacobian() const;
-  const Eigen::Matrix<double, 3, 2>& gravityBasis() const { return gravity_basis_; }
   // R63: fixed accelerometer scale factor applied to every IMU sample
   // (1.0 unless calib/stationary/accel_excess_model == scale). Not a state.
   double accScale() const { return acc_scale_; }
@@ -187,14 +180,7 @@ private:
     std::vector<double> distortion_coeffs;
   };
 
-  // R63: gravity_ is always the 3-vector; under s2 its norm is held fixed
-  // and gravity_basis_ (3x2, orthonormal, orthogonal to gravity_) defines
-  // the tangent coordinates of the error state. The basis is parallel-
-  // transported by applyDelta so error covariance never needs transporting.
-  bool gravity_model_s2_ = false;
-  Eigen::Matrix<double, 3, 2> gravity_basis_ = Eigen::Matrix<double, 3, 2>::Zero();
   double acc_scale_ = 1.0;
-  void resetGravityBasis();
 
   // EKF state
   M3D rot_;

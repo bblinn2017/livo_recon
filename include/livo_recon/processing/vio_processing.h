@@ -13,7 +13,7 @@ struct VioProcOptions
 {
   // Master switch: when false, processVIO() is a no-op (and the node skips
   // ctx_.tracker->updateTracker() entirely too, see LivoReconNode::
-  // updateMaps -- no point running the CoTracker/TAPNext/Track-On backend
+  // updateMaps -- no point running the CoTracker backend
   // just to feed a disabled EKF) -- an LIO-only ablation baseline.
   bool   enable           = true;
 
@@ -23,6 +23,20 @@ struct VioProcOptions
   double min_norm_dtheta = 0.0;
   double min_norm_dt     = 0.0;
   double min_diff_error  = 1e-4;
+
+  // Diagnostic-only (default false, behavior-preserving): when true,
+  // solveSystem()'s "reject this iteration if its avg_error isn't better
+  // than the previous iteration's" check is skipped -- every frame always
+  // runs the full max_iterations, applying each iteration's correction
+  // regardless of whether it improved. Exists to remove the selection
+  // effect this stop criterion otherwise introduces in per-iteration
+  // residual analysis (only "easy" frames that keep improving survive to
+  // iteration 4+, biasing a pooled per-iteration average low at high iter
+  // counts). NOT meant as a production setting -- the reject-if-worse
+  // check exists to prevent committing a worse correction, same rationale
+  // as the LIO motion-Q clamp this codebase has separately found matters
+  // for real divergence cases; use this only for offline analysis.
+  bool force_all_iterations = false;
 
   // Absolute sanity bound on the frame's final (post-iteration) avg_error:
   // solveSystem only ever rejects an iteration relative to the previous
@@ -116,6 +130,16 @@ struct VioProcOptions
   // exists for.
   bool log_raw_tracker_output = false;
 
+  // One row per tracked point per frame: raw (u,v) pixel coordinate, keyed
+  // by its anchor index (frame.indices[i]) so the SAME physical point can
+  // be followed across frames (until the next reseed changes the anchor
+  // set) -- lets a consumer compute true per-point frame-to-frame pixel
+  // displacement directly, which log_raw_tracker_output's one-line-per-
+  // frame summary (counts only) can't give. Separate flag from
+  // log_raw_tracker_output rather than folding into it, so anything
+  // already parsing that single summary line's format is unaffected.
+  bool log_raw_uv_dump = false;
+
   // Single opt-in debug-log destination for every option above.
   std::string log_path = "/tmp/livo_recon_myvio_log.txt";
 
@@ -140,7 +164,12 @@ public:
   std::string processVIO(MeasureGroup& mg);
 
   // History (274-282): see docs/livo_recon_changelog.md#include-livo_recon-processing-vio_processing.h-274
-  bool accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, float& avg_error);
+  // `iter` is CombinedProc's own outer joint-EKF iteration index (0..max_iterations-1),
+  // threaded through to the shared accumulate() call purely so log/vio/point_residuals
+  // tags each row with which combined-loop iteration produced it -- previously hardcoded
+  // to 0 regardless of the caller's actual iteration, which made every combined-mode
+  // point-residual row indistinguishable by iteration. Does not affect accumulation math.
+  bool accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, float& avg_error, int iter);
 
 private:
   // Snapshot of the anchor set TrackedFrame::indices refers into, as

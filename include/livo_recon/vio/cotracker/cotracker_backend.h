@@ -35,14 +35,10 @@ namespace livo_recon
 // same as it would be if using the JIT tracker export that predates it.
 //
 // CoTracker3's own exported pair_tracker.pt only ever computes a direct
-// two-frame correspondence -- it has no real persistent state of its own
-// (unlike TAPNextBackend's genuine recurrent cache), so there's no benefit
-// to carrying the same query points across many frames the way TAPNext
-// needs to: needsReseed() always reports true here, so PointTracker::track()
-// requests a brand new query grid from the caller on every single call
-// (seeded on the previous frame, then immediately tracked forward one step
-// to the current one -- see track()'s docs) rather than maintaining a
-// persistent set of tracks between coverage-triggered reseeds.
+// two-frame correspondence -- it has no real persistent state of its own,
+// so Tracker::stepAndReseedOnce() reseeds a brand new query grid every
+// single frame unconditionally (seeded on the previous frame, then
+// immediately tracked forward one step to the current one).
 //
 // opts.interp_width/interp_height default to CoTracker3's own
 // model_resolution (512x384) if not overridden.
@@ -63,11 +59,6 @@ public:
   size_t numActive() const override { return n_visible_; }
 
 protected:
-  // Always reseed: unlike TAPNext, CoTracker has no persistent state worth
-  // preserving across frames, so a fresh grid every call (rather than a
-  // coverage-triggered reseed of a maintained one) is simplest and cheap.
-  bool needsReseed() const override { return true; }
-
   void seedImpl(const cv::Mat& rgb, const std::vector<cv::Point2f>& query_points) override;
 
   bool stepImpl(const cv::Mat& rgb,

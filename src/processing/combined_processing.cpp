@@ -1,6 +1,7 @@
 #include "livo_recon/processing/combined_processing.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/diagnostics/log/consistency_log.h"
+#include "livo_recon/diagnostics/vio_correction.h"
 #include "livo_recon/processing/lio_base.h"
 #include "livo_recon/processing/vio_processing.h"
 
@@ -11,7 +12,7 @@ namespace livo_recon
 {
 
 CombinedProc::CombinedProc(NodeContext& ctx)
-  : state_(ctx.state), profiler_(ctx.profiler)
+  : state_(ctx.state), profiler_(ctx.profiler), data_queues_(ctx.data_queues)
 {}
 
 std::string CombinedProc::loadParameters(ros::NodeHandle& pnh)
@@ -21,6 +22,7 @@ std::string CombinedProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "combined/ekf/min_norm_dtheta", opts_.min_norm_dtheta, 0.0);
   paramWarn<double>(pnh, "combined/ekf/min_norm_dt",     opts_.min_norm_dt,     0.0);
   paramWarn<double>(pnh, "combined/ekf/min_diff_error",  opts_.min_diff_error,  -1.0);
+  paramWarn<bool>(pnh, "combined/ekf/force_all_iterations", opts_.force_all_iterations, false);
   paramWarn<double>(pnh, "combined/ekf/max_avg_error",   opts_.max_avg_error,   5.0);
   paramWarn<bool>(pnh, "log/combined/debug",       opts_.log_debug_en,   false);
   paramWarn<bool>(pnh, "log/combined/consistency", opts_.log_consistency_en, false);
@@ -28,6 +30,7 @@ std::string CombinedProc::loadParameters(ros::NodeHandle& pnh)
   // here too so a sweep config using the LIO-only flag name still gets a
   // populated nll.txt in combined mode.
   paramWarn<bool>(pnh, "log/lio/nll",              opts_.log_nll_en_compat, false);
+  paramWarn<bool>(pnh, "log/combined/vio_contribution", opts_.log_vio_contribution_en, false);
 
   std::ostringstream oss;
   oss << "[params/combined]"
@@ -36,8 +39,10 @@ std::string CombinedProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  ekf/min_norm_dtheta:" << opts_.min_norm_dtheta
       << "\n  ekf/min_norm_dt:    " << opts_.min_norm_dt
       << "\n  ekf/min_diff_error: " << opts_.min_diff_error
+      << "\n  ekf/force_all_iterations: " << (opts_.force_all_iterations ? "true" : "false")
       << "\n  ekf/max_avg_error:  " << opts_.max_avg_error
       << "\n  log_consistency_en: " << (opts_.log_consistency_en ? "true" : "false")
+      << "\n  log_vio_contribution_en: " << (opts_.log_vio_contribution_en ? "true" : "false")
       << "\n  log_nll_en_compat: " << (opts_.log_nll_en_compat ? "true" : "false");
   return oss.str();
 }
@@ -74,12 +79,13 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
     float avg_err_vio = 0.0f;
 
     const bool have_lio = lio_proc.accumulateForCombined(mg, lio_part, avg_res_lio);
-    const bool have_vio = vio_proc.accumulateForCombined(mg, vio_part, avg_err_vio);
+    const bool have_vio = vio_proc.accumulateForCombined(mg, vio_part, avg_err_vio, iter);
 
     if (!have_lio && !have_vio) { stop = "no_residuals"; break; }
 
-    if ((have_lio && avg_res_lio >= best_avg_res_lio) ||
-        (have_vio && avg_err_vio >= best_avg_err_vio))
+    if (!opts_.force_all_iterations &&
+        ((have_lio && avg_res_lio >= best_avg_res_lio) ||
+         (have_vio && avg_err_vio >= best_avg_err_vio)))
     {
       stop = "no_improve";
       break;
@@ -141,7 +147,13 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
   {
     EkfUpdate final_vio_part;
     float re_avg_err_vio = 0.0f;
-    if (vio_proc.accumulateForCombined(mg, final_vio_part, re_avg_err_vio))
+    // Sentinel iter=99 (well outside 0..max_iterations-1, default max is 5):
+    // this re-accumulate happens AFTER the loop above has already applied
+    // its last correction, so it measures the truly-final post-update
+    // residual -- distinct from every in-loop iter value, so a per-point
+    // log consumer (log/vio/point_residuals) can tell "final" apart from
+    // "last loop iteration" (whose own row is pre-that-iteration's update).
+    if (vio_proc.accumulateForCombined(mg, final_vio_part, re_avg_err_vio, 99))
       final_avg_err_vio = re_avg_err_vio;
   }
 
@@ -162,6 +174,10 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
   // Anchor-pose history recording now happens centrally in
   // LivoReconNode::estimateState() (see Tracker::recordFramePose()) --
   // no per-mode commit call needed here anymore.
+
+  if (opts_.log_vio_contribution_en)
+    writeCombinedVioContributionRow(++vio_contribution_frame_index_, mg.image.t + data_queues_->start_time,
+                                    final_avg_err_vio, last_n_meas_vio, vio_ever_contributed);
 
   std::ostringstream oss;
   oss << "[combined/ekf] iters=" << iter << "  stop=" << stop

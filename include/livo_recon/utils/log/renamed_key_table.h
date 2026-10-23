@@ -235,11 +235,19 @@ inline const std::vector<std::string>& removedKeyTable()
       "imu/process_noise/gauss_markov/accel/correlation_time_s",
       "imu/process_noise/gauss_markov/accel/sigma",
       // R97A Q3 item 2: the motion-dependent Q floor scales.
-      // R97A Q3-fix: the dynamic-variance caps (acc_max_dynamic_variance, gyro_max_dynamic_variance)
-      // are NOT removed -- bisection found removing them caused a real divergence on
-      // r97a_c_nya_02_id1 (see REPORT.md); they are restored as real options, not refused keys.
       "imu/process_noise/motion/acc_floor_scale",
       "imu/process_noise/motion/gyro_floor_scale",
+      // R97B: motion/beta (EMA smoothing of the per-step dynamic excitation
+      // energy) and the acc/gyro_max_dynamic_variance clamp are removed --
+      // the mid360 beta=0 vs beta=0.9 acc/gyro_scale sweep comparison found
+      // no meaningful difference either way, so the per-step instantaneous
+      // energy is now used directly and unclamped. NOTE: R97A Q3-fix had
+      // previously restored the clamp after bisection found removing it
+      // caused a real divergence on r97a_c_nya_02_id1 (NTU_VIRAL) -- that
+      // risk was explicitly re-accepted here, it was not re-verified safe.
+      "imu/process_noise/motion/beta",
+      "imu/process_noise/motion/acc_max_dynamic_variance",
+      "imu/process_noise/motion/gyro_max_dynamic_variance",
       // R97A Q3 item 4: the three Q scale alphas (all identity at 1.0).
       "imu/q_alpha_acc",
       "imu/q_alpha_gyr",
@@ -278,6 +286,8 @@ inline const std::vector<std::string>& removedKeyTable()
 // The release and followup that removed `key` (R74 F-427 for the first eight keys, R82 F-476 / F-403 for the next five, R83 F-401 / F-508 for lio/zupt/*, R84 F-521 for the temporal point-covariance keys, R85 F-520 for lio/point_cov/sample_window_s, R92 for voxel_map/binned/update_count_mode, R93A for the next seven keys, R95 for voxel_map/binned/weight_mode, R97 for estimator/mode, lio/estimator/mode and the 18 keys listed after them).
 inline std::string removedKeyOrigin(const std::string& key)
 {
+  if (key == "imu/process_noise/motion/beta" || key == "imu/process_noise/motion/acc_max_dynamic_variance" ||
+      key == "imu/process_noise/motion/gyro_max_dynamic_variance") return "R97B";
   if (key == "imu/process_noise/gain/nis_lo" || key == "imu/process_noise/gain/deflate") return "R82 (F-476)";
   if (key.rfind("lio/ekf/step_cap/", 0) == 0) return "R82 (F-403)";
   if (key.rfind("lio/zupt/", 0) == 0) return "R83 (F-401, F-508)";

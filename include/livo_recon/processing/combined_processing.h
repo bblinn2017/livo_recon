@@ -21,6 +21,12 @@ struct CombinedProcOptions
   double min_norm_dt     = 0.0;
   double min_diff_error  = -1.0;
 
+  // Diagnostic-only (default false, behavior-preserving) -- see
+  // VioProcOptions::force_all_iterations's doc comment, same rationale:
+  // when true, processCombined()'s "stop=no_improve" rejection is skipped
+  // so every frame always runs the full max_iterations.
+  bool force_all_iterations = false;
+
   // Whole-frame VIO-fit rejection threshold, mirroring VioProcOptions::
   // max_avg_error. If VIO contributed to this frame's joint solve and its
   // own achieved avg_error exceeds this, the ENTIRE joint result (both
@@ -48,6 +54,13 @@ struct CombinedProcOptions
   // too and OR it into the same gate (loadParameters()) so an existing
   // sweep config needs no change.
   bool   log_nll_en_compat = false;
+
+  // log/combined/vio_contribution (default false): per-frame
+  // avg_err_vio/n_meas_vio/vio_ever_contributed, written to
+  // combined_vio_contribution.csv -- see diagnostics/vio_correction.h's
+  // doc comment for why this (not a pose-delta) is the closest available
+  // per-frame "how much did VIO contribute" signal in combined mode.
+  bool   log_vio_contribution_en = false;
 };
 
 // Opt-in combined LIO+VIO EKF step. Each iteration: asks LioProc and
@@ -80,6 +93,8 @@ private:
   StateGroup state_propagat_;
   StateGroupPtr state_;
   ProfilerPtr profiler_;
+  DataQueuesPtr data_queues_;
+  int vio_contribution_frame_index_ = 0;
 };
 
 }  // namespace livo_recon

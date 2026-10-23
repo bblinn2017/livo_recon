@@ -127,6 +127,9 @@ add_executable(livo_recon_node
   src/diagnostics/motion_q_writer.cpp
   src/diagnostics/r66_writers.cpp
   src/diagnostics/bootstrap_diagnostic_writer.cpp
+  src/diagnostics/vio_correction.cpp
+  src/diagnostics/lidar_image_bounds.cpp
+  src/diagnostics/state_correction_trace.cpp
   src/main.cpp
   src/livo_recon_node.cpp
   src/node_context.cpp
@@ -154,8 +157,6 @@ add_executable(livo_recon_node
   src/vio/tracker_cache.cpp
   src/vio/vio_accumulator.cpp
   src/vio/cotracker/cotracker_backend.cpp
-  src/vio/tapnext/tapnext_backend.cpp
-  src/vio/trackon/trackon_backend.cpp
 )
 
 target_compile_options(livo_recon_node PRIVATE
@@ -193,8 +194,6 @@ add_executable(cache_tracker_output_livo_recon
   src/vio/tracker.cpp
   src/vio/tracker_cache.cpp
   src/vio/cotracker/cotracker_backend.cpp
-  src/vio/tapnext/tapnext_backend.cpp
-  src/vio/trackon/trackon_backend.cpp
 )
 
 target_compile_options(cache_tracker_output_livo_recon PRIVATE
@@ -227,9 +226,6 @@ add_library(state_lib
 )
 target_include_directories(state_lib PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
 target_link_libraries(state_lib Eigen3::Eigen ${catkin_LIBRARIES})
-add_executable(test_gravity_s2 tests/test_gravity_s2.cpp)
-target_link_libraries(test_gravity_s2 state_lib)
-add_test(NAME gravity_s2 COMMAND test_gravity_s2)
 
 
 # R65 (planning agent's patch, section 4 of R65_INSTRUCTIONS.md): per-point pose covariance and

@@ -59,6 +59,7 @@ std::string VioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "vio/ekf/min_norm_dtheta", opts_.min_norm_dtheta, 0.0);
   paramWarn<double>(pnh, "vio/ekf/min_norm_dt",     opts_.min_norm_dt,     0.0);
   paramWarn<double>(pnh, "vio/ekf/min_diff_error",  opts_.min_diff_error,  1e-4);
+  paramWarn<bool>(pnh, "vio/ekf/force_all_iterations", opts_.force_all_iterations, false);
   paramWarn<double>(pnh, "vio/ekf/max_avg_error",      opts_.max_avg_error,      5.0);
   paramWarn<double>(pnh, "vio/ekf/pos_epipolar_residual_var", opts_.pos_epipolar_residual_var, 0.0556);
   paramWarn<double>(pnh, "vio/ekf/neg_epipolar_residual_var", opts_.neg_epipolar_residual_var, 0.03125);
@@ -76,6 +77,7 @@ std::string VioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "log/vio/residual_counts",  opts_.log_residual_counts,  false);
   paramWarn<bool>(pnh, "log/vio/consistency_corr", opts_.log_consistency_corr_en, false);
   paramWarn<bool>(pnh, "log/vio/raw_tracker_output", opts_.log_raw_tracker_output, false);
+  paramWarn<bool>(pnh, "log/vio/raw_uv_dump", opts_.log_raw_uv_dump, false);
   paramWarn<double>(pnh, "log/vio/norm_l_low_frac", opts_.log_norm_l_low_frac, 0.3);
   paramWarn<std::string>(pnh, "log/vio/path",       opts_.log_path,             debugLogPath("livo_recon_myvio_log.txt"));
 
@@ -86,6 +88,7 @@ std::string VioProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  min_norm_dtheta: " << opts_.min_norm_dtheta
       << "\n  min_norm_dt:     " << opts_.min_norm_dt
       << "\n  min_diff_error:  " << opts_.min_diff_error
+      << "\n  force_all_iterations: " << (opts_.force_all_iterations ? "true" : "false")
       << "\n  max_avg_error:   " << opts_.max_avg_error
       << "\n  pos_epipolar_residual_var: " << opts_.pos_epipolar_residual_var
       << "\n  neg_epipolar_residual_var: " << opts_.neg_epipolar_residual_var
@@ -102,6 +105,7 @@ std::string VioProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  log_residual_counts:   " << (opts_.log_residual_counts ? "true" : "false")
       << "\n  log_consistency_corr_en: " << (opts_.log_consistency_corr_en ? "true" : "false")
       << "\n  log_raw_tracker_output:" << (opts_.log_raw_tracker_output ? "true" : "false")
+      << "\n  log_raw_uv_dump:       " << (opts_.log_raw_uv_dump ? "true" : "false")
       << "\n  log_norm_l_low_frac:   " << opts_.log_norm_l_low_frac
       << "\n  log_path:              " << opts_.log_path;
 
@@ -145,7 +149,7 @@ bool VioProc::solveSystem(const TrackedFrame& frame, float& last_error, double t
   if (!ok) return false;
 
   // History (147-172): see docs/livo_recon_changelog.md#src-processing-vio_processing.cpp-147
-  if (avg_error >= last_error) return false;
+  if (avg_error >= last_error && !opts_.force_all_iterations) return false;
 
   last_error = avg_error;
 
@@ -176,7 +180,7 @@ bool VioProc::solveSystem(const TrackedFrame& frame, float& last_error, double t
 // error (CombinedProc's own joint loop owns that policy) and does NOT call
 // applyMeanUpdate/applyCovarianceUpdate (CombinedProc sums this with
 // LioProc's own accumulation first and applies once).
-bool VioProc::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, float& avg_error)
+bool VioProc::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, float& avg_error, int iter)
 {
   if (mg.image.image.empty() || !tracker_->loaded()) return false;
   const TrackedFrame& frame = mg.tracked_frame;
@@ -186,7 +190,7 @@ bool VioProc::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, float& avg
   int n_valid = 0;
   const double t_abs = mg.image.t + data_queues_->start_time;  // see processVIO()'s matching comment
   const bool ok = accumulator_.accumulate(frame, frame_anchors_, accumulateOptions(),
-                                          out, avg_error, n_valid, t_abs, 0);
+                                          out, avg_error, n_valid, t_abs, iter);
   last_n_residuals_ = n_valid;
   return ok;
 }
@@ -239,16 +243,19 @@ std::string VioProc::estimateStateCorrection(const TrackedFrame& frame, double t
     const float rel_diff = (prev_error - last_error) / std::max(prev_error, 1e-6f);
     prev_error = last_error;
 
-    if (ekf_.dtheta.norm() < opts_.min_norm_dtheta && ekf_.dt.norm() < opts_.min_norm_dt)
+    if (!opts_.force_all_iterations)
     {
-      std::ostringstream ss;
-      ss << std::scientific << std::setprecision(1)
-         << "norm(dth=" << ekf_.dtheta.norm() * (180.0 / M_PI) << "deg"
-         << ",dt="      << ekf_.dt.norm() * 1000.0              << "mm)";
-      stop = ss.str(); break;
+      if (ekf_.dtheta.norm() < opts_.min_norm_dtheta && ekf_.dt.norm() < opts_.min_norm_dt)
+      {
+        std::ostringstream ss;
+        ss << std::scientific << std::setprecision(1)
+           << "norm(dth=" << ekf_.dtheta.norm() * (180.0 / M_PI) << "deg"
+           << ",dt="      << ekf_.dt.norm() * 1000.0              << "mm)";
+        stop = ss.str(); break;
+      }
+      if (rel_diff < static_cast<float>(opts_.min_diff_error))
+        { stop = "rel_diff"; break; }
     }
-    if (rel_diff < static_cast<float>(opts_.min_diff_error))
-      { stop = "rel_diff"; break; }
   }
 
   // Posterior covariance write happens exactly ONCE here, using the SAME
@@ -275,6 +282,24 @@ std::string VioProc::estimateStateCorrection(const TrackedFrame& frame, double t
     total_dtheta.setZero();
     total_dt.setZero();
     rejected = true;
+  }
+
+  // Sentinel iter=99 (same convention as CombinedProc's own post-loop
+  // re-check): re-evaluate residuals against the TRULY final state (after
+  // the rollback decision above, so it reflects whatever state actually
+  // persists past this frame) -- distinct from every in-loop iter value,
+  // so log/vio/point_residuals can report a true "after everything"
+  // residual instead of only "after the last accepted GN iteration" (which
+  // solveSystem()'s own per-iteration rows already give, pre-that-
+  // iteration's own update). Scratch EkfUpdate/avg_error/n_valid are
+  // unused beyond driving the log write.
+  if (n_successful > 0)
+  {
+    EkfUpdate final_scratch;
+    float final_avg_error = 0.0f;
+    int final_n_valid = 0;
+    accumulator_.accumulate(frame, frame_anchors_, accumulateOptions(),
+                            final_scratch, final_avg_error, final_n_valid, t_abs, 99);
   }
 
   if (opts_.log_iterations)
@@ -358,6 +383,45 @@ std::string VioProc::processVIO(MeasureGroup& mg)
        << "  n_tracked=" << frame.uv_curr.size()
        << "  n_anchors=" << frame.anchors.size()
        << "  reseeded=" << (frame.reseeded ? 1 : 0);
+    logIteration(opts_.log_path, ss.str());
+  }
+
+  if (opts_.log_raw_uv_dump && frame.ok)
+  {
+    // One row per GENUINE tracked pair: the seed pixel this anchor was
+    // picked at (anchors[idx].uv_seed -- the frame that seeded the
+    // tracker, already distortion-corrected, see AnchorPoint::uv_seed)
+    // and this frame's own tracked pixel for that same anchor -- the
+    // following frame in the pair. su/sv -> uc/vc (frame.uv_curr[i],
+    // also distortion-corrected) is the directly-comparable pair in a
+    // CONSISTENT coordinate space -- unlike comparing uv_curr across
+    // DIFFERENT frames' independently-reseeded idx slots (not a stable
+    // point identity beyond one single step -- see Tracker::
+    // stepAndReseedOnce() and CoTrackerBackend's class doc comment: every
+    // frame reseeds its entire anchor set fresh). uc/vc (unlike
+    // uv_curr_raw) is present in BOTH live and cache-replay TrackedFrame
+    // records (an old field, always serialized), so this comparison works
+    // identically whether tracking lived or replayed from cache. u/v
+    // (uv_curr_raw, raw/pre-undistortion) is logged alongside only for a
+    // live run that wants the true raw pixel too -- empty (0,0) when
+    // replaying from a cache predating this field.
+    std::ostringstream ss;
+    for (size_t i = 0; i < frame.uv_curr.size(); ++i)
+    {
+      const int anchor_idx = (i < frame.indices.size()) ? frame.indices[i] : -1;
+      const bool have_seed = anchor_idx >= 0 && static_cast<size_t>(anchor_idx) < frame.anchors.size();
+      const cv::Point2f seed = have_seed ? frame.anchors[anchor_idx].uv_seed : cv::Point2f(-1.0f, -1.0f);
+      const bool have_raw = i < frame.uv_curr_raw.size();
+      const cv::Point2f raw = have_raw ? frame.uv_curr_raw[i] : cv::Point2f(0.0f, 0.0f);
+      ss << "[vio/raw_uv]  t_abs=" << std::fixed << std::setprecision(6) << t_abs
+         << "  idx=" << anchor_idx
+         << "  su=" << std::setprecision(4) << seed.x
+         << "  sv=" << seed.y
+         << "  uc=" << frame.uv_curr[i].x
+         << "  vc=" << frame.uv_curr[i].y
+         << "  u=" << raw.x
+         << "  v=" << raw.y << "\n";
+    }
     logIteration(opts_.log_path, ss.str());
   }
 

@@ -1,16 +1,16 @@
-// Standalone cache-generation tool for livo_recon's tracker (CoTracker/
-// TAPNext/Track-On, see vio/tracker.h).
+// Standalone cache-generation tool for livo_recon's tracker (CoTracker,
+// see vio/tracker.h).
 //
 // Motivation: Tracker::stepAndReseedOnce() (src/vio/tracker.cpp) never
 // reads pose/EKF state anywhere -- confirmed in tracker.cpp, state_ is
 // only read for FIXED camera intrinsics/distortion (undistortPixel()) and
 // in recordFramePose() (called externally by LivoReconNode::estimateState(),
 // outside step()/reseed()'s own call path). Its output is a pure function of (bag,
-// grid_rows, grid_cols, backend, tracker_format). Every ablation sweep
+// grid_rows, grid_cols, tracker_format). Every ablation sweep
 // that only varies downstream (state-dependent) LIO/VIO params (residual
 // weighting/gating, acc_cov/gyr_cov, ...) re-runs the identical, GPU-
 // expensive tracker pass over the identical bag every time. This tool
-// runs the tracker ONCE per (bag, grid_rows, grid_cols, backend,
+// runs the tracker ONCE per (bag, grid_rows, grid_cols,
 // tracker_format) combination and serializes its raw per-frame output
 // (TrackedFrame, see include/livo_recon/vio/tracked_frame.h) to a cache
 // file that Tracker's own replay mode (TrackerOptions::track_cache_path)
@@ -32,7 +32,7 @@
 // Reads bag/topic/tracker parameters from the ROS parameter server under
 // this node's own private namespace, using the SAME param names/paths
 // StateGroup::loadParameters() and Tracker::loadParameters() already read
-// (topics/image, tracker/backend, tracker/tracker_format, tracker/
+// (topics/image, tracker/tracker_format, tracker/
 // grid_selection/*, camera/*) -- so this tool can be launched with the
 // exact same per-sequence launch/config a live run uses, just pointed at
 // a different node name, plus two additional params:
@@ -224,9 +224,8 @@ int main(int argc, char** argv)
   // (Tracker has no public opts() getter -- deliberately not adding one
   // just for this, duplicating two already-read param reads is cheaper
   // than growing Tracker's public surface for a single tool).
-  std::string backend, tracker_format;
+  std::string tracker_format;
   int grid_rows = 0, grid_cols = 0;
-  paramWarn<std::string>(pnh, "tracker/backend", backend, "cotracker");
   paramWarn<std::string>(pnh, "tracker/tracker_format", tracker_format, "jit");
   paramWarn<int>(pnh, "tracker/grid_selection/grid_rows", grid_rows, 10);
   paramWarn<int>(pnh, "tracker/grid_selection/grid_cols", grid_cols, 10);
@@ -286,7 +285,7 @@ int main(int argc, char** argv)
   writePod(f, static_cast<uint32_t>(3));
   writePod(f, static_cast<int32_t>(grid_rows));
   writePod(f, static_cast<int32_t>(grid_cols));
-  writeStr(f, backend + "/" + tracker_format);
+  writeStr(f, std::string("cotracker/") + tracker_format);
   writeStr(f, basenameOf(bag_path));
   writePod(f, static_cast<uint32_t>(frames.size()));
   for (const auto& tf : frames) writeTrackedFrame(f, tf);

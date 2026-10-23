@@ -6,7 +6,7 @@
 //       through update()'s new layer_idx parameter) and the three eigenvalues of the raw (uncorrected) scatter,
 //       ascending order, matching an independently-computed reference to 1e-10.
 //   (E3, addPoints() on the debiased path, was removed in R97 with that path.)
-//   E4  writeMotionQStepDiagnostic() writes one row per call with the exact q_acc/q_gyr/clamp values passed in.
+//   E4  writeMotionQStepDiagnostic() writes one row per call with the exact q_acc/q_gyr values passed in.
 // Exit code 0 = all pass.
 #include "livo_recon/lio/voxelplane.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
@@ -138,16 +138,15 @@ int main()
   std::remove("/tmp/motion_q_step.csv");
   {
     const V3D q_acc(0.1, 0.2, 0.3), q_gyr(0.4, 0.5, 0.6);
-    writeMotionQStepDiagnostic(5, 12, 1000.25, q_acc, q_gyr, true, false, true, false, true, false);
+    writeMotionQStepDiagnostic(5, 12, 1000.25, q_acc, q_gyr);
     std::ifstream f("/tmp/motion_q_step.csv");
     std::string header, line;
     bool ok = false;
     if (f && std::getline(f, header) && std::getline(f, line)) {
       std::stringstream ss(line); std::string tok; std::vector<std::string> c;
       while (std::getline(ss, tok, ',')) c.push_back(tok);
-      ok = c.size() == 15 && c[0] == "5" && c[1] == "12" &&
-           std::fabs(std::stod(c[3]) - 0.1) < 1e-12 && std::fabs(std::stod(c[8]) - 0.6) < 1e-12 &&
-           c[9] == "1" && c[10] == "0" && c[11] == "1" && c[12] == "0" && c[13] == "1" && c[14] == "0";
+      ok = c.size() == 9 && c[0] == "5" && c[1] == "12" &&
+           std::fabs(std::stod(c[3]) - 0.1) < 1e-12 && std::fabs(std::stod(c[8]) - 0.6) < 1e-12;
     }
     check(ok, "E4 motion_q_step.csv row matches the values passed to the writer", ok ? "" : "line=" + line);
   }

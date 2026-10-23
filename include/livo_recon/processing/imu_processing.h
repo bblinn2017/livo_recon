@@ -19,18 +19,14 @@ struct ImuProcOptions
   // production control. The dynamic modes use the stationary-calibration
   // variance as their floor and add a bounded motion-dependent variance.
   std::string process_noise_model = "fixed";  // fixed|isotropic|axis_aware
-  double motion_beta = 0.9;  // 0 = instantaneous; larger = more smoothing (R80 F-477: default 0.9, was 0.0)
+  // R97B: motion/beta (EMA smoothing of the per-step dynamic excitation
+  // energy) and the acc/gyro_max_dynamic_variance clamp were both removed
+  // -- the mid360 beta=0 vs beta=0.9 acc/gyro_scale sweep comparison found
+  // no meaningful difference in best-achievable ATE or in acc/gyro_scale's
+  // effect size either way, so the per-step instantaneous energy is used
+  // directly and unclamped.
   double motion_acc_scale = 0.3;   // R80 F-477: was 1.0
   double motion_gyr_scale = 10.0;  // R80 F-477: was 1.0
-  // R97A Q3-fix: restored after bisection found R97A Q3's removal of this cap caused a real
-  // divergence (not a no-op) on r97a_c_nya_02_id1 -- the motion-dependent dynamic variance
-  // legitimately exceeds the configured cap at some point in that trajectory, and leaving it
-  // uncapped lets a transient huge process noise destabilize the filter. See REPORT.md.
-  // 2026-10-20 (mid360, Bryce's call, with that risk explicitly acknowledged): a value <= 0
-  // disables the cap entirely (no clamping) rather than being refused -- see loadParameters()'s
-  // validation and the clamp site in propagate().
-  double motion_acc_max_dynamic_variance = 0.5;
-  double motion_gyr_max_dynamic_variance = 0.3;
 
   // Per-IMU-step trace of the first three propagations (imu_first_scans.csv).
   bool first_scans_log_en = false;
@@ -102,13 +98,6 @@ private:
   long first_head_seed_count_ = 0;
   long acc_scale_applied_samples_ = 0;   // R63 engagement counter (accel scale)
   bool acc_scale_logged_ = false;
-  bool s2_logged_ = false;   // engagement counter: 1 iff the seed was applied
-  // Low-pass state is excitation ENERGY before the stationary noise floor is
-  // subtracted. Filtering the already-rectified dynamic variance would retain
-  // the positive bias of squared stationary sensor noise.
-  V3D filtered_acc_excitation_energy_ = V3D::Zero();
-  V3D filtered_gyr_excitation_energy_ = V3D::Zero();
-  bool motion_noise_primed_ = false;
   size_t propagation_index_ = 0;
 public:
   std::string engagementReport() const;

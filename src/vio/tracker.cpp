@@ -6,8 +6,6 @@
 #include <opencv2/imgproc.hpp>
 
 #include "livo_recon/vio/cotracker/cotracker_backend.h"
-#include "livo_recon/vio/tapnext/tapnext_backend.h"
-#include "livo_recon/vio/trackon/trackon_backend.h"
 
 namespace livo_recon
 {
@@ -15,18 +13,12 @@ namespace livo_recon
 namespace
 {
 
-// Each backend's exported module paths are fixed 1:1 with the backend
-// itself (see co-tracker/export_pairwise_tracker.py,
-// tapnext/export_pairwise_tapnext.py), so they're hardcoded here rather
-// than independently configurable -- except CoTracker's own encoder/
-// tracker, which additionally vary with tracker_format (see below).
+// CoTracker's own encoder/tracker module paths -- fixed rather than
+// independently configurable, except they additionally vary with
+// tracker_format (see below).
 constexpr const char* kCoTrackerEncoderPath = "/root/catkin_ws/src/livo_recon/checkpoints/cotracker_frame_encoder.pt";
 constexpr const char* kCoTrackerTrackerPath = "/root/catkin_ws/src/livo_recon/checkpoints/cotracker_pair_tracker.pt";
 constexpr const char* kCoTrackerCheckpointDir = "/root/catkin_ws/src/livo_recon/checkpoints";
-constexpr const char* kTAPNextInitPath      = "/root/catkin_ws/src/livo_recon/checkpoints/tapnext_init.pt";
-constexpr const char* kTAPNextStepPath      = "/root/catkin_ws/src/livo_recon/checkpoints/tapnext_step.pt";
-constexpr const char* kTrackOnInitPath      = "/root/catkin_ws/src/livo_recon/checkpoints/trackon_init.pt";
-constexpr const char* kTrackOnStepPath      = "/root/catkin_ws/src/livo_recon/checkpoints/trackon_step.pt";
 
 }  // namespace
 
@@ -36,7 +28,6 @@ Tracker::Tracker(StateGroupPtr state, ProfilerPtr profiler)
 
 std::string Tracker::loadParameters(ros::NodeHandle& pnh)
 {
-  paramWarn<std::string>(pnh, "tracker/backend", opts_.backend, "cotracker");
   paramWarn<std::string>(pnh, "tracker/device",  opts_.device,  "cuda");
   // "jit" (default) -> cotracker_frame_encoder.pt/cotracker_pair_tracker.pt.
   // "aot" -> a genuine full-precision AOTInductor deployment (see
@@ -51,7 +42,6 @@ std::string Tracker::loadParameters(ros::NodeHandle& pnh)
   paramWarn<std::string>(pnh, "tracker/tracker_format", opts_.tracker_format, "jit");
   paramWarn<int>(pnh, "tracker/grid_selection/grid_rows",              opts_.grid_rows,           10);
   paramWarn<int>(pnh, "tracker/grid_selection/grid_cols",              opts_.grid_cols,           10);
-  paramWarn<double>(pnh, "tracker/reseed/active_fraction", opts_.reseed_active_fraction, 0.5);
   paramWarn<double>(pnh, "tracker/reseed/min_candidate_fraction", opts_.min_candidate_fraction, 0.25);
   paramWarn<bool>(pnh, "viz/uv_tracking", opts_.viz_uv_tracking, false);
   // See TrackerOptions::track_cache_path's doc comment -- empty (default)
@@ -60,12 +50,10 @@ std::string Tracker::loadParameters(ros::NodeHandle& pnh)
 
   std::ostringstream oss;
   oss << "[params/tracker]"
-      << "\n  backend:              " << opts_.backend
       << "\n  device:               " << opts_.device
       << "\n  tracker_format:       " << opts_.tracker_format
       << "\n  grid_selection/grid_rows:           " << opts_.grid_rows
       << "\n  grid_selection/grid_cols:           " << opts_.grid_cols
-      << "\n  reseed/active_fraction:        " << opts_.reseed_active_fraction
       << "\n  reseed/min_candidate_fraction: " << opts_.min_candidate_fraction
       << "\n  viz/uv_tracking:        " << (opts_.viz_uv_tracking ? "true" : "false")
       << "\n  track_cache_path:     " << (opts_.track_cache_path.empty() ? "(live tracking)" : opts_.track_cache_path);
@@ -84,7 +72,7 @@ std::string Tracker::loadParameters(ros::NodeHandle& pnh)
       return oss.str();
     }
     const TrackerCacheHeader& h = cache_reader_->header();
-    const std::string this_run_format = opts_.backend + "/" + opts_.tracker_format;
+    const std::string this_run_format = std::string("cotracker/") + opts_.tracker_format;
     if (h.grid_rows != opts_.grid_rows || h.grid_cols != opts_.grid_cols || h.tracker_format != this_run_format)
     {
       oss << "\n  FAILED: cache '" << opts_.track_cache_path << "' was built for grid="
@@ -103,55 +91,39 @@ std::string Tracker::loadParameters(ros::NodeHandle& pnh)
   PointTrackerOptions topts;
   topts.device = opts_.device;
   topts.profiler = profiler_;
-  topts.reseed_active_fraction = opts_.reseed_active_fraction;
 
+  backend_ = std::make_unique<CoTrackerBackend>(topts);
+  const std::string dir = std::string(kCoTrackerCheckpointDir) + "/";
   std::string model_path_a, model_path_b;
-  if (opts_.backend == "tapnext")
+  // Tracker's AOTInductor package is compiled for a FIXED query count
+  // (grid_rows*grid_cols at export time), so its filename encodes the
+  // exact grid shape (cotracker_pair_tracker_aot_<rows>x<cols>.pt2) --
+  // changing grid_rows/grid_cols with tracker_format=aot makes this look
+  // for a differently-named file automatically. If no matching export
+  // exists, AOTIModelPackageLoader's constructor throws (file not
+  // found) and the try/catch below turns that into a clear "FAILED to
+  // load" line instead of silently loading a wrong-shaped model.
+  if (opts_.tracker_format == "aot")
   {
-    backend_ = std::make_unique<TAPNextBackend>(topts);
-    model_path_a = kTAPNextInitPath;
-    model_path_b = kTAPNextStepPath;
-  }
-  else if (opts_.backend == "trackon")
-  {
-    backend_ = std::make_unique<TrackOnBackend>(topts);
-    model_path_a = kTrackOnInitPath;
-    model_path_b = kTrackOnStepPath;
+    model_path_a = dir + "cotracker_frame_encoder_aot.pt2";
+    model_path_b = dir + "cotracker_pair_tracker_aot_" + std::to_string(opts_.grid_rows) + "x"
+                 + std::to_string(opts_.grid_cols) + ".pt2";
   }
   else
   {
-    backend_ = std::make_unique<CoTrackerBackend>(topts);
-    const std::string dir = std::string(kCoTrackerCheckpointDir) + "/";
-    // Tracker's AOTInductor package is compiled for a FIXED query count
-    // (grid_rows*grid_cols at export time), so its filename encodes the
-    // exact grid shape (cotracker_pair_tracker_aot_<rows>x<cols>.pt2) --
-    // changing grid_rows/grid_cols with tracker_format=aot makes this look
-    // for a differently-named file automatically. If no matching export
-    // exists, AOTIModelPackageLoader's constructor throws (file not
-    // found) and the try/catch below turns that into a clear "FAILED to
-    // load" line instead of silently loading a wrong-shaped model.
-    if (opts_.tracker_format == "aot")
-    {
-      model_path_a = dir + "cotracker_frame_encoder_aot.pt2";
-      model_path_b = dir + "cotracker_pair_tracker_aot_" + std::to_string(opts_.grid_rows) + "x"
-                   + std::to_string(opts_.grid_cols) + ".pt2";
-    }
-    else
-    {
-      model_path_a = kCoTrackerEncoderPath;
-      model_path_b = kCoTrackerTrackerPath;
-    }
+    model_path_a = kCoTrackerEncoderPath;
+    model_path_b = kCoTrackerTrackerPath;
   }
 
   try
   {
     backend_->load(model_path_a, model_path_b);
-    oss << "\n  loaded " << opts_.backend << " modules on " << opts_.device;
+    oss << "\n  loaded cotracker modules on " << opts_.device;
   }
   catch (const std::exception& e)
   {
     backend_.reset();
-    oss << "\n  FAILED to load " << opts_.backend << " modules: " << e.what();
+    oss << "\n  FAILED to load cotracker modules: " << e.what();
   }
 
   return oss.str();
@@ -326,22 +298,23 @@ TrackedFrame Tracker::stepAndReseedOnce(const cv::Mat& image)
     // pixels for the backend/visualization), TrackedFrame::uv_curr feeds
     // directly into the epipolar residual.
     out.uv_curr.reserve(uv_curr_.size());
+    out.uv_curr_raw.reserve(uv_curr_.size());
     out.uv_curr_uv_jacobian.reserve(uv_curr_.size());
     for (const cv::Point2f& p : uv_curr_)
     {
       out.uv_curr.push_back(undistortPixel(p));
+      out.uv_curr_raw.push_back(p);
       out.uv_curr_uv_jacobian.push_back(localPixelToUVJacobian(p));  // evaluated at the RAW pixel, see doc comment
     }
     out.indices = std::move(indices);
     out.anchors = anchors_;
   }
 
-  // Pose-independent (see task #145): reseed whenever there's no prior
-  // tracking to build on, or the backend's own needsReseed() signal says
-  // coverage has degraded -- no camera-motion/baseline gate. Uses THIS
-  // SAME image, exactly like the old synchronous updateTracker() did.
+  // Pose-independent (see task #145): reseed unconditionally, every
+  // single frame, on THIS SAME image -- CoTracker has no persistent
+  // state worth preserving across frames, so there's no coverage-based
+  // decision to make here (see CoTrackerBackend's class doc comment).
   std::ostringstream log;
-  if (!hasPrev() || needsReseed())
   {
     std::vector<AnchorPoint> candidate_anchors;
     const std::vector<cv::Point2f> query_points = selectAnchors(image, candidate_anchors);

@@ -18,13 +18,10 @@ namespace livo_recon
 {
 
 Eigen::MatrixXd gravityCovarianceFromCalibration(
-    const V3D& u, const M3D& R_init, const M3D& acc_mean_cov, double s_r2,
-    bool gravity_s2, const Eigen::Matrix<double, 3, 2>& basis)
+    const V3D& u, const M3D& R_init, const M3D& acc_mean_cov, double s_r2)
 {
   const M3D T = M3D::Identity() - u * u.transpose();
   const M3D C_tan = symmetrized(M3D(T * (R_init * acc_mean_cov * R_init.transpose()) * T));
-  if (gravity_s2)
-    return symmetrized(Eigen::Matrix2d(basis.transpose() * C_tan * basis));
   return C_tan + s_r2 * u * u.transpose();
 }
 
@@ -75,13 +72,15 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
   if (opts_.accel_excess_model != "bias" && opts_.accel_excess_model != "scale")
     throw std::invalid_argument(
         "calib/stationary/accel_excess_model must be bias or scale");
+  for (const char* removed_key : {"calib/p0/tilt_ba_ambiguity_accel_std", "calib/p0/ba_radial_model_floor"})
+    if (pnh.hasParam(removed_key))
+      throw std::invalid_argument(
+          std::string("removed key: ") + removed_key + " -- both were ablated away 2026-10-23 "
+          "(zeroing each changed frame-1 position drift by <0.5%, not adding real information); "
+          "P_ba is now exactly the calibration's own measured J*acc_mean_cov*J^T, nothing added");
   paramWarn<int>(pnh, "calib/p0/autocov_lags", opts_.p0_autocov_lags, 20);
-  paramWarn<double>(pnh, "calib/p0/tilt_ba_ambiguity_accel_std",
-                    opts_.p0_tilt_ba_ambiguity_accel_std, 0.03);
   paramWarn<double>(pnh, "calib/p0/bg_model_floor",
                     opts_.p0_bg_model_floor, 1.0e-5);
-  paramWarn<double>(pnh, "calib/p0/ba_radial_model_floor",
-                    opts_.p0_ba_radial_model_floor, 1.0e-5);
   paramWarn<double>(pnh, "calib/p0/numerical_eigenvalue_floor",
                     opts_.p0_numerical_eigenvalue_floor, 1e-12);
   paramWarn<std::string>(pnh, "calib/p0/gravity_cov_mode", opts_.p0_gravity_cov_mode, std::string("fixed"));
@@ -89,12 +88,10 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
     throw std::invalid_argument("calib/p0/gravity_cov_mode must be fixed or calibration");
 
   opts_.p0_autocov_lags = std::max(0, opts_.p0_autocov_lags);
-  if (!std::isfinite(opts_.p0_tilt_ba_ambiguity_accel_std) || opts_.p0_tilt_ba_ambiguity_accel_std < 0.0 ||
-      !std::isfinite(opts_.p0_bg_model_floor) || opts_.p0_bg_model_floor < 0.0 ||
-      !std::isfinite(opts_.p0_ba_radial_model_floor) || opts_.p0_ba_radial_model_floor < 0.0 ||
+  if (!std::isfinite(opts_.p0_bg_model_floor) || opts_.p0_bg_model_floor < 0.0 ||
       !std::isfinite(opts_.p0_numerical_eigenvalue_floor) ||
       opts_.p0_numerical_eigenvalue_floor <= 0.0)
-    throw std::invalid_argument("calib/p0 ambiguity and floor parameters must be finite and not negative");
+    throw std::invalid_argument("calib/p0 floor parameters must be finite and not negative");
   std::ostringstream oss;
   oss << "[params/calib/stationary]"
       << "\n  required: true"
@@ -102,10 +99,7 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
   oss << "\n  bootstrap point covariance: sensor model"
       << "\n  sensor sigma_r2, sigma_a2: " << opts_.sensor_sigma_r2 << ", " << opts_.sensor_sigma_a2;
   oss << "\n  p0/autocov_lags: " << opts_.p0_autocov_lags
-      << "\n  p0/tilt_ba_ambiguity_accel_std: "
-      << opts_.p0_tilt_ba_ambiguity_accel_std
-      << "\n  p0/model_floors(bg,ba_radial): " << opts_.p0_bg_model_floor << ", "
-      << opts_.p0_ba_radial_model_floor;
+      << "\n  p0/model_floor(bg): " << opts_.p0_bg_model_floor;
   oss << "\n  p0/numerical_eigenvalue_floor: "
       << opts_.p0_numerical_eigenvalue_floor;
   oss << "\n  p0/gravity_cov_mode: " << opts_.p0_gravity_cov_mode;
@@ -189,40 +183,21 @@ void CalibProc::computeBiasAndNoise(V3D& acc_bias, V3D& gyro_bias,
   acc_bias  /= static_cast<double>(N);
   gyro_bias /= static_cast<double>(N);
 
-  M3D acc_cov  = M3D::Zero();
-  M3D gyro_cov = M3D::Zero();
-  for (int i = 0; i < N; ++i)
-  {
-    const V3D da = calib_imu_samples[i].acc  - acc_bias;
-    const V3D dg = calib_imu_samples[i].gyro - gyro_bias;
-    acc_cov  += da * da.transpose();
-    gyro_cov += dg * dg.transpose();
-  }
-  acc_cov  /= static_cast<double>(N - 1);
-  gyro_cov /= static_cast<double>(N - 1);
+  // Stationary noise floor: fixed, measured directly from a dedicated
+  // 20.6s stationary IMU calibration run (mid360 unit, 2026-10-22 14:18),
+  // not derived from this calibration's own short collectSamples() window
+  // (calib/stationary/num_frames, ~0.5s of IMU samples). That short-window
+  // derivation (removed here) was found to overestimate the true
+  // stationary floor by ~19x for accel and ~2x for gyro against this
+  // dedicated measurement -- too few samples for a reliable variance
+  // estimate. No config option controls this; it is the only floor this
+  // calibration now produces.
+  var_acc = V3D(1.335e-03, 1.463e-03, 8.644e-04);
+  var_gyr = V3D(5.885e-06, 2.257e-06, 2.242e-06);
 
-  // CQ-59 item 4: measured on eee_01/eee_02 (10s LIO-only smoke runs,
-  // calib_processing's own diag print below) -- acc max/min ratio 9.8-17.4,
-  // gyr max/min ratio 7.98-39.4. Neither is anywhere near 1, so per the
-  // card's own criterion this IS worth a flag: var_acc/var_gyr now carry
-  // the REAL per-axis diagonal instead of an isotropic V3D::Constant(mean)
-  // broadcast. This is behavior-PRESERVING for every existing consumer --
-  // grepped every varAccFloor()/varGyrFloor() call site (lio_coupled.cpp,
-  // lio_iekf.cpp): all of them immediately
-  // call .mean() on the result, and mean([d0,d1,d2]) == trace/3 exactly,
-  // so nothing downstream changes unless it reads the raw V3D directly --
-  // which only the new prior_per_axis_sigma path (estimateCoupledCorrection())
-  // now does.
-  ROS_INFO_STREAM("[calib] per-axis floor (diag, not mean-reduced):"
-      << "  acc=[" << acc_cov(0,0) << ", " << acc_cov(1,1) << ", " << acc_cov(2,2) << "]"
-      << "  gyr=[" << gyro_cov(0,0) << ", " << gyro_cov(1,1) << ", " << gyro_cov(2,2) << "]"
-      << "  acc_ratio(max/min)=" << (std::max({acc_cov(0,0), acc_cov(1,1), acc_cov(2,2)})
-                                    / std::max(std::min({acc_cov(0,0), acc_cov(1,1), acc_cov(2,2)}), 1e-18))
-      << "  gyr_ratio(max/min)=" << (std::max({gyro_cov(0,0), gyro_cov(1,1), gyro_cov(2,2)})
-                                    / std::max(std::min({gyro_cov(0,0), gyro_cov(1,1), gyro_cov(2,2)}), 1e-18)));
-
-  var_acc = V3D(acc_cov(0,0), acc_cov(1,1), acc_cov(2,2));
-  var_gyr = V3D(gyro_cov(0,0), gyro_cov(1,1), gyro_cov(2,2));
+  ROS_INFO_STREAM("[calib] stationary noise floor (fixed, measured 2026-10-22, not derived from this run's own samples):"
+      << "  acc=[" << var_acc.x() << ", " << var_acc.y() << ", " << var_acc.z() << "]"
+      << "  gyr=[" << var_gyr.x() << ", " << var_gyr.y() << ", " << var_gyr.z() << "]");
 }
 
 M3D CalibProc::covarianceOfMean(bool accelerometer) const
@@ -290,25 +265,16 @@ void CalibProc::applyCalibrationDerivedP0(
     J.col(axis) = (bap - bam) / (2.0 * eps);
   }
 
+  // 2026-10-23: P_ba is the calibration's own measured J*acc_mean_cov*J^T
+  // alone now -- the transverse tilt/b_a-ambiguity term (a hardcoded
+  // worst-case constant, calib/p0/tilt_ba_ambiguity_accel_std) and the
+  // radial floor (calib/p0/ba_radial_model_floor) were both removed after
+  // a direct ablation (holding gravity/Q-scale/extrinsic fixed at their
+  // own defaults) found zeroing both changed frame-1 position drift by
+  // <0.5% -- neither was adding real information, just inflating P_ba
+  // for no measurable benefit.
   M3D P_ba = symmetrized(M3D(J * acc_mean_cov * J.transpose()));
   const double bg_floor = opts_.p0_bg_model_floor;
-  const double ba_radial_floor = opts_.p0_ba_radial_model_floor;
-
-  // Stationary specific force constrains only the SUM delta_a = A*delta_theta + delta_ba; the transverse null-space ambiguity
-  // (shared equally, in acceleration-equivalent units, by gravity tilt and accelerometer bias) still contributes to the
-  // accelerometer-bias block even though the tilt side is pinned away.
-  const double gravity_mag = state_->gravity().norm();
-  if (!std::isfinite(gravity_mag) || gravity_mag < 1e-6)
-    throw std::runtime_error("calibration-derived P0 requires nonzero finite gravity");
-  const V3D gravity_axis_body =
-      (R_init.transpose() * (-state_->gravity())).normalized();
-  const M3D tangent = M3D::Identity() -
-      gravity_axis_body * gravity_axis_body.transpose();
-  const double ambiguity_std = opts_.p0_tilt_ba_ambiguity_accel_std;
-  const M3D ambiguity_accel_cov =
-      ambiguity_std * ambiguity_std * tangent;
-  P_ba += ambiguity_accel_cov + ba_radial_floor *
-      gravity_axis_body * gravity_axis_body.transpose();
 
   Eigen::MatrixXd& P = state_->covMut();
   P.block(state_->idxBA(), state_->idxBA(), 3, 3) = P_ba;
@@ -330,17 +296,11 @@ void CalibProc::applyCalibrationDerivedP0(
     // Cross-covariance between gravity and every other block (bg, ba, theta, p, v) stays zero --
     // the tilt/ba/gravity coupling is a known omission, not modeled here.
     const Eigen::MatrixXd P_g = gravityCovarianceFromCalibration(
-        state_->gravity().normalized(), R_init, acc_mean_cov, state_->initCovGravity(),
-        state_->gravityS2(), state_->gravityBasis());
+        state_->gravity().normalized(), R_init, acc_mean_cov, state_->initCovGravity());
     P.block(state_->idxG(), state_->idxG(), state_->gravDim(), state_->gravDim()) = P_g;
   }
 
   P = symmetrized(P);
-
-  ROS_INFO_STREAM("[calib/P0] balanced tilt-b_a ambiguity: accel_std="
-      << ambiguity_std << " m/s^2, equivalent_each_accel_std="
-      << ambiguity_std << " m/s^2, equivalent_each_tilt_std="
-      << ambiguity_std / gravity_mag << " rad");
 }
 
 M3D CalibProc::computeInitialRotation(const V3D& acc_bias) const

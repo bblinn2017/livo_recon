@@ -4,7 +4,11 @@
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/lio/voxelplane.h"
 #include "livo_recon/diagnostics/r66_writers.h"
+#include "livo_recon/diagnostics/vio_correction.h"
+#include "livo_recon/diagnostics/lidar_image_bounds.h"
+#include "livo_recon/diagnostics/state_correction_trace.h"
 
+#include <cmath>
 #include <memory>
 #include <stdexcept>
 
@@ -50,6 +54,9 @@ void LivoReconNode::loadParameters()
   paramWarn<bool>(pnh_, "run/auto_terminate_on_idle", auto_terminate_on_idle_, false);
   paramWarn<double>(pnh_, "run/auto_terminate_idle_secs", auto_terminate_idle_secs_, 5.0);
   paramWarn<bool>(pnh_, "log/frame_window", frame_window_log_, false);
+  paramWarn<bool>(pnh_, "log/vio_correction/enable", vio_correction_log_, false);
+  paramWarn<bool>(pnh_, "log/lidar_image_bounds", lidar_image_bounds_log_, false);
+  paramWarn<bool>(pnh_, "log/state_correction_trace", state_correction_trace_log_, false);
 
   ctx_.printer->print(PrintCategory::PARAMS, ctx_.printer->loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, ctx_.state->loadParameters(pnh_));
@@ -58,7 +65,7 @@ void LivoReconNode::loadParameters()
 
   // vio_proc_ (which owns the vio/enable switch) must load before the
   // tracker so we know whether to load the tracker's backend at all -- with
-  // VIO disabled (an LIO-only ablation), no CoTracker/TAPNext/Track-On
+  // VIO disabled (an LIO-only ablation), no CoTracker
   // model should ever be constructed, not just skipped per-frame.
   // combined_proc_ also needs loading here (not down with the other procs
   // below) since CombinedProc::processCombined() always calls VioProc::
@@ -177,6 +184,25 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
     writeFrameWindowRow(++frame_window_index_, mg.image.t + ctx_.data_queues->start_time,
                         mg.lidar_points.size(), mg.points.size(), mg.n_imu_samples);
 
+  if (lidar_image_bounds_log_ && !mg.image.image.empty())
+  {
+    const int img_rows = mg.image.image.rows;
+    const int img_cols = mg.image.image.cols;
+    int n_behind = 0, n_oob = 0, n_visible = 0;
+    for (const auto& src : mg.points)
+    {
+      const V3D p_cam = ctx_.state->imuToCamera(src.point);
+      if (p_cam.z() <= 0) { ++n_behind; continue; }
+      const int u = static_cast<int>(std::round(ctx_.state->cameraFx() * p_cam.x() / p_cam.z() + ctx_.state->cameraCx()));
+      const int v = static_cast<int>(std::round(ctx_.state->cameraFy() * p_cam.y() / p_cam.z() + ctx_.state->cameraCy()));
+      if (u < 0 || v < 0 || u >= img_cols || v >= img_rows) { ++n_oob; continue; }
+      ++n_visible;
+    }
+    writeLidarImageBoundsRow(static_cast<int>(++lidar_image_bounds_frame_index_),
+                             mg.image.t + ctx_.data_queues->start_time,
+                             static_cast<int>(mg.points.size()), n_behind, n_oob, n_visible);
+  }
+
   // mg.tracked_frame was already populated by CbkProc::syncMeasures()
   // before this measure group ever reached popMeasureGroup() (task #145)
   // -- no wait needed here, whichever path below reads it. Resolve its
@@ -240,9 +266,22 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
     mg.pos_after_vio = ctx_.state->pos();
     mg.rot_after_vio = ctx_.state->rot();
 
+    if (vio_correction_log_)
+      writeVioCorrectionRow(static_cast<int>(++vio_correction_frame_index_),
+                            mg.image.t + ctx_.data_queues->start_time,
+                            mg.pos_after_lio, mg.rot_after_lio, mg.pos_after_vio, mg.rot_after_vio);
+
     ctx_.printer->print(PrintCategory::LIO, lio_log);
     ctx_.printer->print(PrintCategory::VIO, vio_log);
   }
+
+  if (state_correction_trace_log_)
+    writeStateCorrectionTraceRow(static_cast<int>(++state_correction_trace_frame_index_),
+                                 mg.image.t + ctx_.data_queues->start_time,
+                                 mg.pos_before_imu, mg.rot_before_imu, mg.vel_before_imu,
+                                 mg.pos_after_imu, mg.rot_after_imu, mg.vel_after_imu,
+                                 mg.pos_after_lio, mg.rot_after_lio, mg.vel_after_lio,
+                                 mg.pos_after_vio, mg.rot_after_vio);
 
   // Record THIS frame's own final, fully-corrected pose (whichever path
   // above produced it, including any CombinedProc rollback) for whatever

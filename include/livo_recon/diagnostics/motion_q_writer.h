@@ -18,21 +18,17 @@ void writeMotionQSampleDiagnostic(
     const V3D& q_acc, const V3D& q_gyr);
 
 // R83B (A6/B5): one row per IMU step (not per scan) -- the compact motion_q_scan.csv holds scan means only, which
-// hides the per-step pairing structure the onset analysis needs. acc_clamped/gyr_clamped are THIS STEP's per-axis
-// clamp flags (the var_acc_step/var_gyr_step axis hit its max_dynamic_variance ceiling before scaling down).
+// hides the per-step pairing structure the onset analysis needs.
 void writeMotionQStepDiagnostic(
     size_t scan_index, size_t step_index, double t_abs,
-    const V3D& q_acc, const V3D& q_gyr,
-    bool acc_clamped_x, bool acc_clamped_y, bool acc_clamped_z,
-    bool gyr_clamped_x, bool gyr_clamped_y, bool gyr_clamped_z);
+    const V3D& q_acc, const V3D& q_gyr);
 
 void writeMotionQScanDiagnostic(
-    size_t scan_index, double t_abs, const std::string& model, double beta,
+    size_t scan_index, double t_abs, const std::string& model,
     double acc_scale, double gyr_scale,
     size_t sample_count, double mean_dynamic_acc_norm,
     double mean_dynamic_gyr_norm, const V3D& mean_q_acc,
     const V3D& mean_q_gyr, const V3D& mean_debiased_acc_energy,
-    const V3D& mean_debiased_gyr_energy, size_t acc_clamped_axes,
-    size_t gyr_clamped_axes);
+    const V3D& mean_debiased_gyr_energy);
 
 }  // namespace livo_recon
