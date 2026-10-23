@@ -150,11 +150,26 @@ bool VioProc::solveSystem(const TrackedFrame& frame, float& last_error, float& l
 
   if (!ok) return false;
 
-  // History (147-172): see docs/livo_recon_changelog.md#src-processing-vio_processing.cpp-147
-  // This per-iteration convergence check stays on avg_error's weighted/
-  // squared/normalized scale -- only the whole-frame max_avg_error gate
-  // (estimateStateCorrection(), below) switched to the pixel-space metric.
-  if (avg_error >= last_error && !opts_.force_all_iterations) return false;
+  // 2026-10-23: gate VIO admission ONCE, at the first iteration, on an ABSOLUTE criterion (the
+  // same avg_abs_pixel_residual threshold the whole-frame rollback check below uses, opts_.
+  // max_avg_error) -- not every iteration having to IMPROVE on the previous one (the old
+  // behavior: `avg_error >= last_error -> reject AND stop the whole loop`, via estimateState
+  // Correction()'s "no_improve" break on this function returning false). That conflated real
+  // divergence with the ordinary small iteration-to-iteration wobble a converging Gauss-Newton
+  // fit has -- fine during a clean, low-blur stationary window (where this matched force_all_
+  // iterations closely enough not to matter), but during real motion (lower effective tracking
+  // rate, motion blur) a transient wobble could trip this and abandon a frame that would have
+  // converged fine. Now: iteration 0 decides whether VIO is admissible AT ALL this frame (a bad
+  // initial fit is still rejected, same as before, just judged on an absolute scale instead of
+  // "worse than iteration -1" which is meaningless for iter 0 anyway -- last_error starts at
+  // FLT_MAX, so the old check was already a no-op at iter 0). Once admitted, later iterations are
+  // never rejected for merely not improving on the immediately preceding one; the convergence
+  // checks in estimateStateCorrection() (min_norm_dtheta/dt, rel_diff) are what stop the loop once
+  // it's actually converged, and the end-of-frame max_avg_error check still catches a frame that
+  // degraded badly by its final iteration.
+  if (iter == 0 && avg_abs_pixel_residual > static_cast<float>(opts_.max_avg_error) &&
+      !opts_.force_all_iterations)
+    return false;
 
   last_error = avg_error;
   last_pixel_residual = avg_abs_pixel_residual;

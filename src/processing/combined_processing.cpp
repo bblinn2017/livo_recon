@@ -82,14 +82,36 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
   // last_avg_res_lio is overwritten every iteration LIO actually
   // contributes (no longer gated on improvement -- there's no "best" to
   // track once nothing stops on it), purely for the post-loop consistency
-  // log. Only VIO's own fit is checked per iteration now, and failing it
-  // rejects VIO's contribution for THAT iteration alone (see below) --
-  // never stops the loop.
+  // log.
   double last_avg_res_lio = std::numeric_limits<double>::quiet_NaN();
-  float  best_avg_err_vio = std::numeric_limits<float>::max();
   // History (74-78): see docs/livo_recon_changelog.md#src-processing-combined_processing.cpp-74
   int last_n_meas_lio = 0;
   int last_n_meas_vio = 0;
+  // 2026-10-23: VIO is gated ONCE, at iteration 0, on an ABSOLUTE criterion (avg_abs_pixel_
+  // residual_vio vs opts_.max_avg_error -- the SAME threshold the end-of-frame rollback check
+  // below uses) instead of every iteration having to improve on a running best-so-far. History:
+  // the old per-iteration "avg_err_vio >= best_avg_err_vio -> exclude VIO from THIS iteration"
+  // check let VIO flip in and out of the joint solve mid-frame -- confirmed via a direct
+  // investigation (capture_10_20_no3's stationary window) that excluding VIO for even one
+  // iteration removes its restraint on LIO's own step, letting LIO's position correction grow
+  // (observed one frame going from ~0.5mm/iteration with VIO included to 1.35mm the moment VIO
+  // was excluded), which then pushes the state somewhere VIO's OWN reprojection disagrees with
+  // even more (observed avg_err_vio jumping 0.06->3.14, pixel residual 1.1px->8.3px, consistent
+  // with ~1.35mm of unconstrained translation at ~0.4m feature depth) -- a feedback loop that
+  // both degrades the mean (unconstrained LIO-only steps are real, applied corrections) and
+  // corrupts the reported covariance (applyCovarianceUpdate() only snapshots the LAST iteration's
+  // information, so a frame that oscillated LIO-only/joint/LIO-only ends with a covariance that
+  // reflects whichever one the last iteration happened to land on, not what actually moved the
+  // mean). Fixing this (force_all_iterations=true, i.e. never excluding VIO once it has
+  // residuals) cut mean position drift over the full stationary window by over half (1.71mm ->
+  // 0.77mm) and made it the best of all three modes -- but force_all_iterations ALSO removes the
+  // iteration-0 admission check entirely, which is NOT safe during real motion (motion blur/bad
+  // tracking could produce a genuinely bad initial VIO fit that should be rejected outright, not
+  // forced in) -- the stationary window can't exercise that failure mode at all, so a clean win
+  // there doesn't prove it's safe in general. This is the middle ground: gate once, on an
+  // absolute scale, then commit -- VIO admitted at iteration 0 is never re-litigated mid-frame,
+  // but a genuinely bad iteration-0 fit is still rejected for the whole frame, same as before.
+  bool vio_admitted = false;
 
   for (; iter < opts_.max_iterations; ++iter)
   {
@@ -104,19 +126,17 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
 
     if (!have_lio && !have_vio) { stop = "no_residuals"; break; }
 
-    // VIO-only per-iteration rejection: this stays on avg_err_vio's
-    // weighted/squared/normalized scale (the EKF's own convergence
-    // signal, same reasoning as VioProc::solveSystem()'s identical
-    // per-iteration check) -- if this iteration's VIO fit didn't improve
-    // on VIO's own best-so-far, exclude VIO's contribution from THIS
-    // iteration's joint update. LIO's own residual is never checked (see
-    // last_avg_res_lio's doc comment above) and the loop keeps going
-    // rather than halting the whole frame, so LIO keeps refining every
-    // iteration regardless of what VIO is doing.
-    if (!opts_.force_all_iterations && have_vio && avg_err_vio >= best_avg_err_vio)
+    // See vio_admitted's own doc comment above. iter==0 decides ONCE whether VIO is usable at
+    // all this frame, on an absolute scale; once admitted it is never excluded again mid-frame
+    // merely for a worse-than-best-so-far iteration (force_all_iterations still bypasses the
+    // iter-0 gate too, same as before, for offline analysis).
+    if (iter == 0)
+      vio_admitted = opts_.force_all_iterations ||
+          (have_vio && avg_abs_pixel_residual_vio <= static_cast<float>(opts_.max_avg_error));
+    if (!vio_admitted)
       have_vio = false;
-    else if (have_vio)
-      { best_avg_err_vio = avg_err_vio; last_n_meas_vio = vio_part.n_meas; }
+    if (have_vio)
+      last_n_meas_vio = vio_part.n_meas;
     if (have_lio) { last_avg_res_lio = avg_res_lio; last_n_meas_lio = lio_part.n_meas; }
 
     if (have_vio)
@@ -151,6 +171,18 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
 
     ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
     any_solved = true;
+
+    if (opts_.log_debug_en)
+    {
+      // 2026-10-23 (investigation): the STEP this iteration's applyMeanUpdate() just applied --
+      // logged separately from the pre-update accumulate line above so it can be correlated with
+      // the NEXT iteration's avg_err_vio (testing whether a rotation jump this iteration explains
+      // a VIO reprojection-error spike next iteration).
+      ROS_INFO_STREAM(std::scientific << std::setprecision(4)
+          << "[combined/ekf/step] t=" << mg.image.t << " iter=" << iter
+          << "  dtheta_deg=" << ekf_.dtheta.norm() * 180.0 / M_PI
+          << "  dt_mm=" << ekf_.dt.norm() * 1000.0);
+    }
 
     if (ekf_.dtheta.norm() < opts_.min_norm_dtheta && ekf_.dt.norm() < opts_.min_norm_dt)
     {
