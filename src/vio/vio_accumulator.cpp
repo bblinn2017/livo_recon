@@ -318,13 +318,18 @@ bool VioAccumulator::computeRayDistanceResidualAndJacobian(const ReprojectionPre
 
 bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<AnchorPoint>& anchors,
                                 const VioAccumulateOptions& opts, EkfUpdate& out,
-                                float& avg_error, int& n_valid, double t_abs, int iter) const
+                                float& avg_error, float& avg_abs_pixel_residual,
+                                int& n_valid, double t_abs, int iter) const
 {
   const M3D rot_curr = state_->rot();
   const V3D pos_curr = state_->pos();
   const M3D Rcw = state_->Rcw();
   const double fx = state_->cameraFx(), fy = state_->cameraFy();
   const double cx = state_->cameraCx(), cy = state_->cameraCy();
+  // NOTE for avg_abs_pixel_residual below: computeEpipolarResidualAndJacobian()
+  // already multiplies its own residual_out by pixel_scale = 0.5*(fx+fy) (see
+  // its own last lines) before returning it -- so residual/residual_epi here
+  // are ALREADY in pixel units. Do not re-scale by (fx+fy) again.
 
   const ReprojectionPrecomputed pre = computeReprojectionPrecomputed(rot_curr, pos_curr, Rcw,
                                                                      frame.rot_anchor, frame.pos_anchor);
@@ -342,6 +347,7 @@ bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<Anc
   std::vector<Eigen::Matrix<double, 6, 6>> point_HtH(n, Eigen::Matrix<double, 6, 6>::Zero());
   std::vector<Eigen::Matrix<double, 6, 1>> point_Htz(n, Eigen::Matrix<double, 6, 1>::Zero());
   std::vector<double> point_err(n, 0.0);
+  std::vector<double> point_abs_px(n, 0.0);
   std::vector<int> thread_n(n_threads, 0);
   std::vector<int> thread_n_reject(n_threads, 0);
   std::vector<int> thread_n_low_norml(n_threads, 0);
@@ -417,6 +423,10 @@ bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<Anc
       point_Htz[i].noalias() += J_epi_rot_only.transpose() * weight_epi * residual_epi;
       point_Htz[i].noalias() += J_ray_pos_only.transpose() * weight_ray * residual_ray;
       point_err[i] = mdist2;
+      // Epipolar term only -- residual_ray is metric (meters), not a pixel
+      // distance, see avg_abs_pixel_residual's doc comment. residual_epi is
+      // already pixel-scaled (see computeEpipolarResidualAndJacobian()).
+      point_abs_px[i] = std::abs(residual_epi);
       ++thread_n[t];
 
       if (do_point_log)
@@ -501,6 +511,8 @@ bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<Anc
     point_HtH[i].noalias() += J_scaled.transpose() * weight * J_scaled;
     point_Htz[i].noalias() += J_scaled.transpose() * weight * residual;
     point_err[i] = mdist2;
+    // residual is already pixel-scaled (see computeEpipolarResidualAndJacobian()).
+    point_abs_px[i] = std::abs(residual);
     ++thread_n[t];
 
     if (do_point_log)
@@ -526,12 +538,13 @@ bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<Anc
   // fixed point-index order 0..n-1, regardless of how many OMP threads
   // computed the individual point_HtH[i]/point_Htz[i]/point_err[i] entries
   // above -- see their declaration's doc comment.
-  double total_err = 0.0;
+  double total_err = 0.0, total_abs_px = 0.0;
   for (int i = 0; i < n; ++i)
   {
     out.HtH.noalias() += point_HtH[i];
     out.Htz.noalias() += point_Htz[i];
     total_err += point_err[i];
+    total_abs_px += point_abs_px[i];
   }
 
   n_valid = 0;
@@ -559,6 +572,7 @@ bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<Anc
   if (n_valid == 0) return false;
 
   avg_error = static_cast<float>(total_err / n_valid);
+  avg_abs_pixel_residual = static_cast<float>(total_abs_px / n_valid);
   return true;
 }
 

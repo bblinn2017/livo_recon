@@ -47,6 +47,7 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
         "calib/stationary/num_samples was removed in R106+ (Bryce, 2026-10-20): "
         "use calib/stationary/num_frames instead (must be > 0)");
   paramWarn<int>(pnh, "calib/stationary/num_frames", opts_.num_frames, 0);
+  vib_ = loadVibrationConfig(pnh);
   if (opts_.num_frames <= 0)
     throw std::invalid_argument("calib/stationary/num_frames must be set and > 0");
   paramWarn<std::string>(pnh, "imu/ds/mode", opts_.ds_mode, "first");
@@ -78,7 +79,15 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
           std::string("removed key: ") + removed_key + " -- both were ablated away 2026-10-23 "
           "(zeroing each changed frame-1 position drift by <0.5%, not adding real information); "
           "P_ba is now exactly the calibration's own measured J*acc_mean_cov*J^T, nothing added");
+  paramWarn<double>(pnh, "imu/process_noise/floor/acc_variance",
+                    opts_.floor_acc_variance, 1.288e-03);
+  paramWarn<double>(pnh, "imu/process_noise/floor/gyro_variance",
+                    opts_.floor_gyro_variance, 2.865e-06);
+  if (!std::isfinite(opts_.floor_acc_variance) || opts_.floor_acc_variance <= 0.0 ||
+      !std::isfinite(opts_.floor_gyro_variance) || opts_.floor_gyro_variance <= 0.0)
+    throw std::invalid_argument("imu/process_noise/floor/{acc,gyro}_variance must be finite and > 0");
   paramWarn<int>(pnh, "calib/p0/autocov_lags", opts_.p0_autocov_lags, 20);
+  paramWarn<double>(pnh, "calib/p0/theta_variance", opts_.p0_theta_variance, -1.0);
   paramWarn<double>(pnh, "calib/p0/bg_model_floor",
                     opts_.p0_bg_model_floor, 1.0e-5);
   paramWarn<double>(pnh, "calib/p0/numerical_eigenvalue_floor",
@@ -88,6 +97,8 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
     throw std::invalid_argument("calib/p0/gravity_cov_mode must be fixed or calibration");
 
   opts_.p0_autocov_lags = std::max(0, opts_.p0_autocov_lags);
+  if (!std::isfinite(opts_.p0_theta_variance))
+    throw std::invalid_argument("calib/p0/theta_variance must be finite (-1 keeps the exact-zero pin)");
   if (!std::isfinite(opts_.p0_bg_model_floor) || opts_.p0_bg_model_floor < 0.0 ||
       !std::isfinite(opts_.p0_numerical_eigenvalue_floor) ||
       opts_.p0_numerical_eigenvalue_floor <= 0.0)
@@ -98,7 +109,9 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  num_frames: " << opts_.num_frames;
   oss << "\n  bootstrap point covariance: sensor model"
       << "\n  sensor sigma_r2, sigma_a2: " << opts_.sensor_sigma_r2 << ", " << opts_.sensor_sigma_a2;
+  oss << "\n  process_noise/floor(acc,gyro): " << opts_.floor_acc_variance << ", " << opts_.floor_gyro_variance;
   oss << "\n  p0/autocov_lags: " << opts_.p0_autocov_lags
+      << "\n  p0/theta_variance: " << opts_.p0_theta_variance
       << "\n  p0/model_floor(bg): " << opts_.p0_bg_model_floor;
   oss << "\n  p0/numerical_eigenvalue_floor: "
       << opts_.p0_numerical_eigenvalue_floor;
@@ -106,11 +119,15 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
   return oss.str();
 }
 
-// R97A Q4 item 3: calib/p0/mode (and known_{pos,vel,theta}_variance) are removed -- attitude, position and velocity are
-// always pinned exactly zero (the yaml's own "calibration_derived" values, unconditionally now).
+// R97A Q4 item 3: calib/p0/mode (and known_{pos,vel,theta}_variance) are removed -- position and velocity are
+// always pinned exactly zero (the yaml's own "calibration_derived" values, unconditionally now). Attitude
+// (theta) is pinned exactly zero too UNLESS p0_theta_variance (diagnostic-only, see its own doc comment) is
+// set >= 0, in which case it becomes a known CONSTANT (not pinned, see KnownBlock's own variance semantics)
+// of that isotropic value instead.
 std::vector<p0::KnownBlock> CalibProc::knownP0Blocks() const
 {
-  return { {StateGroup::idxR(), 0.0}, {StateGroup::idxP(), 0.0}, {StateGroup::idxV(), 0.0} };
+  const double theta_var = opts_.p0_theta_variance >= 0.0 ? opts_.p0_theta_variance : 0.0;
+  return { {StateGroup::idxR(), theta_var}, {StateGroup::idxP(), 0.0}, {StateGroup::idxV(), 0.0} };
 }
 
 void CalibProc::stabilizeP0()
@@ -183,19 +200,30 @@ void CalibProc::computeBiasAndNoise(V3D& acc_bias, V3D& gyro_bias,
   acc_bias  /= static_cast<double>(N);
   gyro_bias /= static_cast<double>(N);
 
-  // Stationary noise floor: fixed, measured directly from a dedicated
-  // 20.6s stationary IMU calibration run (mid360 unit, 2026-10-22 14:18),
-  // not derived from this calibration's own short collectSamples() window
-  // (calib/stationary/num_frames, ~0.5s of IMU samples). That short-window
-  // derivation (removed here) was found to overestimate the true
-  // stationary floor by ~19x for accel and ~2x for gyro against this
+  // Stationary noise floor: isotropic (same value all 3 axes), config-
+  // controlled (imu/process_noise/floor/*), measured directly from a
+  // dedicated 20.6s stationary IMU calibration run (mid360 unit) rather
+  // than derived from this calibration's own short collectSamples()
+  // window (calib/stationary/num_frames, ~0.5s of IMU samples). That
+  // short-window derivation (removed here) was found to overestimate the
+  // true stationary floor by ~19x for accel and ~2x for gyro against this
   // dedicated measurement -- too few samples for a reliable variance
-  // estimate. No config option controls this; it is the only floor this
-  // calibration now produces.
-  var_acc = V3D(1.335e-03, 1.463e-03, 8.644e-04);
-  var_gyr = V3D(5.885e-06, 2.257e-06, 2.242e-06);
+  // estimate.
+  var_acc = V3D::Constant(opts_.floor_acc_variance);
+  var_gyr = V3D::Constant(opts_.floor_gyro_variance);
 
-  ROS_INFO_STREAM("[calib] stationary noise floor (fixed, measured 2026-10-22, not derived from this run's own samples):"
+  // cbk/imu/vibration/enable: the isotropic floor above was measured on a run that still has the
+  // prism vibration lines in it. The stream the filter actually propagates has the lines removed
+  // (CbkProc runs every live IMU sample through the canceller before it reaches the filter), so the
+  // floor must be the vibration-free one from the config instead, not the isotropic one above.
+  if (vib_.canceller.enable)
+  {
+    var_acc = V3D(vib_.floor_acc_variance[0], vib_.floor_acc_variance[1], vib_.floor_acc_variance[2]);
+    var_gyr = V3D(vib_.floor_gyro_variance[0], vib_.floor_gyro_variance[1], vib_.floor_gyro_variance[2]);
+  }
+
+  ROS_INFO_STREAM("[calib] stationary noise floor (isotropic, config-set, not derived from this run's own samples"
+      << (vib_.canceller.enable ? ", vibration-free: cbk/imu/vibration/floor_*" : "") << "):"
       << "  acc=[" << var_acc.x() << ", " << var_acc.y() << ", " << var_acc.z() << "]"
       << "  gyr=[" << var_gyr.x() << ", " << var_gyr.y() << ", " << var_gyr.z() << "]");
 }
@@ -246,38 +274,39 @@ M3D CalibProc::covarianceOfMean(bool accelerometer) const
 }
 
 void CalibProc::applyCalibrationDerivedP0(
-    const V3D& acc_mean, const M3D& R_init, const M3D& acc_mean_cov,
+    const M3D& R_init, const M3D& acc_mean_cov,
     const M3D& gyro_mean_cov)
 {
-  // R97A Q4 item 3: position, velocity and attitude are always pinned exactly zero (knownP0Blocks() below, applied last --
-  // clears every cross term of those rows/columns too), so the attitude row of the numeric Jacobian and the tilt/accelerometer-bias
-  // cross terms that used to feed P.block(idxR(), idxR()) and its BA cross terms are dead: nothing below ever reaches a pinned
-  // row or column. Only the accelerometer-bias row of the Jacobian is needed.
-  Eigen::Matrix3d J = Eigen::Matrix3d::Zero();
-  for (int axis = 0; axis < 3; ++axis)
-  {
-    const double eps = std::max(1e-7, std::abs(acc_mean(axis)) * 1e-7);
-    V3D plus = acc_mean, minus = acc_mean;
-    plus(axis) += eps;
-    minus(axis) -= eps;
-    const V3D bap = plus + computeInitialRotation(plus).transpose() * state_->gravity();
-    const V3D bam = minus + computeInitialRotation(minus).transpose() * state_->gravity();
-    J.col(axis) = (bap - bam) / (2.0 * eps);
-  }
-
-  // 2026-10-23: P_ba is the calibration's own measured J*acc_mean_cov*J^T
-  // alone now -- the transverse tilt/b_a-ambiguity term (a hardcoded
-  // worst-case constant, calib/p0/tilt_ba_ambiguity_accel_std) and the
-  // radial floor (calib/p0/ba_radial_model_floor) were both removed after
-  // a direct ablation (holding gravity/Q-scale/extrinsic fixed at their
-  // own defaults) found zeroing both changed frame-1 position drift by
-  // <0.5% -- neither was adding real information, just inflating P_ba
-  // for no measurable benefit.
-  M3D P_ba = symmetrized(M3D(J * acc_mean_cov * J.transpose()));
+  // 2026-10-23 (this session, R-ba-zero): P0's ba BLOCK (the one-time
+  // initial covariance set here, at calibration completion -- NOT a
+  // permanent pin; ba is not in knownP0Blocks(), so its covariance still
+  // evolves normally frame-to-frame afterward via ordinary EKF prediction/
+  // process noise, exactly like any other state) is now unconditionally
+  // Zero. Previously this was J*acc_mean_cov*J^T (J = d(true_acc_bias)/
+  // d(acc_mean) via central finite difference through
+  // computeInitialRotation()) -- the predecessor to that (a hardcoded
+  // tilt/b_a-ambiguity term plus a radial floor) was already removed
+  // earlier the same session after an ablation found <0.5% effect on
+  // frame-1 drift. A direct sweep of a diagnostic p0_ba_scale multiplier
+  // (0, 0.1, 0.5, 1, 10, 25, 100) on this same P0 ba block found the SAME
+  // result at the other end: propagated position covariance at
+  // frame_idx_=6 barely moved across five orders of magnitude (0.316-
+  // 0.321mm pooled std) -- it has essentially no leverage on position
+  // covariance growth over these frames, in either direction. It DID have
+  // a small, monotonic effect on the actual realized trajectory (more
+  // initial ba uncertainty -> more drift, 1.79mm at scale=0 up to 2.57mm
+  // at scale=100), so zero is strictly the best of everything tested: less
+  // drift, and no measurable covariance cost since this block wasn't
+  // informing anything anyway. Removed entirely rather than left at a
+  // config-set zero, since the whole Jacobian machinery existed only to
+  // produce this now-discarded value -- acc_mean/R_init are still needed
+  // by true_acc_bias/gravity's own construction above this function, just
+  // not here anymore.
+  const M3D P0_ba = M3D::Zero();
   const double bg_floor = opts_.p0_bg_model_floor;
 
   Eigen::MatrixXd& P = state_->covMut();
-  P.block(state_->idxBA(), state_->idxBA(), 3, 3) = P_ba;
+  P.block(state_->idxBA(), state_->idxBA(), 3, 3) = P0_ba;
   P.block(state_->idxBG(), state_->idxBG(), 3, 3) =
       gyro_mean_cov + bg_floor * M3D::Identity();
 
@@ -334,6 +363,14 @@ std::string CalibProc::estimateFromBuffer()
     return oss.str();
   }
 
+  // cbk/imu/vibration: the calibration window is raw (the canceller only learns until calibration is
+  // done); remove the vibration lines from it in batch so the stationary mean (the bias) and its
+  // covariance (covarianceOfMean) are not biased by a partial vibration cycle.
+  const int vib_params = removeLinesBatch(vib_.canceller, calib_imu_samples);
+  if (vib_.canceller.enable)
+    ROS_INFO_STREAM("[calib] vibration lines removed from the calibration window: " << vib_params
+        << " parameters over " << calib_imu_samples.size() << " samples");
+
   V3D acc_bias, gyro_bias, var_acc, var_gyr;
   computeBiasAndNoise(acc_bias, gyro_bias, var_acc, var_gyr);
 
@@ -364,7 +401,7 @@ std::string CalibProc::estimateFromBuffer()
   // dynamic process-noise model. Keep it separate from imu/process_noise.
   state_->setNoiseFloor(var_acc, var_gyr);
   state_->setAccScale(r63_acc_scale);
-  applyCalibrationDerivedP0(acc_bias, R_init, acc_mean_cov, gyro_mean_cov);
+  applyCalibrationDerivedP0(R_init, acc_mean_cov, gyro_mean_cov);
   stabilizeP0();
   state_->captureInitialCovariance("calibration_derived");
   writeGravityAlignmentDiagnostic(

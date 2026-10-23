@@ -3,6 +3,7 @@
 #include "livo_recon/node_context.h"
 #include "livo_recon/common_ros.h"
 #include "livo_recon/utils/lidar/lidar.h"
+#include "livo_recon/utils/imu/vibration_canceller.h"
 
 namespace livo_recon
 {
@@ -144,6 +145,9 @@ private:
   image_transport::ImageTransport&    it_;
 
   CbkProcOptions opts_;
+  // cbk/imu/vibration/*: removes the prism vibration lines from every IMU sample (learns only until the
+  // stationary calibration is done, see imuCallback())
+  VibrationCanceller vib_;
 
   ros::Subscriber image_sub_;
   ros::Subscriber lidar_sub_;

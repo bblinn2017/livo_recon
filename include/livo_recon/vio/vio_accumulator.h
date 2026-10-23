@@ -75,10 +75,29 @@ public:
   // out.applyMeanUpdate()/applyCovarianceUpdate() -- caller owns the EKF
   // solve step). avg_error/n_valid are the same diagnostics VioProc's
   // sequential solveSystem() has always computed. Returns false if there
-  // were no valid residuals this call (out/avg_error untouched).
+  // were no valid residuals this call (out/avg_error/avg_abs_pixel_residual
+  // untouched).
+  //
+  // `residual`/`residual_epi` (computeEpipolarResidualAndJacobian()) are
+  // already pixel-scaled internally (multiplied by pixel_scale =
+  // 0.5*(fx+fy) before being returned) -- so avg_error is a weighted,
+  // SQUARED pixel-space quantity (mean residual_px^2 * weight -- a
+  // Mahalanobis/chi-square-like statistic, not itself a plain pixel
+  // distance since it's squared and weighted) -- it is what the EKF's own
+  // per-iteration convergence check (solveSystem()'s reject-if-worse)
+  // compares against, and must stay on this scale for that math to mean
+  // anything. avg_abs_pixel_residual is a SEPARATE quantity: the plain
+  // mean |residual_px| (no squaring, no weight) across the same valid
+  // points, epipolar term only even in "mixed" mode -- the ray-distance
+  // term is metric/meters, not a pixel distance -- this is what
+  // VioProcOptions::max_avg_error/CombinedProcOptions::max_avg_error (the
+  // whole-frame rejection gate) compares against, 2026-10-23 onward, since
+  // that threshold is meant to be interpretable directly as a mean pixel
+  // error, unlike the squared/weighted per-iteration convergence check.
   bool accumulate(const TrackedFrame& frame, const std::vector<AnchorPoint>& anchors,
                    const VioAccumulateOptions& opts, EkfUpdate& out,
-                   float& avg_error, int& n_valid, double t_abs, int iter) const;
+                   float& avg_error, float& avg_abs_pixel_residual,
+                   int& n_valid, double t_abs, int iter) const;
 
 private:
   bool computeEpipolarResidualAndJacobian(const ReprojectionPrecomputed& pre,

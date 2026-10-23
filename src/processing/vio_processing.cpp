@@ -135,23 +135,29 @@ VioAccumulateOptions VioProc::accumulateOptions() const
   return a;
 }
 
-bool VioProc::solveSystem(const TrackedFrame& frame, float& last_error, double t_abs, int iter)
+bool VioProc::solveSystem(const TrackedFrame& frame, float& last_error, float& last_pixel_residual,
+                          double t_abs, int iter)
 {
   TimedScope ts(profiler_, "vio/ekf/solve");
 
   ekf_.reset();
   float avg_error = 0.0f;
+  float avg_abs_pixel_residual = 0.0f;
   int n_valid = 0;
   const bool ok = accumulator_.accumulate(frame, frame_anchors_, accumulateOptions(),
-                                          ekf_, avg_error, n_valid, t_abs, iter);
+                                          ekf_, avg_error, avg_abs_pixel_residual, n_valid, t_abs, iter);
   last_n_residuals_ = n_valid;
 
   if (!ok) return false;
 
   // History (147-172): see docs/livo_recon_changelog.md#src-processing-vio_processing.cpp-147
+  // This per-iteration convergence check stays on avg_error's weighted/
+  // squared/normalized scale -- only the whole-frame max_avg_error gate
+  // (estimateStateCorrection(), below) switched to the pixel-space metric.
   if (avg_error >= last_error && !opts_.force_all_iterations) return false;
 
   last_error = avg_error;
+  last_pixel_residual = avg_abs_pixel_residual;
 
   ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
 
@@ -163,6 +169,7 @@ bool VioProc::solveSystem(const TrackedFrame& frame, float& last_error, double t
     std::ostringstream ss;
     ss << "[vio/iter]  t_abs=" << std::fixed << std::setprecision(6) << t_abs
        << "  iter=" << iter << "  n_valid=" << n_valid << "  avg_error=" << avg_error
+       << "  avg_abs_pixel_residual=" << avg_abs_pixel_residual
        << std::scientific << std::setprecision(4)
        << "  trace(HtH_RR)=" << HtH_RR.trace() << "  trace(HtH_PP)=" << HtH_PP.trace()
        << "  dtheta_iter=[" << ekf_.dtheta.transpose() << "]"
@@ -180,7 +187,8 @@ bool VioProc::solveSystem(const TrackedFrame& frame, float& last_error, double t
 // error (CombinedProc's own joint loop owns that policy) and does NOT call
 // applyMeanUpdate/applyCovarianceUpdate (CombinedProc sums this with
 // LioProc's own accumulation first and applies once).
-bool VioProc::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, float& avg_error, int iter)
+bool VioProc::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, float& avg_error,
+                                    float& avg_abs_pixel_residual, int iter)
 {
   if (mg.image.image.empty() || !tracker_->loaded()) return false;
   const TrackedFrame& frame = mg.tracked_frame;
@@ -190,7 +198,7 @@ bool VioProc::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, float& avg
   int n_valid = 0;
   const double t_abs = mg.image.t + data_queues_->start_time;  // see processVIO()'s matching comment
   const bool ok = accumulator_.accumulate(frame, frame_anchors_, accumulateOptions(),
-                                          out, avg_error, n_valid, t_abs, iter);
+                                          out, avg_error, avg_abs_pixel_residual, n_valid, t_abs, iter);
   last_n_residuals_ = n_valid;
   return ok;
 }
@@ -229,13 +237,14 @@ std::string VioProc::estimateStateCorrection(const TrackedFrame& frame, double t
 
   V3D total_dtheta = V3D::Zero(), total_dt = V3D::Zero();
   float last_error = std::numeric_limits<float>::max();
+  float last_pixel_residual = std::numeric_limits<float>::max();
   float prev_error = std::numeric_limits<float>::max();
   std::string stop = "max_iter";
   int n_successful = 0;
 
   for (int iter = 0; iter < opts_.max_iterations; ++iter)
   {
-    if (!solveSystem(frame, last_error, t_abs, iter))
+    if (!solveSystem(frame, last_error, last_pixel_residual, t_abs, iter))
       { stop = "no_improve"; break; }
     ++n_successful;
     total_dtheta += ekf_.dtheta;
@@ -274,9 +283,13 @@ std::string VioProc::estimateStateCorrection(const TrackedFrame& frame, double t
   // criterion happened to accept it. Restoring `state_before_frame`
   // (captured before this frame's prior_cov_/covariance write) discards the
   // just-written posterior covariance too, exactly like it discards the
-  // mean correction.
+  // mean correction. 2026-10-23: compares against last_pixel_residual (a
+  // genuine mean |pixel error| across tracked points), not last_error
+  // (weighted/squared/normalized-coordinate) -- see VioAccumulator::
+  // accumulate()'s doc comment. max_avg_error's old default (5.0) was
+  // calibrated for the OLD metric's scale and needs re-tuning for this one.
   bool rejected = false;
-  if (n_successful > 0 && last_error > static_cast<float>(opts_.max_avg_error))
+  if (n_successful > 0 && last_pixel_residual > static_cast<float>(opts_.max_avg_error))
   {
     *state_ = state_before_frame;
     total_dtheta.setZero();
@@ -297,9 +310,11 @@ std::string VioProc::estimateStateCorrection(const TrackedFrame& frame, double t
   {
     EkfUpdate final_scratch;
     float final_avg_error = 0.0f;
+    float final_avg_abs_pixel_residual = 0.0f;
     int final_n_valid = 0;
     accumulator_.accumulate(frame, frame_anchors_, accumulateOptions(),
-                            final_scratch, final_avg_error, final_n_valid, t_abs, 99);
+                            final_scratch, final_avg_error, final_avg_abs_pixel_residual,
+                            final_n_valid, t_abs, 99);
   }
 
   if (opts_.log_iterations)
@@ -310,6 +325,7 @@ std::string VioProc::estimateStateCorrection(const TrackedFrame& frame, double t
         << "  max_iterations=" << opts_.max_iterations
         << "  stop=" << stop
         << "  avg_error=" << (n_successful > 0 ? last_error : std::numeric_limits<float>::quiet_NaN())
+        << "  avg_abs_pixel_residual=" << (n_successful > 0 ? last_pixel_residual : std::numeric_limits<float>::quiet_NaN())
         << "  rejected=" << (rejected ? 1 : 0);
     logIteration(opts_.log_path, fss.str());
   }
@@ -319,7 +335,7 @@ std::string VioProc::estimateStateCorrection(const TrackedFrame& frame, double t
       << "  residuals=" << last_n_residuals_
       << "  " << n_successful << "(" << stop << ")";
   if (rejected)
-    oss << " REJECTED(avg_error=" << last_error << " > " << opts_.max_avg_error << ")";
+    oss << " REJECTED(avg_abs_pixel_residual=" << last_pixel_residual << " > " << opts_.max_avg_error << ")";
   oss << std::scientific << std::setprecision(1)
       << "  |dtheta|=" << total_dtheta.norm() * (180.0 / M_PI) << " deg"
       << "  |dt|=" << total_dt.norm() * 1000.0 << " mm";

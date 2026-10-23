@@ -1,4 +1,5 @@
 #include "livo_recon/processing/cbk_processing.h"
+#include "livo_recon/utils/imu/vibration_params.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/profiler.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
@@ -118,6 +119,8 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
     throw std::invalid_argument("cbk/lidar/point_time_field, point_time_mode and point_time_ref are implemented for the PointCloud2 callback only (cbk/lidar/type pcl)");
   paramWarn<std::string>(pnh, "cbk/imu/acc_type", opts_.imu_acc_type, "g");
   paramWarn<std::string>(pnh, "cbk/imu/gyr_type", opts_.imu_gyr_type, "rad_s");
+  const VibrationConfig vib_cfg = loadVibrationConfig(pnh);
+  vib_.configure(vib_cfg.canceller);
 
   paramWarn<bool>(pnh, "log/data_queues/sync_debug", opts_.log_sync_debug, false);
   paramWarn<std::string>(pnh, "log/data_queues/sync_debug_path", opts_.sync_debug_log_path,
@@ -153,6 +156,7 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  cbk/lidar/type:   " << lidar_type_str
       << "\n  cbk/imu/acc_type: " << opts_.imu_acc_type
       << "\n  cbk/imu/gyr_type: " << opts_.imu_gyr_type
+      << "\n  cbk/imu/vibration/enable: " << (vib_.active() ? "true" : "false")
       << "\n  log/data_queues/sync_debug: " << (opts_.log_sync_debug ? "true" : "false")
       << "\n  log/data_queues/sync_debug_path: " << opts_.sync_debug_log_path
       << "\n  log/data_queues/lidar_msgs: " << (opts_.log_lidar_msgs ? "true" : "false")   // R80 (F-389)
@@ -414,6 +418,15 @@ void CbkProc::imuCallback(const sensor_msgs::ImuConstPtr& msg)
       msg->angular_velocity.z);
   if (opts_.imu_gyr_type == "deg_s")
     sample.gyro *= M_PI / 180.0;
+
+  // Prism vibration (cbk/imu/vibration/*). Until the stationary calibration is done the canceller only
+  // learns and the raw sample goes on: the calibration removes the lines from its own window in batch
+  // (CalibProc::estimateFromBuffer()), and the canceller is converged by the time it starts subtracting.
+  // 2026-10-23: UNLESS seeded (seed_main etc.) -- a seeded beta_ is already a real estimate from sample
+  // 0, not the "cold, unconverged" state apply=false exists to protect against, so start applying
+  // immediately rather than waiting for calib_done too.
+  if (vib_.active())
+    vib_.process(sample.t, sample.acc, sample.gyro, measures_->calib_done.get() || vib_.seeded());
 
   data_queues_->pushImu(sample);
 }

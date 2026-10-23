@@ -4,6 +4,7 @@
 #include "livo_recon/utils/data/measures.h"
 #include "livo_recon/utils/log/profiler.h"
 #include "livo_recon/lio/p0_pin.h"
+#include "livo_recon/utils/imu/vibration_params.h"
 #include <vector>
 
 namespace livo_recon
@@ -61,6 +62,13 @@ struct CalibProcOptions
   std::string ds_mode = "first";
   double ds_leaf_size = 0.15;
 
+  // Stationary noise floor (isotropic -- same value on all 3 axes),
+  // measured directly from a dedicated 20.6s stationary IMU calibration
+  // run (mid360 unit), config-controlled rather than hardcoded in
+  // computeBiasAndNoise() -- see imu/process_noise/floor/* in mid360.yaml.
+  double floor_acc_variance = 1.288e-03;   // (m/s^2)^2 per sample
+  double floor_gyro_variance = 2.865e-06;  // (rad/s)^2 per sample
+
   // R67 (F-265). Sensor covariance of the bootstrap (calibration) points.
   //   "sensor_model" (default): the same model the live scans use in deskewPoints(): getBodyCov(p_lidar, sigma_r2, sigma_a2)
   //                             rotated to the IMU frame with the LiDAR-IMU extrinsic. There is no motion inside a stationary
@@ -86,16 +94,49 @@ struct CalibProcOptions
   // pinned, excluded-from-the-floor path "calibration_derived" always
   // selected with known_pos/vel/theta_variance == 0.
   int p0_autocov_lags = 20;
-  // 2026-10-23: calib/p0/tilt_ba_ambiguity_accel_std and
-  // calib/p0/ba_radial_model_floor are removed. Both were hardcoded
-  // additions on top of P_ba (the calibration's own measured
-  // J*acc_mean_cov*J^T) modeling the transverse tilt/accelerometer-bias
-  // degeneracy and a radial floor respectively -- a direct ablation
-  // (holding gravity/Q-scale/extrinsic fixed at their own defaults, 2026-
-  // 10-22/23 session) found zeroing both changed frame-1 position drift
-  // by <0.5%, i.e. neither was adding real information. P_ba is now
-  // exactly J*acc_mean_cov*J^T, nothing added.
+  // 2026-10-23: calib/p0/tilt_ba_ambiguity_accel_std, calib/p0/
+  // ba_radial_model_floor, and calib/p0/ba_scale (a diagnostic multiplier,
+  // briefly added then removed the same session) are all gone -- P_ba is
+  // now unconditionally Zero. History: the first two were hardcoded
+  // additions on top of P_ba (then J*acc_mean_cov*J^T) modeling the
+  // transverse tilt/accelerometer-bias degeneracy and a radial floor
+  // respectively; an ablation found zeroing both changed frame-1 position
+  // drift by <0.5%. The diagnostic ba_scale sweep (0 to 100x) that
+  // followed found P_ba had essentially no leverage on propagated
+  // position covariance either direction (0.316-0.321mm pooled std at
+  // frame_idx_=6 across the whole range), while a monotonically
+  // increasing effect on the actual realized drift (worse as P_ba grew) --
+  // zero is strictly the best of everything tested, so applyCalibration
+  // DerivedP0() now sets P_ba = Zero directly, no scale knob needed.
+  //
+  // calib/p0/bg_scale (a diagnostic multiplier on P_bg, mirroring
+  // p0_ba_scale above) was added and removed the same session. Unlike
+  // P_ba, the sweep found bg's initial uncertainty DOES measurably affect
+  // rotation covariance at frame_idx_=1 (0.062->0.149mrad pooled std,
+  // scale 0->100) and a higher scale had a small positive effect on the
+  // realized drift (best around scale~10, 1.792mm->1.781mm vs the
+  // scale=1 default) -- but that rotation-covariance difference fully
+  // washes out by frame_idx_=6 regardless of starting scale (0.131mrad
+  // in every case), and no specific scale value was adopted as a new
+  // permanent default, so the knob was removed rather than left in at an
+  // arbitrary value. Worth revisiting with a more targeted experiment if
+  // the small positive effect turns out to matter.
   double p0_bg_model_floor = 1.0e-5;
+  // Diagnostic-only (2026-10-23 session): P0's attitude (theta) block is
+  // normally pinned EXACTLY zero (R89/R97A Q4 item 3 -- "position,
+  // velocity and attitude are known exactly" -- see knownP0Blocks()),
+  // even though a real, nonzero tilt uncertainty IS already measured and
+  // written every run (gravity_alignment.txt's tilt_sd_from_acc_mean_cov_
+  // rad, ~0.17-0.41mrad on this bag) and simply never fed into the
+  // filter. Testing the "initial gravity/attitude error" hypothesis for
+  // the frame-6 covariance-vs-drift gap: default -1.0 keeps the existing
+  // exact-zero pin (behavior-preserving); >= 0.0 unpins theta and sets
+  // its P0 diagonal to this isotropic variance (rad^2) instead, via the
+  // SAME KnownBlock mechanism (p0_pin.h) ba/bg already use, just a
+  // constant rather than a calibration-derived value, so cross terms
+  // with other states are still cleared (correlation with ba/bg/position
+  // through this tilt source is a known simplification, not modeled).
+  double p0_theta_variance = -1.0;
   // Purely numerical covariance floor. This is not a physical uncertainty
   // model: it only makes the symmetric P0 strictly positive definite for
   // information-form solves when a physically valid construction is PSD.
@@ -145,8 +186,7 @@ private:
   void        computeBiasAndNoise(V3D& acc_bias, V3D& gyro_bias,
                                   V3D& var_acc, V3D& var_gyr) const;
   M3D         covarianceOfMean(bool accelerometer) const;
-  void        applyCalibrationDerivedP0(const V3D& acc_mean,
-                                        const M3D& R_init,
+  void        applyCalibrationDerivedP0(const M3D& R_init,
                                         const M3D& acc_mean_cov,
                                         const M3D& gyro_mean_cov);
   void        stabilizeP0();
@@ -171,6 +211,9 @@ private:
   ImageData              calib_last_img_;
 
   CalibProcOptions opts_;
+  // cbk/imu/vibration/* (the same values CbkProc reads): line removal on the calibration window and the
+  // vibration-free noise floor
+  VibrationConfig vib_;
   // R97A R4: the gravity block of P0 as it was BEFORE applyCalibrationDerivedP0() ran (always
   // state/cov/gravity * I at that point, by construction -- nothing else touches it earlier) --
   // calibration_p0.txt reports it alongside the final (possibly calibration-derived) block.

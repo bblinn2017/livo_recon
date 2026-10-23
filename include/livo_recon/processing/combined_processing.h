@@ -21,19 +21,22 @@ struct CombinedProcOptions
   double min_norm_dt     = 0.0;
   double min_diff_error  = -1.0;
 
-  // Diagnostic-only (default false, behavior-preserving) -- see
-  // VioProcOptions::force_all_iterations's doc comment, same rationale:
-  // when true, processCombined()'s "stop=no_improve" rejection is skipped
-  // so every frame always runs the full max_iterations.
+  // Diagnostic-only -- see VioProcOptions::force_all_iterations's doc
+  // comment, same rationale: when true, a non-improving VIO iteration is
+  // no longer excluded from that iteration's joint update (see
+  // processCombined()'s per-iteration VIO-only rejection, 2026-10-23).
+  // LIO's own residual was never gated on this and still isn't.
   bool force_all_iterations = false;
 
   // Whole-frame VIO-fit rejection threshold, mirroring VioProcOptions::
-  // max_avg_error. If VIO contributed to this frame's joint solve and its
-  // own achieved avg_error exceeds this, the ENTIRE joint result (both
-  // LIO's and VIO's contribution) is discarded and LioProc::processLIO()
-  // is re-run alone as the fallback (see processCombined()'s doc comment
-  // for why -- can't decompose a joint solve after the fact to keep just
-  // LIO's share).
+  // max_avg_error -- including its 2026-10-23 unit change to
+  // avg_abs_pixel_residual (mean |pixel error|, not the weighted/squared/
+  // normalized-coordinate avg_err_vio the per-iteration check still uses).
+  // If VIO contributed to this frame's joint solve and its final pixel
+  // residual exceeds this, the ENTIRE joint result (both LIO's and VIO's
+  // contribution) is discarded and LioProc::processLIO() is re-run alone
+  // as the fallback (see processCombined()'s doc comment for why -- can't
+  // decompose a joint solve after the fact to keep just LIO's share).
   double max_avg_error   = 5.0;
 
   bool   log_debug_en    = false;

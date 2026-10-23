@@ -61,12 +61,24 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
 
   bool vio_ever_contributed = false;
   float last_avg_err_vio = std::numeric_limits<float>::quiet_NaN();
+  // Fallback for final_pixel_residual below if the post-loop sentinel
+  // re-check (iter=99) ever fails -- mirrors last_avg_err_vio's own role
+  // as final_avg_err_vio's fallback.
+  float last_pixel_residual_vio = std::numeric_limits<float>::quiet_NaN();
   std::string stop = "max_iter";
   int iter = 0;
   bool any_solved = false;
 
-  // History (58-71): see docs/livo_recon_changelog.md#src-processing-combined_processing.cpp-58
-  double best_avg_res_lio = std::numeric_limits<double>::max();
+  // 2026-10-23: LIO's own per-iteration "stop if worse" check is removed --
+  // LIO never rejects on its own residual now (mirrors LIO-only's own
+  // unconditional-iteration behavior, lio_iekf.cpp's R97A Q2 removal).
+  // last_avg_res_lio is overwritten every iteration LIO actually
+  // contributes (no longer gated on improvement -- there's no "best" to
+  // track once nothing stops on it), purely for the post-loop consistency
+  // log. Only VIO's own fit is checked per iteration now, and failing it
+  // rejects VIO's contribution for THAT iteration alone (see below) --
+  // never stops the loop.
+  double last_avg_res_lio = std::numeric_limits<double>::quiet_NaN();
   float  best_avg_err_vio = std::numeric_limits<float>::max();
   // History (74-78): see docs/livo_recon_changelog.md#src-processing-combined_processing.cpp-74
   int last_n_meas_lio = 0;
@@ -77,23 +89,38 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
     EkfUpdate lio_part, vio_part;
     double avg_res_lio = 0.0;
     float avg_err_vio = 0.0f;
+    float avg_abs_pixel_residual_vio = 0.0f;
 
     const bool have_lio = lio_proc.accumulateForCombined(mg, lio_part, avg_res_lio);
-    const bool have_vio = vio_proc.accumulateForCombined(mg, vio_part, avg_err_vio, iter);
+    bool have_vio = vio_proc.accumulateForCombined(mg, vio_part, avg_err_vio,
+                                                   avg_abs_pixel_residual_vio, iter);
 
     if (!have_lio && !have_vio) { stop = "no_residuals"; break; }
 
-    if (!opts_.force_all_iterations &&
-        ((have_lio && avg_res_lio >= best_avg_res_lio) ||
-         (have_vio && avg_err_vio >= best_avg_err_vio)))
-    {
-      stop = "no_improve";
-      break;
-    }
-    if (have_lio) { best_avg_res_lio = avg_res_lio; last_n_meas_lio = lio_part.n_meas; }
-    if (have_vio) { best_avg_err_vio = avg_err_vio; last_n_meas_vio = vio_part.n_meas; }
+    // VIO-only per-iteration rejection: this stays on avg_err_vio's
+    // weighted/squared/normalized scale (the EKF's own convergence
+    // signal, same reasoning as VioProc::solveSystem()'s identical
+    // per-iteration check) -- if this iteration's VIO fit didn't improve
+    // on VIO's own best-so-far, exclude VIO's contribution from THIS
+    // iteration's joint update. LIO's own residual is never checked (see
+    // last_avg_res_lio's doc comment above) and the loop keeps going
+    // rather than halting the whole frame, so LIO keeps refining every
+    // iteration regardless of what VIO is doing.
+    if (!opts_.force_all_iterations && have_vio && avg_err_vio >= best_avg_err_vio)
+      have_vio = false;
+    else if (have_vio)
+      { best_avg_err_vio = avg_err_vio; last_n_meas_vio = vio_part.n_meas; }
+    if (have_lio) { last_avg_res_lio = avg_res_lio; last_n_meas_lio = lio_part.n_meas; }
 
-    if (have_vio) { vio_ever_contributed = true; last_avg_err_vio = avg_err_vio; }
+    if (have_vio)
+    {
+      vio_ever_contributed = true;
+      last_avg_err_vio = avg_err_vio;
+      last_pixel_residual_vio = avg_abs_pixel_residual_vio;
+    }
+
+    if (!have_lio && !have_vio)
+      continue;  // VIO rejected this iteration and LIO had nothing -- nothing to apply, try again next iteration
 
     ekf_.reset();
     if (have_lio) { ekf_.HtH += lio_part.HtH; ekf_.Htz += lio_part.Htz; }
@@ -111,7 +138,8 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
           << "  tr(HtH_lio_RR)=" << tr_lio_rr << "  tr(HtH_lio_PP)=" << tr_lio_pp
           << "  tr(HtH_vio_RR)=" << tr_vio_rr << "  tr(HtH_vio_PP)=" << tr_vio_pp
           << "  |Htz_lio|=" << lio_part.Htz.norm() << "  |Htz_vio|=" << vio_part.Htz.norm()
-          << "  avg_res_lio=" << avg_res_lio << "  avg_err_vio=" << avg_err_vio);
+          << "  avg_res_lio=" << avg_res_lio << "  avg_err_vio=" << avg_err_vio
+          << "  avg_abs_pixel_residual_vio=" << avg_abs_pixel_residual_vio);
     }
 
     ekf_.applyMeanUpdate(state_, prior_cov_, state_propagat_);
@@ -135,7 +163,7 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
     // relative to each other, which is a concrete argument for one filter.
     // If they agree, REA-LVIO's decoupling case is the better one and the
     // goal should be restated rather than pursued.
-    logConsistencyNll("lio", mg.image.t, best_avg_res_lio, last_n_meas_lio,
+    logConsistencyNll("lio", mg.image.t, last_avg_res_lio, last_n_meas_lio,
                       ekf_.pivotRatio(), ekf_.kalmanGainNorm());
     logConsistencyNll("vio", mg.image.t, last_avg_err_vio, last_n_meas_vio,
                       ekf_.pivotRatio(), ekf_.kalmanGainNorm());
@@ -143,22 +171,32 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
 
   // History (138-152): see docs/livo_recon_changelog.md#src-processing-combined_processing.cpp-138
   float final_avg_err_vio = last_avg_err_vio;
+  // 2026-10-23: final_pixel_residual (not final_avg_err_vio) is what the
+  // whole-frame max_avg_error gate below now compares against -- see
+  // VioAccumulator::accumulate()'s doc comment for why this is a separate,
+  // genuinely pixel-space quantity from avg_err_vio's weighted/squared/
+  // normalized one.
+  float final_pixel_residual = last_pixel_residual_vio;
   if (vio_ever_contributed)
   {
     EkfUpdate final_vio_part;
     float re_avg_err_vio = 0.0f;
+    float re_pixel_residual = 0.0f;
     // Sentinel iter=99 (well outside 0..max_iterations-1, default max is 5):
     // this re-accumulate happens AFTER the loop above has already applied
     // its last correction, so it measures the truly-final post-update
     // residual -- distinct from every in-loop iter value, so a per-point
     // log consumer (log/vio/point_residuals) can tell "final" apart from
     // "last loop iteration" (whose own row is pre-that-iteration's update).
-    if (vio_proc.accumulateForCombined(mg, final_vio_part, re_avg_err_vio, 99))
+    if (vio_proc.accumulateForCombined(mg, final_vio_part, re_avg_err_vio, re_pixel_residual, 99))
+    {
       final_avg_err_vio = re_avg_err_vio;
+      final_pixel_residual = re_pixel_residual;
+    }
   }
 
   bool rejected = false;
-  if (vio_ever_contributed && final_avg_err_vio > static_cast<float>(opts_.max_avg_error))
+  if (vio_ever_contributed && final_pixel_residual > static_cast<float>(opts_.max_avg_error))
   {
     // Can't decompose the joint solve after the fact to keep just LIO's
     // share (HtH_lio/HtH_vio were already summed before the one solve) --
@@ -183,7 +221,7 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
   oss << "[combined/ekf] iters=" << iter << "  stop=" << stop
       << "  vio_contributed=" << (vio_ever_contributed ? 1 : 0);
   if (rejected)
-    oss << "  REJECTED(vio_avg_error=" << final_avg_err_vio << " > " << opts_.max_avg_error << ", ran LIO-only fallback)";
+    oss << "  REJECTED(vio_avg_abs_pixel_residual=" << final_pixel_residual << " > " << opts_.max_avg_error << ", ran LIO-only fallback)";
   return oss.str();
 }
 

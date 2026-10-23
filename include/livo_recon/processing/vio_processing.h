@@ -38,16 +38,26 @@ struct VioProcOptions
   // for real divergence cases; use this only for offline analysis.
   bool force_all_iterations = false;
 
-  // Absolute sanity bound on the frame's final (post-iteration) avg_error:
-  // solveSystem only ever rejects an iteration relative to the previous
-  // iteration's error, so without this, a frame that lands in a
+  // Absolute sanity bound on the frame's final (post-iteration) fit
+  // quality: solveSystem only ever rejects an iteration relative to the
+  // previous iteration's error, so without this, a frame that lands in a
   // catastrophically bad state (e.g. from a burst of bad correspondences)
   // will happily "converge" to and commit an objectively terrible fit --
   // and since vio has no absolute reference, that contaminates every
-  // subsequent frame's fixed "previous pose" permanently. If the best
-  // avg_error achieved this frame still exceeds this, the entire frame's
-  // correction is rolled back (state left exactly as it was beforehand)
-  // rather than committed.
+  // subsequent frame's fixed "previous pose" permanently. If the best fit
+  // achieved this frame still exceeds this, the entire frame's correction
+  // is rolled back (state left exactly as it was beforehand) rather than
+  // committed.
+  //
+  // 2026-10-23: units changed from a weighted/squared/normalized-
+  // coordinate quantity (the EKF's own optimization objective, not
+  // interpretable in real-world terms) to avg_abs_pixel_residual -- the
+  // mean |pixel error| across tracked points (see VioAccumulator::
+  // accumulate()'s doc comment). The per-iteration convergence check
+  // inside solveSystem() is UNCHANGED, still on the old scale -- only
+  // this whole-frame gate switched. The old default (5.0) was calibrated
+  // for the old metric and needs re-tuning for this one; still the
+  // placeholder value pending that.
   double max_avg_error = 5.0;
 
   // History (46-68): see docs/livo_recon_changelog.md#include-livo_recon-processing-vio_processing.h-46
@@ -169,7 +179,13 @@ public:
   // tags each row with which combined-loop iteration produced it -- previously hardcoded
   // to 0 regardless of the caller's actual iteration, which made every combined-mode
   // point-residual row indistinguishable by iteration. Does not affect accumulation math.
-  bool accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, float& avg_error, int iter);
+  // avg_abs_pixel_residual: see VioAccumulator::accumulate()'s doc comment
+  // -- the genuinely pixel-space quantity CombinedProcOptions::
+  // max_avg_error now compares against, separate from avg_error (which
+  // stays on its weighted/squared/normalized scale for anything that
+  // reads it as a convergence signal).
+  bool accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, float& avg_error,
+                             float& avg_abs_pixel_residual, int iter);
 
 private:
   // Snapshot of the anchor set TrackedFrame::indices refers into, as
@@ -211,7 +227,12 @@ private:
   // Takes the whole TrackedFrame (not just indices/uv_curr) so it can also
   // read uv_curr_uv_jacobian for distortion_weight_on. t_abs/iter identify
   // the caller for log_iterations/log_point_residuals.
-  bool solveSystem(const TrackedFrame& frame, float& last_error, double t_abs, int iter);
+  // last_pixel_residual is updated in lockstep with last_error, ONLY on an
+  // iteration that's actually accepted (mirrors last_error's own update
+  // site) -- see VioAccumulator::accumulate()'s doc comment for why this
+  // is a separate, genuinely pixel-space quantity.
+  bool solveSystem(const TrackedFrame& frame, float& last_error, float& last_pixel_residual,
+                   double t_abs, int iter);
 
   // Runs the EKF correction loop (repeated solveSystem calls) to convergence
   // and returns a log string summarizing how it stopped.

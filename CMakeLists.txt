@@ -400,6 +400,12 @@ target_include_directories(test_binned_touch_r91 PUBLIC include ${EIGEN3_INCLUDE
 target_link_libraries(test_binned_touch_r91 ${catkin_LIBRARIES} OpenMP::OpenMP_CXX)
 add_test(NAME binned_touch_r91 COMMAND test_binned_touch_r91)
 
+# Prism vibration canceller (header-only, Eigen only).
+add_executable(test_vibration_canceller tests/test_vibration_canceller.cpp)
+target_include_directories(test_vibration_canceller PUBLIC include ${EIGEN3_INCLUDE_DIRS})
+target_link_libraries(test_vibration_canceller Eigen3::Eigen)
+add_test(NAME vibration_canceller COMMAND test_vibration_canceller)
+
 add_executable(test_calib_num_frames_r1 tests/test_calib_num_frames_r1.cpp)
 target_include_directories(test_calib_num_frames_r1 PUBLIC include ${EIGEN3_INCLUDE_DIRS} ${catkin_INCLUDE_DIRS})
 add_test(NAME calib_num_frames_r1 COMMAND test_calib_num_frames_r1)
