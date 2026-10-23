@@ -1,12 +1,24 @@
 #pragma once
 // R61: per-scan raw state and FULL covariance trace, plus the per-scan IMU covariance growth split.
 //
-// state_trace.csv: two rows per scan (phase = post_imu | post_lio) with the raw state (rotation as a quaternion
-// w,x,y,z of R body->world, position, velocity, gyro bias, accel bias, gravity) and the upper triangle of the state
-// covariance for the FIRST 18 state dimensions (layout R(0-2) P(3-5) V(6-8) BG(9-11) BA(12-14) G(15-17), valid when
-// bg, ba and gravity are all estimated; `dim` is written so a different layout is detectable and the missing columns
-// are left empty). Unlike initialization_consistency_all_scans.csv this file has NO reference in it: errors are formed
-// offline against the stationary reference (constant) or against GT (position only, see the analysis scripts).
+// state_trace.csv: two rows per scan under lio_only/combined (phase = post_imu | post_lio), three
+// under sequential (post_imu | post_lio | post_vio, added 2026-10-23) -- with the raw state
+// (rotation as a quaternion w,x,y,z of R body->world, position, velocity, gyro bias, accel bias,
+// gravity) and the upper triangle of the state covariance for the FIRST 18 state dimensions
+// (layout R(0-2) P(3-5) V(6-8) BG(9-11) BA(12-14) G(15-17), valid when bg, ba and gravity are all
+// estimated; `dim` is written so a different layout is detectable and the missing columns are left
+// empty). Unlike initialization_consistency_all_scans.csv this file has NO reference in it: errors
+// are formed offline against the stationary reference (constant) or against GT (position only,
+// see the analysis scripts).
+//
+// "post_lio" means different things across modes, by design, mirroring LivoReconNode's/
+// CombinedProc's own treatment of mg.pos_after_lio/pos_after_vio: under lio_only/sequential it is
+// BEFORE this frame's VIO correction (sequential runs VIO as a separate step afterward); under
+// combined it already IS the final per-frame state (LIO/VIO are fused into one joint update, so
+// there's no meaningful separate LIO-only checkpoint -- see combined_processing.cpp). "post_vio"
+// (sequential only, logged from LivoReconNode's own sequential branch, gated on vio/enable) is the
+// checkpoint that makes "post_lio under combined" and "post_vio under sequential" the two
+// comparable "final per-frame state" rows across modes.
 //
 // imu_cov_growth.csv: one row per scan: diag(P) at the start of the scan's IMU propagation, diag(P) at its end, and
 // diag of the scan-accumulated process covariance Qacc (Qacc <- F Qacc F^T + Q per IMU step), so that

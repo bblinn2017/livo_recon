@@ -51,6 +51,13 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
 {
   TimedScope ts(profiler_, "combined/ekf");
 
+  // 2026-10-23: "post_imu" state_trace.csv row -- see LioProcBase::logStateTrace()'s own doc
+  // comment for why this mode needs its own calls (processLIO() isn't called in the normal,
+  // non-rejected path below, so the row LioProcIekf::processLIO() would otherwise log never
+  // happens). The state here is exactly the post-IMU-propagation state processLIO() itself logs
+  // from, since nothing between IMU propagation and this call touches the state.
+  lio_proc.logStateTrace("post_imu", mg, 0, 0);
+
   // Fallback snapshot -- see the rollback comment near the bottom. Taken
   // before ANY correction (LIO or VIO) is applied this frame, mirroring
   // VioProc::estimateStateCorrection()'s own state_before_frame pattern.
@@ -205,8 +212,21 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
     *state_ = state_before_frame;
     if (opts_.log_consistency_en)
       logConsistencyNll("rollback", mg.image.t, final_avg_err_vio, 0, 0.0, 0.0);
+    // processLIO() logs its own "post_imu"/"post_lio" state_trace.csv rows internally -- this
+    // frame's "post_imu" row duplicates the one already logged at the top of this function (same
+    // state either way, since nothing between the two calls changes it other than this rollback
+    // restoring state_before_frame, which IS that same post-IMU state), harmless but redundant;
+    // its "post_lio" row is the one this frame actually needs, so no separate call below for it.
     lio_proc.processLIO(mg);
     rejected = true;
+  }
+  else
+  {
+    // 2026-10-23: "post_lio" state_trace.csv row for the normal (non-rejected) path -- see
+    // LioProcBase::logStateTrace()'s own doc comment. last_n_meas_lio + last_n_meas_vio is the
+    // combined residual count from whichever iteration last contributed each; iter is the loop's
+    // own completed-iterations count, mirroring processLIO()'s own call shape.
+    lio_proc.logStateTrace("post_lio", mg, last_n_meas_lio + last_n_meas_vio, iter);
   }
 
   // Anchor-pose history recording now happens centrally in

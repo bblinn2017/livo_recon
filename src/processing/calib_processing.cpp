@@ -73,12 +73,19 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
   if (opts_.accel_excess_model != "bias" && opts_.accel_excess_model != "scale")
     throw std::invalid_argument(
         "calib/stationary/accel_excess_model must be bias or scale");
-  for (const char* removed_key : {"calib/p0/tilt_ba_ambiguity_accel_std", "calib/p0/ba_radial_model_floor"})
+  for (const char* removed_key : {
+           "calib/p0/tilt_ba_ambiguity_accel_std", "calib/p0/ba_radial_model_floor",
+           "calib/p0/ba_from_calibration", "calib/p0/bg_model_floor", "calib/p0/gravity_cov_mode",
+           "calib/p0/fixed_override", "calib/p0/fixed_ba_value", "calib/p0/fixed_bg_value",
+           "calib/p0/fixed_gravity_value"})
     if (pnh.hasParam(removed_key))
       throw std::invalid_argument(
-          std::string("removed key: ") + removed_key + " -- both were ablated away 2026-10-23 "
-          "(zeroing each changed frame-1 position drift by <0.5%, not adding real information); "
-          "P_ba is now exactly the calibration's own measured J*acc_mean_cov*J^T, nothing added");
+          std::string("removed key: ") + removed_key + " -- P0_ba and P0_bg are now unconditionally "
+          "Zero (2026-10-23, Bryce's call: a fixed_override diagnostic test at 1e-5/1e-8/0, ba/bg "
+          "shared, found a large, consistent, monotonic improvement all the way down across "
+          "lio_only/sequential/combined; exact zero is now permanent, not config-gated). Gravity's "
+          "P0/covariance mode now follows state/gravity_estimable + state/cov/gravity instead -- "
+          "see applyCalibrationDerivedP0()'s own doc comment for the gravity section");
   paramWarn<double>(pnh, "imu/process_noise/floor/acc_variance",
                     opts_.floor_acc_variance, 1.288e-03);
   paramWarn<double>(pnh, "imu/process_noise/floor/gyro_variance",
@@ -87,22 +94,13 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
       !std::isfinite(opts_.floor_gyro_variance) || opts_.floor_gyro_variance <= 0.0)
     throw std::invalid_argument("imu/process_noise/floor/{acc,gyro}_variance must be finite and > 0");
   paramWarn<int>(pnh, "calib/p0/autocov_lags", opts_.p0_autocov_lags, 20);
-  paramWarn<double>(pnh, "calib/p0/theta_variance", opts_.p0_theta_variance, -1.0);
-  paramWarn<double>(pnh, "calib/p0/bg_model_floor",
-                    opts_.p0_bg_model_floor, 1.0e-5);
   paramWarn<double>(pnh, "calib/p0/numerical_eigenvalue_floor",
                     opts_.p0_numerical_eigenvalue_floor, 1e-12);
-  paramWarn<std::string>(pnh, "calib/p0/gravity_cov_mode", opts_.p0_gravity_cov_mode, std::string("fixed"));
-  if (opts_.p0_gravity_cov_mode != "fixed" && opts_.p0_gravity_cov_mode != "calibration")
-    throw std::invalid_argument("calib/p0/gravity_cov_mode must be fixed or calibration");
 
   opts_.p0_autocov_lags = std::max(0, opts_.p0_autocov_lags);
-  if (!std::isfinite(opts_.p0_theta_variance))
-    throw std::invalid_argument("calib/p0/theta_variance must be finite (-1 keeps the exact-zero pin)");
-  if (!std::isfinite(opts_.p0_bg_model_floor) || opts_.p0_bg_model_floor < 0.0 ||
-      !std::isfinite(opts_.p0_numerical_eigenvalue_floor) ||
+  if (!std::isfinite(opts_.p0_numerical_eigenvalue_floor) ||
       opts_.p0_numerical_eigenvalue_floor <= 0.0)
-    throw std::invalid_argument("calib/p0 floor parameters must be finite and not negative");
+    throw std::invalid_argument("calib/p0/numerical_eigenvalue_floor must be finite and positive");
   std::ostringstream oss;
   oss << "[params/calib/stationary]"
       << "\n  required: true"
@@ -111,23 +109,19 @@ std::string CalibProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  sensor sigma_r2, sigma_a2: " << opts_.sensor_sigma_r2 << ", " << opts_.sensor_sigma_a2;
   oss << "\n  process_noise/floor(acc,gyro): " << opts_.floor_acc_variance << ", " << opts_.floor_gyro_variance;
   oss << "\n  p0/autocov_lags: " << opts_.p0_autocov_lags
-      << "\n  p0/theta_variance: " << opts_.p0_theta_variance
-      << "\n  p0/model_floor(bg): " << opts_.p0_bg_model_floor;
+      << "\n  p0/ba, p0/bg: unconditionally Zero";
   oss << "\n  p0/numerical_eigenvalue_floor: "
       << opts_.p0_numerical_eigenvalue_floor;
-  oss << "\n  p0/gravity_cov_mode: " << opts_.p0_gravity_cov_mode;
+  oss << "\n  p0/gravity: see [params/transform]'s own gravity_estimable/dimState -- "
+         "state/cov/gravity seeds it when estimable, else gravity is a fixed constant, no P0 block";
   return oss.str();
 }
 
-// R97A Q4 item 3: calib/p0/mode (and known_{pos,vel,theta}_variance) are removed -- position and velocity are
-// always pinned exactly zero (the yaml's own "calibration_derived" values, unconditionally now). Attitude
-// (theta) is pinned exactly zero too UNLESS p0_theta_variance (diagnostic-only, see its own doc comment) is
-// set >= 0, in which case it becomes a known CONSTANT (not pinned, see KnownBlock's own variance semantics)
-// of that isotropic value instead.
+// R97A Q4 item 3: calib/p0/mode (and known_{pos,vel,theta}_variance) are removed -- attitude, position and
+// velocity are always pinned exactly zero (the yaml's own "calibration_derived" values, unconditionally now).
 std::vector<p0::KnownBlock> CalibProc::knownP0Blocks() const
 {
-  const double theta_var = opts_.p0_theta_variance >= 0.0 ? opts_.p0_theta_variance : 0.0;
-  return { {StateGroup::idxR(), theta_var}, {StateGroup::idxP(), 0.0}, {StateGroup::idxV(), 0.0} };
+  return { {StateGroup::idxR(), 0.0}, {StateGroup::idxP(), 0.0}, {StateGroup::idxV(), 0.0} };
 }
 
 void CalibProc::stabilizeP0()
@@ -273,61 +267,35 @@ M3D CalibProc::covarianceOfMean(bool accelerometer) const
                          es.eigenvectors().transpose()));   // R74 F-419
 }
 
-void CalibProc::applyCalibrationDerivedP0(
-    const M3D& R_init, const M3D& acc_mean_cov,
-    const M3D& gyro_mean_cov)
+void CalibProc::applyCalibrationDerivedP0()
 {
-  // 2026-10-23 (this session, R-ba-zero): P0's ba BLOCK (the one-time
-  // initial covariance set here, at calibration completion -- NOT a
-  // permanent pin; ba is not in knownP0Blocks(), so its covariance still
-  // evolves normally frame-to-frame afterward via ordinary EKF prediction/
-  // process noise, exactly like any other state) is now unconditionally
-  // Zero. Previously this was J*acc_mean_cov*J^T (J = d(true_acc_bias)/
-  // d(acc_mean) via central finite difference through
-  // computeInitialRotation()) -- the predecessor to that (a hardcoded
-  // tilt/b_a-ambiguity term plus a radial floor) was already removed
-  // earlier the same session after an ablation found <0.5% effect on
-  // frame-1 drift. A direct sweep of a diagnostic p0_ba_scale multiplier
-  // (0, 0.1, 0.5, 1, 10, 25, 100) on this same P0 ba block found the SAME
-  // result at the other end: propagated position covariance at
-  // frame_idx_=6 barely moved across five orders of magnitude (0.316-
-  // 0.321mm pooled std) -- it has essentially no leverage on position
-  // covariance growth over these frames, in either direction. It DID have
-  // a small, monotonic effect on the actual realized trajectory (more
-  // initial ba uncertainty -> more drift, 1.79mm at scale=0 up to 2.57mm
-  // at scale=100), so zero is strictly the best of everything tested: less
-  // drift, and no measurable covariance cost since this block wasn't
-  // informing anything anyway. Removed entirely rather than left at a
-  // config-set zero, since the whole Jacobian machinery existed only to
-  // produce this now-discarded value -- acc_mean/R_init are still needed
-  // by true_acc_bias/gravity's own construction above this function, just
-  // not here anymore.
-  const M3D P0_ba = M3D::Zero();
-  const double bg_floor = opts_.p0_bg_model_floor;
-
+  // 2026-10-23 (this session, Bryce's call): P0's ba and bg blocks (the one-time initial
+  // covariance set here, at calibration completion -- NOT a permanent pin; neither is in
+  // knownP0Blocks(), so both still evolve normally frame-to-frame afterward via ordinary EKF
+  // prediction/process noise, exactly like any other state) are UNCONDITIONALLY Zero. See
+  // CalibProcOptions::p0_numerical_eigenvalue_floor's own doc comment (just above, in
+  // calib_processing.h) for the full history of everything this used to compute instead
+  // (tilt-ambiguity/radial-floor terms, a J*acc_mean_cov*J^T calibration-derived P0_ba, gyro_mean_
+  // cov+floor for P0_bg) and the final fixed_override sweep (1e-5/1e-8/0, shared across ba/bg/
+  // gravity) that settled on exact zero as strictly the best of everything tested, for both
+  // blocks, at every frame, in every mode. Gravity's own P0 is handled separately -- see
+  // StateGroup::gravDim()'s doc comment in state.h: when state/gravity_estimable is false (the
+  // default), gravity has no P0 block at all (dimState()==15); when true, state/cov/gravity seeds
+  // it once at StateGroup::initCov() and this function has nothing further to add (the removed
+  // "calibration" gravity_cov_mode used to overwrite it here with a calibration-derived tangential
+  // covariance -- gone, so a single state/cov/gravity constant is now the only knob, as intended).
   Eigen::MatrixXd& P = state_->covMut();
-  P.block(state_->idxBA(), state_->idxBA(), 3, 3) = P0_ba;
-  P.block(state_->idxBG(), state_->idxBG(), 3, 3) =
-      gyro_mean_cov + bg_floor * M3D::Identity();
+  P.block(state_->idxBA(), state_->idxBA(), 3, 3) = M3D::Zero();
+  P.block(state_->idxBG(), state_->idxBG(), 3, 3) = M3D::Zero();
 
   // R89: known blocks (exact zero position, velocity and attitude). Cross terms of those rows and columns are cleared:
   // removing states from a positive semi-definite matrix leaves it positive semi-definite.
   p0::applyKnownBlocks(P, knownP0Blocks());
 
-  // R97A R4: calib/p0/gravity_cov_mode. "fixed" (default) leaves the gravity block exactly at
-  // state/cov/gravity (the identity path below is unreachable at the default -- nothing above or
-  // below this point touches P.block(idxG, idxG, ...)). Gravity magnitude/direction is otherwise
-  // deliberately left at state/cov/gravity: one stationary accelerometer mean cannot separate
-  // gravity from b_a (the radial part, |g| vs b_a along gravity, is NOT separable at rest).
+  // Diagnostic bookkeeping only (calibration_p0.txt's P0_g_g_before vs P0_g_g): nothing above or
+  // below this point touches gravity's block anymore, so "before" and "after" are now always
+  // identical by construction -- kept for the writer's existing schema rather than ripping it out.
   p0_gravity_before_ = P.block(state_->idxG(), state_->idxG(), state_->gravDim(), state_->gravDim());
-  if (opts_.p0_gravity_cov_mode == "calibration")
-  {
-    // Cross-covariance between gravity and every other block (bg, ba, theta, p, v) stays zero --
-    // the tilt/ba/gravity coupling is a known omission, not modeled here.
-    const Eigen::MatrixXd P_g = gravityCovarianceFromCalibration(
-        state_->gravity().normalized(), R_init, acc_mean_cov, state_->initCovGravity());
-    P.block(state_->idxG(), state_->idxG(), state_->gravDim(), state_->gravDim()) = P_g;
-  }
 
   P = symmetrized(P);
 }
@@ -401,7 +369,7 @@ std::string CalibProc::estimateFromBuffer()
   // dynamic process-noise model. Keep it separate from imu/process_noise.
   state_->setNoiseFloor(var_acc, var_gyr);
   state_->setAccScale(r63_acc_scale);
-  applyCalibrationDerivedP0(R_init, acc_mean_cov, gyro_mean_cov);
+  applyCalibrationDerivedP0();
   stabilizeP0();
   state_->captureInitialCovariance("calibration_derived");
   writeGravityAlignmentDiagnostic(

@@ -208,6 +208,20 @@ public:
   // untouched since the previous scan. No-op by default.
   void logPreImuState(const MeasureGroup& mg);
 
+  // R61. Writes one state_trace.csv row (no-op when log/state_trace/enable is false). R92: for
+  // phase post_lio it also writes the pose_cov_trace.csv row when log/pose_cov_trace/enable is
+  // true. Made public 2026-10-23: CombinedProc::processCombined() does NOT call processLIO() in
+  // its normal (non-rejected) path -- it accumulates LIO's HtH/Htz via lio_proc.
+  // accumulateForCombined() instead and applies one joint update -- so without this, combined
+  // mode produced NO state_trace.csv rows at all whenever VIO wasn't rejected (confirmed this
+  // session: a lio_only/sequential/combined frame 1-6 comparison came back with combined's
+  // state_trace.csv simply missing). CombinedProc calls this directly (via its own lio_proc
+  // reference) at the same two checkpoints LioProcIekf::processLIO() uses internally -- "post_imu"
+  // before its iteration loop, "post_lio" after its one joint correction is applied -- so all
+  // three modes produce a comparable post_imu/post_lio row per frame. For combined mode "post_lio"
+  // means "after the per-frame correction" (there's no separate LIO-only checkpoint once LIO/VIO
+  // are fused -- see LivoReconNode's own identical treatment of mg.pos_after_lio/pos_after_vio).
+  void logStateTrace(const char* phase, const MeasureGroup& mg, int residual_count, int completed_iterations);
 
   // Assumes deskewAndDownsample(mg) already ran this frame (mg.points
   // populated) -- see that method's doc comment for why this isn't called
@@ -248,8 +262,6 @@ protected:
   // map, never reset per frame, and is deliberately outside the estimator.
   void ensureStationaryReference(const MeasureGroup& mg);
 
-  // R61. Writes one state_trace.csv row (no-op when log/state_trace/enable is false). R92: for phase post_lio it also writes the pose_cov_trace.csv row when log/pose_cov_trace/enable is true.
-  void logStateTrace(const char* phase, const MeasureGroup& mg, int residual_count, int completed_iterations);
   // R97A Q2: openLoopActive()/startupHoldActive()/openLoopFinishScan() are removed with
   // lio/open_loop/* and lio/startup_hold/scans.
 

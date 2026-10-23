@@ -57,6 +57,7 @@ StateGroup& StateGroup::operator=(const StateGroup& o)
 {
   if (this != &o) {
     acc_scale_ = o.acc_scale_;
+    gravity_estimable_ = o.gravity_estimable_;
     rot_ = o.rot_; pos_ = o.pos_; vel_ = o.vel_;
     bias_gyr_ = o.bias_gyr_; bias_acc_ = o.bias_acc_; gravity_ = o.gravity_;
     cov_ = o.cov_;
@@ -163,7 +164,9 @@ void StateGroup::applyDelta(const Eigen::VectorXd& dx)
   vel_      += dx.segment<3>(idxV());
   bias_gyr_ += dx.segment<3>(idxBG());
   bias_acc_ += dx.segment<3>(idxBA());
-  gravity_ += dx.segment<3>(idxG());
+  // gravity_estimable_=false: gravDim()==0, dx has no segment at idxG() at all (dx.size() ==
+  // dimState() == 15) -- gravity_ stays exactly what calibration/config set it to, forever.
+  if (gravity_estimable_) gravity_ += dx.segment<3>(idxG());
   updateDerivedTransforms();
 }
 
@@ -176,7 +179,7 @@ Eigen::VectorXd StateGroup::boxminusFromPropagat(const StateGroup& propagat) con
   vec.segment<3>(idxV()) = propagat.vel_ - vel_;
   vec.segment<3>(idxBG()) = propagat.bias_gyr_ - bias_gyr_;
   vec.segment<3>(idxBA()) = propagat.bias_acc_ - bias_acc_;
-  vec.segment<3>(idxG()) = propagat.gravity_ - gravity_;
+  if (gravity_estimable_) vec.segment<3>(idxG()) = propagat.gravity_ - gravity_;
   return vec;
 }
 
@@ -197,6 +200,16 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
     throw std::invalid_argument(
         "state/gravity_model was removed: the s2 tangent-gravity model is gone, gravity is "
         "always the free 3-vector (vector3) -- remove this key");
+  // 2026-10-23: state/gravity_estimable -- see gravDim()'s own doc comment in state.h. Read here,
+  // before initCov() below, since initCov() sizes cov_ by dimState() which depends on this.
+  // Default false: gravity has zero process noise everywhere in this codebase (confirmed --
+  // imu_processing.cpp's covariance propagation has no cov_w.block(idxG(),idxG(),...) term), so a
+  // live-estimated gravity with any nonzero P0 is only ever as correctable as that P0 allows, and
+  // a full-bag scale-less ATE comparison (gravity P0 1e-5 vs 0, capture_10_20_no3/no4/no5) found
+  // no measurable difference either way on these bags -- fixing it outright (no P0, no row/column
+  // in the covariance at all) costs nothing observed and removes 3 live state dimensions' worth of
+  // Jacobian/Kalman-gain work every scan.
+  paramWarn<bool>(pnh, "state/gravity_estimable", gravity_estimable_, false);
 
   std::vector<double> R_l2i, t_l2i, R_l2c, t_l2c;
   paramWarn<std::vector<double>>(pnh, "extrinsics/R_l2i", R_l2i, std::vector<double>());
@@ -258,9 +271,19 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
 
   // R97A Q4 item 6: state/cov/{rot_tilt,rot_yaw,pos,vel,bg,ba} are removed -- CalibProc::applyCalibrationDerivedP0() always
   // pins position/velocity/attitude to exactly zero and always replaces the bias blocks, so none of these six keys had a
-  // consumer left after Q4 items 3-5. state/cov/gravity is kept (an arm of this round changes how the gravity covariance
-  // is built) -- it still seeds initCov() below, unchanged.
-  paramWarn<double>(pnh, "state/cov/gravity", init_cov_gravity_, 1e-5);
+  // consumer left after Q4 items 3-5. state/cov/gravity is kept -- it still seeds initCov() below,
+  // but only meaningful (and read) when state/gravity_estimable is true; refused if set otherwise
+  // (gravity_estimable_=false has no gravity row/column in cov_ at all for this to seed).
+  if (gravity_estimable_)
+  {
+    paramWarn<double>(pnh, "state/cov/gravity", init_cov_gravity_, 1e-5);
+  }
+  else if (pnh.hasParam("state/cov/gravity"))
+  {
+    throw std::invalid_argument(
+        "state/cov/gravity is set but state/gravity_estimable is false -- gravity has no "
+        "covariance block to seed when it isn't a live state");
+  }
   initCov(init_cov_gravity_);
 
   // R97A Q4 item 6: state/init_state/{vel,ba,bg} are removed -- CalibProc::estimateFromBuffer() always overwrites vel_
@@ -316,6 +339,7 @@ std::string StateGroup::loadParameters(ros::NodeHandle& pnh)
       << "  fx=" << camera_.fx << "  fy=" << camera_.fy
       << "  cx=" << camera_.cx << "  cy=" << camera_.cy
       << "  gravity_model=vector3"
+      << "  gravity_estimable=" << (gravity_estimable_ ? "true" : "false")
       << "  dimState=" << dimState();
   return oss.str();
 }

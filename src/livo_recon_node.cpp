@@ -266,6 +266,16 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
     mg.pos_after_vio = ctx_.state->pos();
     mg.rot_after_vio = ctx_.state->rot();
 
+    // 2026-10-23: "post_vio" state_trace.csv row -- the sequential path's own "post_lio" row
+    // (logged from inside lio_proc_->processLIO() above) is BEFORE this frame's VIO correction,
+    // so it isn't the right checkpoint for a "same point in the per-frame pipeline" comparison
+    // against combined mode's "post_lio" (which IS the final per-frame state, since LIO/VIO are
+    // fused into one joint update there -- see combined_processing.cpp). Gated on vio_proc_.
+    // enabled() so lio_only mode (which also runs through this branch, with processVIO() a no-op)
+    // doesn't get a redundant duplicate-of-post_lio row.
+    if (vio_proc_.enabled())
+      lio_proc_->logStateTrace("post_vio", mg, 0, 0);
+
     if (vio_correction_log_)
       writeVioCorrectionRow(static_cast<int>(++vio_correction_frame_index_),
                             mg.image.t + ctx_.data_queues->start_time,

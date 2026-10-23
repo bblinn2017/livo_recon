@@ -386,13 +386,18 @@ void ImuProc::propagate(MeasureGroup& mg)
     if (opts_.second_order)
     {
       F_x.block<3,3>(StateGroup::idxP(), StateGroup::idxR()) += -0.5 * rot_imu * acc_avr_skew * dt2;
-      F_x.block(StateGroup::idxP(), StateGroup::idxG(), 3, state_->gravDim()) = 0.5 * J_g * dt2;
+      // state/gravity_estimable=false: gravDim()==0, no gravity column in F_x at all (J_g is a
+      // fixed 3x3, so this assignment would mismatch a 3x0 block -- skip it entirely rather than
+      // assign nothing-shaped-as-something).
+      if (state_->gravDim() > 0)
+        F_x.block(StateGroup::idxP(), StateGroup::idxG(), 3, state_->gravDim()) = 0.5 * J_g * dt2;
     }
 
     // Velocity
     F_x.block<3,3>(StateGroup::idxV(), StateGroup::idxR()) = -rot_imu * acc_avr_skew * dt;
     F_x.block(StateGroup::idxV(), StateGroup::idxBA(), 3, 3) = -rot_imu * dt;
-    F_x.block(StateGroup::idxV(), StateGroup::idxG(), 3, state_->gravDim()) = J_g * dt;
+    if (state_->gravDim() > 0)
+      F_x.block(StateGroup::idxV(), StateGroup::idxG(), 3, state_->gravDim()) = J_g * dt;
 
     // Rotation noise
     cov_w.block<3,3>(StateGroup::idxR(), StateGroup::idxR()).diagonal() =

@@ -635,14 +635,16 @@ struct VoxelOpts
   // R88: the binned map accumulator (src/map/binned_voxelmap.cpp; map/binned/binned_bins.h). R97A: it is the only map (voxel_map/backend
   // is removed); binned_enabled is gone with it -- VoxelNode::insertPoints() always keeps returns in bins and fits from the occupied bins.
   //   binned_bin_fraction   : bin edge = this x the node's own edge (0 < f <= 1).
-  //   binned_cov_mode       : 0 average (C / k), 1 shrunk (C / k^2), 2 fused (R97A R3, precision-
-  //                           weighted), 3 fused_pose (R97A R3, fused + a fixed scene term) --
-  //                           matches binned::CovMode's own enum values exactly.
+  //   binned_cov_mode       : 0 average (C / k), 1 shrunk (C / k^2) -- matches binned::CovMode's
+  //                           own enum values exactly. R97A R3 added 2 fused / 3 fused_pose
+  //                           (precision-weighted fusion); a scalar-weighted "pose_weighted"
+  //                           generalization of average was tried as a replacement. All three
+  //                           removed 2026-10-23 (this session) -- a stationary-window re-test
+  //                           found none of them beat plain average at any value tried, see
+  //                           binned_bins.h's header comment for the numbers.
   //   (R95: binned_weight_mode was removed; the weight of a bin is always its return count k.)
   double binned_bin_fraction = 0.2;
   int    binned_cov_mode = 0;
-  // R97A R3: voxel_map/binned/fused_pose_sigma_m -- only meaningful (and validated) under binned_cov_mode == 3 (fused_pose).
-  double binned_fused_pose_sigma_m = 0.0;
   // R92: min_init / min_update in a binned map always count the UNIQUE bins that received a return since the last fit (a bin hit in several scans counts once; before the first fit = occupied bins). The R91 member binned_update_count_mode was removed.
 };
 using VoxelOptsPtr = std::shared_ptr<VoxelOpts>;
@@ -856,8 +858,6 @@ struct VoxelStats
   std::atomic<long long> binned_new_bins{0};
   std::atomic<long long> binned_fits{0};
   std::atomic<long long> binned_touched_at_fit{0};   // R91: sum over binned fits of the unique bins touched since the previous fit (R92: touched is the only count)
-  // R97A R3: cumulative count of returns, under cov_mode fused/fused_pose, whose covariance needed the numerical floor before inversion. Always 0 under average/shrunk.
-  std::atomic<long long> binned_fused_clamped{0};
 
   int total() const { return open + converged + disabled; }
 

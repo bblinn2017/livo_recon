@@ -20,17 +20,30 @@ public:
   StateGroup& operator=(const StateGroup& o);
 
   // History (22-29): see docs/livo_recon_changelog.md#include-livo_recon-utils-state-state.h-22
-  // R97A Q4 item 5: rotation, position, velocity, gyro bias, accelerometer bias, then gravity LAST -- all five fixed-width
-  // blocks are always estimated (state/est/bg|ba|gravity were always true), so every index including gravity's own width
-  // is a compile-time constant (the s2 tangent-gravity model was removed; gravity is always the free 3-vector).
+  // R97A Q4 item 5 made rotation/position/velocity/gyro-bias/accelerometer-bias/gravity all
+  // always-estimated, compile-time-constant-width blocks. 2026-10-23 (this session) partially
+  // reopened that for gravity ONLY: state/gravity_estimable (default false) now controls whether
+  // gravity is a live EKF state (18-dim total, gravity's own P0/process-noise/correction all real)
+  // or a fixed constant set once at calibration and never touched again, with NO row/column in the
+  // covariance at all (15-dim total) -- not merely pinned at zero covariance (which this project
+  // already uses for position/velocity/attitude's P0, and already proved behaviorally IDENTICAL to
+  // removing a state entirely when that state also has zero process noise, which gravity always
+  // has -- see this flag's own default-false rationale below). The OTHER four blocks (R/P/V/BG/BA)
+  // are unaffected and stay compile-time constants; only idxG() position is still a compile-time
+  // constant (15 -- "where gravity's block WOULD start"), because Eigen allows a zero-row/column
+  // block at exactly the end of a matrix (`.block(rows(), 0, 0, cols)` is valid, the STL-"end"
+  // case) -- gravDim()/dimState() are the only two that actually depend on the flag.
   static constexpr int idxR()  { return 0; }
   static constexpr int idxP()  { return 3; }
   static constexpr int idxV()  { return 6; }
   static constexpr int idxBG() { return 9; }
   static constexpr int idxBA() { return 12; }
   static constexpr int idxG()  { return 15; }
-  static constexpr int gravDim() { return 3; }
-  static constexpr int dimState() { return idxG() + gravDim(); }
+  // 0 when gravity is fixed (state/gravity_estimable=false, the default), else 3 (vector3; the s2
+  // tangent-gravity model was removed, gravity is always the free 3-vector when it IS a state).
+  int gravDim() const { return gravity_estimable_ ? 3 : 0; }
+  int dimState() const { return idxG() + gravDim(); }
+  bool gravityEstimable() const { return gravity_estimable_; }
   // d(gravity vector)/d(gravity error coordinates) = I3.
   Eigen::MatrixXd gravityJacobian() const;
   // R63: fixed accelerometer scale factor applied to every IMU sample
@@ -181,6 +194,8 @@ private:
   };
 
   double acc_scale_ = 1.0;
+  // state/gravity_estimable (default false): see gravDim()'s own doc comment above.
+  bool gravity_estimable_ = false;
 
   // EKF state
   M3D rot_;

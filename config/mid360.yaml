@@ -80,10 +80,14 @@ calib:
     # image ~10.0Hz, IMU ~200.9Hz -> ~20.1 IMU samples/frame) -- a straightforward unit conversion.
     num_frames: 5
 # R97A Q4: calib/stationary/stall_calls_max, apply_to_state/*, state/est/{bg,ba,gravity}, state/cov/{rot_tilt,rot_yaw,pos,vel,bg,ba},
-# and state/init_state/{vel,ba,bg} are removed. state/cov/gravity and state/init_state/gravity are kept.
+# and state/init_state/{vel,ba,bg} are removed. state/init_state/gravity is kept.
+# 2026-10-23: state/gravity_estimable defaults to false (gravity is a fixed constant set once at
+# calibration, no covariance block, no live correction -- see state.h's gravDim() doc comment: a
+# full-bag scale-less ATE comparison, gravity P0 1e-5 vs 0, found no measurable difference on
+# capture_10_20_no3/no4/no5). state/cov/gravity is only meaningful (and only read) when
+# gravity_estimable is explicitly set true -- refused otherwise, so it's left unset here rather
+# than carried as a now-inert default.
 state:
-  cov:
-    gravity: 1.0e-5
   init_state:
     # 2026-10-23: 9.796 (not the generic 9.81 constant) -- set explicitly
     # for this device/location. true_acc_bias absorbs the gap between this

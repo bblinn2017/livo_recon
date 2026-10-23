@@ -41,16 +41,6 @@ inline bool calibFrameStopConsumeGroup(CalibFrameStopState& s, int imu_count)
   return true;
 }
 
-// R97A R4: calib/p0/gravity_cov_mode=calibration's math, factored out for unit testing (pure,
-// no StateGroup/ROS dependency). `u` is the unit gravity direction (world frame). `R_init` is the
-// initial attitude aligned to the mean specific force. `acc_mean_cov` is the covariance of the
-// sample mean of the accelerometer readings (the calibration's own Bartlett-window estimate).
-// `s_r2` is state/cov/gravity (the fixed radial value: |g| vs b_a along gravity is not separable
-// at rest, so the radial part always keeps this value). Result is always 3x3 (the s2
-// tangent-gravity model was removed; gravity is always the free 3-vector).
-Eigen::MatrixXd gravityCovarianceFromCalibration(
-    const V3D& u, const M3D& R_init, const M3D& acc_mean_cov, double s_r2);
-
 struct CalibProcOptions
 {
   // R97A R1: the calibration stops after this many measure groups (image windows) with >= 2
@@ -94,61 +84,21 @@ struct CalibProcOptions
   // pinned, excluded-from-the-floor path "calibration_derived" always
   // selected with known_pos/vel/theta_variance == 0.
   int p0_autocov_lags = 20;
-  // 2026-10-23: calib/p0/tilt_ba_ambiguity_accel_std, calib/p0/
-  // ba_radial_model_floor, and calib/p0/ba_scale (a diagnostic multiplier,
-  // briefly added then removed the same session) are all gone -- P_ba is
-  // now unconditionally Zero. History: the first two were hardcoded
-  // additions on top of P_ba (then J*acc_mean_cov*J^T) modeling the
-  // transverse tilt/accelerometer-bias degeneracy and a radial floor
-  // respectively; an ablation found zeroing both changed frame-1 position
-  // drift by <0.5%. The diagnostic ba_scale sweep (0 to 100x) that
-  // followed found P_ba had essentially no leverage on propagated
-  // position covariance either direction (0.316-0.321mm pooled std at
-  // frame_idx_=6 across the whole range), while a monotonically
-  // increasing effect on the actual realized drift (worse as P_ba grew) --
-  // zero is strictly the best of everything tested, so applyCalibration
-  // DerivedP0() now sets P_ba = Zero directly, no scale knob needed.
-  //
-  // calib/p0/bg_scale (a diagnostic multiplier on P_bg, mirroring
-  // p0_ba_scale above) was added and removed the same session. Unlike
-  // P_ba, the sweep found bg's initial uncertainty DOES measurably affect
-  // rotation covariance at frame_idx_=1 (0.062->0.149mrad pooled std,
-  // scale 0->100) and a higher scale had a small positive effect on the
-  // realized drift (best around scale~10, 1.792mm->1.781mm vs the
-  // scale=1 default) -- but that rotation-covariance difference fully
-  // washes out by frame_idx_=6 regardless of starting scale (0.131mrad
-  // in every case), and no specific scale value was adopted as a new
-  // permanent default, so the knob was removed rather than left in at an
-  // arbitrary value. Worth revisiting with a more targeted experiment if
-  // the small positive effect turns out to matter.
-  double p0_bg_model_floor = 1.0e-5;
-  // Diagnostic-only (2026-10-23 session): P0's attitude (theta) block is
-  // normally pinned EXACTLY zero (R89/R97A Q4 item 3 -- "position,
-  // velocity and attitude are known exactly" -- see knownP0Blocks()),
-  // even though a real, nonzero tilt uncertainty IS already measured and
-  // written every run (gravity_alignment.txt's tilt_sd_from_acc_mean_cov_
-  // rad, ~0.17-0.41mrad on this bag) and simply never fed into the
-  // filter. Testing the "initial gravity/attitude error" hypothesis for
-  // the frame-6 covariance-vs-drift gap: default -1.0 keeps the existing
-  // exact-zero pin (behavior-preserving); >= 0.0 unpins theta and sets
-  // its P0 diagonal to this isotropic variance (rad^2) instead, via the
-  // SAME KnownBlock mechanism (p0_pin.h) ba/bg already use, just a
-  // constant rather than a calibration-derived value, so cross terms
-  // with other states are still cleared (correlation with ba/bg/position
-  // through this tilt source is a known simplification, not modeled).
-  double p0_theta_variance = -1.0;
+  // P0_ba and P0_bg are UNCONDITIONALLY Zero (2026-10-23, Bryce's call, this session) -- all
+  // Jacobian/calibration-derived machinery for both is removed entirely, not just config-gated to
+  // zero. History: P_ba went through tilt-ambiguity/radial-floor terms (removed, <0.5% effect),
+  // then a J*acc_mean_cov*J^T calibration-derived value (briefly baked in, then on/off-tested),
+  // then a shared ba+bg+gravity `fixed_override` diagnostic swept at 1e-5/1e-8/0 -- that last
+  // sweep found a large, CONSISTENT, MONOTONIC improvement all the way down to zero, across
+  // lio_only/sequential/combined, on every frame from 2 onward (frame 6 position: lio_only
+  // 2.08->0.99mm, sequential 2.00->0.50mm, combined 1.87->0.25mm, at value=0), with reported
+  // uncertainty roughly flat and rotation barely moving (<0.3mrad) -- exact zero is simply the
+  // best value tested for both blocks, not a diagnostic default, so it's now permanent and the
+  // Jacobian/gyro_mean_cov/floor code that used to compute something else is deleted outright.
   // Purely numerical covariance floor. This is not a physical uncertainty
   // model: it only makes the symmetric P0 strictly positive definite for
   // information-form solves when a physically valid construction is PSD.
   double p0_numerical_eigenvalue_floor = 1e-12;
-
-  // R97A R4: "fixed" (default) leaves the gravity block of P0 at state/cov/gravity (isotropic),
-  // untouched by calibration. "calibration" overwrites it with the calibration's own transverse
-  // specific-force noise, projected onto the plane perpendicular to gravity (the radial part --
-  // |g| vs b_a along gravity -- stays at the fixed value; one stationary accelerometer mean cannot
-  // separate the two). Gravity's cross-covariance with every other block stays zero either way
-  // (the tilt/ba/gravity coupling is a known omission).
-  std::string p0_gravity_cov_mode = "fixed";
 
   // A stationary calibration window measures the sensor's noise *floor*,
   // not the process noise real dynamic motion needs. The measured floor is
@@ -186,9 +136,7 @@ private:
   void        computeBiasAndNoise(V3D& acc_bias, V3D& gyro_bias,
                                   V3D& var_acc, V3D& var_gyr) const;
   M3D         covarianceOfMean(bool accelerometer) const;
-  void        applyCalibrationDerivedP0(const M3D& R_init,
-                                        const M3D& acc_mean_cov,
-                                        const M3D& gyro_mean_cov);
+  void        applyCalibrationDerivedP0();
   void        stabilizeP0();
   std::vector<p0::KnownBlock> knownP0Blocks() const;
   M3D         computeInitialRotation(const V3D& acc_bias) const;
