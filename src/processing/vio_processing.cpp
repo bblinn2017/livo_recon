@@ -2,6 +2,7 @@
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
+#include "livo_recon/diagnostics/correction_breakdown_diag.h"  // TEMPORARY, see its own header doc comment
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -61,12 +62,7 @@ std::string VioProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<double>(pnh, "vio/ekf/min_diff_error",  opts_.min_diff_error,  1e-4);
   paramWarn<bool>(pnh, "vio/ekf/force_all_iterations", opts_.force_all_iterations, false);
   paramWarn<double>(pnh, "vio/ekf/max_avg_error",      opts_.max_avg_error,      5.0);
-  paramWarn<double>(pnh, "vio/ekf/pos_epipolar_residual_var", opts_.pos_epipolar_residual_var, 0.0556);
-  paramWarn<double>(pnh, "vio/ekf/neg_epipolar_residual_var", opts_.neg_epipolar_residual_var, 0.03125);
-  paramWarn<double>(pnh, "vio/ekf/pos_weight_scale", opts_.pos_weight_scale, 1.0);
-  paramWarn<std::string>(pnh, "vio/ekf/residual_mode", opts_.residual_mode, "epipolar");
-  paramWarn<double>(pnh, "vio/ekf/pos_ray_distance_residual_var", opts_.pos_ray_distance_residual_var, 1000.0);
-  paramWarn<double>(pnh, "vio/ekf/neg_ray_distance_residual_var", opts_.neg_ray_distance_residual_var, 10.0);
+  paramWarn<double>(pnh, "vio/ekf/epipolar_residual_weight", opts_.epipolar_residual_weight, 0.0556);
   paramWarn<double>(pnh, "vio/ekf/anchor_split_depth", opts_.anchor_split_depth,  0.0);
   paramWarn<bool>(pnh, "vio/ekf/bidirectional",        opts_.bidirectional,        true);
   paramWarn<bool>(pnh, "vio/ekf/distortion_weight_on",  opts_.distortion_weight_on,  false);
@@ -90,12 +86,7 @@ std::string VioProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  min_diff_error:  " << opts_.min_diff_error
       << "\n  force_all_iterations: " << (opts_.force_all_iterations ? "true" : "false")
       << "\n  max_avg_error:   " << opts_.max_avg_error
-      << "\n  pos_epipolar_residual_var: " << opts_.pos_epipolar_residual_var
-      << "\n  neg_epipolar_residual_var: " << opts_.neg_epipolar_residual_var
-      << "\n  pos_weight_scale:          " << opts_.pos_weight_scale
-      << "\n  residual_mode:             " << opts_.residual_mode
-      << "\n  pos_ray_distance_residual_var: " << opts_.pos_ray_distance_residual_var
-      << "\n  neg_ray_distance_residual_var: " << opts_.neg_ray_distance_residual_var
+      << "\n  epipolar_residual_weight:     " << opts_.epipolar_residual_weight
       << "\n  anchor_split_depth:         " << opts_.anchor_split_depth
       << "\n  bidirectional:              " << (opts_.bidirectional ? "true" : "false")
       << "\n  distortion_weight_on:       " << (opts_.distortion_weight_on ? "true" : "false")
@@ -117,12 +108,7 @@ std::string VioProc::loadParameters(ros::NodeHandle& pnh)
 VioAccumulateOptions VioProc::accumulateOptions() const
 {
   VioAccumulateOptions a;
-  a.pos_epipolar_residual_var = opts_.pos_epipolar_residual_var;
-  a.neg_epipolar_residual_var = opts_.neg_epipolar_residual_var;
-  a.pos_weight_scale          = opts_.pos_weight_scale;
-  a.residual_mode             = opts_.residual_mode;
-  a.pos_ray_distance_residual_var = opts_.pos_ray_distance_residual_var;
-  a.neg_ray_distance_residual_var = opts_.neg_ray_distance_residual_var;
+  a.epipolar_residual_weight = opts_.epipolar_residual_weight;
   a.anchor_split_depth        = opts_.anchor_split_depth;
   a.bidirectional              = opts_.bidirectional;
   a.distortion_weight_on       = opts_.distortion_weight_on;
@@ -222,7 +208,10 @@ bool VioProc::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, float& avg
 //  EKF iteration loop — repeated solveSystem calls to convergence
 // ─────────────────────────────────────────────
 
-std::string VioProc::estimateStateCorrection(const TrackedFrame& frame, double t_abs)
+std::string VioProc::estimateStateCorrection(const TrackedFrame& frame, double t_abs,
+                                             float* out_avg_error, float* out_avg_abs_pixel_residual,
+                                             int* out_n_valid, const StateGroup* pre_lio_state_for_ask,
+                                             int diag_frame_idx)
 {
   TimedScope ts_ekf(profiler_, "vio/ekf");
 
@@ -249,6 +238,55 @@ std::string VioProc::estimateStateCorrection(const TrackedFrame& frame, double t
   // applyCovarianceUpdate() is called exactly once.
   prior_cov_ = state_before_frame.cov();
   state_propagat_ = state_before_frame;
+
+  // TEMPORARY (2026-10-27, correction_breakdown_diag investigation): what
+  // does VIO's measurement evidence ALONE ask for, at frame entry, before
+  // any Kalman-gain weighting against the prior? -- i.e. the unweighted
+  // normal-equations solution -HtH^-1*Htz, NOT applyMeanUpdate()'s own
+  // measurement_term (which already incorporates prior_cov via K1).
+  // Reuses the existing out-param request as this feature's gate too.
+  // Delete alongside the rest of this investigation's plumbing.
+  //
+  // Reference-point fix (2026-10-27): combined mode's matching ask
+  // diagnostic (combined_processing.cpp) evaluates at the TRUE frame-entry
+  // state (post-IMU-propagation, before LIO or VIO has touched anything
+  // this frame). In sequential mode, state_ already holds LIO's converged
+  // correction by the time this function runs -- so to make the two
+  // "ask_vio" numbers comparable, temporarily swap *state_ to the caller-
+  // supplied pre-LIO snapshot for this one read-only accumulate() call,
+  // then restore it immediately (state_before_frame, captured above,
+  // already IS that restore value -- it equals *state_ at function entry).
+  // Safe: nothing else reads state_'s pose concurrently with this
+  // single-threaded per-frame call (see vio_processing.h's doc comment).
+  if (out_avg_error || out_avg_abs_pixel_residual || out_n_valid)
+  {
+    if (pre_lio_state_for_ask) *state_ = *pre_lio_state_for_ask;
+
+    EkfUpdate ask_scratch;
+    float ask_avg_error = 0.0f, ask_avg_abs_pixel_residual = 0.0f;
+    int ask_n_valid = 0;
+    const bool ask_ok = accumulator_.accumulate(frame, frame_anchors_, accumulateOptions(),
+                                                ask_scratch, ask_avg_error, ask_avg_abs_pixel_residual,
+                                                ask_n_valid, t_abs, /*iter=*/-1);
+
+    if (pre_lio_state_for_ask) *state_ = state_before_frame;
+
+    V3D ask_dtheta = V3D::Zero(), ask_dt = V3D::Zero();
+    double tr_rot_vio = 0.0, tr_pos_vio = 0.0;
+    if (ask_ok && ask_n_valid > 0)
+    {
+      const Eigen::Matrix<double, 6, 1> ask = -ask_scratch.HtH.ldlt().solve(ask_scratch.Htz);
+      ask_dtheta = ask.segment<3>(0);
+      ask_dt = ask.segment<3>(3);
+      tr_rot_vio = ask_scratch.HtH.block<3, 3>(0, 0).trace();
+      tr_pos_vio = ask_scratch.HtH.block<3, 3>(3, 3).trace();
+    }
+    writeCorrectionBreakdownRow(diag_frame_idx >= 0 ? diag_frame_idx : static_cast<int>(++correction_breakdown_frame_index_), t_abs, "sequential",
+                                ask_dtheta, ask_dt, ask_n_valid,
+                                /*have_lio_ask=*/false, V3D::Zero(), V3D::Zero(), 0,
+                                /*have_counterfactual=*/false, V3D::Zero(), V3D::Zero(), V3D::Zero(), V3D::Zero(),
+                                /*tr_HtH_rot_lio=*/0.0, /*tr_HtH_pos_lio=*/0.0, tr_rot_vio, tr_pos_vio);
+  }
 
   V3D total_dtheta = V3D::Zero(), total_dt = V3D::Zero();
   float last_error = std::numeric_limits<float>::max();
@@ -321,7 +359,14 @@ std::string VioProc::estimateStateCorrection(const TrackedFrame& frame, double t
   // solveSystem()'s own per-iteration rows already give, pre-that-
   // iteration's own update). Scratch EkfUpdate/avg_error/n_valid are
   // unused beyond driving the log write.
-  if (n_successful > 0)
+  // TEMPORARY (2026-10-27, vio_residual_diag): also run this re-check when
+  // an out-param was requested, even if n_successful==0 (e.g. iter-0's own
+  // admission gate rejected immediately) -- a caller asking for the true
+  // final residual wants it regardless of whether any correction actually
+  // got applied this frame. Delete the `|| want_diag_out` disjunct (and the
+  // out-param writes below) alongside the rest of this investigation.
+  const bool want_diag_out = out_avg_error || out_avg_abs_pixel_residual || out_n_valid;
+  if (n_successful > 0 || want_diag_out)
   {
     EkfUpdate final_scratch;
     float final_avg_error = 0.0f;
@@ -330,6 +375,9 @@ std::string VioProc::estimateStateCorrection(const TrackedFrame& frame, double t
     accumulator_.accumulate(frame, frame_anchors_, accumulateOptions(),
                             final_scratch, final_avg_error, final_avg_abs_pixel_residual,
                             final_n_valid, t_abs, 99);
+    if (out_avg_error) *out_avg_error = final_avg_error;
+    if (out_avg_abs_pixel_residual) *out_avg_abs_pixel_residual = final_avg_abs_pixel_residual;
+    if (out_n_valid) *out_n_valid = final_n_valid;
   }
 
   if (opts_.log_iterations)
@@ -382,11 +430,17 @@ std::string VioProc::estimateStateCorrection(const TrackedFrame& frame, double t
 //  Main entry point
 // ─────────────────────────────────────────────
 
-std::string VioProc::processVIO(MeasureGroup& mg)
+std::string VioProc::processVIO(MeasureGroup& mg, bool force_run,
+                                float* out_avg_error, float* out_avg_abs_pixel_residual,
+                                int* out_n_valid, bool* out_ok,
+                                const StateGroup* pre_lio_state_for_ask,
+                                int diag_frame_idx)
 {
   TimedScope ts(profiler_, "vio");
 
-  if (!opts_.enable)
+  if (out_ok) *out_ok = false;
+
+  if (!opts_.enable && !force_run)
     return "";
 
   if (mg.image.image.empty() || !tracker_->loaded())
@@ -464,7 +518,10 @@ std::string VioProc::processVIO(MeasureGroup& mg)
   // reseed by now).
   frame_anchors_ = frame.anchors;
 
-  std::string log = "[vio/ekf]" + estimateStateCorrection(frame, t_abs);
+  if (out_ok) *out_ok = true;
+  std::string log = "[vio/ekf]" + estimateStateCorrection(frame, t_abs, out_avg_error,
+                                                           out_avg_abs_pixel_residual, out_n_valid,
+                                                           pre_lio_state_for_ask, diag_frame_idx);
 
   if (!frame.log.empty())
     log += "  " + frame.log;

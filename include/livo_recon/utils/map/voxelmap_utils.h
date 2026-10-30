@@ -573,6 +573,44 @@ struct VoxelOpts
   // trusted, which is the physical claim under test.
   double weight_incidence_k = 1.0;
 
+  // 2026-10-29 (sign-mismatch investigation): tried a multiplicative
+  // (1 + k*sin^2(incidence)) correction to sigma_diag_squared (gate()'s
+  // residual-weighting projection, which measurably has the WRONG sign vs.
+  // a direct stationary-window measurement: -0.91 correlation, i.e. the
+  // anisotropic radial/tangential model predicts LESS noise at grazing
+  // incidence when the real data shows MORE), and separately extended the
+  // same correction to the plane FIT itself (VoxelNode::update(), scaling
+  // sensor_cov before binning, using sensor_cov's own dominant eigenvector
+  // as a ray-direction proxy against the voxel's previous-fit normal --
+  // no point-class change needed). Removed 2026-10-29: the gate-only
+  // version left calibration unchanged (as expected, since it doesn't
+  // touch the map) and didn't improve it either; the fit-level version
+  // measurably WORSENED stationary-window RMS (17.15mm -> 17.77mm) and
+  // widened the worst-case per-voxel miscalibration tail (ratio spread
+  // 5.6x -> 14.8x), despite a marginal correlation gain (0.23 -> 0.31).
+  // Root cause: the real incidence-vs-noise relationship is U-shaped
+  // (elevated at BOTH near-normal and grazing incidence), which no
+  // monotonic sin^2 correction can represent at either gate or fit level.
+
+  // 2026-10-29 (empirical per-voxel variance, follow-up to the incidence
+  // investigation above): rather than predicting sigma_diag_squared from
+  // ANY formula (range/incidence-based or otherwise), blend in each
+  // voxel's own OBSERVED residual variance (VoxelPlane::
+  // empiricalVariance(), a plain running mean(r^2) over admitted
+  // residuals) once it has enough samples to trust -- this is the thing
+  // that actually varies voxel-to-voxel in the real data (surface
+  // material/roughness), which no formula keyed only on range/incidence
+  // can represent. Blend weight shrink = n/(n+prior_n), so a voxel with
+  // few observations still uses mostly the formula, and one with many
+  // increasingly trusts its own history. Applied in computeResidual(),
+  // AFTER sigma_diag_squared is finalized, to the WEIGHT only (same scope
+  // as the incidence correction above) -- not to the fit; see that
+  // correction's own negative fit-level result before extending this one
+  // there. Default off.
+  bool   empirical_variance_enable = false;
+  int    empirical_variance_min_n = 20;
+  double empirical_variance_prior_n = 20.0;
+
   // History (479-507, removal): see docs/livo_recon_changelog.md#include-livo_recon-utils-map-voxelmap_utils.h-487-removed
 
   // R93A: plane_var_denom_floor_en is removed (it was false in every job).

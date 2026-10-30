@@ -4,6 +4,8 @@
 #include "livo_recon/utils/data/measures.h"
 #include "livo_recon/utils/log/profiler.h"
 
+#include <Eigen/Core>
+
 namespace livo_recon
 {
 
@@ -25,8 +27,22 @@ struct ImuProcOptions
   // no meaningful difference in best-achievable ATE or in acc/gyro_scale's
   // effect size either way, so the per-step instantaneous energy is used
   // directly and unclamped.
-  double motion_acc_scale = 0.3;   // R80 F-477: was 1.0
-  double motion_gyr_scale = 10.0;  // R80 F-477: was 1.0
+  // 2026-10-28: isotropic (scalar, broadcast to all 3 axes -- Constant(k) reproduces the old
+  // scalar behavior exactly) or per-axis (anisotropic). config.yaml's imu/process_noise/motion/
+  // {acc,gyro}_scale accepts EITHER a single number or a 3-element [x,y,z] array for this reason --
+  // see imu_processing.cpp's loadScaleParam().
+  Eigen::Vector3d motion_acc_scale = Eigen::Vector3d::Constant(0.3);   // R80 F-477: was 1.0
+  Eigen::Vector3d motion_gyr_scale = Eigen::Vector3d::Constant(10.0);  // R80 F-477: was 1.0
+  // 2026-10-29: how motion_{acc,gyr}_scale turns the debiased dynamic signal into a variance.
+  // "quadratic" (the original/only form before this date): variance = scale^2 * debiased_energy,
+  // i.e. variance grows with the SQUARE of the dynamic signal's magnitude (matches qscale_fit's
+  // "s"/acc_scale/gyro_scale, the excess-ENERGY term). "linear" (new default): variance =
+  // scale * debiased_magnitude, i.e. variance grows LINEARLY with magnitude (matches qscale_fit's
+  // "w", the excess-MAGNITUDE term). qscale_fit's own joint fits this session found the two terms
+  // highly collinear (X vs X2, r~0.9), and the real acc/gyro error-vs-motion-magnitude relationship
+  // tracks the linear term, not the quadratic one -- see scratchpad/TODO_investigation.md. "linear"
+  // is the new default; "quadratic" reproduces this file's exact pre-2026-10-29 behavior unchanged.
+  std::string motion_scale_form = "linear";  // "quadratic" | "linear"
 
   // Per-IMU-step trace of the first three propagations (imu_first_scans.csv).
   bool first_scans_log_en = false;

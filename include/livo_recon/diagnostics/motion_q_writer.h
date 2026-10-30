@@ -25,7 +25,7 @@ void writeMotionQStepDiagnostic(
 
 void writeMotionQScanDiagnostic(
     size_t scan_index, double t_abs, const std::string& model,
-    double acc_scale, double gyr_scale,
+    const V3D& acc_scale, const V3D& gyr_scale,
     size_t sample_count, double mean_dynamic_acc_norm,
     double mean_dynamic_gyr_norm, const V3D& mean_q_acc,
     const V3D& mean_q_gyr, const V3D& mean_debiased_acc_energy,

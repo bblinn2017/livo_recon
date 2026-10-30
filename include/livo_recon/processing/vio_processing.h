@@ -60,17 +60,15 @@ struct VioProcOptions
   // placeholder value pending that.
   double max_avg_error = 5.0;
 
-  // History (46-68): see docs/livo_recon_changelog.md#include-livo_recon-processing-vio_processing.h-46
-  double pos_epipolar_residual_var = 0.0556;
-
-  // History (71-83): see docs/livo_recon_changelog.md#include-livo_recon-processing-vio_processing.h-71
-  double neg_epipolar_residual_var = 0.03125;
-
-  // See VioAccumulateOptions::pos_weight_scale's doc comment (vio_accumulator
-  // .h) -- multiplies ONLY the position-column weight of every epipolar
-  // residual's HtH/Htz contribution, leaving rotation-column weight
-  // untouched. 1.0 (default) reproduces old behavior (no DOF split).
-  double pos_weight_scale = 1.0;
+  // 2026-10-27: collapsed from pos_/neg_epipolar_residual_var into one
+  // value, and renamed from "_var" to "_weight" -- it was always applied
+  // DIRECTLY as the weight (weight = epipolar_residual_weight), never as
+  // an inverse variance requiring a runtime 1/var division, so "_var" was
+  // misleading (larger value = MORE weight/trust, opposite of what a
+  // variance name implies). Mixed mode and pos_weight_scale, the other
+  // two residual-strength levers, were removed the same day -- see
+  // docs/livo_recon_changelog.md for the removal history.
+  double epipolar_residual_weight = 0.0556;
 
   // History (92-108): see docs/livo_recon_changelog.md#include-livo_recon-processing-vio_processing.h-92
   double anchor_split_depth = 0.0;
@@ -87,14 +85,6 @@ struct VioProcOptions
   // into distortion_weight_on's error propagation -- only consulted when
   // distortion_weight_on is true. Ported default: 0.5.
   double weight_pixel_noise_px = 0.5;
-
-  // See VioAccumulateOptions::residual_mode's doc comment (vio_accumulator.h)
-  // -- "epipolar" (default) or "mixed" (ported from FAST-LIVO2's
-  // ResidualMode::kMixed: two independently-weighted, DOF-disjoint
-  // residuals per point instead of one conflated one).
-  std::string residual_mode = "epipolar";
-  double pos_ray_distance_residual_var = 1000.0;
-  double neg_ray_distance_residual_var = 10.0;
 
   // History (149-159): see docs/livo_recon_changelog.md#include-livo_recon-processing-vio_processing.h-149
 
@@ -171,7 +161,44 @@ public:
   // populated by CbkProc::syncMeasures() by the time this frame reaches
   // state estimation at all (see its own waitReadyFor(0ms) gate), so no
   // wait/consume call is needed here.
-  std::string processVIO(MeasureGroup& mg);
+  // TEMPORARY (2026-10-27, vio_residual_diag investigation -- delete
+  // force_run/out_* params + their plumbing in estimateStateCorrection()
+  // once done): force_run=true bypasses the `!opts_.enable` early return
+  // and actually runs (and APPLIES to state_) a real VIO correction even
+  // when VIO is normally disabled -- the caller is responsible for
+  // snapshotting/restoring state_ around such a call if it wants a
+  // read-only evaluation (see livo_recon_node.h's force_vio_residual_log_
+  // doc comment for why). out_avg_error/out_avg_abs_pixel_residual/
+  // out_n_valid/out_ok, when non-null, receive the TRUE final values
+  // (evaluated AFTER the accept/reject decision, at whatever pose this
+  // frame actually ends with) -- not the stale pre-last-update values
+  // last_error/last_pixel_residual hold mid-loop. Default args keep every
+  // existing call site byte-identical.
+  // pre_lio_state_for_ask (2026-10-27, correction_breakdown_diag fix):
+  // optional snapshot of state_ taken by the caller BEFORE LioProc::
+  // processLIO() ran this frame. In sequential mode, by the time
+  // processVIO() is entered, state_ already holds LIO's converged
+  // correction for this frame -- so without this, the diagnostic "ask"
+  // block in estimateStateCorrection() computes VIO's unweighted ask
+  // against a post-LIO pose, not the true frame-entry (post-IMU-
+  // propagation, pre-any-correction) pose that combined mode's own ask
+  // diagnostic uses. When non-null, estimateStateCorrection() temporarily
+  // swaps *state_ to this snapshot for that one read-only accumulate()
+  // call, then restores it before the real correction loop runs -- see
+  // estimateStateCorrection()'s own comment. Does not affect the real
+  // correction in any way.
+  // diag_frame_idx (2026-10-27, correction_breakdown_diag scan_id-alignment
+  // fix): the caller's voxel_map frame index (LioProcBase::frameIdx()),
+  // used ONLY to tag the ask-diagnostic row with the SAME physical-frame
+  // counter combined mode's own ask diagnostic uses (see LioProcBase::
+  // frameIdx()'s doc comment) -- replaces a separately-incremented counter
+  // that could (and, confirmed this session, did) drift by a full frame
+  // relative to combined mode's.
+  std::string processVIO(MeasureGroup& mg, bool force_run = false,
+                         float* out_avg_error = nullptr, float* out_avg_abs_pixel_residual = nullptr,
+                         int* out_n_valid = nullptr, bool* out_ok = nullptr,
+                         const StateGroup* pre_lio_state_for_ask = nullptr,
+                         int diag_frame_idx = -1);
 
   // History (274-282): see docs/livo_recon_changelog.md#include-livo_recon-processing-vio_processing.h-274
   // `iter` is CombinedProc's own outer joint-EKF iteration index (0..max_iterations-1),
@@ -215,6 +242,9 @@ private:
 
   int last_n_residuals_ = 0;  // number of residuals actually used in the most recent solveSystem call
 
+  // TEMPORARY (2026-10-27, correction_breakdown_diag investigation) -- delete alongside it.
+  int correction_breakdown_frame_index_ = 0;
+
   // History (313-317): see docs/livo_recon_changelog.md#include-livo_recon-processing-vio_processing.h-313
   VioAccumulator accumulator_;
 
@@ -236,7 +266,16 @@ private:
 
   // Runs the EKF correction loop (repeated solveSystem calls) to convergence
   // and returns a log string summarizing how it stopped.
-  std::string estimateStateCorrection(const TrackedFrame& frame, double t_abs);
+  // TEMPORARY (2026-10-27, vio_residual_diag): out_avg_error/
+  // out_avg_abs_pixel_residual/out_n_valid, when non-null, receive the
+  // TRUE final residual (see processVIO()'s matching doc comment) --
+  // delete alongside the rest of this investigation's plumbing.
+  std::string estimateStateCorrection(const TrackedFrame& frame, double t_abs,
+                                      float* out_avg_error = nullptr,
+                                      float* out_avg_abs_pixel_residual = nullptr,
+                                      int* out_n_valid = nullptr,
+                                      const StateGroup* pre_lio_state_for_ask = nullptr,
+                                      int diag_frame_idx = -1);
 };
 
 }  // namespace livo_recon

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ros/ros.h>
+#include <xmlrpcpp/XmlRpcValue.h>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -108,6 +109,89 @@ std::string paramWarnFormat(const T& v)
 }
 }  // namespace detail
 
+// 2026-10-27: a param present on the server with the WRONG XmlRpc type (the
+// exact failure mode that let a YAML scalar like `1.0e6` -- parsed by
+// PyYAML/ruamel as the STRING "1.0e6", not a float, since YAML's float
+// grammar requires a signed exponent -- silently reach the server as a
+// string where a double was wanted) used to be indistinguishable from a
+// correctly-typed value: pnh.param<T>() coerces what it can and falls back
+// to the default on ANY failure, missing-key or wrong-type alike, with no
+// warning either way once hasParam() says true. Confirmed this session: a
+// job's own `max_avg_error: 1.0e6` override silently never took effect,
+// and nothing printed to say so. XmlRpcTypeCheck below closes exactly that
+// gap for the four scalar types this codebase's *ProcOptions structs
+// actually load (double/int/bool/std::string) -- same "refuse rather than
+// resolve silently" contract ConfigResolver's mode()/nested() already
+// enforce for scope/enum violations, extended to the raw param-server type.
+namespace detail
+{
+template <typename T>
+struct XmlRpcTypeCheck
+{
+  static constexpr bool kChecked = false;
+  static void check(ros::NodeHandle&, const std::string&) {}
+};
+
+template <>
+struct XmlRpcTypeCheck<double>
+{
+  static constexpr bool kChecked = true;
+  static void check(ros::NodeHandle& pnh, const std::string& key)
+  {
+    XmlRpc::XmlRpcValue v;
+    if (!pnh.getParam(key, v)) return;  // hasParam() raced/lied -- param()'s own fallback handles it
+    if (v.getType() != XmlRpc::XmlRpcValue::TypeDouble && v.getType() != XmlRpc::XmlRpcValue::TypeInt)
+      throw std::runtime_error("[params] '" + key + "' is set on the param server but is not a "
+                               "number (likely a YAML scalar that parsed as a string, e.g. an "
+                               "unsigned-exponent float like 1.0e6 instead of 1.0e+6) -- "
+                               "expected a double");
+  }
+};
+
+template <>
+struct XmlRpcTypeCheck<int>
+{
+  static constexpr bool kChecked = true;
+  static void check(ros::NodeHandle& pnh, const std::string& key)
+  {
+    XmlRpc::XmlRpcValue v;
+    if (!pnh.getParam(key, v)) return;
+    if (v.getType() != XmlRpc::XmlRpcValue::TypeInt)
+      throw std::runtime_error("[params] '" + key + "' is set on the param server but is not an "
+                               "int -- expected an int");
+  }
+};
+
+template <>
+struct XmlRpcTypeCheck<bool>
+{
+  static constexpr bool kChecked = true;
+  static void check(ros::NodeHandle& pnh, const std::string& key)
+  {
+    XmlRpc::XmlRpcValue v;
+    if (!pnh.getParam(key, v)) return;
+    if (v.getType() != XmlRpc::XmlRpcValue::TypeBoolean)
+      throw std::runtime_error("[params] '" + key + "' is set on the param server but is not a "
+                               "bool (see the YAML 1.1 bool-keyword gotcha -- an unquoted on/off/"
+                               "yes/no elsewhere in the same file is the usual cause) -- expected a bool");
+  }
+};
+
+template <>
+struct XmlRpcTypeCheck<std::string>
+{
+  static constexpr bool kChecked = true;
+  static void check(ros::NodeHandle& pnh, const std::string& key)
+  {
+    XmlRpc::XmlRpcValue v;
+    if (!pnh.getParam(key, v)) return;
+    if (v.getType() != XmlRpc::XmlRpcValue::TypeString)
+      throw std::runtime_error("[params] '" + key + "' is set on the param server but is not a "
+                               "string -- expected a string");
+  }
+};
+}  // namespace detail
+
 template <typename T>
 void paramWarn(ros::NodeHandle& pnh, const std::string& key, T& out, const T& default_value)
 {
@@ -116,6 +200,10 @@ void paramWarn(ros::NodeHandle& pnh, const std::string& key, T& out, const T& de
   {
     ROS_WARN_STREAM("[params] '" << key << "' not found on the param server "
                      "-- falling back to default: " << detail::paramWarnFormat(default_value));
+  }
+  else if (detail::XmlRpcTypeCheck<T>::kChecked)
+  {
+    detail::XmlRpcTypeCheck<T>::check(pnh, key);
   }
   pnh.param<T>(key, out, default_value);
 }

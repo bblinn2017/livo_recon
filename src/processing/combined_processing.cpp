@@ -2,6 +2,7 @@
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/diagnostics/log/consistency_log.h"
 #include "livo_recon/diagnostics/vio_correction.h"
+#include "livo_recon/diagnostics/correction_breakdown_diag.h"  // TEMPORARY, see its own header doc comment
 #include "livo_recon/processing/lio_base.h"
 #include "livo_recon/processing/vio_processing.h"
 
@@ -17,13 +18,20 @@ CombinedProc::CombinedProc(NodeContext& ctx)
 
 std::string CombinedProc::loadParameters(ros::NodeHandle& pnh)
 {
+  // 2026-10-27: these six knobs used to be loaded a second time under
+  // combined/*, independently of VioProcOptions's vio/ekf/* copies, even
+  // though every dataset config has always given them the same value --
+  // collapsed onto the single vio/ekf/* namespace so there is one key per
+  // concept instead of two that could silently drift apart.
   paramWarn<bool>(pnh, "combined/enable",             opts_.enable,          false);
-  paramWarn<int>(pnh, "combined/max_iterations",      opts_.max_iterations,  5);
-  paramWarn<double>(pnh, "combined/ekf/min_norm_dtheta", opts_.min_norm_dtheta, 0.0);
-  paramWarn<double>(pnh, "combined/ekf/min_norm_dt",     opts_.min_norm_dt,     0.0);
-  paramWarn<double>(pnh, "combined/ekf/min_diff_error",  opts_.min_diff_error,  -1.0);
-  paramWarn<bool>(pnh, "combined/ekf/force_all_iterations", opts_.force_all_iterations, false);
-  paramWarn<double>(pnh, "combined/ekf/max_avg_error",   opts_.max_avg_error,   5.0);
+  paramWarn<int>(pnh, "vio/ekf/max_iterations",       opts_.max_iterations,  5);
+  paramWarn<double>(pnh, "vio/ekf/min_norm_dtheta",   opts_.min_norm_dtheta, 0.0);
+  paramWarn<double>(pnh, "vio/ekf/min_norm_dt",       opts_.min_norm_dt,     0.0);
+  paramWarn<double>(pnh, "vio/ekf/min_diff_error",    opts_.min_diff_error,  1e-4);
+  paramWarn<bool>(pnh, "vio/ekf/force_all_iterations", opts_.force_all_iterations, false);
+  paramWarn<double>(pnh, "vio/ekf/max_avg_error",     opts_.max_avg_error,   5.0);
+  paramWarn<bool>(pnh, "diag/combined/split_dof_lio_pos_vio_rot",
+                   opts_.diag_split_dof_lio_pos_vio_rot, false);
   paramWarn<bool>(pnh, "log/combined/debug",       opts_.log_debug_en,   false);
   paramWarn<bool>(pnh, "log/combined/consistency", opts_.log_consistency_en, false);
   // See CombinedProcOptions::log_nll_en_compat -- log/lio/nll is read
@@ -47,7 +55,9 @@ std::string CombinedProc::loadParameters(ros::NodeHandle& pnh)
   return oss.str();
 }
 
-std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_proc, VioProc& vio_proc)
+std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_proc, VioProc& vio_proc,
+                                          float* out_avg_error, float* out_avg_abs_pixel_residual,
+                                          int* out_n_valid)
 {
   TimedScope ts(profiler_, "combined/ekf");
 
@@ -112,6 +122,16 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
   // absolute scale, then commit -- VIO admitted at iteration 0 is never re-litigated mid-frame,
   // but a genuinely bad iteration-0 fit is still rejected for the whole frame, same as before.
   bool vio_admitted = false;
+  // TEMPORARY (2026-10-27, vio_residual_diag): the RAW iter-0 VIO residual,
+  // captured regardless of whether it ends up admitted -- unlike
+  // last_avg_err_vio/last_pixel_residual_vio (only ever set when
+  // vio_ever_contributed), this always holds a value whenever VIO had ANY
+  // candidate residuals at all, so a diagnostic caller can see what VIO
+  // WOULD have seen even on a frame where it was excluded for the rest of
+  // the loop. Delete alongside the rest of this investigation's plumbing.
+  bool iter0_have_vio = false;
+  float iter0_avg_err_vio = 0.0f, iter0_avg_abs_pixel_residual_vio = 0.0f;
+  int iter0_n_meas_vio = 0;
 
   for (; iter < opts_.max_iterations; ++iter)
   {
@@ -120,9 +140,71 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
     float avg_err_vio = 0.0f;
     float avg_abs_pixel_residual_vio = 0.0f;
 
-    const bool have_lio = lio_proc.accumulateForCombined(mg, lio_part, avg_res_lio);
+    const bool have_lio = lio_proc.accumulateForCombined(mg, lio_part, avg_res_lio, iter);
     bool have_vio = vio_proc.accumulateForCombined(mg, vio_part, avg_err_vio,
                                                    avg_abs_pixel_residual_vio, iter);
+
+    if (iter == 0)
+    {
+      iter0_have_vio = have_vio;
+      iter0_avg_err_vio = avg_err_vio;
+      iter0_avg_abs_pixel_residual_vio = avg_abs_pixel_residual_vio;
+      iter0_n_meas_vio = vio_part.n_meas;
+
+      // TEMPORARY (2026-10-27, correction_breakdown_diag investigation):
+      // (1) what LIO's and VIO's measurement evidence ALONE ask for, at
+      // frame entry, unweighted by the prior (-HtH^-1*Htz -- see vio_
+      // processing.cpp's matching comment for why this differs from
+      // applyMeanUpdate()'s own measurement_term); (2) a single-iteration
+      // counterfactual isolating VIO's marginal contribution to the joint
+      // solve: re-run applyMeanUpdate() on a SCRATCH state copy (never
+      // touches the real state_) once with LIO's info alone, once with
+      // LIO+VIO summed, both from the SAME frame-entry snapshot -- the
+      // difference is what including VIO changes about the committed
+      // result, which can't be read off the real (summed-before-solving)
+      // joint result directly. Delete alongside the rest of this
+      // investigation's plumbing.
+      if (out_avg_error || out_avg_abs_pixel_residual || out_n_valid)
+      {
+        V3D ask_lio_dtheta = V3D::Zero(), ask_lio_dt = V3D::Zero();
+        if (have_lio)
+        {
+          const Eigen::Matrix<double, 6, 1> ask = -lio_part.HtH.ldlt().solve(lio_part.Htz);
+          ask_lio_dtheta = ask.segment<3>(0);
+          ask_lio_dt = ask.segment<3>(3);
+        }
+        V3D ask_vio_dtheta = V3D::Zero(), ask_vio_dt = V3D::Zero();
+        if (have_vio)
+        {
+          const Eigen::Matrix<double, 6, 1> ask = -vio_part.HtH.ldlt().solve(vio_part.Htz);
+          ask_vio_dtheta = ask.segment<3>(0);
+          ask_vio_dt = ask.segment<3>(3);
+        }
+
+        auto scratch_lio_only = std::make_shared<StateGroup>(*state_);
+        EkfUpdate cf_lio_only;
+        if (have_lio) { cf_lio_only.HtH = lio_part.HtH; cf_lio_only.Htz = lio_part.Htz; }
+        cf_lio_only.applyMeanUpdate(scratch_lio_only, prior_cov_, state_propagat_);
+
+        auto scratch_joint = std::make_shared<StateGroup>(*state_);
+        EkfUpdate cf_joint;
+        if (have_lio) { cf_joint.HtH += lio_part.HtH; cf_joint.Htz += lio_part.Htz; }
+        if (have_vio) { cf_joint.HtH += vio_part.HtH; cf_joint.Htz += vio_part.Htz; }
+        cf_joint.applyMeanUpdate(scratch_joint, prior_cov_, state_propagat_);
+
+        const double tr_rot_lio = have_lio ? lio_part.HtH.block<3, 3>(0, 0).trace() : 0.0;
+        const double tr_pos_lio = have_lio ? lio_part.HtH.block<3, 3>(3, 3).trace() : 0.0;
+        const double tr_rot_vio = have_vio ? vio_part.HtH.block<3, 3>(0, 0).trace() : 0.0;
+        const double tr_pos_vio = have_vio ? vio_part.HtH.block<3, 3>(3, 3).trace() : 0.0;
+
+        writeCorrectionBreakdownRow(lio_proc.frameIdx(), mg.image.t + data_queues_->start_time, "combined",
+                                    ask_vio_dtheta, ask_vio_dt, have_vio ? vio_part.n_meas : 0,
+                                    /*have_lio_ask=*/true, ask_lio_dtheta, ask_lio_dt, have_lio ? lio_part.n_meas : 0,
+                                    /*have_counterfactual=*/true,
+                                    cf_lio_only.dtheta, cf_lio_only.dt, cf_joint.dtheta, cf_joint.dt,
+                                    tr_rot_lio, tr_pos_lio, tr_rot_vio, tr_pos_vio);
+      }
+    }
 
     if (!have_lio && !have_vio) { stop = "no_residuals"; break; }
 
@@ -148,6 +230,28 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
 
     if (!have_lio && !have_vio)
       continue;  // VIO rejected this iteration and LIO had nothing -- nothing to apply, try again next iteration
+
+    // Diagnostic DOF split (see CombinedProcOptions::diag_split_dof_lio_pos_vio_rot's
+    // doc comment) -- applied only to what actually gets summed into the real
+    // joint solve below, AFTER the ask_lio/ask_vio/counterfactual diagnostics
+    // above are computed from the unsplit lio_part/vio_part.
+    if (opts_.diag_split_dof_lio_pos_vio_rot)
+    {
+      if (have_lio)
+      {
+        lio_part.HtH.block<3, 3>(0, 0).setZero();
+        lio_part.HtH.block<3, 3>(0, 3).setZero();
+        lio_part.HtH.block<3, 3>(3, 0).setZero();
+        lio_part.Htz.segment<3>(0).setZero();
+      }
+      if (have_vio)
+      {
+        vio_part.HtH.block<3, 3>(3, 3).setZero();
+        vio_part.HtH.block<3, 3>(3, 0).setZero();
+        vio_part.HtH.block<3, 3>(0, 3).setZero();
+        vio_part.Htz.segment<3>(3).setZero();
+      }
+    }
 
     ekf_.reset();
     if (have_lio) { ekf_.HtH += lio_part.HtH; ekf_.Htz += lio_part.Htz; }
@@ -268,6 +372,27 @@ std::string CombinedProc::processCombined(MeasureGroup& mg, LioProcBase& lio_pro
   if (opts_.log_vio_contribution_en)
     writeCombinedVioContributionRow(++vio_contribution_frame_index_, mg.image.t + data_queues_->start_time,
                                     final_avg_err_vio, last_n_meas_vio, vio_ever_contributed);
+
+  // TEMPORARY (2026-10-27, vio_residual_diag) -- see this function's header
+  // doc comment. When VIO never got admitted this frame (vio_ever_
+  // contributed=false), final_avg_err_vio/final_pixel_residual/
+  // last_n_meas_vio are all still at their initial zero/unset values -- fall
+  // back to the raw iter-0 attempt instead, so a diagnostic caller sees
+  // "what VIO would have seen" rather than a misleading zero, matching
+  // VioProc::processVIO()'s own fallback-to-raw-iter-0 behavior for
+  // sequential/lio_only (see its matching comment).
+  if (vio_ever_contributed)
+  {
+    if (out_avg_error) *out_avg_error = final_avg_err_vio;
+    if (out_avg_abs_pixel_residual) *out_avg_abs_pixel_residual = final_pixel_residual;
+    if (out_n_valid) *out_n_valid = last_n_meas_vio;
+  }
+  else
+  {
+    if (out_avg_error) *out_avg_error = iter0_have_vio ? iter0_avg_err_vio : 0.0f;
+    if (out_avg_abs_pixel_residual) *out_avg_abs_pixel_residual = iter0_have_vio ? iter0_avg_abs_pixel_residual_vio : 0.0f;
+    if (out_n_valid) *out_n_valid = iter0_have_vio ? iter0_n_meas_vio : 0;
+  }
 
   std::ostringstream oss;
   oss << "[combined/ekf] iters=" << iter << "  stop=" << stop

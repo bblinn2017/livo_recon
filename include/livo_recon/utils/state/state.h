@@ -86,6 +86,11 @@ public:
   // R66: mean-bias writers, used only by the opt-in Gauss-Markov bias model (imu/process_noise/bias_model).
   V3D& biasGyrMut() { return bias_gyr_; }
   V3D& biasAccMut() { return bias_acc_; }
+  // TEMPORARY (2026-10-27, pin_state_diag investigation): mutable gravity access,
+  // used only by the diagnostic that overwrites the live state from a reference
+  // state_trace.csv row. No existing writer touches gravity_ otherwise -- delete
+  // alongside the rest of that investigation's plumbing.
+  V3D& gravityMut() { return gravity_; }
   void applyDelta(const Eigen::VectorXd& dx);
 
   // Manifold-consistent (SO(3)-aware for rotation, plain subtraction
@@ -168,6 +173,8 @@ public:
   V3D lidarToImu(const V3D& p)  const { return R_li_ * p + t_li_; }
   M3D lidarToImu(const M3D& C)  const { return R_li_ * C * R_li_.transpose(); }
   V3D imuToCamera(const V3D& p) const { return R_ic_ * p + t_ic_; }
+  const M3D& R_l2c() const { return R_lc_; }
+  const V3D& t_l2c() const { return t_lc_; }
   V3D worldToCamera(const V3D& p) const { return Rcw_ * p + tcw_; }
 
   // ── Camera intrinsic getters ──────────────────────────────────────────────

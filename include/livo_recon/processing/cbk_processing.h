@@ -4,6 +4,7 @@
 #include "livo_recon/common_ros.h"
 #include "livo_recon/utils/lidar/lidar.h"
 #include "livo_recon/utils/imu/vibration_canceller.h"
+#include "livo_recon/utils/imu/motion_band_canceller.h"
 
 namespace livo_recon
 {
@@ -46,6 +47,26 @@ struct CbkProcOptions
   // FAST-LIVO2's preprocess/point_filter_num (Preprocess::process's
   // `i % point_filter_num != 0` skip). 1 = keep everything (no decimation).
   int point_filter_num = 1;
+
+  // Livox CustomMsg per-point timestamp reconstruction (pointsFromLivoxMsg()
+  // in lidar.cpp): each point's offset_time is smoothed/clamped against this
+  // sensor's nominal per-point rate, as a guard against rare out-of-order
+  // values -- see that function's own doc comment. Was hardcoded to 240000
+  // (LIDAR_HZ, lidar_ros_driver/math.h), which matches the Avia's point
+  // rate, not the mid360's: confirmed empirically on calib_10_28.bag that
+  // the mid360's real per-point dt is a rock-solid 4.947us (202142 Hz, 0
+  // variance over 3777 scans), while the clamp at 240000 Hz triggers on
+  // EVERY point (its own threshold, 4.1667us, is smaller than the real
+  // 4.947us step) -- not a rare-value guard at all in that configuration,
+  // but a permanent ~8.3ms cumulative lag by the end of every ~50ms scan,
+  // resetting every scan message (this investigation's concrete numbers:
+  // docs/QSCALE_REFINE_RESTRUCTURE_PLAN.md). Default kept at the old
+  // (Avia-correct) 240000 so no other dataset's behavior changes silently;
+  // mid360.yaml now sets this explicitly to 200000 (the mid360's
+  // documented nominal rate; the measured 202142 is close enough that the
+  // guard still never trips on real data, while erring toward the
+  // documented spec value rather than this one bag's own measurement).
+  double lidar_point_rate_hz = 240000.0;
 
   // R97A Q2: dry_run_point_filter_num is removed.
 
@@ -148,6 +169,11 @@ private:
   // cbk/imu/vibration/*: removes the prism vibration lines from every IMU sample (learns only until the
   // stationary calibration is done, see imuCallback())
   VibrationCanceller vib_;
+  // cbk/imu/motion_band/*: attenuates the non-mechanical, motion-gated 8-12Hz
+  // broadband noise hump (distinct from vib_'s coherent prism lines -- see
+  // motion_band_canceller.h's header comment). Runs right after vib_ in
+  // imuCallback(), on whatever vib_ already left in the sample.
+  MotionBandCanceller motion_band_;
 
   ros::Subscriber image_sub_;
   ros::Subscriber lidar_sub_;

@@ -39,20 +39,16 @@ struct RayClosestApproach
 // from its own VioProcOptions each call.
 struct VioAccumulateOptions
 {
-  double pos_epipolar_residual_var = 0.0556;
-  double neg_epipolar_residual_var = 0.03125;
+  // 2026-10-27: collapsed from a pos_/neg_ pair (one value for normal
+  // points, a looser one for depth-clamped points) into a single value --
+  // mixed mode and pos_weight_scale (the only other two residual-strength
+  // levers) were removed the same day, see docs/livo_recon_changelog.md
+  // for the removal history.
+  double epipolar_residual_weight    = 0.0556;
   double anchor_split_depth        = 0.0;
   bool   bidirectional              = true;
   bool   distortion_weight_on       = false;
   double weight_pixel_noise_px      = 0.5;
-
-  // History (60-78): see docs/livo_recon_changelog.md#include-livo_recon-vio-vio_accumulator.h-60
-  double pos_weight_scale          = 1.0;
-
-  // History (81-94): see docs/livo_recon_changelog.md#include-livo_recon-vio-vio_accumulator.h-81
-  std::string residual_mode         = "epipolar";
-  double pos_ray_distance_residual_var = 1000.0;  // free-solve (unclamped) ray-gap weight -- FAST-LIVO2's own tuned default
-  double neg_ray_distance_residual_var = 10.0;    // clamped (either ray) ray-gap weight -- FAST-LIVO2's own tuned default
 
   // Diagnostic logging -- see VioProcOptions's matching fields for the
   // full doc comments. Kept here (not stripped) so accumulate() can
@@ -88,9 +84,8 @@ public:
   // compares against, and must stay on this scale for that math to mean
   // anything. avg_abs_pixel_residual is a SEPARATE quantity: the plain
   // mean |residual_px| (no squaring, no weight) across the same valid
-  // points, epipolar term only even in "mixed" mode -- the ray-distance
-  // term is metric/meters, not a pixel distance -- this is what
-  // VioProcOptions::max_avg_error/CombinedProcOptions::max_avg_error (the
+  // points -- this is what VioProcOptions::max_avg_error/
+  // CombinedProcOptions::max_avg_error (the
   // whole-frame rejection gate) compares against, 2026-10-23 onward, since
   // that threshold is meant to be interpretable directly as a mean pixel
   // error, unlike the squared/weighted per-iteration convergence check.
@@ -123,24 +118,6 @@ private:
                                const Eigen::Matrix2d& anchor_uv_jacobian,
                                const Eigen::Matrix2d& curr_uv_jacobian,
                                double fx, double fy, const VioAccumulateOptions& opts) const;
-
-  // Ray-gap residual for "mixed" residual_mode -- see VioAccumulateOptions::
-  // residual_mode's doc comment. Returns the FULL 6-column Jacobian (both
-  // rotation and position blocks populated, like computeEpipolarResidual
-  // AndJacobian's own jacobian_out) -- accumulate() is responsible for
-  // zeroing whichever columns this residual shouldn't influence (rotation,
-  // for the position-only role this residual plays in "mixed" mode).
-  bool computeRayDistanceResidualAndJacobian(const ReprojectionPrecomputed& pre,
-                                             double fx, double fy, double cx, double cy,
-                                             const cv::Point2f& uv_seed,
-                                             const cv::Point2f& uv_tracked,
-                                             const Eigen::Matrix2d& anchor_uv_jacobian,
-                                             const Eigen::Matrix2d& curr_uv_jacobian,
-                                             const VioAccumulateOptions& opts,
-                                             double& residual_out,
-                                             Eigen::Matrix<double, 1, 6>& jacobian_out,
-                                             bool& depth_clamped_out,
-                                             double* weight_var_out) const;
 
   RayClosestApproach solveClosestRayPoints(const V3D& y, const V3D& x_compare, const V3D& t_cc,
                                            double min_depth) const;

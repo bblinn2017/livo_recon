@@ -7,6 +7,9 @@
 #include "livo_recon/diagnostics/vio_correction.h"
 #include "livo_recon/diagnostics/lidar_image_bounds.h"
 #include "livo_recon/diagnostics/state_correction_trace.h"
+#include "livo_recon/diagnostics/vio_residual_diag.h"  // TEMPORARY, see livo_recon_node.h's doc comment
+#include "livo_recon/diagnostics/lidar_window_dump.h"  // TEMPORARY, see livo_recon_node.h's doc comment
+#include "livo_recon/diagnostics/pin_state_diag.h"  // TEMPORARY, see livo_recon_node.h's doc comment
 
 #include <cmath>
 #include <memory>
@@ -57,6 +60,14 @@ void LivoReconNode::loadParameters()
   paramWarn<bool>(pnh_, "log/vio_correction/enable", vio_correction_log_, false);
   paramWarn<bool>(pnh_, "log/lidar_image_bounds", lidar_image_bounds_log_, false);
   paramWarn<bool>(pnh_, "log/state_correction_trace", state_correction_trace_log_, false);
+  // TEMPORARY (2026-10-27, vio_residual_diag investigation) -- see livo_recon_node.h's doc comment.
+  paramWarn<bool>(pnh_, "diag/force_vio_residual_log", force_vio_residual_log_, false);
+  // TEMPORARY (2026-10-27, independent LiDAR-registration investigation) -- see livo_recon_node.h's doc comment.
+  paramWarn<int>(pnh_, "diag/dump_lidar_window_end_scan", dump_lidar_window_end_scan_, 0);
+  // TEMPORARY (2026-10-27, apples-to-apples ask-comparison investigation) -- see livo_recon_node.h's doc comment.
+  paramWarn<int>(pnh_, "diag/pin_state_before_scan", pin_state_before_scan_, -1);
+  paramWarn<std::string>(pnh_, "diag/pin_state_file", pin_state_file_, std::string());
+  paramWarn<std::string>(pnh_, "diag/pin_state_phase", pin_state_phase_, std::string("post_lio"));
 
   ctx_.printer->print(PrintCategory::PARAMS, ctx_.printer->loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, ctx_.state->loadParameters(pnh_));
@@ -74,7 +85,13 @@ void LivoReconNode::loadParameters()
   // residuals, or combined mode would silently degrade to LIO-only.
   ctx_.printer->print(PrintCategory::PARAMS, vio_proc_.loadParameters(pnh_));
   ctx_.printer->print(PrintCategory::PARAMS, combined_proc_.loadParameters(pnh_));
-  if (vio_proc_.enabled() || combined_proc_.enabled())
+  // TEMPORARY (2026-10-27, vio_residual_diag): force_vio_residual_log_
+  // also needs the tracker running, even in lio_only mode (vio/enable=
+  // combined/enable=false), so mg.tracked_frame is populated for the
+  // diagnostic residual evaluation below -- see livo_recon_node.h's doc
+  // comment. No effect on any existing config (flag defaults false, so
+  // this condition is identical to before when it is).
+  if (vio_proc_.enabled() || combined_proc_.enabled() || force_vio_residual_log_)
   {
     ctx_.printer->print(PrintCategory::PARAMS, ctx_.tracker->loadParameters(pnh_));
     if (!ctx_.tracker->loaded())
@@ -166,6 +183,36 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
   mg.cov_before_imu = ctx_.state->cov();
   lio_proc_->logPreImuState(mg);   // R86B: write-only pre_imu state_trace row (no-op unless log/state_trace/pre_imu_frames > 0)
 
+  // TEMPORARY (2026-10-27, apples-to-apples ask-comparison investigation) --
+  // see livo_recon_node.h's pin_state_before_scan_ doc comment. Overwrites
+  // state_ from pin_state_file_'s row at scan_id = (this frame's scan_id -
+  // 1), phase pin_state_phase_ -- i.e. the reference run's COMMITTED state
+  // at the end of the frame immediately before this one -- so this frame's
+  // own IMU propagation (right below) starts from an identical prior
+  // regardless of which mode/run is executing. No-op unless
+  // pin_state_before_scan_ >= 0 and matches this frame's scan_id exactly.
+  bool pin_applied_this_frame = false;
+  M3D pinned_rot_anchor = M3D::Identity();
+  V3D pinned_pos_anchor = V3D::Zero();
+  if (pin_state_before_scan_ >= 0 &&
+      static_cast<int>(ctx_.voxel_map->frame_idx_) == pin_state_before_scan_)
+  {
+    const bool ok = loadPinState(pin_state_file_, pin_state_before_scan_ - 1, pin_state_phase_, *ctx_.state);
+    ROS_WARN_STREAM("[diag/pin_state] scan_id=" << pin_state_before_scan_
+                    << (ok ? "  loaded OK from " : "  FAILED to load from ") << pin_state_file_
+                    << "  (reference scan_id=" << (pin_state_before_scan_ - 1) << ", phase=" << pin_state_phase_ << ")");
+    if (ok)
+    {
+      // Capture the just-loaded pose (pre-IMU-propagation, i.e. the
+      // reference run's frame scan_id-1 committed pose) for the
+      // VIO-anchor-pose override below -- see that override's own doc
+      // comment for why state_ alone isn't enough.
+      pin_applied_this_frame = true;
+      pinned_rot_anchor = ctx_.state->rot();
+      pinned_pos_anchor = ctx_.state->pos();
+    }
+  }
+
   { TimedScope ts(ctx_.profiler, "imu"); imu_proc_.processIMU(mg); }
   mg.pos_after_imu = ctx_.state->pos();
   mg.rot_after_imu = ctx_.state->rot();
@@ -180,6 +227,17 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
   // downsamplePoints() used to guarantee before this deskewing logic
   // moved out of ImuProc).
   lio_proc_->deskewAndDownsample(mg);
+
+  // TEMPORARY (2026-10-27, independent LiDAR-registration investigation) --
+  // see livo_recon_node.h's doc comment. Points are still in BODY/IMU
+  // frame here (deskewAndDownsample() doesn't transform to world) --
+  // intentional, the offline registration script applies each frame's own
+  // pose itself.
+  if (dump_lidar_window_end_scan_ > 0 &&
+      static_cast<int>(ctx_.voxel_map->frame_idx_) <= dump_lidar_window_end_scan_)
+    writeLidarWindowPoints(static_cast<int>(ctx_.voxel_map->frame_idx_),
+                           mg.image.t + ctx_.data_queues->start_time, mg.points);
+
   if (frame_window_log_)
     writeFrameWindowRow(++frame_window_index_, mg.image.t + ctx_.data_queues->start_time,
                         mg.lidar_points.size(), mg.points.size(), mg.n_imu_samples);
@@ -215,6 +273,34 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
   if (ctx_.tracker->asyncTrackingActive())
     ctx_.tracker->resolveAnchorPose(mg.tracked_frame);
 
+  // TEMPORARY (2026-10-27, apples-to-apples ask-comparison investigation):
+  // resolveAnchorPose() just set mg.tracked_frame.rot_anchor/pos_anchor
+  // from Tracker::anchor_pose_history_ -- a side-channel populated by
+  // EVERY prior frame's own, un-pinned, really-committed pose (see
+  // Tracker::recordFramePose(), called once per frame regardless of mode).
+  // Pinning state_ above does NOT reach this history, so two differently-
+  // configured runs (e.g. sequential vs. combined) that diverged over
+  // frames before the pivot frame still get DIFFERENT VIO anchor poses at
+  // the pivot frame even once state_ is pinned identical -- confirmed this
+  // session to otherwise swing the VIO "ask" by tens of degrees. Override
+  // the just-resolved anchor pose with the SAME reference pose used to pin
+  // state_ above, so the VIO residual geometry (which reads rot_anchor/
+  // pos_anchor directly, not state_) is also pinned.
+  if (pin_applied_this_frame)
+  {
+    mg.tracked_frame.rot_anchor = pinned_rot_anchor;
+    mg.tracked_frame.pos_anchor = pinned_pos_anchor;
+  }
+
+  // TEMPORARY (2026-10-27, vio_residual_diag investigation) -- captured by
+  // whichever path below actually runs (combined's processCombined(), or
+  // sequential/lio_only's processVIO()), then written to vio_residual_diag
+  // .csv further down. See livo_recon_node.h's force_vio_residual_log_ doc
+  // comment; delete alongside the rest of this investigation's plumbing.
+  float diag_avg_error = 0.0f, diag_avg_abs_pixel_residual = 0.0f;
+  int diag_n_valid = 0;
+  bool diag_ok = false;
+
   if (combined_proc_.enabled())
   {
     // Opt-in joint LIO+VIO step (combined/enable, default false) -- see
@@ -224,7 +310,14 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
     // there's no meaningful separate "LIO-only" checkpoint once the two
     // are fused, so both stages correctly read identically here.
     std::string combined_log;
-    { TimedScope ts(ctx_.profiler, "combined"); combined_log = combined_proc_.processCombined(mg, *lio_proc_, vio_proc_); }
+    {
+      TimedScope ts(ctx_.profiler, "combined");
+      combined_log = combined_proc_.processCombined(mg, *lio_proc_, vio_proc_,
+          force_vio_residual_log_ ? &diag_avg_error : nullptr,
+          force_vio_residual_log_ ? &diag_avg_abs_pixel_residual : nullptr,
+          force_vio_residual_log_ ? &diag_n_valid : nullptr);
+    }
+    if (force_vio_residual_log_) diag_ok = true;
     mg.pos_after_lio = mg.pos_after_vio = ctx_.state->pos();
     mg.rot_after_lio = mg.rot_after_vio = ctx_.state->rot();
     mg.vel_after_lio = ctx_.state->vel();
@@ -243,6 +336,14 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
   {
     // Original sequential path, unchanged.
     std::string lio_log, vio_log;
+    // TEMPORARY (2026-10-27, correction_breakdown_diag reference-point fix):
+    // snapshot state_ before LIO runs, so processVIO()'s diagnostic "ask"
+    // block can evaluate VIO's unweighted ask at the TRUE frame-entry pose
+    // (matching combined mode's own ask, which runs before LIO OR VIO has
+    // touched anything this frame) instead of at LIO's already-converged
+    // post-correction pose. Only needed when the diagnostic is active.
+    StateGroup pre_lio_state_for_ask;
+    if (force_vio_residual_log_) pre_lio_state_for_ask = *ctx_.state;
     { TimedScope ts(ctx_.profiler, "lio"); lio_log = lio_proc_->processLIO(mg); }
     mg.pos_after_lio = ctx_.state->pos();
     mg.rot_after_lio = ctx_.state->rot();
@@ -262,7 +363,30 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
       mg.map_inserted = true;
     }
 
-    { TimedScope ts(ctx_.profiler, "vio"); vio_log = vio_proc_.processVIO(mg); }
+    // TEMPORARY (2026-10-27, vio_residual_diag): in lio_only mode (vio_proc_
+    // disabled), force_vio_residual_log_ needs processVIO() to actually run
+    // (force_run=true) so we get a REAL converged residual, not a static
+    // single-shot evaluation -- but that means it also APPLIES a real EKF
+    // correction to ctx_.state, which lio_only must never actually keep.
+    // Snapshot state_ before and restore it right after, so the committed
+    // trajectory is byte-identical to force_vio_residual_log_=false (verified
+    // this session: cmp of odometry.txt before/after this change was
+    // identical). Sequential mode (vio_proc_ already enabled) needs none of
+    // this -- its own real correction is exactly what we want to keep.
+    const bool diag_force_lio_only = force_vio_residual_log_ && !vio_proc_.enabled();
+    StateGroup diag_state_before;
+    if (diag_force_lio_only) diag_state_before = *ctx_.state;
+    {
+      TimedScope ts(ctx_.profiler, "vio");
+      vio_log = vio_proc_.processVIO(mg, diag_force_lio_only,
+          force_vio_residual_log_ ? &diag_avg_error : nullptr,
+          force_vio_residual_log_ ? &diag_avg_abs_pixel_residual : nullptr,
+          force_vio_residual_log_ ? &diag_n_valid : nullptr,
+          force_vio_residual_log_ ? &diag_ok : nullptr,
+          force_vio_residual_log_ ? &pre_lio_state_for_ask : nullptr,
+          force_vio_residual_log_ ? static_cast<int>(ctx_.voxel_map->frame_idx_) : -1);
+    }
+    if (diag_force_lio_only) *ctx_.state = diag_state_before;
     mg.pos_after_vio = ctx_.state->pos();
     mg.rot_after_vio = ctx_.state->rot();
 
@@ -284,6 +408,17 @@ void LivoReconNode::estimateState(MeasureGroup& mg) {
     ctx_.printer->print(PrintCategory::LIO, lio_log);
     ctx_.printer->print(PrintCategory::VIO, vio_log);
   }
+
+  // TEMPORARY (2026-10-27, vio_residual_diag investigation) -- uniform,
+  // mode-agnostic "post-refinement avg VIO error" row, using whichever
+  // path above (combined's processCombined(), sequential's real
+  // processVIO(), or lio_only's force-run-then-restore processVIO())
+  // populated diag_avg_error/diag_avg_abs_pixel_residual/diag_n_valid/
+  // diag_ok. See livo_recon_node.h's doc comment; delete this block when done.
+  if (force_vio_residual_log_)
+    writeVioResidualDiagRow(static_cast<int>(++vio_residual_diag_frame_index_),
+                            mg.image.t + ctx_.data_queues->start_time, diag_ok, diag_avg_error,
+                            diag_avg_abs_pixel_residual, diag_n_valid);
 
   if (state_correction_trace_log_)
     writeStateCorrectionTraceRow(static_cast<int>(++state_correction_trace_frame_index_),

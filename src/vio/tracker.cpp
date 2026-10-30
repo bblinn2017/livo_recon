@@ -2,6 +2,7 @@
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/algo/omp_utils.h"
 #include <algorithm>
+#include <stdexcept>
 #include <opencv2/calib3d.hpp>
 #include <opencv2/imgproc.hpp>
 
@@ -43,6 +44,15 @@ std::string Tracker::loadParameters(ros::NodeHandle& pnh)
   paramWarn<int>(pnh, "tracker/grid_selection/grid_rows",              opts_.grid_rows,           10);
   paramWarn<int>(pnh, "tracker/grid_selection/grid_cols",              opts_.grid_cols,           10);
   paramWarn<double>(pnh, "tracker/reseed/min_candidate_fraction", opts_.min_candidate_fraction, 0.25);
+  // See TrackerOptions::anchor_selection_mode's doc comment.
+  paramWarn<std::string>(pnh, "tracker/grid_selection/anchor_selection_mode", opts_.anchor_selection_mode, "grid");
+  if (opts_.anchor_selection_mode != "grid" && opts_.anchor_selection_mode != "global_top_n")
+    throw std::invalid_argument("tracker/grid_selection/anchor_selection_mode must be 'grid' or 'global_top_n', got '"
+                                + opts_.anchor_selection_mode + "'");
+  paramWarn<double>(pnh, "tracker/grid_selection/global_top_n_min_distance_px", opts_.global_top_n_min_distance_px, 8.0);
+  paramWarn<int>(pnh, "tracker/grid_selection/shi_tomasi_block_size", opts_.shi_tomasi_block_size, 3);
+  if (opts_.shi_tomasi_block_size < 1)
+    throw std::invalid_argument("tracker/grid_selection/shi_tomasi_block_size must be >= 1");
   paramWarn<bool>(pnh, "viz/uv_tracking", opts_.viz_uv_tracking, false);
   // See TrackerOptions::track_cache_path's doc comment -- empty (default)
   // means live tracking, unchanged below.
@@ -54,6 +64,9 @@ std::string Tracker::loadParameters(ros::NodeHandle& pnh)
       << "\n  tracker_format:       " << opts_.tracker_format
       << "\n  grid_selection/grid_rows:           " << opts_.grid_rows
       << "\n  grid_selection/grid_cols:           " << opts_.grid_cols
+      << "\n  grid_selection/anchor_selection_mode: " << opts_.anchor_selection_mode
+      << "\n  grid_selection/global_top_n_min_distance_px: " << opts_.global_top_n_min_distance_px
+      << "\n  grid_selection/shi_tomasi_block_size: " << opts_.shi_tomasi_block_size
       << "\n  reseed/min_candidate_fraction: " << opts_.min_candidate_fraction
       << "\n  viz/uv_tracking:        " << (opts_.viz_uv_tracking ? "true" : "false")
       << "\n  track_cache_path:     " << (opts_.track_cache_path.empty() ? "(live tracking)" : opts_.track_cache_path);
@@ -206,7 +219,10 @@ std::vector<cv::Point2f> Tracker::selectAnchors(const cv::Mat& image,
   if (image.channels() == 3) cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
   else                       gray = image;
   cv::Mat shi_tomasi_scores;
-  cv::cornerMinEigenVal(gray, shi_tomasi_scores, /*blockSize=*/3, /*ksize=*/3);
+  cv::cornerMinEigenVal(gray, shi_tomasi_scores, opts_.shi_tomasi_block_size, /*ksize=*/3);
+
+  if (opts_.anchor_selection_mode == "global_top_n")
+    return selectAnchorsGlobalTopN(shi_tomasi_scores, valid, n_cells, opts_.global_top_n_min_distance_px, anchors_out);
 
   // Purely image-based: the epipolar residual only ever needs a 2D seed
   // pixel per anchor (see VioProc::computeEpipolarResidualAndJacobian), not
@@ -237,6 +253,60 @@ std::vector<cv::Point2f> Tracker::selectAnchors(const cv::Mat& image,
     anchors_out.push_back(a);
   }
 
+  return uv_out;
+}
+
+std::vector<cv::Point2f> Tracker::selectAnchorsGlobalTopN(const cv::Mat& shi_tomasi_scores, const cv::Rect& valid,
+                                                           int max_n, double min_distance_px,
+                                                           std::vector<AnchorPoint>& anchors_out) const
+{
+  std::vector<cv::Point2f> uv_out;
+  anchors_out.clear();
+  if (max_n <= 0) return uv_out;
+
+  struct Cand { float score; int x, y; };
+  std::vector<Cand> cands;
+  const cv::Rect region = valid & cv::Rect(0, 0, shi_tomasi_scores.cols, shi_tomasi_scores.rows);
+  cands.reserve(static_cast<size_t>(std::max(region.width, 0)) * std::max(region.height, 0));
+  for (int y = region.y; y < region.y + region.height; ++y)
+  {
+    const float* row = shi_tomasi_scores.ptr<float>(y);
+    for (int x = region.x; x < region.x + region.width; ++x)
+      cands.push_back({row[x], x, y});
+  }
+  if (cands.empty()) return uv_out;
+
+  // Only the raw TOP few thousand candidates can possibly matter once
+  // min_distance_px spacing is enforced -- nth_element bounds the cost of
+  // ranking a multi-megapixel image to O(n), then a cheap sort of just the
+  // kept slice, instead of sorting every pixel in the valid region.
+  const size_t candidate_cap = std::min(cands.size(), static_cast<size_t>(std::max(max_n * 50, 20000)));
+  std::nth_element(cands.begin(), cands.begin() + candidate_cap - 1, cands.end(),
+                   [](const Cand& a, const Cand& b) { return a.score > b.score; });
+  cands.resize(candidate_cap);
+  std::sort(cands.begin(), cands.end(), [](const Cand& a, const Cand& b) { return a.score > b.score; });
+
+  const double min_dist_sq = min_distance_px * min_distance_px;
+  uv_out.reserve(max_n);
+  anchors_out.reserve(max_n);
+  for (const auto& c : cands)
+  {
+    if (static_cast<int>(uv_out.size()) >= max_n) break;
+    bool too_close = false;
+    for (const auto& p : uv_out)
+    {
+      const double dx = p.x - c.x, dy = p.y - c.y;
+      if (dx * dx + dy * dy < min_dist_sq) { too_close = true; break; }
+    }
+    if (too_close) continue;
+
+    const cv::Point2f uv_pixel(static_cast<float>(c.x), static_cast<float>(c.y));
+    uv_out.push_back(uv_pixel);
+    AnchorPoint a;
+    a.uv_seed = undistortPixel(uv_pixel);
+    a.uv_jacobian_seed = localPixelToUVJacobian(uv_pixel);
+    anchors_out.push_back(a);
+  }
   return uv_out;
 }
 

@@ -54,7 +54,7 @@ void writeMotionQStepDiagnostic(
 
 void writeMotionQScanDiagnostic(
     size_t scan_index, double t_abs, const std::string& model,
-    double acc_scale, double gyr_scale,
+    const V3D& acc_scale, const V3D& gyr_scale,
     size_t sample_count, double mean_dynamic_acc_norm,
     double mean_dynamic_gyr_norm, const V3D& mean_q_acc,
     const V3D& mean_q_gyr, const V3D& mean_debiased_acc_energy,
@@ -64,14 +64,19 @@ void writeMotionQScanDiagnostic(
   bool first = false;
   std::ofstream& out = log.stream(&first);
   if (first)
-    out << "scan_index,t_abs,t_rel_s,model,acc_scale,gyro_scale,n_samples,mean_dynamic_acc_norm,"
+    // 2026-10-28: acc_scale/gyro_scale expanded from one scalar column each to per-axis
+    // (anisotropic process_noise support) -- _x/_y/_z suffixes, same convention as every other
+    // per-axis column here. All 3 are identical (isotropic) unless the config sets a 3-vector.
+    out << "scan_index,t_abs,t_rel_s,model,acc_scale_x,acc_scale_y,acc_scale_z,"
+           "gyro_scale_x,gyro_scale_y,gyro_scale_z,n_samples,mean_dynamic_acc_norm,"
            "mean_dynamic_gyr_norm,mean_q_acc_x,mean_q_acc_y,mean_q_acc_z,"
            "mean_q_gyr_x,mean_q_gyr_y,mean_q_gyr_z,mean_debiased_acc_energy_x,"
            "mean_debiased_acc_energy_y,mean_debiased_acc_energy_z,"
            "mean_debiased_gyr_energy_x,mean_debiased_gyr_energy_y,"
            "mean_debiased_gyr_energy_z\n";
   out << std::setprecision(17) << scan_index << ',' << t_abs << ',' << tRelString(t_abs) << ',' << model
-      << ',' << acc_scale << ',' << gyr_scale << ','
+      << ',' << acc_scale.x() << ',' << acc_scale.y() << ',' << acc_scale.z()
+      << ',' << gyr_scale.x() << ',' << gyr_scale.y() << ',' << gyr_scale.z() << ','
       << sample_count << ',' << mean_dynamic_acc_norm
       << ',' << mean_dynamic_gyr_norm << ',' << mean_q_acc.x() << ','
       << mean_q_acc.y() << ',' << mean_q_acc.z() << ',' << mean_q_gyr.x()

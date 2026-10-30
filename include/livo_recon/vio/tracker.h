@@ -42,6 +42,32 @@ struct TrackerOptions
   int    grid_rows            = 10;
   int    grid_cols            = 10;
 
+  // 2026-10-27 (user-requested experiment, scan-64 investigation): "grid"
+  // (default, unchanged) buckets the image into grid_rows x grid_cols cells
+  // and picks each cell's own best Shi-Tomasi corner -- guarantees spatial
+  // coverage but can force a weak/ambiguous corner to be picked in a cell
+  // that has no good texture anywhere in it (see the scan-64 finding: 93% of
+  // tracked points landed on low-texture patches -- a plain door panel,
+  // blank ceiling, dark background). "global_top_n" instead scores the WHOLE
+  // image once (same cv::cornerMinEigenVal, same shi_tomasi_block_size) and
+  // greedily picks the globally strongest grid_rows*grid_cols corners
+  // (spaced at least global_top_n_min_distance_px apart to avoid clustering
+  // all 256 picks into one small highly-textured region) -- no cell ever
+  // forces a weak pick, but coverage is no longer guaranteed (a
+  // texture-poor frame could place most/all anchors in one part of the
+  // image). See Tracker::selectAnchorsGlobalTopN().
+  std::string anchor_selection_mode = "grid";
+  double global_top_n_min_distance_px = 8.0;
+
+  // cv::cornerMinEigenVal's blockSize (the Shi-Tomasi corner-response
+  // window) -- was hardcoded to 3 (3x3 px) regardless of image resolution.
+  // 2026-10-27: user hypothesis (scan-64 investigation) -- a 3px window may
+  // be too small to reliably distinguish real corners from noise/compression
+  // artifacts on this sensor's 2048x2048 resolution. Exposed as a config
+  // knob to test larger windows; default 3 is the prior hardcoded behavior
+  // (bit-identical at default).
+  int    shi_tomasi_block_size = 3;
+
   // Minimum fraction of grid_rows*grid_cols selectAnchors() must find a
   // candidate for before a reseed is actually committed to -- below this,
   // reseeding is skipped entirely and whatever's currently tracked (if
@@ -201,6 +227,17 @@ public:
   // tracking thread (via stepAndReseedOnce()) once that thread is running.
   std::vector<cv::Point2f> selectAnchors(const cv::Mat& image,
                                         std::vector<AnchorPoint>& anchors_out) const;
+
+  // 2026-10-27: global (non-grid) counterpart to selectAnchors()'s grid
+  // path -- see TrackerOptions::anchor_selection_mode's doc comment. Picks
+  // up to max_n of the image's globally strongest Shi-Tomasi corners,
+  // greedily skipping any candidate within min_distance_px of an
+  // already-accepted one. Candidates are capped (top ~50x max_n by raw
+  // score, via nth_element) before the O(candidates x accepted) greedy
+  // spacing pass, so this stays fast even on a multi-megapixel image.
+  std::vector<cv::Point2f> selectAnchorsGlobalTopN(const cv::Mat& shi_tomasi_scores, const cv::Rect& valid,
+                                                   int max_n, double min_distance_px,
+                                                   std::vector<AnchorPoint>& anchors_out) const;
 
   // Draws an arrow from each uvPrev()[i] to uvCurr()[i] on a copy of
   // `image`, colored by uvPrev()[i]'s position (a polar color wheel around

@@ -57,8 +57,9 @@ std::vector<PointXYZT> pointsFromLivoxMsg(
     const livox_ros_driver::CustomMsg& msg, double scan_time,
     uint8_t tag_mask, uint8_t tag_max_keep,
     double blind_sqr, const MeasuresPtr& measures,
-    int point_filter_num)
+    int point_filter_num, double point_rate_hz)
 {
+  const double point_period_s = 1.0 / point_rate_hz;
   double prev_offset = 0.;
   return buildLidarPoints(
       msg.point_num, scan_time, blind_sqr, measures, point_filter_num,
@@ -67,7 +68,7 @@ std::vector<PointXYZT> pointsFromLivoxMsg(
 
         const double raw_offset = static_cast<double>(pt.offset_time) * 1e-9;
         double diff = raw_offset - prev_offset;
-        if (diff > LIDAR_HZ) diff = LIDAR_HZ;
+        if (diff > point_period_s) diff = point_period_s;
         const double offset = (prev_offset += diff);
 
         const bool keep = (pt.tag & tag_mask) < tag_max_keep;

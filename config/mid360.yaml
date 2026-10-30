@@ -101,26 +101,42 @@ imu:
   process_noise:
     # R97B: motion/beta and the acc/gyro_max_dynamic_variance clamp were removed entirely -- the
     # beta=0 vs beta=0.9 acc/gyro_scale sweep comparison found no meaningful difference either way.
-    # 2026-10-23: acc_scale/gyro_scale refined to Bryce's updated joint-fit values
-    # (gyro_scale 95% CI [0.204,0.239], acc_scale 95% CI [0.156,0.693]) -- supersedes the
-    # 2026-10-22 qscale_20261022_141821 values (0.802/0.289). These only affect the
-    # MOTION-dependent excess-energy term (imu_processing.cpp) -- the stationary floor below
-    # is a separate, additive term. That excess-energy term was found (2026-10-23 session) to
-    # be THE dominant driver of frame-1 position/velocity uncertainty growth (~87%, vs <2%
-    # combined for every P0 initialization term), so this scale materially affects how
-    # conservative the filter is.
+    # 2026-10-29: superseded by livo_recon's OWN qscale_refine_livo_recon pipeline (this tool's Phase
+    # 1 ICP + Phase 2 batch spline refinement, replacing the earlier LiDAR_IMU_Init ct_refine-based
+    # calibration), run on calib_10_28.bag with knot=0.1s (up from the tool's own 0.05s default --
+    # see tools/qscale_refine/refine/knot's own doc comment for the full knot-spacing investigation)
+    # and this file's own voxel_map/empirical_variance tuning (see that section's doc comment). The
+    # coarser knot spacing was the single biggest lever found all session: it denies the spline the
+    # freedom to track the acceleration-domain noise floor (real per-point LiDAR sensor noise,
+    # massively amplified by double-differentiation) while barely affecting genuine motion, which
+    # is lower-frequency. Per-T joint-fit consistency stays close to 1.0 at knot=0.1 (it visibly
+    # degrades at knot=0.2, a sign of real motion attenuation starting, not just noise removal --
+    # 0.1 was chosen specifically to stay on the healthy side of that). acc_scale/gyro_scale here are
+    # the LINEAR-in-magnitude coefficient ("w" in qscale_fit's report), not the quadratic-in-energy
+    # one -- see scale_form below. Before this change: acc w=0.6417, gyro w=0.0134, LiDAR-noise-floor
+    # share 88%/51% of the fit's own variance (acc was effectively unresolved). After: acc w=0.5552
+    # (46% LiDAR-noise share, 34% genuine motion -- the acc channel resolving at ALL is new this
+    # session), gyro w=0.0257 (12% LiDAR-noise share, 88% genuine motion, nearly doubled from before).
     model: isotropic
     motion:
-      acc_scale: 0.455
-      gyro_scale: 0.223
+      acc_scale: 0.5552
+      gyro_scale: 0.0257
+      # 2026-10-29: "linear" (variance = scale * debiased_magnitude, matches qscale_fit's "w" term)
+      # is now the default in imu_processing.h itself -- set explicitly here too since this config's
+      # own acc_scale/gyro_scale above are only meaningful paired with this setting (they are "w"
+      # values, not "s" -- loading them under scale_form=quadratic would be wrong by construction).
+      scale_form: linear
     # Stationary noise floor (isotropic -- same value all 3 axes), measured directly from a
     # dedicated 20.6s stationary IMU calibration run (mid360 unit), config-controlled rather
     # than hardcoded in CalibProc::computeBiasAndNoise(). Feeds var_acc_step/var_gyr_step
     # (imu_processing.cpp) as the additive floor under the motion-dependent excess-energy term
     # above; dominates the per-step process noise while genuinely stationary.
     floor:
-      acc_variance: 1.288e-03    # (m/s^2)^2 per sample, isotropic
-      gyro_variance: 2.865e-06   # (rad/s)^2 per sample, isotropic
+      # 2026-10-29: calib_10_28.bag, raw (WITH vibration) isotropic floor -- used only when
+      # cbk/imu/vibration/enable is false; the per-axis CLEANED floor below is what's actually
+      # used in normal operation (vibration cancellation on by default).
+      acc_variance: 2.7022e-02    # (m/s^2)^2 per sample, isotropic
+      gyro_variance: 7.8771e-06   # (rad/s)^2 per sample, isotropic
     bias_random_walk:
       gyro_variance_rate: 1.0e-5
       accel_variance_rate: 1.0e-5
@@ -142,13 +158,26 @@ lio:
     # non-zero values, a real behavior change -- flagged in REPORT.md).
     max_iterations: 5
 voxel_map:
-  # 2026-10-20: copied from ntu_viral (not yet separately tuned for mid360).
   binned:
     bin_size_fraction: 0.25   # bin edge = this x the node's own edge
     cov_mode: average         # average (C / k) | shrunk (C / k^2)
   map:
-    voxel_size: 0.425  # 2026-10-20: starting point, ntu_viral/HILTI's shared tuned value
-    max_layer: 2
+    # 2026-10-29: tuned for mid360 via a direct stationary-window plane-fit
+    # RMS sweep (calib_10_28), replacing the 2026-10-20 ntu_viral/HILTI
+    # starting point (voxel_size 0.425, max_layer 2). max_layer=0 (no
+    # subdivision) combined with a small voxel_size gave the cleanest,
+    # most monotonic improvement of everything tried (voxel_size alone at
+    # the old max_layer=2, always_update convergence_mode, max_layer=3 --
+    # see docs/QSCALE_REFINE_RESTRUCTURE_PLAN.md for the full sweep).
+    # RMS trend (max_layer=0): 0.6->24.10mm, 0.425->20.37mm, 0.3->16.62mm,
+    # 0.2->11.64mm, 0.15->9.10mm, 0.1->6.69mm, 0.05->4.72mm, 0.03->4.35mm --
+    # 0.05 is the chosen value: the missed/rejected point rate (match-
+    # starvation, voxels too small to reach min_init_points=5) stays low
+    # (0.76%) there, then roughly triples by 0.03 (1.85%) while the RMS
+    # gain itself is already decelerating sharply (29% step at 0.1->0.05,
+    # only 8% at 0.05->0.03) -- diminishing returns past this point.
+    voxel_size: 0.05
+    max_layer: 0
   plane:
     plane_threshold: 2.5e-3
     # 2026-10-20: copied from ntu_viral (not yet separately tuned for mid360).
@@ -157,6 +186,20 @@ voxel_map:
       rule: absolute
       rows: per_normal
       variance: plane_equivalent
+    # 2026-10-29: tracks each voxel's own OBSERVED residual variance
+    # (running mean(r^2) over admitted residuals) and blends it into the
+    # weight once enough samples exist, instead of relying purely on the
+    # range/incidence-based formula. Confirmed via a direct stationary-
+    # window out-of-sample test (predict from the first half of a voxel's
+    # residual history, validate against the second half only): the
+    # formula-only baseline correlates just 0.23 (log-log) with real
+    # per-voxel noise; this gets 0.95, held out, with no cost to RMS
+    # (17.15mm baseline vs. 17.27mm with this on). Real surfaces differ in
+    # material/roughness in a way no range/incidence formula alone can see.
+    empirical_variance:
+      enable: true
+      min_n: 20
+      prior_n: 20.0
   points:
     min_init: 5
     min_update: 5
@@ -193,27 +236,43 @@ vio:
     # residual_var=0.0556) ~= 9.5px) -- the old default was calibrated
     # correctly all along, this just re-expresses it in interpretable units.
     max_avg_error: 10.0  # reject (roll back) the whole frame if the best fit is still worse than this
-    anchor_split_depth: 0.0  # pos_/neg_epipolar_residual_var split threshold -- see that option's doc comment
+    # 2026-10-27: 16x the code default (0.0556 -> 0.8896), from a no3-only
+    # weight sweep over the first-motion-onset window (scans 49-55,
+    # combined mode, gate temporarily loosened to 50px to let VIO through
+    # at the two frames that matter): mean direction error off an
+    # independent LiDAR+visual registration dropped 119 deg (baseline,
+    # 1x weight) -> 23 deg (8x) -> 26 deg (16x) -- improvement saturates
+    # around 8-16x, 16x chosen for its near-exact magnitude calibration
+    # (102% of the true correction vs 8x's 117% overshoot) at
+    # equivalent direction accuracy. Full-bag ATE confirmed flat across
+    # the whole 1x-16x range (0.3645-0.3763m) -- this is NOT validated
+    # on no4/no5 or any other dataset yet.
+    epipolar_residual_weight: 0.8896
+    anchor_split_depth: 0.0  # depth-clamp diagnostic threshold -- see that option's doc comment
     distortion_weight_on: false  # rigorous per-point distortion weighting -- see that option's doc comment
     weight_pixel_noise_px: 0.5   # only consulted when distortion_weight_on is true
 combined:
   # Opt-in joint LIO+VIO EKF step (default off -- see combined_processing.h).
   # Requires vio/enable: true too (see livo_recon_node.cpp's loadParameters()
   # doc comment) for the tracker backend to actually load.
+  # 2026-10-27: max_iterations/ekf/* used to be set again here, separately
+  # from vio/ekf/* above -- removed, since CombinedProc now reads the SAME
+  # vio/ekf/* keys (see CombinedProcOptions's doc comment) rather than its
+  # own combined/ekf/* copies.
   enable: false
-  max_iterations: 5
-  ekf:
-    min_norm_dtheta: 0.0
-    min_norm_dt: 0.0
-    min_diff_error: -1.0
-    # Same pixel-residual metric/rationale as vio/ekf/max_avg_error above.
-    max_avg_error: 10.0
 tracker:
   device: "cuda"
   tracker_format: "jit"  # "jit" (default), "aot" (AOTInductor, fp16), or "aot_fp32" (AOTInductor, full precision) -- cotracker only, see Tracker::loadParameters. AOT packages must match grid_selection/grid_rows x grid_cols (filename-encoded query count).
   grid_selection:
     grid_rows: 16
     grid_cols: 16  # set by test_*.sh
+    # 2026-10-28: promoted to default after the no3/no4/no5 5-variant x 3-bag ATE comparison
+    # (mid360_lever_sweep batch) -- global_top_n with an 8px NMS spacing and the default 3x3
+    # Shi-Tomasi block size ("d8_block3") won or tied-won on every bag against grid selection
+    # and every other variant tried (wider NMS spacing, 9x9 block size, their combinations).
+    # See scratchpad/TODO_investigation.md for the full writeup.
+    anchor_selection_mode: global_top_n
+    global_top_n_min_distance_px: 8.0
   reseed:
     min_candidate_fraction: 0.25  # fraction of grid_rows*grid_cols selectAnchors must find a candidate for before a reseed is actually committed to. NOTE: the achievable fraction under healthy conditions drops as grid_rows*grid_cols grows -- retune lower when increasing grid resolution
   track_cache_path: ""  # path to a .rlivtrackcache file (src/tools/cache_tracker_output.cpp). Empty (default) = live tracking. When set, skips the GPU tracker pass entirely and replays cached TrackedFrame records by timestamp -- see TrackerOptions::track_cache_path's doc comment.
@@ -267,22 +326,35 @@ cbk:
     type: mid360   # avia | mid360 | pcl
     blind: 0.5
     point_filter_num: 1  # 2026-10-20: Bryce's explicit call
+    # 2026-10-29: the mid360's real per-point rate (confirmed empirically on
+    # calib_10_28.bag: offset_time step is a rock-solid 4.947us = 202142Hz
+    # across all 3777 scans, zero variance) is NOT the previously-hardcoded
+    # 240000 (LIDAR_HZ, correct for the Avia, not this sensor) -- that
+    # mismatch made pointsFromLivoxMsg()'s per-point out-of-order guard trip
+    # on EVERY point instead of only rare bad ones, smoothing in a constant
+    # ~8.3ms cumulative lag by the end of every ~50ms scan message (resets
+    # every scan). See docs/QSCALE_REFINE_RESTRUCTURE_PLAN.md for the full
+    # investigation. 200000 is the mid360's documented nominal rate (close
+    # enough to the measured 202142 that the guard still never trips on
+    # real data).
+    point_rate_hz: 200000
   imu:
     acc_type: "g"  # this device's IMU reports linear_acceleration in units of gravity, not m/s^2
     gyr_type: "rad_s"
     # 2026-10-23: prism vibration canceller (include/livo_recon/utils/imu/vibration_canceller.h). The
     # Mid-360's rotating prisms shake the housing at fixed lines seen in all six IMU channels; they carry
-    # 50-90 % of the stationary per-sample accel variance (more on a soft mount: 0.23 m/s^2 on z on a
-    # bin lid in capture_10_20_no3, 0.03-0.04 on a table in qscale_calib) but are microns of motion that
-    # cancel within a frame. Constants derived offline from qscale_calib.bag (2026-10-22 14:18) and
-    # checked on capture_10_20 / capture_10_20_no3 (LiDAR_IMU_Init qscale_fit --vib-cancel):
+    # 50-90 % of the stationary per-sample accel variance but are microns of motion that cancel within a
+    # frame. 2026-10-29: constants refreshed to calib_10_28.bag's own measurement (LiDAR_IMU_Init
+    # qscale_fit on the bag we actually captured and are calibrating for), superseding the 2026-10-22
+    # qscale_calib.bag/capture_10_20_no3 values -- same canceller tuning params (tau_fit_s etc.) kept,
+    # those aren't something qscale_fit measures.
     vibration:
       enable: true
       sample_rate_hz: 199.998       # IMU sample clock = mean rate (the median stamp step says 206 Hz: jitter)
-      main_hz: 28.025               # tracked (28.016-28.026 across bags, still and moving)
-      sideband_offset_hz: 0.790     # modulation sidebands at main +- 0.790 Hz
-      harmonics: 2                  # 56.05 Hz
-      extra_hz: [13.400, 18.124]    # weaker lines (tracked slowly within +-max_freq_dev_hz)
+      main_hz: 28.0119              # tracked (28.016-28.026 across bags, still and moving)
+      sideband_offset_hz: 0.7900    # modulation sidebands at main +- 0.790 Hz
+      harmonics: 2                  # 56.02 Hz
+      extra_hz: [13.4000, 18.1240]  # weaker lines (tracked slowly within +-max_freq_dev_hz)
       tau_fit_s: 4.0                # longer = less noise near the lines absorbed; 1 s removed ~1 %/line
       highpass_hz: 8.0
       tau_freq_s: 20.0
@@ -290,19 +362,39 @@ cbk:
       max_freq_dev_hz: 0.05
       sideband_delay_s: 2.5         # sidebands join the fit after this (not separable from the main line sooner)
       max_gap_s: 0.5
-      # Stationary floor with the lines removed: qscale_calib.bag still window 5.9-26.0 s, cleaned by this
-      # canceller (replaces CalibProc's fixed raw floor 1.335e-3 1.463e-3 8.644e-4 / 5.885e-6 2.257e-6 2.242e-6)
-      floor_acc_variance: [1.992e-04, 1.845e-04, 2.133e-04]
-      floor_gyro_variance: [3.051e-06, 1.007e-06, 1.273e-06]
-      # 2026-10-23: startup amplitude seeds for each line (acc x,y,z [m/s^2] then gyro x,y,z [rad/s]) --
-      # capture_10_20_no3's own measured values. Phase is not seeded (see VibrationCancellerOptions::
-      # seed_main's doc comment -- it changes every power-up, nothing to seed it from). These are a per-
-      # bag measurement, not a device constant; swap them for another bag's own fit before trusting this
-      # for anything but no3. Gyro values above the main/13.4 Hz lines are only 1-2x above the gyro noise
-      # floor on handheld bags (no4/no5) -- treat those as upper bounds, not precise measurements.
-      seed_main:        [0.120, 0.111, 0.244, 1.14e-3, 3.47e-3, 1.43e-3]   # 28.025 Hz
-      seed_sideband_lo: [0.014, 0.013, 0.027, 2.5e-4,  4.0e-4,  2.1e-4]    # 27.235 Hz
-      seed_sideband_hi: [0.017, 0.017, 0.039, 2.6e-4,  5.5e-4,  2.6e-4]    # 28.815 Hz
-      seed_harmonic2:   [0.016, 0.004, 0.008, 1.9e-4,  1.5e-4,  8.7e-5]    # 56.05 Hz
-      seed_extra0:      [0.016, 0.010, 0.012, 8.5e-4,  1.09e-3, 6.8e-4]    # 13.400 Hz
-      seed_extra1:      [0.012, 0.011, 0.025, 4.1e-4,  3.7e-4,  2.0e-4]    # 18.124 Hz
+      # Stationary floor with the lines removed: calib_10_28.bag's own 19.2s still window, cleaned by
+      # this canceller.
+      floor_acc_variance: [7.1959e-04, 4.7414e-04, 2.7528e-03]
+      floor_gyro_variance: [2.6000e-06, 1.7129e-06, 1.2079e-06]
+      # 2026-10-29: startup amplitude seeds for each line (acc x,y,z [m/s^2] then gyro x,y,z [rad/s]) --
+      # calib_10_28.bag's own measured values (median over 46 windows of 4s). Phase is not seeded (see
+      # VibrationCancellerOptions::seed_main's doc comment -- it changes every power-up, nothing to seed
+      # it from). These are a per-bag measurement, not a device constant; swap them for another bag's
+      # own fit before trusting this for anything but calib_10_28/capture_10_28_no1.
+      seed_main:        [0.1401, 0.1239, 0.3216, 0.0000e+00, 4.981e-03, 2.037e-03]   # 28.012 Hz
+      seed_sideband_lo: [0.0166, 0.0156, 0.0357, 0.0000e+00, 0.000e+00, 0.000e+00]   # 27.222 Hz
+      seed_sideband_hi: [0.0217, 0.0191, 0.0489, 0.0000e+00, 7.303e-04, 0.000e+00]   # 28.802 Hz
+      seed_harmonic2:   [0.0092, 0.0000, 0.0000, 0.0000e+00, 0.000e+00, 0.000e+00]   # 56.024 Hz
+      seed_extra0:      [0.0207, 0.0210, 0.0302, 3.391e-03, 2.787e-03, 2.127e-03]    # 13.400 Hz
+      seed_extra1:      [0.0164, 0.0112, 0.0270, 0.0000e+00, 1.176e-03, 1.214e-03]   # 18.124 Hz
+    # 2026-10-29: motion-gated 8-12Hz broadband attenuation (include/livo_recon/
+    # utils/imu/motion_band_canceller.h) -- DIFFERENT in character from the
+    # vibration block above: that one removes coherent prism-rotation TONES
+    # (present regardless of motion); this one removes a non-mechanical,
+    # broadband noise hump confirmed present ONLY while moving (near-zero at
+    # gyro-magnitude < ~0.025 rad/s, jumping to a roughly CONSTANT plateau
+    # above it -- a step, not a function of how fast the motion is). See
+    # motion_band_canceller.h's header comment for the full investigation.
+    # floor/plateau_amplitude measured directly from calib_10_28.bag's own
+    # raw IMU stream (median 8-12Hz Hilbert envelope in the detected
+    # stationary/motion periods) -- per-bag measurements, same caveat as the
+    # vibration block's seed_* values above.
+    motion_band:
+      enable: true
+      sample_rate_hz: 199.998
+      band_lo_hz: 8.0
+      band_hi_hz: 12.0
+      gyro_threshold_rad_s: 0.03
+      gyro_lpf_tau_s: 0.5
+      floor_amplitude:    [0.0024, 0.0021, 0.0032]   # m/s^2, stationary
+      plateau_amplitude:  [0.0630, 0.0664, 0.0464]   # m/s^2, in motion

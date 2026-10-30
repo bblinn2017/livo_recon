@@ -1,5 +1,6 @@
 #include "livo_recon/processing/cbk_processing.h"
 #include "livo_recon/utils/imu/vibration_params.h"
+#include "livo_recon/utils/imu/motion_band_params.h"
 #include "livo_recon/utils/log/param_warn.h"
 #include "livo_recon/utils/log/profiler.h"
 #include "livo_recon/diagnostics/log/debug_log_dir.h"
@@ -76,6 +77,7 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
   opts_.blind_sqr = blind * blind;
 
   paramWarn<int>(pnh, "cbk/lidar/point_filter_num", opts_.point_filter_num, 1);
+  paramWarn<double>(pnh, "cbk/lidar/point_rate_hz", opts_.lidar_point_rate_hz, 240000.0);
   // R82 (F-504): per-point time field. Plain params (not paramWarn) so the default path prints exactly what R81 printed; the engagement line below appears only when a key is set.
   {
     opts_.point_time_explicit = pnh.hasParam("cbk/lidar/point_time_field") || pnh.hasParam("cbk/lidar/point_time_mode") || pnh.hasParam("cbk/lidar/point_time_ref");
@@ -121,6 +123,7 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<std::string>(pnh, "cbk/imu/gyr_type", opts_.imu_gyr_type, "rad_s");
   const VibrationConfig vib_cfg = loadVibrationConfig(pnh);
   vib_.configure(vib_cfg.canceller);
+  motion_band_.configure(loadMotionBandConfig(pnh));
 
   paramWarn<bool>(pnh, "log/data_queues/sync_debug", opts_.log_sync_debug, false);
   paramWarn<std::string>(pnh, "log/data_queues/sync_debug_path", opts_.sync_debug_log_path,
@@ -152,6 +155,7 @@ std::string CbkProc::loadParameters(ros::NodeHandle& pnh)
       << "\n  topics/quiet_margin_s:     " << data_queues_->quiet_margin_s
       << "\n  cbk/lidar/blind:  " << blind
       << "\n  cbk/lidar/point_filter_num: " << opts_.point_filter_num
+      << "\n  cbk/lidar/point_rate_hz: " << opts_.lidar_point_rate_hz
       << (opts_.point_time_explicit ? "\n  cbk/lidar/point_time: field=" + opts_.point_time_field + " mode=" + opts_.point_time_mode + (opts_.point_time_mode == "absolute_s_f64" ? " ref=" + opts_.point_time_ref : std::string()) : std::string())   // R82 (F-504): printed only when a key is set
       << "\n  cbk/lidar/type:   " << lidar_type_str
       << "\n  cbk/imu/acc_type: " << opts_.imu_acc_type
@@ -294,7 +298,7 @@ void CbkProc::lidarCallbackMsg(const livox_ros_driver::CustomMsg::ConstPtr& msg)
 
   std::vector<PointXYZT> points = pointsFromLivoxMsg(
       *msg, scan_time, opts_.tag_mask, opts_.tag_max_keep, opts_.blind_sqr, measures_,
-      opts_.point_filter_num);
+      opts_.point_filter_num, opts_.lidar_point_rate_hz);
   if (opts_.log_sensor_stamps) logSensorStamp('L', scan_time, static_cast<std::size_t>(msg->point_num), points.size());   // R65
   perturbPoints(points, scan_time, opts_.perturb_std_m, opts_.perturb_seed);                                               // R65
 
@@ -427,6 +431,12 @@ void CbkProc::imuCallback(const sensor_msgs::ImuConstPtr& msg)
   // immediately rather than waiting for calib_done too.
   if (vib_.active())
     vib_.process(sample.t, sample.acc, sample.gyro, measures_->calib_done.get() || vib_.seeded());
+
+  // Motion-gated 8-12Hz broadband attenuation (cbk/imu/motion_band/*, see
+  // motion_band_canceller.h) -- runs on whatever vib_ already left in the
+  // sample, same stream everything downstream (deskew, calibration) sees.
+  if (motion_band_.active())
+    motion_band_.process(sample.gyro, sample.acc);
 
   data_queues_->pushImu(sample);
 }

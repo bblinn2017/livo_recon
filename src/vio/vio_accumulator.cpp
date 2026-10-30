@@ -65,42 +65,6 @@ bool lineResidualAndJacobian(const V3D& t_cc, const V3D& y,
   return true;
 }
 
-// Ray-gap residual for "mixed" residual_mode: perpendicular distance between
-// the anchor ray P1(s)=t_cc+s*y and the current ray P2(u)=u*x1 at their
-// closest-approach depths s,u (already solved by solveClosestRayPoints(),
-// same clamp-at-anchor_split_depth logic the epipolar residual's depth-
-// clamped-weight decision uses). Ported verbatim from FAST-LIVO2's
-// vio_proc.cpp rayGapResidualAndJacobian() -- s,u held fixed w.r.t. state in
-// the Jacobian (envelope theorem, valid whether free or clamped). Unlike the
-// epipolar residual, this is UNSQUARED and METRIC (meters) -- never scaled
-// by pixel_scale -- so its weight constants (VioAccumulateOptions::
-// pos_/neg_ray_distance_residual_var) are on a completely different numeric
-// scale (~1000/~10) than the epipolar ones (~0.05/~0.03); the two residuals'
-// raw magnitudes are not directly comparable, only their weighted HtH/Htz
-// contributions are.
-void rayGapResidualAndJacobian(const V3D& y, const V3D& x1, const V3D& t_cc,
-                               const V3D& w, const M3D& Ric, const M3D& Rcw,
-                               double s, double u,
-                               double& residual_out, Eigen::Matrix<double, 1, 6>& jacobian_out)
-{
-  const V3D v = (t_cc + s * y) - u * x1;
-  const double gap = v.norm();
-  if (gap < 1e-12) { residual_out = 0.0; jacobian_out.setZero(); return; }
-  residual_out = gap;
-
-  M3D skew_y, skew_w;
-  skew_y << SKEW_SYM_MATRX(y);
-  skew_w << SKEW_SYM_MATRX(w);
-
-  const M3D dtcc_dtheta = skew_w * Ric;
-  const M3D dy_dtheta   = skew_y * Ric;
-  const M3D dv_dtheta   = dtcc_dtheta + s * dy_dtheta;
-  const M3D dv_dt       = -Rcw;
-
-  jacobian_out.block<1, 3>(0, 0) = (v.transpose() * dv_dtheta) / gap;
-  jacobian_out.block<1, 3>(0, 3) = (v.transpose() * dv_dt) / gap;
-}
-
 }  // namespace
 
 VioAccumulator::VioAccumulator(StateGroupPtr state)
@@ -281,41 +245,6 @@ bool VioAccumulator::computeEpipolarResidualAndJacobian(const ReprojectionPrecom
   return true;
 }
 
-bool VioAccumulator::computeRayDistanceResidualAndJacobian(const ReprojectionPrecomputed& pre,
-                                                            double fx, double fy, double cx, double cy,
-                                                            const cv::Point2f& uv_seed,
-                                                            const cv::Point2f& uv_tracked,
-                                                            const Eigen::Matrix2d& anchor_uv_jacobian,
-                                                            const Eigen::Matrix2d& curr_uv_jacobian,
-                                                            const VioAccumulateOptions& opts,
-                                                            double& residual_out,
-                                                            Eigen::Matrix<double, 1, 6>& jacobian_out,
-                                                            bool& depth_clamped_out,
-                                                            double* weight_var_out) const
-{
-  const V3D x0((uv_seed.x - cx) / fx, (uv_seed.y - cy) / fy, 1.0);
-  const V3D x1((uv_tracked.x - cx) / fx, (uv_tracked.y - cy) / fy, 1.0);
-
-  const M3D R_cc = pre.Ric * pre.R_common * pre.Ric.transpose();
-  const V3D t_cc = (M3D::Identity() - R_cc) * pre.tic + pre.Ric * pre.t_common;
-  const V3D y = R_cc * x0;
-  const V3D w = pre.Ric * pre.t_common - R_cc * pre.tic;
-
-  const RayClosestApproach diag = solveClosestRayPoints(y, x1, t_cc, opts.anchor_split_depth);
-  depth_clamped_out = diag.s_clamped || diag.u_clamped;
-
-  rayGapResidualAndJacobian(y, x1, t_cc, w, pre.Ric, pre.Rcw, diag.s, diag.u, residual_out, jacobian_out);
-
-  // See computeRayDistanceResidualAndJacobian's own doc comment: FAST-LIVO2
-  // reuses epipolarLineWeightVar() verbatim for raydist's distortion weight
-  // too (a fresh from-scratch Var(||v||) derivation was tried and found
-  // worse there) -- matched here rather than deriving a new one.
-  if (weight_var_out)
-    *weight_var_out = epipolarLineWeightVar(t_cc, y, x1, R_cc, anchor_uv_jacobian, curr_uv_jacobian, fx, fy, opts);
-
-  return true;
-}
-
 bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<AnchorPoint>& anchors,
                                 const VioAccumulateOptions& opts, EkfUpdate& out,
                                 float& avg_error, float& avg_abs_pixel_residual,
@@ -360,93 +289,6 @@ bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<Anc
     const AnchorPoint& anchor = anchors[indices[i]];
     const int t = omp_get_thread_num();
 
-    if (opts.residual_mode == "mixed")
-    {
-      // See VioAccumulateOptions::residual_mode's doc comment -- two
-      // independently-weighted, DOF-disjoint residuals per point instead of
-      // one conflated one. Ported from FAST-LIVO2's ResidualMode::kMixed.
-      double residual_epi = 0.0, residual_ray = 0.0, norm_l = 0.0;
-      Eigen::Matrix<double, 1, 6> J_epi, J_ray;
-      bool depth_clamped_epi = false, depth_clamped_ray = false;
-      double weight_var_epi = -1.0, weight_var_ray = -1.0;
-
-      const bool ok_epi = computeEpipolarResidualAndJacobian(
-          pre, fx, fy, cx, cy, anchor.uv_seed, uv_curr[i],
-          anchor.uv_jacobian_seed, frame.uv_curr_uv_jacobian[i], opts,
-          residual_epi, J_epi, norm_l, depth_clamped_epi,
-          opts.distortion_weight_on ? &weight_var_epi : nullptr);
-      const bool ok_ray = computeRayDistanceResidualAndJacobian(
-          pre, fx, fy, cx, cy, anchor.uv_seed, uv_curr[i],
-          anchor.uv_jacobian_seed, frame.uv_curr_uv_jacobian[i], opts,
-          residual_ray, J_ray, depth_clamped_ray,
-          opts.distortion_weight_on ? &weight_var_ray : nullptr);
-
-      // Point accepted only if BOTH residuals compute successfully --
-      // matches FAST-LIVO2's own "reject the point entirely unless BOTH
-      // succeed" behavior (a point with no valid rotation vote AND no valid
-      // position vote contributes nothing useful either way).
-      if (!ok_epi || !ok_ray)
-      {
-        if (opts.log_residual_counts) ++thread_n_reject[t];
-        if (do_point_log)
-        {
-          std::ostringstream ps;
-          ps << "[vio/point_residual]  t_abs=" << std::fixed << std::setprecision(6) << t_abs
-             << "  iter=" << iter << "  pt=" << i << "  ok=0\n";
-          thread_point_log[t] += ps.str();
-        }
-        continue;
-      }
-
-      double weight_epi = depth_clamped_epi ? opts.neg_epipolar_residual_var
-                                             : opts.pos_epipolar_residual_var;
-      double weight_ray = depth_clamped_ray ? opts.neg_ray_distance_residual_var
-                                             : opts.pos_ray_distance_residual_var;
-      if (opts.distortion_weight_on && weight_var_epi > 0.0 && std::isfinite(weight_var_epi))
-        weight_epi *= 1.0 / weight_var_epi;
-      if (opts.distortion_weight_on && weight_var_ray > 0.0 && std::isfinite(weight_var_ray))
-        weight_ray *= 1.0 / weight_var_ray;
-
-      if (opts.log_residual_counts && norm_l < opts.log_norm_l_low_frac * baseline_cc)
-        ++thread_n_low_norml[t];
-
-      // Zero the columns each residual shouldn't influence -- epipolar
-      // keeps rotation only, raydist keeps position only.
-      Eigen::Matrix<double, 1, 6> J_epi_rot_only = J_epi; J_epi_rot_only.tail<3>().setZero();
-      Eigen::Matrix<double, 1, 6> J_ray_pos_only = J_ray; J_ray_pos_only.head<3>().setZero();
-
-      const double mdist2 = residual_epi * residual_epi * weight_epi
-                           + residual_ray * residual_ray * weight_ray;
-
-      point_HtH[i].noalias() += J_epi_rot_only.transpose() * weight_epi * J_epi_rot_only;
-      point_HtH[i].noalias() += J_ray_pos_only.transpose() * weight_ray * J_ray_pos_only;
-      point_Htz[i].noalias() += J_epi_rot_only.transpose() * weight_epi * residual_epi;
-      point_Htz[i].noalias() += J_ray_pos_only.transpose() * weight_ray * residual_ray;
-      point_err[i] = mdist2;
-      // Epipolar term only -- residual_ray is metric (meters), not a pixel
-      // distance, see avg_abs_pixel_residual's doc comment. residual_epi is
-      // already pixel-scaled (see computeEpipolarResidualAndJacobian()).
-      point_abs_px[i] = std::abs(residual_epi);
-      ++thread_n[t];
-
-      if (do_point_log)
-      {
-        std::ostringstream ps;
-        ps << "[vio/point_residual]  t_abs=" << std::fixed << std::setprecision(6) << t_abs
-           << "  iter=" << iter << "  pt=" << i << "  ok=1"
-           << std::scientific << std::setprecision(4)
-           << "  residual_epi=" << residual_epi << "  residual_ray=" << residual_ray
-           << "  norm_l=" << norm_l
-           << "  depth_clamped_epi=" << (depth_clamped_epi ? 1 : 0)
-           << "  depth_clamped_ray=" << (depth_clamped_ray ? 1 : 0)
-           << "  weight_epi=" << weight_epi << "  weight_ray=" << weight_ray
-           << "  htH_rr=" << (J_epi_rot_only.head<3>().squaredNorm() * weight_epi)
-           << "  htH_pp=" << (J_ray_pos_only.tail<3>().squaredNorm() * weight_ray) << "\n";
-        thread_point_log[t] += ps.str();
-      }
-      continue;
-    }
-
     double residual, norm_l;
     Eigen::Matrix<double, 1, 6> J;
     bool depth_clamped = false;
@@ -470,8 +312,7 @@ bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<Anc
       continue;
     }
 
-    double weight = depth_clamped ? opts.neg_epipolar_residual_var
-                                   : opts.pos_epipolar_residual_var;
+    double weight = opts.epipolar_residual_weight;
 
     if (opts.distortion_weight_on && weight_var > 0.0 && std::isfinite(weight_var))
       weight *= 1.0 / weight_var;
@@ -479,11 +320,6 @@ bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<Anc
     if (opts.log_residual_counts && norm_l < opts.log_norm_l_low_frac * baseline_cc)
       ++thread_n_low_norml[t];
 
-    // avg_error/mdist2 (used for both solveSystem()'s reject-if-worse check
-    // and the whole-frame max_avg_error threshold) stays on the base,
-    // un-split weight -- only HtH/Htz's actual position-column contribution
-    // is scaled down below, so existing max_avg_error tuning keeps meaning
-    // what it always meant.
     const double mdist2 = residual * residual * weight;
 
     if (opts.log_consistency_corr_en) {
@@ -491,25 +327,11 @@ bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<Anc
       // logs candidates rather than acceptances: a NIS computed over the
       // survivors of its own gate is biased low, which T0-D measured at
       // 2.59 -> 1.85 on a fixture. weight is an inverse variance, so S = 1/weight.
-      logConsistencyVioCorr(t_abs, iter, residual, (weight > 0.0 ? 1.0 / weight : -1.0),
-                            opts.residual_mode.c_str());
+      logConsistencyVioCorr(t_abs, iter, residual, (weight > 0.0 ? 1.0 / weight : -1.0), "epipolar");
     }
 
-    // See VioAccumulateOptions::pos_weight_scale's doc comment -- scale
-    // J's position columns (last 3) directly before forming the outer
-    // product, leaving rotation columns (first 3) untouched. This makes
-    // HtH's rotation-rotation block exactly as before, its position-
-    // position block scaled by pos_weight_scale^2, its rotation/position
-    // cross terms scaled by pos_weight_scale^1, and Htz's position rows
-    // scaled by pos_weight_scale^1 -- the standard effect of reducing a
-    // scalar residual's effective sensitivity to a subset of state
-    // dimensions (equivalent to trusting this residual's implied position
-    // correction less, without discarding its rotation information).
-    Eigen::Matrix<double, 1, 6> J_scaled = J;
-    J_scaled.tail<3>() *= opts.pos_weight_scale;
-
-    point_HtH[i].noalias() += J_scaled.transpose() * weight * J_scaled;
-    point_Htz[i].noalias() += J_scaled.transpose() * weight * residual;
+    point_HtH[i].noalias() += J.transpose() * weight * J;
+    point_Htz[i].noalias() += J.transpose() * weight * residual;
     point_err[i] = mdist2;
     // residual is already pixel-scaled (see computeEpipolarResidualAndJacobian()).
     point_abs_px[i] = std::abs(residual);
@@ -517,7 +339,7 @@ bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<Anc
 
     if (do_point_log)
     {
-      const Eigen::Matrix<double, 6, 1> Htz_i = J_scaled.transpose() * weight * residual;
+      const Eigen::Matrix<double, 6, 1> Htz_i = J.transpose() * weight * residual;
       std::ostringstream ps;
       ps << "[vio/point_residual]  t_abs=" << std::fixed << std::setprecision(6) << t_abs
          << "  iter=" << iter << "  pt=" << i << "  ok=1"
@@ -526,8 +348,7 @@ bool VioAccumulator::accumulate(const TrackedFrame& frame, const std::vector<Anc
          << "  depth_clamped=" << (depth_clamped ? 1 : 0)
          << "  weight=" << weight << "  weight_var=" << weight_var
          << "  htH_rr=" << (J.head<3>().squaredNorm() * weight)
-         // pos_weight_scale^2 matches the actually-applied scaling (outer product of a once-scaled J).
-         << "  htH_pp=" << (J.tail<3>().squaredNorm() * weight * opts.pos_weight_scale * opts.pos_weight_scale)
+         << "  htH_pp=" << (J.tail<3>().squaredNorm() * weight)
          << "  J=[" << J << "]"
          << "  Htz_i=[" << Htz_i.transpose() << "]\n";
       thread_point_log[t] += ps.str();

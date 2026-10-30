@@ -49,6 +49,13 @@ find_package(PCL REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(OpenMP REQUIRED)
 find_package(CUDA REQUIRED)  # provides ${CUDA_LIBRARIES} (includes libcudart)
+# Only for qscale_refine_livo_recon's batch trajectory_refine (see
+# docs/QSCALE_REFINE_RESTRUCTURE_PLAN.md) -- not linked into livo_recon_node
+# itself. Matches LiDAR_IMU_Init/CMakeLists.txt's own find_package(Ceres).
+# ceres/glog are currently only installed in the livo_test_h2 container
+# (also added to the base Dockerfile for future builds); always build this
+# target via h2 per the livo-recon-code-changes skill.
+find_package(Ceres REQUIRED)
 
 # Skip Torch's own try_run-based GPU arch auto-detection (it fails under this
 # CMake/CUDA setup with a "requires CUDA17 dialect" error) — declare the
@@ -130,6 +137,10 @@ add_executable(livo_recon_node
   src/diagnostics/vio_correction.cpp
   src/diagnostics/lidar_image_bounds.cpp
   src/diagnostics/state_correction_trace.cpp
+  src/diagnostics/vio_residual_diag.cpp  # TEMPORARY, see its own header doc comment
+  src/diagnostics/correction_breakdown_diag.cpp  # TEMPORARY, see its own header doc comment
+  src/diagnostics/lidar_window_dump.cpp  # TEMPORARY, see its own header doc comment
+  src/diagnostics/pin_state_diag.cpp  # TEMPORARY, see its own header doc comment
   src/main.cpp
   src/livo_recon_node.cpp
   src/node_context.cpp
@@ -207,6 +218,84 @@ target_link_libraries(cache_tracker_output_livo_recon
   ${PCL_LIBRARIES}
   ${OpenCV_LIBS}
   ${TORCH_LIBRARIES}
+  OpenMP::OpenMP_CXX
+  tbb
+)
+
+# Standalone LiDAR-only trajectory estimator for IMU Q-scale calibration --
+# see docs/QSCALE_REFINE_RESTRUCTURE_PLAN.md and src/tools/qscale_refine.cpp's
+# own header comment for the full rationale. A SEPARATE executable (per
+# explicit instruction: this is not a mode of livo_recon_node's own
+# odometry estimation), but reuses livo_recon's real CbkProc/ImuProc/
+# LioProcIekf/VoxelMap pipeline directly -- same source list as
+# livo_recon_node minus the node-orchestration-only files (main.cpp,
+# livo_recon_node.cpp) and the processors this tool never instantiates
+# (pub_processing/vio_processing/combined_processing/evo_processing).
+# NodeContext constructs a Tracker unconditionally (even when VIO is never
+# enabled at runtime), so the vio/ sources are still needed to link.
+add_executable(qscale_refine_livo_recon
+  src/utils/state/state.cpp
+  src/utils/algo/covariance_math.cpp
+  src/utils/algo/chi_square.cpp
+  src/utils/lidar/lidar.cpp
+  src/utils/data/data_queues.cpp
+  src/utils/data/measures.cpp
+  src/diagnostics/log/debug_log_dir.cpp
+  src/diagnostics/log/consistency_log.cpp
+  src/diagnostics/eval/nees_logger.cpp
+  src/diagnostics/stationary_diagnostic_writer.cpp
+  src/diagnostics/state_trace.cpp
+  src/diagnostics/calibration_p0_writer.cpp
+  src/diagnostics/motion_q_writer.cpp
+  src/diagnostics/r66_writers.cpp
+  src/diagnostics/bootstrap_diagnostic_writer.cpp
+  src/diagnostics/vio_correction.cpp
+  src/diagnostics/lidar_image_bounds.cpp
+  src/diagnostics/state_correction_trace.cpp
+  src/diagnostics/vio_residual_diag.cpp
+  src/diagnostics/correction_breakdown_diag.cpp
+  src/diagnostics/lidar_window_dump.cpp
+  src/diagnostics/pin_state_diag.cpp
+  src/node_context.cpp
+  src/processing/cbk_processing.cpp
+  src/processing/calib_processing.cpp
+  src/processing/imu_processing.cpp
+  src/processing/vio_processing.cpp
+  src/processing/combined_processing.cpp
+  src/processing/lio_base.cpp
+  src/processing/lio_iekf.cpp
+  src/processing/lio_iekf_scan_log.cpp
+  src/lio/voxelplane.cpp
+  src/lio/voxelnode.cpp
+  src/lio/lio_accumulator.cpp
+  src/lio/deskew.cpp
+  src/lio/relpose_noise.cpp
+  src/lio/info_scale.cpp
+  src/map/voxelmap.cpp
+  src/map/map_backend_factory.cpp
+  src/vio/crop_utils.cpp
+  src/vio/point_tracker.cpp
+  src/vio/tracker.cpp
+  src/vio/tracker_cache.cpp
+  src/vio/vio_accumulator.cpp
+  src/vio/cotracker/cotracker_backend.cpp
+  src/calib/trajectory_refine.cpp
+  src/calib/icp_odometry.cpp
+  src/tools/qscale_refine.cpp
+)
+
+target_compile_options(qscale_refine_livo_recon PRIVATE
+  $<$<COMPILE_LANGUAGE:CXX>:${TORCH_CXX_FLAGS}>
+)
+
+target_link_libraries(qscale_refine_livo_recon
+  livo_cuda
+  ${CUDA_LIBRARIES}
+  ${catkin_LIBRARIES}
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  ${TORCH_LIBRARIES}
+  ${CERES_LIBRARIES}
   OpenMP::OpenMP_CXX
   tbb
 )

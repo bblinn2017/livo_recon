@@ -192,6 +192,17 @@ public:
 
   virtual std::string loadParameters(ros::NodeHandle& pnh) = 0;
 
+  // TEMPORARY (2026-10-27, correction_breakdown_diag scan_id-alignment fix):
+  // the SAME physical-frame counter state_trace.csv's "scan_id" column is
+  // keyed on (see logStateTrace()) -- used so diagnostics logged from
+  // different call sites (combined_processing.cpp, vio_processing.cpp) can
+  // tag their rows with a scan_id that's directly comparable across modes,
+  // instead of each keeping its own independently-incremented counter
+  // (which can drift from this one, and from each other, whenever either
+  // path's diagnostic call is skipped on a different subset of frames --
+  // confirmed this session to drift by a full frame by scan ~52).
+  int frameIdx() const;
+
   // One line per toggle: what it was set to, how often its mechanism ran, and
   // how far it moved things. Written to engagement.txt in the debug log dir
   // and to the log.
@@ -268,7 +279,15 @@ protected:
 public:
 
   // History (270-279): see docs/livo_recon_changelog.md#include-livo_recon-processing-lio_processing.h-270
-  bool accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, double& avg_res);
+  // `iteration` (2026-10-28): the combined joint-GN loop's own iteration
+  // counter, mirroring VioProcBase::accumulateForCombined()'s existing
+  // `iter` parameter -- lets logResidualDump() (log/lio/residual_dump/*)
+  // fire in combined mode the same way it already does in LIO-only mode's
+  // estimateStateCorrection(). Previously accumulateForCombined() never
+  // called logResidualDump() at all (dumpResidualsIfListed() existed but
+  // was dead code, never invoked from anywhere), so every combined-mode
+  // residual_dump.csv request silently produced nothing.
+  bool accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, double& avg_res, int iteration = 0);
 
 protected:
   // CQ-49 item 1: the shared half of loadParameters(), extracted once and
@@ -377,6 +396,9 @@ protected:
   mutable double residual_binning_trace_before_sum_ = 0.0, residual_binning_trace_after_sum_ = 0.0;
   mutable long residual_binning_rot_rows_sum_ = 0, residual_binning_rot_bins_sum_ = 0, residual_binning_solve_failed_sum_ = 0;   // R91F (rotation and both modes)
   void applyResidualBinningToEkf(const std::vector<Residual>& residuals) const;
+  // 2026-10-27: generalized target of applyResidualBinningToEkf() -- see its own .cpp doc
+  // comment. applyResidualBinningToEkf() is now a thin wrapper calling this with ekf_.
+  void applyResidualBinningTo(const std::vector<Residual>& residuals, EkfUpdate& target) const;
 };
 
 }  // namespace livo_recon

@@ -124,6 +124,49 @@ private:
   // log/state_correction_trace (default false): see diagnostics/state_correction_trace.h's doc comment.
   bool state_correction_trace_log_ = false;
   std::size_t state_correction_trace_frame_index_ = 0;
+
+  // TEMPORARY (2026-10-27, mid360 lio/sequential/combined VIO-error
+  // comparison investigation -- delete this flag + its call sites +
+  // diagnostics/vio_residual_diag.* once done). diag/force_vio_residual_log,
+  // default false (no behavior change for any existing config). When true:
+  // (1) forces the async tracker to start even when vio/enable and
+  // combined/enable are both false (normally the tracker never starts in
+  // that case, so lio_only mode has no tracked features at all to compute
+  // any VIO residual against -- see loadParameters()'s tracker-startup
+  // gate), and (2) after every frame's pose is finalized (regardless of
+  // which mode produced it), re-evaluates VioProc::accumulateForCombined()
+  // read-only (no state mutation -- see its own doc comment) at that final
+  // pose and logs one row to vio_residual_diag.csv. This gives a uniform,
+  // mode-agnostic "post-refinement avg VIO pixel-reprojection error" series
+  // even for lio_only, which otherwise never computes any such quantity.
+  bool force_vio_residual_log_ = false;
+  std::size_t vio_residual_diag_frame_index_ = 0;
+
+  // TEMPORARY (2026-10-27, independent LiDAR-registration investigation --
+  // delete alongside diagnostics/lidar_window_dump.* once done).
+  // diag/dump_lidar_window_end_scan, default 0 (disabled, no behavior
+  // change). When > 0, every frame's deskewed body-frame points are
+  // appended to lidar_window_dump.csv for scan_id in [1, this value] --
+  // meant for a small pre-motion window (tens of frames), not the whole
+  // run, so keep this set to just past the frame of interest.
+  int dump_lidar_window_end_scan_ = 0;
+
+  // TEMPORARY (2026-10-27, apples-to-apples ask-comparison investigation --
+  // delete alongside diagnostics/pin_state_diag.* once done). diag/
+  // pin_state_before_scan (default -1, disabled) + diag/pin_state_file +
+  // diag/pin_state_phase (default "post_lio"): when pin_state_before_scan_
+  // >= 0, the frame whose scan_id (ctx_.voxel_map->frame_idx_) equals it
+  // has its state_ OVERWRITTEN from the matching row of pin_state_file_
+  // (a state_trace.csv from a reference run, e.g. a lio_only baseline),
+  // right before that frame's IMU propagation runs -- see estimateState()'s
+  // call site. Lets two differently-configured runs (e.g. sequential vs.
+  // combined) be forced to enter the SAME pivot frame from an IDENTICAL
+  // prior state, isolating that one frame's own correction from the two
+  // runs' otherwise-independently-diverged trajectories. No effect on any
+  // other frame; no effect at all when pin_state_before_scan_ < 0 (default).
+  int pin_state_before_scan_ = -1;
+  std::string pin_state_file_;
+  std::string pin_state_phase_ = "post_lio";
 };
 
 }  // namespace livo_recon

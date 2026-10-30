@@ -20,6 +20,46 @@ namespace livo_recon
 namespace
 {
 
+// imu/process_noise/motion/{acc,gyro}_scale: accepts either a scalar (broadcast to all 3 axes,
+// reproducing the pre-2026-10-28 isotropic-only behavior exactly) or a 3-element [x,y,z] array
+// (per-axis/anisotropic). paramWarn<T>() can't express this either/or, so this is its own loader;
+// same "refuse on the wrong XmlRpc type" contract as XmlRpcTypeCheck's checked specializations in
+// param_warn.h (a 2-element array or a string, say, throws rather than silently falling back).
+Eigen::Vector3d loadScaleParam(ros::NodeHandle& pnh, const std::string& key, double scalar_default)
+{
+  markParamConsumed(key);
+  if (!pnh.hasParam(key))
+  {
+    ROS_WARN_STREAM("[params] '" << key << "' not found on the param server -- falling back to "
+                     "default: " << scalar_default);
+    return Eigen::Vector3d::Constant(scalar_default);
+  }
+  XmlRpc::XmlRpcValue v;
+  pnh.getParam(key, v);
+  if (v.getType() == XmlRpc::XmlRpcValue::TypeDouble || v.getType() == XmlRpc::XmlRpcValue::TypeInt)
+  {
+    double s = 0.0;
+    pnh.param<double>(key, s, scalar_default);
+    return Eigen::Vector3d::Constant(s);
+  }
+  if (v.getType() == XmlRpc::XmlRpcValue::TypeArray && v.size() == 3)
+  {
+    Eigen::Vector3d out;
+    for (int i = 0; i < 3; ++i)
+    {
+      if (v[i].getType() == XmlRpc::XmlRpcValue::TypeDouble)
+        out(i) = static_cast<double>(v[i]);
+      else if (v[i].getType() == XmlRpc::XmlRpcValue::TypeInt)
+        out(i) = static_cast<int>(v[i]);
+      else
+        throw std::runtime_error("[params] '" + key + "'[" + std::to_string(i) + "] is not a number");
+    }
+    return out;
+  }
+  throw std::runtime_error("[params] '" + key + "' must be a single number or a 3-element [x,y,z] "
+                           "array, got something else");
+}
+
 // Debug trace of IMU propagation's per-measure-group state and covariance,
 // for diagnosing where trajectory divergence originates (see lio_processing
 // .cpp's debugLogLio() for the LIO-side counterpart, and evo_processing
@@ -153,10 +193,10 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   paramWarn<bool>(pnh, "log/imu/qhat", opts_.log_qhat_en, false);
   paramWarn<std::string>(pnh, "imu/process_noise/model",
                          opts_.process_noise_model, std::string("fixed"));
-  paramWarn<double>(pnh, "imu/process_noise/motion/acc_scale",
-                    opts_.motion_acc_scale, 0.3);   // R80 F-477 (Bryce): was 1.0
-  paramWarn<double>(pnh, "imu/process_noise/motion/gyro_scale",
-                    opts_.motion_gyr_scale, 10.0);   // R80 F-477 (Bryce): was 1.0
+  opts_.motion_acc_scale = loadScaleParam(pnh, "imu/process_noise/motion/acc_scale", 0.3);   // R80 F-477 (Bryce): was 1.0
+  opts_.motion_gyr_scale = loadScaleParam(pnh, "imu/process_noise/motion/gyro_scale", 10.0);  // R80 F-477 (Bryce): was 1.0
+  paramWarn<std::string>(pnh, "imu/process_noise/motion/scale_form",
+                         opts_.motion_scale_form, std::string("linear"));
   {
     // R63 (F-118): the zero-initialised head sample is removed. The key is
     // no longer an option; a config that still sets it is refused rather
@@ -173,8 +213,10 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
       opts_.process_noise_model != "axis_aware")
     throw std::invalid_argument(
         "imu/process_noise/model must be fixed, isotropic, or axis_aware");
-  for (double v : {opts_.motion_acc_scale, opts_.motion_gyr_scale})
-    if (!std::isfinite(v) || v < 0.0)
+  if (opts_.motion_scale_form != "quadratic" && opts_.motion_scale_form != "linear")
+    throw std::invalid_argument("imu/process_noise/motion/scale_form must be quadratic or linear");
+  for (const Eigen::Vector3d& v : {opts_.motion_acc_scale, opts_.motion_gyr_scale})
+    if (!v.allFinite() || (v.array() < 0.0).any())
       throw std::invalid_argument("IMU motion-noise scales must be finite and nonnegative");
   // R74 (F-427): the local-polynomial energy source and the additive WNOA disturbance were removed; their keys are refused by
   // refuseRenamedKeys() (removedKeyTable) before this point.
@@ -187,8 +229,9 @@ std::string ImuProc::loadParameters(ros::NodeHandle& pnh)
   oss << "[params/imu]"
       << "\n  second_order:         " << (opts_.second_order ? "true" : "false")
       << "\n  process_noise/model:  " << opts_.process_noise_model
-      << "\n  motion/acc_scale:     " << opts_.motion_acc_scale
-      << "\n  motion/gyro_scale:    " << opts_.motion_gyr_scale
+      << "\n  motion/acc_scale:     [" << opts_.motion_acc_scale.transpose() << "]"
+      << "\n  motion/gyro_scale:    [" << opts_.motion_gyr_scale.transpose() << "]"
+      << "\n  motion/scale_form:    " << opts_.motion_scale_form
       << "\n  first_scan_head:      always seeded from first sample (R63)"
       << "\n  log_qhat_en:          " << (opts_.log_qhat_en ? "true" : "false");
   return oss.str();
@@ -335,10 +378,22 @@ void ImuProc::propagate(MeasureGroup& mg)
         debiased_acc_energy = (acc_energy - state_->varAccFloor()).cwiseMax(0.0);
         debiased_gyr_energy = (gyr_energy - state_->varGyrFloor()).cwiseMax(0.0);
       }
-      acc_dynamic_variance = opts_.motion_acc_scale * opts_.motion_acc_scale *
-          debiased_acc_energy;
-      gyr_dynamic_variance = opts_.motion_gyr_scale * opts_.motion_gyr_scale *
-          debiased_gyr_energy;
+      // Elementwise (not scalar*scalar): reduces exactly to the old scalar formula when
+      // motion_{acc,gyr}_scale is isotropic (Constant(k)), since k*k*energy(i) per axis is
+      // identical to the old k^2*energy(i); per-axis scale values give a genuinely different
+      // variance on each axis.
+      if (opts_.motion_scale_form == "linear") {
+        // variance = scale * debiased_magnitude (qscale_fit's "w"/excess-MAGNITUDE term) --
+        // debiased_{acc,gyr}_energy is already |signal|^2 debiased against the stationary floor
+        // (cwiseMax(0.0) above), so its elementwise sqrt is the debiased magnitude.
+        acc_dynamic_variance = opts_.motion_acc_scale.cwiseProduct(debiased_acc_energy.cwiseSqrt());
+        gyr_dynamic_variance = opts_.motion_gyr_scale.cwiseProduct(debiased_gyr_energy.cwiseSqrt());
+      } else {
+        acc_dynamic_variance = opts_.motion_acc_scale.cwiseProduct(opts_.motion_acc_scale)
+            .cwiseProduct(debiased_acc_energy);
+        gyr_dynamic_variance = opts_.motion_gyr_scale.cwiseProduct(opts_.motion_gyr_scale)
+            .cwiseProduct(debiased_gyr_energy);
+      }
       var_acc_step = state_->varAccFloor() + acc_dynamic_variance;
       var_gyr_step = state_->varGyrFloor() + gyr_dynamic_variance;
     }

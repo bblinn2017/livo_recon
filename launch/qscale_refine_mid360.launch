@@ -1,0 +1,47 @@
+<launch>
+  <arg name="bag" default="" />
+  <arg name="out_path" default="" />
+  <arg name="duration_secs" default="-1" />
+  <arg name="highrate_out_path" default="" />
+  <arg name="refine_out_path" default="" />
+  <arg name="refine_window_s" default="25.0" />
+  <arg name="refine_knot" default="0.1" />
+  <arg name="refine_control_points_out_path" default="" />
+  <arg name="refine_debug_dump_path" default="" />
+  <arg name="refine_still_t0" default="-1.0" />
+  <arg name="refine_still_t1" default="-1.0" />
+  <arg name="refine_camera_enable" default="false" />
+  <arg name="refine_camera_track_cache_path" default="" />
+  <arg name="refine_camera_weight_px" default="1.0" />
+  <arg name="overrides_file" default="$(find livo_recon)/config/mid360_no_overrides.yaml" />
+  <arg name="base_config_file" default="$(find livo_recon)/config/mid360.yaml" />
+
+  <arg name="launch_prefix" default="" />
+  <node pkg="livo_recon" type="qscale_refine_livo_recon" name="qscale_refine" output="screen" required="true"
+        launch-prefix="$(arg launch_prefix)">
+    <rosparam file="$(arg base_config_file)" command="load" />
+    <rosparam file="$(arg overrides_file)" command="load" />
+    <param name="common/offline_bag_path" value="$(arg bag)" />
+    <param name="tools/qscale_refine/out_path" value="$(arg out_path)" />
+    <param name="tools/qscale_refine/duration_secs" value="$(arg duration_secs)" />
+    <param name="tools/qscale_refine/highrate_out_path" value="$(arg highrate_out_path)" />
+    <param name="tools/qscale_refine/refine_out_path" value="$(arg refine_out_path)" />
+    <param name="tools/qscale_refine/refine/window_s" value="$(arg refine_window_s)" />
+    <param name="tools/qscale_refine/refine/knot" value="$(arg refine_knot)" />
+    <param name="tools/qscale_refine/refine/control_points_out_path" value="$(arg refine_control_points_out_path)" />
+    <param name="tools/qscale_refine/refine/debug_dump_path" value="$(arg refine_debug_dump_path)" />
+    <param name="tools/qscale_refine/refine/still_t0" value="$(arg refine_still_t0)" />
+    <param name="tools/qscale_refine/refine/still_t1" value="$(arg refine_still_t1)" />
+    <param name="tools/qscale_refine/refine/camera/enable" value="$(arg refine_camera_enable)" />
+    <param name="tools/qscale_refine/refine/camera/track_cache_path" value="$(arg refine_camera_track_cache_path)" />
+    <param name="tools/qscale_refine/refine/camera/weight_px" value="$(arg refine_camera_weight_px)" />
+    <!-- Phase 1's own tracker (fed every image regardless, just to keep
+         syncMeasures()'s barrier from starving, see qscale_refine.cpp's
+         header comment) replays from the SAME cache Phase 2's camera
+         residual reads, instead of wastefully re-running live GPU
+         tracking for a result Phase 1 itself never uses. Empty (camera
+         disabled, the default) leaves this empty too, i.e. live tracking,
+         unchanged existing behavior. -->
+    <param name="tracker/track_cache_path" value="$(arg refine_camera_track_cache_path)" />
+  </node>
+</launch>

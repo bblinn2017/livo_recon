@@ -16,10 +16,17 @@ struct CombinedProcOptions
   // History (16-26): see docs/livo_recon_changelog.md#include-livo_recon-processing-combined_processing.h-16
   bool   enable          = false;
 
+  // 2026-10-27: these five fields are loaded from the SAME vio/ekf/* keys
+  // VioProcOptions uses (see loadParameters()) rather than their own
+  // combined/ekf/* copies -- no dataset config has ever set them
+  // differently, so the two separately-loaded copies were pure
+  // duplication risk, not a real independent knob. Still separate STRUCT
+  // fields (combined's own joint loop reads opts_.* here, not VioProc's),
+  // just sourced from one shared config key per concept.
   int    max_iterations  = 5;
   double min_norm_dtheta = 0.0;
   double min_norm_dt     = 0.0;
-  double min_diff_error  = -1.0;
+  double min_diff_error  = 1e-4;
 
   // Diagnostic-only -- see VioProcOptions::force_all_iterations's doc
   // comment, same rationale: when true, a non-improving VIO iteration is
@@ -38,6 +45,19 @@ struct CombinedProcOptions
   // as the fallback (see processCombined()'s doc comment for why -- can't
   // decompose a joint solve after the fact to keep just LIO's share).
   double max_avg_error   = 5.0;
+
+  // TEMPORARY (2026-10-27, LIO-wrong-direction investigation -- delete
+  // alongside the rest of this investigation's plumbing): diagnostic DOF
+  // split, testing the hypothesis that LIO corrects position well but
+  // rotation poorly while VIO is the reverse. When true, right before
+  // summing lio_part/vio_part into the joint normal equations, LIO's
+  // rotation block (HtH rows/cols 0-2, Htz rows 0-2) is zeroed -- LIO
+  // contributes ONLY a position correction -- and VIO's position block
+  // (HtH rows/cols 3-5, Htz rows 3-5) is zeroed -- VIO contributes ONLY a
+  // rotation correction. The resulting joint HtH is block-diagonal (no
+  // rotation/position cross-coupling at all between the two sources).
+  // Default false is behavior-preserving.
+  bool   diag_split_dof_lio_pos_vio_rot = false;
 
   bool   log_debug_en    = false;
 
@@ -87,7 +107,16 @@ public:
   // instances (passed in, not owned here) -- this class only orchestrates
   // their accumulate-only entry points, it doesn't duplicate LIO/VIO's own
   // per-frame bookkeeping (voxel map, tracker, etc.).
-  std::string processCombined(MeasureGroup& mg, LioProcBase& lio_proc, VioProc& vio_proc);
+  // TEMPORARY (2026-10-27, vio_residual_diag investigation): out_avg_error/
+  // out_avg_abs_pixel_residual/out_n_valid, when non-null, receive this
+  // frame's final_avg_err_vio/final_pixel_residual/last_n_meas_vio (the
+  // function's own already-correct true-post-refinement values -- see
+  // processCombined()'s body) -- delete alongside the rest of this
+  // investigation's plumbing. Default args keep existing call sites
+  // byte-identical.
+  std::string processCombined(MeasureGroup& mg, LioProcBase& lio_proc, VioProc& vio_proc,
+                              float* out_avg_error = nullptr, float* out_avg_abs_pixel_residual = nullptr,
+                              int* out_n_valid = nullptr);
 
 private:
   CombinedProcOptions opts_;
@@ -98,6 +127,8 @@ private:
   ProfilerPtr profiler_;
   DataQueuesPtr data_queues_;
   int vio_contribution_frame_index_ = 0;
+  // TEMPORARY (2026-10-27, correction_breakdown_diag investigation) -- delete alongside it.
+  int correction_breakdown_frame_index_ = 0;
 };
 
 }  // namespace livo_recon

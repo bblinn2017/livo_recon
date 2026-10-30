@@ -842,6 +842,20 @@ double VoxelPlane::weightFloor(const V3D& body_dir, const V3D& body_normal,
   return sr2 * (c2 + opts_->weight_incidence_k * (1.0 - c2));
 }
 
+double VoxelPlane::empiricalVariance(int min_n) const
+{
+  const int n = empirical_n_.load(std::memory_order_relaxed);
+  if (n < min_n) return -1.0;
+  return empirical_sum_r2_.load(std::memory_order_relaxed) / static_cast<double>(n);
+}
+
+void VoxelPlane::updateEmpiricalResidualStats(double r) const
+{
+  empirical_n_.fetch_add(1, std::memory_order_relaxed);
+  double cur = empirical_sum_r2_.load(std::memory_order_relaxed);
+  while (!empirical_sum_r2_.compare_exchange_weak(cur, cur + r * r, std::memory_order_relaxed)) {}
+}
+
 bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int scan_id) const
 {
   if (!is_plane_) return false;
@@ -1041,6 +1055,22 @@ bool VoxelPlane::computeResidual(const WorldPointCov& pt, Residual& res, int sca
   res.sigma_diag_squared = sigma_diag_squared;
   res.sigma_gate_squared = sigma_gate_squared_out;   // R80: write-only
   res.sigma_squared  = floor_term + sigma_diag_squared;
+
+  // 2026-10-29 (empirical per-voxel variance, see VoxelOpts::
+  // empirical_variance_enable's doc comment): blend in this voxel's own
+  // observed residual history, read BEFORE this point's own residual
+  // updates it (so a point never weighs itself), then record this
+  // residual for FUTURE points.
+  if (opts_->empirical_variance_enable) {
+    const double emp_var = empiricalVariance(opts_->empirical_variance_min_n);
+    if (emp_var >= 0.0) {
+      const double n = static_cast<double>(empirical_n_.load(std::memory_order_relaxed));
+      const double shrink = n / (n + opts_->empirical_variance_prior_n);
+      res.sigma_squared = shrink * emp_var + (1.0 - shrink) * res.sigma_squared;
+    }
+    updateEmpiricalResidualStats(r);
+  }
+
   res.plane_id       = this;
   res.voxel_point_count = points_size_;           // R81 (F-485 2B): write-only, read by the residual dump when log/lio/residual_dump/voxel_info
   res.voxel_distinct_frames = distinct_frames_;

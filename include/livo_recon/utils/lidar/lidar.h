@@ -16,15 +16,19 @@ namespace livo_recon
 
 // Livox (avia/mid360) per-point extraction: computes each point's absolute
 // timestamp from its offset_time (smoothed/clamped to guard against rare
-// out-of-order values), applies the return-type tag filter, and shares the
-// same blind-radius/measures->isValid() filtering as pointsFromPointCloud2.
+// out-of-order values -- the clamp step is 1/point_rate_hz, the sensor's
+// own nominal per-point rate; see CbkProcOptions::lidar_point_rate_hz's doc
+// comment for why this must match the ACTUAL sensor, not an assumed
+// default, or the clamp fires on every point instead of only rare bad
+// ones), applies the return-type tag filter, and shares the same
+// blind-radius/measures->isValid() filtering as pointsFromPointCloud2.
 // point_filter_num > 1 keeps only every point_filter_num-th point of the
 // raw scan (see CbkProcOptions::point_filter_num).
 std::vector<PointXYZT> pointsFromLivoxMsg(
     const livox_ros_driver::CustomMsg& msg, double scan_time,
     uint8_t tag_mask, uint8_t tag_max_keep,
     double blind_sqr, const MeasuresPtr& measures,
-    int point_filter_num = 1);
+    int point_filter_num = 1, double point_rate_hz = 240000.0);
 
 // Generic Ouster/PCL PointCloud2 extraction: reads each point's own "t"
 // field (nanoseconds since scan start), if present, for a true per-point

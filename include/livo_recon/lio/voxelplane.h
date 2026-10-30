@@ -69,6 +69,25 @@ public:
   int pointsSize() const { return points_size_; }
   int lastFitJ() const { return last_fit_j_; }
 
+  // 2026-10-29 (empirical per-voxel variance, see VoxelOpts::
+  // empirical_variance_enable's doc comment): this voxel's own running
+  // residual variance, estimated directly from its OBSERVED residuals
+  // rather than predicted from a formula -- captures real surface-to-
+  // surface noise heterogeneity (confirmed to dominate over any range/
+  // incidence-based model: a direct stationary-window measurement found
+  // the formula-based prediction correlates only 0.23 (log-log) with real
+  // per-voxel residual variance, vs. ratios spanning 0.005x-5.6x). -1 if
+  // fewer than min_n residuals have been observed yet (caller should fall
+  // back to the formula-based estimate). Read this BEFORE calling
+  // updateEmpiricalResidualStats() for the current point, so a point's own
+  // weight never depends on itself.
+  double empiricalVariance(int min_n) const;
+  // CAS-loop updated (lock-free): computeResidual() runs inside an OMP
+  // parallel-for over residuals (same reason updateMaxPlaneVarTrace()'s
+  // own CAS loop exists, see voxelplane.cpp), and multiple threads can hit
+  // the SAME voxel within one scan.
+  void updateEmpiricalResidualStats(double r) const;
+
   // Diagnostic-only accessors (see the point_filter_num=1 single-frame-
   // init failure-mode investigation): expose the raw PCA outputs so a
   // caller can log them without duplicating the eigen-decomposition.
@@ -156,6 +175,13 @@ private:
   M3D plane_var_;
   M3D covariance_;
   PlaneInfo plane_;
+
+  // Backing storage for empiricalVariance()/updateEmpiricalResidualStats()
+  // -- mutable since computeResidual() is const (the running stats are a
+  // pure diagnostic/weighting side-channel, not part of the fit's own
+  // state the way plane_/plane_var_ are).
+  mutable std::atomic<int> empirical_n_{0};
+  mutable std::atomic<double> empirical_sum_r2_{0.0};
 
   V3D y_normal_;
   V3D x_normal_;

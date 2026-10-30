@@ -25,12 +25,20 @@
   <arg name="dataset" />
   <arg name="bag" />
   <arg name="out" />
+  <!-- 2026-10-27: same pattern as livo_recon_(dataset).launch's own
+       overrides_file arg: loaded LAST so a real override file always
+       wins without editing the checked-in dataset config. Added to let
+       e.g. tracker/grid_selection/anchor_selection_mode or
+       shi_tomasi_block_size be varied per cache build without a one-off
+       copy of this launch file. -->
+  <arg name="overrides_file" default="$(find livo_recon)/config/mid360_no_overrides.yaml" />
 
   <node pkg="livo_recon"
         type="cache_tracker_output_livo_recon"
         name="cache_tracker_output"
         output="screen">
     <rosparam file="$(find livo_recon)/config/$(arg dataset).yaml" command="load" />
+    <rosparam file="$(arg overrides_file)"                         command="load" />
 
     <param name="common/offline_bag_path"  value="$(arg bag)" />
     <param name="tracker/cache_out_path"   value="$(arg out)" />

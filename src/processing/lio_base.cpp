@@ -397,6 +397,8 @@ LioProcBase::LioProcBase(NodeContext& ctx)
   : state_(ctx.state), voxel_map_(ctx.voxel_map), profiler_(ctx.profiler), data_queues_(ctx.data_queues)
 {}
 
+int LioProcBase::frameIdx() const { return static_cast<int>(voxel_map_->frame_idx_); }
+
 // CQ-49 item 1: extracted ONCE from the pre-split LioProc::loadParameters(),
 // called from both derived classes' own loadParameters() overrides against
 // their OWN ConfigResolver -- see each override for the estimator-specific
@@ -485,11 +487,11 @@ void LioProcBase::loadSharedParameters(ConfigResolver& cfg, ros::NodeHandle& pnh
                                "and the order of the corrections is not specified.");
       std::string lr_rows = "per_normal";
       pnh.getParam("voxel_map/plane/line_residual/rows", lr_rows);
-      bool combined_en = false;
-      pnh.getParam("combined/enable", combined_en);
-      if (combined_en)
-        cfg.requireCombination("lio/residual_binning/mode != off cannot be combined with combined/enable = true: the joint LIO+VIO step builds its own HtH and Htz through "
-                               "accumulateForCombined() and does not call the binning correction (the binning covers the LIO-only solve).");
+      // 2026-10-27: previously refused combined/enable=true here -- that was a missing-wiring
+      // limitation (accumulateForCombined() didn't call the binning correction), not a real
+      // incompatibility; applyResidualBinning() operates generically on any (HtH, Htz), and
+      // accumulateForCombined() now calls it (via applyResidualBinningTo()) the same way the
+      // LIO-only solve does. See lio_base.cpp's applyResidualBinningTo() doc comment.
       // R97A Q2: line residuals are always on now (voxel_map/plane/line_residual/enabled is removed).
       if (lr_rows == "distance")
         cfg.requireCombination("lio/residual_binning/mode != off needs voxel_map/plane/line_residual/rows = per_normal: the Jacobian direction of a distance row is set by the noise draw, "
@@ -830,10 +832,28 @@ void LioProcBase::solveSystem_cuda(const std::vector<Residual>& residuals) const
 
 void LioProcBase::applyResidualBinningToEkf(const std::vector<Residual>& residuals) const
 {
+  applyResidualBinningTo(residuals, ekf_);
+}
+
+// 2026-10-27: factored out of applyResidualBinningToEkf() (which still exists, now a thin
+// wrapper targeting the LIO-only solve's own ekf_ member) so CombinedProc's joint step can
+// apply the exact same correction to its own EkfUpdate (accumulateForCombined()'s `out`) --
+// previously refused entirely in combined mode (see loadParameters()'s requireCombination
+// check, now removed) purely because this method was hardcoded to ekf_, not because binning
+// is mathematically incompatible with the joint solve: applyResidualBinning() is a free
+// function operating generically on any (HtH, Htz), and accumulateForCombined() already has
+// the same residuals_ this needs. User-requested 2026-10-27 after confirming LIO's own ask is
+// frequently badly wrong-directioned at the frames where combined mode's joint EKF iteration
+// diverges/gets stuck (while VIO alone, same frames, converges cleanly) -- residual binning
+// is the existing tool for correcting LIO's own overconfidence, worth having available in
+// combined mode even though the scan 52/64 investigations found it doesn't fix the ASK's
+// direction (only claimed-information magnitude) on its own.
+void LioProcBase::applyResidualBinningTo(const std::vector<Residual>& residuals, EkfUpdate& target) const
+{
   if (!opts_.residual_binning.on()) return;   // default: HtH/Htz untouched (bit-identical)
   ResidualBinningStats st;
   { TimedScope ts(profiler_, "lio/ekf/binning");
-    st = applyResidualBinning(residuals, opts_.residual_binning, ekf_.HtH, ekf_.Htz); }
+    st = applyResidualBinning(residuals, opts_.residual_binning, target.HtH, target.Htz); }
   ++residual_binning_iterations_;
   residual_binning_rows_sum_ += st.n_corrected_rows;
   residual_binning_skipped_sum_ += st.n_skipped_rows;
@@ -1025,7 +1045,7 @@ double LioProcBase::estimateStateCorrection(
   return avg_res;
 }
 
-bool LioProcBase::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, double& avg_res)
+bool LioProcBase::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, double& avg_res, int iteration)
 {
   if (voxel_map_->isEmpty()) return false;
 
@@ -1034,6 +1054,15 @@ bool LioProcBase::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, double
     buildResiduals(mg.points, residuals_);
   }
   if (residuals_.empty()) return false;
+
+  // R71, wired into combined mode 2026-10-28 (see lio_base.h's doc comment
+  // on the new `iteration` param): same gating as estimateStateCorrection()'s
+  // own call, evaluated against residuals_ as just built at the CURRENT
+  // iterate (i.e. "iteration 0" here means the propagated/pre-correction
+  // state for this combined solve, same semantics as the LIO-only path).
+  if (!opts_.residual_dump_frames.empty() && dump_rules::residualDumpIterationWanted(opts_.residual_dump_all_iters, iteration) &&
+      std::find(opts_.residual_dump_frames.begin(), opts_.residual_dump_frames.end(), voxel_map_->frame_idx_) != opts_.residual_dump_frames.end())
+    logResidualDump(voxel_map_->frame_idx_, iteration, *state_, residuals_, opts_.residual_dump_voxel_info, opts_.residual_dump_line_geometry, opts_.residual_dump_slim);
 
   avg_res = 0.0;
   for (const auto& r : residuals_)
@@ -1047,6 +1076,7 @@ bool LioProcBase::accumulateForCombined(MeasureGroup& mg, EkfUpdate& out, double
     else
       accumulateLioResiduals(residuals_, out);
   }
+  applyResidualBinningTo(residuals_, out);   // R91E/R91F, now also wired for combined mode -- no-op unless lio/residual_binning/mode != off
   return true;
 }
 
