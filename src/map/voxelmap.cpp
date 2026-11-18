@@ -189,6 +189,11 @@ std::string VoxelMap::loadParameters(ros::NodeHandle& pnh)
       throw std::runtime_error(std::string("[config] refused: ") + e.what());
     }
   }
+  // 2026-11-18: independent of snapshot_post_calibration/snapshot_frames
+  // above (both of which only ever capture the map partway through a run)
+  // -- checked from LivoReconNode's finishRun(), after the main processing
+  // loop has fully drained, via opts()->snapshot_final.
+  paramWarn<bool>(pnh, "log/voxel_map/snapshot_final", opts_->snapshot_final, false);
   paramWarn<std::string>(pnh, "voxel_map/map/bootstrap_mode", bootstrap_mode_, "aggregate");
   if (bootstrap_mode_ != "aggregate" && bootstrap_mode_ != "sequential")
     throw std::runtime_error("voxel_map/map/bootstrap_mode must be aggregate or sequential");

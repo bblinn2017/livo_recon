@@ -628,6 +628,15 @@ struct VoxelOpts
   // bit-identical). Needs snapshot_post_calibration; parsed and validated in VoxelMap::loadParameters.
   std::vector<int> snapshot_frames;
 
+  // 2026-11-18: dump every voxel plane's fitted parameters (center/normal/
+  // tangent_x/tangent_y/radius/...) to final_voxelmap.csv once the whole
+  // run has finished (finishRun(), after the main processing loop has
+  // fully drained) -- unlike snapshot_post_calibration/snapshot_frames
+  // above, which only ever capture the map as it stood partway through
+  // (right after the stationary bootstrap, or at an early named frame).
+  // Independent of those two; off by default (bit-identical).
+  bool snapshot_final = false;
+
   // R97A: voxel_map/map/freeze_after_calibration is removed (it was false in every job).
 
   // R76 (F-445): residual form for voxels that may be lines. R97A: always on (voxel_map/plane/line_residual/enabled is removed; the

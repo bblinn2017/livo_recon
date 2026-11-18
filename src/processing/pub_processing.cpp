@@ -490,12 +490,15 @@ void PubProc::enqueueExport(const MeasureGroup& mg)
 
   if (do_image) {
     // Named by absolute (epoch) timestamp, matching extract_bag_images.py's
-    // "<secs>.<nsecs:06d>.png" convention used for the SfM/COLMAP pipeline's
+    // "<secs>.<nsecs:09d>.png" convention used for the SfM/COLMAP pipeline's
     // own image set -- lets the two reconstructions' frame sets be
-    // intersected by filename later.
+    // intersected by filename later. nsec is a full 9-digit field (0 to
+    // 999999999); padding to fewer digits drops leading zeros whenever
+    // nsec < 100,000,000 (~10% of frames), corrupting both the value and
+    // the filename's alphabetical sort order relative to true time.
     const ros::Time stamp(mg.image.t + data_queues_->start_time);
     std::ostringstream img_ss;
-    img_ss << stamp.sec << "." << std::setw(6) << std::setfill('0') << stamp.nsec << ".png";
+    img_ss << stamp.sec << "." << std::setw(9) << std::setfill('0') << stamp.nsec << ".png";
     task.img_name    = img_ss.str();
     task.write_image = true;
     task.image       = mg.image.image.clone();

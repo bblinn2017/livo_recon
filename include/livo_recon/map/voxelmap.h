@@ -18,6 +18,18 @@ public:
 
   std::string loadParameters(ros::NodeHandle& pnh) override;
 
+  // 2026-11-18: true end-of-run voxel-plane dump (final_voxelmap.csv),
+  // gated by log/voxel_map/snapshot_final (default off, no-op) -- called
+  // from LivoReconNode's finishRun() after the main processing loop has
+  // fully drained, so it sees every voxel the whole run ever touched
+  // (unlike snapshot_post_calibration/snapshot_frames, which only ever
+  // capture the map partway through). A thin public wrapper so the
+  // private writeSnapshotFile()/opts_ stay private.
+  void writeFinalSnapshotIfEnabled() const
+  {
+    if (opts_->snapshot_final) writeSnapshotFile("final_voxelmap.csv", -1, false);
+  }
+
   void updateMap(MeasureGroup& mg) override;
   void bootstrap(const std::vector<std::vector<PointXYZCov>>& observations) override;
 

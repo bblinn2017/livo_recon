@@ -494,6 +494,14 @@ void finishRun(NodeContext& ctx, PubProc& pub_proc, EvoProc& evo_proc)
   ctx.tracker->stopAsyncTracking();
 
   pub_proc.exportColmap();
+  // 2026-11-18: true end-of-run voxel-plane dump (final_voxelmap.csv),
+  // gated by log/voxel_map/snapshot_final (default off) -- distinct from
+  // snapshot_post_calibration/snapshot_frames above, which only ever
+  // capture the map as it stood partway through a run (right after the
+  // stationary bootstrap, or at an early named frame). This is reached
+  // after the main processing loop (run()/runOffline()) has fully
+  // drained, so it sees every voxel the whole run ever touched.
+  if (auto* vm = dynamic_cast<VoxelMap*>(ctx.voxel_map.get())) vm->writeFinalSnapshotIfEnabled();
   ctx.profiler->exportReport();
   // gt_source=="file" only, no-op otherwise: commits the last sparse
   // checkpoint's pending match if the run ends while its window is still
